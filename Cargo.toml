@@ -1,0 +1,25 @@
+[package]
+name = "pankarta-software"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[dependencies]
+sdl2 = {version = "*", default-features = false, features = ["ttf", "image", "raw-window-handle"]}
+wgpu = "0.18.0"
+tokio = { version = "*", features = ["full"] }
+bytemuck = { version = "*", features = [ "derive" ] }
+image = { version = "*", default-features = false, features = ["png", "jpeg"] }
+anyhow = "*"
+cgmath = "*"
+fs_extra = "*"
+glob = "*"
+tobj = { version = "*", features = ["async"]}
+rand = "0.8"
+
+[build-dependencies]
+anyhow = "*"
+cgmath = "*"
+fs_extra = "*"
+glob = "*"
+tobj = { version = "*", features = ["async"]}
