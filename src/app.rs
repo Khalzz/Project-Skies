@@ -168,7 +168,6 @@ pub struct App {
     pub config: SurfaceConfiguration,
     pub render_pipeline: wgpu::RenderPipeline,
     pub index_buffer: wgpu::Buffer,
-    pub diffuse_bind_group: wgpu::BindGroup,
     pub camera: CameraRenderizable,
     pub instances: Vec<Instance>,
     instance_buffer: wgpu::Buffer,
@@ -245,9 +244,6 @@ impl App {
         let depth_texture = Texture::create_depth_texture(&device, &config, "depth_texture");
         // depth
 
-        let diffuse_bytes = include_bytes!("../assets/textures/sad_hamster.png"); // search the image
-        let diffuse_texture = Texture::from_bytes(diffuse_bytes, &device, &queue, "sad-hamster.png").unwrap();
-
         // The bindgroup describes resources and how the shader will access to them
         let texture_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("texture_bind_group_layout"),
@@ -274,22 +270,6 @@ impl App {
         });
 
         // we have to create a bind group for each texture since the fact that the layout and the group are separated is because we can swap the bind group on runtime
-        let diffuse_bind_group = device.create_bind_group(
-            &wgpu::BindGroupDescriptor {
-                label: Some("diffuse_bind_group"),
-                layout: &texture_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&diffuse_texture.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&diffuse_texture.sampler),
-                    }
-                ],
-            }
-        );
         // Textures
 
         // Camera
@@ -443,7 +423,6 @@ impl App {
             config,
             render_pipeline,
             index_buffer,
-            diffuse_bind_group,
             camera,
             instances,
             instance_buffer,
@@ -510,7 +489,6 @@ impl App {
 
             render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
             render_pass.set_pipeline(&self.render_pipeline);
-            render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
             render_pass.draw_model_instanced(&self.obj_model, 0..self.instances.len() as u32, &self.camera.bind_group);
 
             // make a water object who creates a vertex buffer
