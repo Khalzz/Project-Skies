@@ -1,4 +1,4 @@
-use cgmath::{perspective, InnerSpace, Matrix4, Point3, Rad, SquareMatrix, Vector3};
+use cgmath::{perspective, InnerSpace, Matrix4, One, Point3, Quaternion, Rad, Rotation3, SquareMatrix, Vector3};
 use sdl2::rect::Point;
 use wgpu::{util::DeviceExt, BindGroup, BindGroupLayout, BindGroupLayoutDescriptor, Buffer, Device};
 use std::f32::consts::FRAC_PI_2;
@@ -76,7 +76,8 @@ pub struct Camera {
     pub yaw: Rad<f32>,
     pub pitch: Rad<f32>,
     pub look_at: Option<Point3<f32>>,
-    pub up: Vector3<f32>
+    pub up: Vector3<f32>,
+    pub rotation_modifier: Quaternion<f32>
 }
 
 impl Camera {
@@ -86,32 +87,21 @@ impl Camera {
             yaw: yaw.into(),
             pitch: pitch.into(),
             look_at: None,
-            up: Vector3::unit_y()
+            up: Vector3::unit_y(),
+            rotation_modifier: Quaternion::one()
         }    
     }
 
     pub fn calc_matrix(&self) -> Matrix4<f32> {
         let (sin_pitch, cos_pitch) = self.pitch.0.sin_cos();
         let (sin_yaw, cos_yaw) = self.yaw.0.sin_cos();
+        let direction = Vector3::new(cos_pitch * cos_yaw, sin_pitch, cos_pitch * sin_yaw).normalize();
 
-        match self.look_at {
-            Some(look_at_pos) => {
-                println!("executao");
-                return Matrix4::look_at_rh(
-                    self.position,
-                    (look_at_pos.x, look_at_pos.y, look_at_pos.z).into(),
-                    self.up,
-                )
-            },
-            None => {
-                return Matrix4::look_to_rh(
-                    self.position,
-                    Vector3::new(cos_pitch * cos_yaw, sin_pitch, cos_pitch * sin_yaw).normalize(),
-                    self.up,
-                )
-            },
-        }
-        
+        // Apply the modifier quaternion to the direction
+        let modified_direction = self.rotation_modifier * direction;
+        let modified_up = self.rotation_modifier * self.up;
+
+        return Matrix4::look_to_rh(self.position, direction, self.up)
     }
 
     pub fn look_at(&mut self, target: Point3<f32>) {
@@ -131,6 +121,21 @@ impl Camera {
     pub fn set_position(&mut self, target_position: Point3<f32>, delta_time: f32) {
         // let smooth_factor = 10.0; // Adjust this factor to make the movement smoother
         self.position += target_position - self.position;
+    }
+    
+
+    pub fn rot_to_quaternion(&self) -> Quaternion<f32> {
+        let cy = (self.yaw.0 * 0.5).cos();
+        let sy = (self.yaw.0 * 0.5).sin();
+        let cp = (self.pitch.0 * 0.5).cos();
+        let sp = (self.pitch.0 * 0.5).sin();
+    
+        Quaternion::new(
+            cy * cp,
+            cy * sp,
+            sy * cp,
+            -sy * sp,
+        )
     }
 }
 

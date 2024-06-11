@@ -19,7 +19,6 @@ mod gameplay {
 mod rendering {
     pub mod textures;
     pub mod camera;
-    pub mod camera_by_target;
     pub mod model;
     pub mod basic_shape;
     pub mod depth_renderer;

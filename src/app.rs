@@ -3,9 +3,11 @@ use std::time::{Duration, Instant};
 
 use cgmath::*;
 use rand::Rng;
+use sdl2::controller::GameController;
 use sdl2::pixels::Color;
 use sdl2::render::TextureCreator;
 use sdl2::video::{DisplayMode, WindowContext};
+use sdl2::GameControllerSubsystem;
 use sdl2::{video::Window, Sdl, render::Canvas};
 use wgpu::util::DeviceExt;
 use wgpu::{BindGroup, BindGroupLayout, BindGroupLayoutDescriptor, Buffer, DepthBiasState, Device, DeviceDescriptor, Features, InstanceDescriptor, Limits, PipelineLayout, Queue, RenderPassDepthStencilAttachment, RenderPipeline, StencilState, Surface, SurfaceConfiguration, TextureUsages};
@@ -87,7 +89,6 @@ pub struct AppState {
     pub state: GameState,
 }
 
-// Instancing
 pub struct Instance {
     pub position: cgmath::Vector3<f32>,
     pub rotation: cgmath::Quaternion<f32>,
@@ -97,19 +98,14 @@ pub struct Instance {
 impl Instance {
     pub fn to_raw(&self) -> InstanceRaw {
         let translation = cgmath::Matrix4::from_translation(self.position.cast::<f32>().unwrap());
-        // Create a rotation matrix from the quaternion
         let rotation = cgmath::Matrix4::from(self.rotation.cast::<f32>().unwrap());
-
         let scale = cgmath::Matrix4::from_nonuniform_scale(self.scale.x as f32, self.scale.y as f32, self.scale.z as f32);
-
         let model: Matrix4<f32> = translation * Matrix4::from(rotation) * scale;
-        
+
         InstanceRaw {
             model: model.into(),
         }
     }
-
-    
 }
 
 // quaternions are not very usable in wgpu so instead of doing math in the shader we are gonna save the raw instance here directly
@@ -176,9 +172,12 @@ pub struct App {
     pub show_depth_map: bool,
     obj_model: Model,
     pub water: Model,
+    pub water_instance: Instance,
     pub water_instance_buffer: wgpu::Buffer,
     pub mountain: Model,
-    pub mountain_instance_buffer: wgpu::Buffer
+    pub mountain_instance: Instance,
+    pub mountain_instance_buffer: wgpu::Buffer,
+    pub controller_subsystem: GameControllerSubsystem
 }
 
 impl App {
@@ -186,6 +185,8 @@ impl App {
         // base sdl2
         let context = sdl2::init().expect("SDL2 wasn't initialized");
         let video_susbsystem = context.video().expect("The Video subsystem wasn't initialized");
+        
+        let controller_subsystem = context.game_controller().unwrap();
 
         let current_display = video_susbsystem.current_display_mode(0).unwrap();
         
@@ -351,7 +352,7 @@ impl App {
         // this will define a list of instances and setting their position/rotation automatically bassed on the constants especified
         let instances = (0..NUM_INSTANCES_PER_ROW).flat_map(|z| {
             (0..NUM_INSTANCES_PER_ROW).map(move |x| {
-                let position = cgmath::Vector3 { x: -600.0, y: 10.0, z: 0.0 };
+                let position = cgmath::Vector3 { x: 0.0, y: 0.0, z: 0.0 };
                 let rotation = cgmath::Quaternion::from_axis_angle(cgmath::Vector3::unit_y(), cgmath::Deg(90.0));
                 let scale = cgmath::Vector3 { x: 1.0, y: 1.0, z: 1.0 };
 
@@ -430,10 +431,13 @@ impl App {
             depth_render,
             show_depth_map: false,
             obj_model,
+            water_instance,
             water,
             water_instance_buffer,
+            mountain_instance,
             mountain,
             mountain_instance_buffer,
+            controller_subsystem
         }
     }
 
@@ -523,7 +527,8 @@ impl App {
         // here we define the initial state of our game states
         let mut play = play::GameLogic::new(&mut self, 5.0);
 
-        let example_button = Button::new(GameObject{ active: true, x: 0.0, y: 0.0, width: 100.0, height: 20.0 }, 
+        let example_button = Button::new(
+        GameObject{ active: true, x: 0.0, y: 0.0, width: 100.0, height: 20.0 }, 
         Some("Example".to_owned()), 
         Color::RGB(100, 100, 100), 
         Color::RGB(0, 0, 0), 
@@ -536,13 +541,15 @@ impl App {
         let mut target: Point3<f32>;
         let mut camera_position: Point3<f32>;
 
+        let controller = Self::open_first_available_controller(&self.controller_subsystem);
+
         // main game loop
         while app_state.is_running { 
             let delta_time = self.delta_time().as_secs_f32();
             self.canvas.clear();
             example_button.render(&mut self.canvas, &self.texture_creator, &_font);
 
-            play.update(&_font, &mut app_state, &mut event_pump, &mut self);
+            play.update(&_font, &mut app_state, &mut event_pump, &mut self, &controller);
 
             match self.render() {
                 Ok(_) => {},
@@ -555,25 +562,89 @@ impl App {
             match app_state.state {
                 GameState::Playing => {
                     for instance in &mut self.instances {
+                        self.camera.camera.up = instance.rotation * Vector3::unit_y();
+
                         match camera_state {
                             CameraState::Normal => {
-                                camera_position = Point3::new(instance.position.x, instance.position.y, instance.position.z) + (instance.rotation * Vector3::new(0.0, 1.0, -3.0));
-                                target = Point3::new(instance.position.x, instance.position.y, instance.position.z) + (instance.rotation * Vector3::new(0.0, 0.0, 100.0));
-                
+                                let mut base_vector = Vector3::new(0.0 , 1.0, -3.0);
+                                let mut rotation_mod = Quaternion::one();
+
+                                
+
+                                if play.controller.ry > 0.1 || play.controller.ry < -0.1 {
+                                    base_vector.x = 0.0;
+                                    base_vector.z = 0.0;
+                                    base_vector.y = 1.0;
+                                }
+
+                                if play.controller.rx > 0.1 || play.controller.rx < -0.1 {
+                                    base_vector.x = 0.0;
+                                    base_vector.z = 0.0;
+                                    base_vector.y = 1.0;
+                                    
+                                }
+
+                                camera_position = Point3::new(instance.position.x, instance.position.y, instance.position.z) + ((instance.rotation * rotation_mod) * base_vector);
+                                target = Point3::new(instance.position.x, instance.position.y, instance.position.z) + (instance.rotation * Vector3::new(0.0, 0.0, 10.0));
+                                self.camera.camera.position = camera_position;
+                                self.camera.camera.look_at(target);
+                                
+                                println!("{}", self.camera.camera.pitch.0);
+
+
+                                if play.controller.rx > 0.1 || play.controller.rx < -0.1 || play.controller.ry > 0.1 || play.controller.ry < -0.1 {
+                                    
+                                    // self.camera.camera.yaw = play.controller.rx;
+
+                                    // self.camera.camera.pitch = Rad(1.5 * play.controller.ry);
+                                }
+
+                                    
+                                    /* 
+                                if play.controller.rx > 0.1 || play.controller.rx < -0.1 {
+                                    self.camera.camera.look_at(target);
+                                }
+                                */
+
+
+                                // let rotation_view = instance.rotation * Vector3::new(-play.controller.rx, play.controller.ry, 0.0) * 30.0;
+
+                                // let edited = target + rotation_view;
+                                // let pos = instance.position + Quaternion::between_vectors(Vector3::unit_z(), (self.mountain_instance.position - instance.position).normalize()) * (Vector3::new(0.0, 0.0, -5.0));
+                                // self.camera.camera.position = (pos.x, pos.y, pos.z).into();
+
+
+
+                                // self.camera.camera.look_at((10.0 * play.controller.rx, 10.0 * play.controller.ry, 0.0).into());
                             },
                             CameraState::Front => {
                                 camera_position = Point3::new(instance.position.x, instance.position.y, instance.position.z) + (instance.rotation * Vector3::new(0.0, 1.0, 0.0));
                                 target = Point3::new(instance.position.x, instance.position.y, instance.position.z) + (instance.rotation * Vector3::new(0.0, 0.0, 10.0));
+
+                                self.camera.camera.position = camera_position;
+                                let rotation_view = instance.rotation * Vector3::new(-play.controller.rx, play.controller.ry * 10.0, 0.0) * 30.0;
+                                let edited = target + rotation_view;
+                                self.camera.camera.look_at((edited.x, edited.y, edited.z).into());
                             },
                         }
 
-                        self.camera.camera.position = camera_position;
+                        if play.controller.fix_view {
+                            self.camera.camera.look_at(Point3::new(self.mountain_instance.position.x, self.mountain_instance.position.y, self.mountain_instance.position.z));
+                            let pos = instance.position + Quaternion::between_vectors(Vector3::unit_z(), (self.mountain_instance.position - instance.position).normalize()) * (Vector3::new(0.0, 0.0, -5.0));
+                            self.camera.camera.position = (pos.x, pos.y, pos.z).into();
+                        }
+
                         // self.camera.camera.position = Self::lerp_point3(self.camera.camera.position, camera_position, delta_time * 20.0);
-                        self.camera.camera.look_at((target.x, target.y, target.z).into());
-                        self.camera.camera.up = instance.rotation * Vector3::unit_y();
+
+                        // Camera Relative Rendering
+                        self.mountain_instance.position -= instance.rotation * play.velocity * delta_time;
+                        self.water_instance.position -= instance.rotation * play.velocity * delta_time;
                     }
-                    
+
                     let instance_data = self.instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
+
+                    self.queue.write_buffer(&self.mountain_instance_buffer, 0, bytemuck::cast_slice(&[self.mountain_instance.to_raw()]));
+                    self.queue.write_buffer(&self.water_instance_buffer, 0, bytemuck::cast_slice(&[self.water_instance.to_raw()]));
 
                     self.queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(&instance_data));
                     self.camera.uniform.update_view_proj(&self.camera.camera, &self.camera.projection);
@@ -600,5 +671,15 @@ impl App {
             start.y + (end.y - start.y) * t,
             start.z + (end.z - start.z) * t
         )
+    }
+
+    // connect the first controller found
+    fn open_first_available_controller(controller_subsystem: &GameControllerSubsystem) -> Option<GameController> {
+        for id in 0..controller_subsystem.num_joysticks().unwrap() {
+            if controller_subsystem.is_game_controller(id) {
+                return Some(controller_subsystem.open(id).unwrap());
+            }
+        }
+        None
     }
 }
