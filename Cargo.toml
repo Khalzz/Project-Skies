@@ -16,6 +16,7 @@ fs_extra = "*"
 glob = "*"
 tobj = { version = "*", features = ["async"]}
 rand = "0.8"
+glyphon = "0.4"
 
 [build-dependencies]
 anyhow = "*"

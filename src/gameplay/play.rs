@@ -57,7 +57,7 @@ impl GameLogic {
     }
 
     // this is called every frame
-    pub fn update(&mut self, _font: &Font, mut app_state: &mut AppState, mut event_pump: &mut sdl2::EventPump, app: &mut App, controller: &Option<GameController>) {
+    pub fn update(&mut self, mut app_state: &mut AppState, mut event_pump: &mut sdl2::EventPump, app: &mut App, controller: &Option<GameController>) {
         let delta_time = self.delta_time().as_secs_f32();
         self.display_framerate(delta_time);
 
@@ -180,18 +180,10 @@ impl GameLogic {
                         },
                         Axis::RightX | Axis::RightY => {
                             let x = controller.as_ref().map_or(0, |c| c.axis(Axis::RightX)) as f32 / 32767.0;
-                            if x > self.controller.rs_deathzone || x < -self.controller.rs_deathzone {
-                                self.controller.rx = x;
-                            } else {
-                                self.controller.rx = 0.0;
-                            }
+                            self.controller.rx = x;
 
                             let y = controller.as_ref().map_or(0, |c| c.axis(Axis::RightY)) as f32 / 32767.0;
-                            if y > self.controller.rs_deathzone || y < -self.controller.rs_deathzone {
-                                self.controller.ry = -y;
-                            } else {
-                                self.controller.ry = 0.0;
-                            }
+                            self.controller.ry = -y;
                         },
                         Axis::TriggerLeft | Axis::TriggerRight => {
                             let left = -(controller.as_ref().map_or(0, |c| c.axis(Axis::TriggerLeft)) as f32 / 32767.0);

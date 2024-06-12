@@ -2,9 +2,10 @@ use std::env;
 use std::time::{Duration, Instant};
 
 use cgmath::*;
+
+use glyphon::{Color, Font, FontSystem, Resolution, SwashCache, TextArea, TextAtlas, TextRenderer};
 use rand::Rng;
 use sdl2::controller::GameController;
-use sdl2::pixels::Color;
 use sdl2::render::TextureCreator;
 use sdl2::video::{DisplayMode, WindowContext};
 use sdl2::GameControllerSubsystem;
@@ -13,67 +14,15 @@ use wgpu::util::DeviceExt;
 use wgpu::{BindGroup, BindGroupLayout, BindGroupLayoutDescriptor, Buffer, DepthBiasState, Device, DeviceDescriptor, Features, InstanceDescriptor, Limits, PipelineLayout, Queue, RenderPassDepthStencilAttachment, RenderPipeline, StencilState, Surface, SurfaceConfiguration, TextureUsages};
 use crate::game_object::GameObject;
 use crate::gameplay::play;
-use crate::input::button_module::Button;
+use crate::primitive::button::{self, Button};
+use crate::primitive::rectangle::{self, RectPos};
 use crate::rendering::camera::{Camera, CameraRenderizable};
 use crate::rendering::depth_renderer::DepthRender;
 use crate::rendering::model::{self, DrawModel, Model, Vertex};
 
 use crate::rendering::textures::Texture;
+use crate::rendering::vertex::VertexUi;
 use crate::resources;
-
-// instances: these values are just for generating the elements
-const NUM_INSTANCES_PER_ROW: u32 = 1;
-// instances 
-
-// the bytemuck elements let us have better control on our lists of T elements and without this we can't create our vertex buffer
-#[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct ManualVertex {
-    pub position: [f32; 3],
-    pub tex_coords: [f32; 2],
-}
-
-impl ManualVertex {
-    pub fn desc() -> wgpu::VertexBufferLayout<'static> {
-        wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<ManualVertex>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[
-                wgpu::VertexAttribute { // position of the vertex
-                    offset: 0,
-                    shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-                wgpu::VertexAttribute { // tex_coords
-                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
-                    shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x2,
-                }
-            ]
-        }
-    }
-}
-
-const DEPTH_VERTICES: &[ManualVertex] = &[
-    ManualVertex {
-        position: [-1.0, -1.0, 0.0],
-        tex_coords: [0.0, 1.0],
-    },
-    ManualVertex {
-        position: [1.0, -1.0, 0.0],
-        tex_coords: [1.0, 1.0],
-    },
-    ManualVertex {
-        position: [1.0, 1.0, 0.0],
-        tex_coords: [1.0, 0.0],
-    },
-    ManualVertex {
-        position: [-1.0, 1.0, 0.0],
-        tex_coords: [0.0, 0.0],
-    },
-];
-
-const DEPTH_INDICES: &[u16] = &[0, 1, 2, 0, 2, 3];
 
 pub enum GameState {
     Playing,
@@ -82,6 +31,14 @@ pub enum GameState {
 pub enum CameraState {
     Normal,
     Front,
+}
+
+pub struct Text {
+    pub text_renderer: TextRenderer,
+    pub text_cache: SwashCache,
+    pub font_system: FontSystem,
+    pub text_atlas: TextAtlas
+
 }
 
 pub struct AppState {
@@ -150,11 +107,19 @@ impl InstanceRaw {
 }
 // Instancing
 
+pub struct Size {
+    pub width: u32,
+    pub height: u32
+}
+pub struct MousePos {
+    pub x: f64,
+    pub y: f64,
+}
+
 pub struct App {
     last_frame: Instant,
     pub context: Sdl,
-    pub width: u32,
-    pub height: u32,
+    pub size: Size,
     pub canvas: Canvas<Window>,
     pub current_display: DisplayMode,
     pub texture_creator: TextureCreator<WindowContext>,
@@ -163,6 +128,7 @@ pub struct App {
     pub device: Device,
     pub config: SurfaceConfiguration,
     pub render_pipeline: wgpu::RenderPipeline,
+    pub ui_pipeline: wgpu::RenderPipeline,
     pub index_buffer: wgpu::Buffer,
     pub camera: CameraRenderizable,
     pub instances: Vec<Instance>,
@@ -177,7 +143,10 @@ pub struct App {
     pub mountain: Model,
     pub mountain_instance: Instance,
     pub mountain_instance_buffer: wgpu::Buffer,
-    pub controller_subsystem: GameControllerSubsystem
+    pub controller_subsystem: GameControllerSubsystem,
+    pub text: Text,
+    pub components: Vec<Button>,
+    pub mouse_pos: MousePos
 }
 
 impl App {
@@ -201,7 +170,7 @@ impl App {
 
         env::set_var("SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS", "0"); // this is highly needed so the sdl2 can alt tab without generating bugs
 
-        let window: Window = video_susbsystem.window(title, width, height as u32).vulkan().fullscreen().build().expect("The window wasn't created");
+        let window: Window = video_susbsystem.window(title, width, height as u32).vulkan().build().expect("The window wasn't created");
         
         // WGPU INSTANCES AND SURFACE
         let instance = wgpu::Instance::new(InstanceDescriptor::default());
@@ -272,6 +241,73 @@ impl App {
 
         // we have to create a bind group for each texture since the fact that the layout and the group are separated is because we can swap the bind group on runtime
         // Textures
+
+        let mut font_system = FontSystem::new();
+        let font = include_bytes!("Inter-Thin.ttf");
+        font_system.db_mut().load_font_data(font.to_vec());
+
+        let text_cache = SwashCache::new();
+        let mut text_atlas = TextAtlas::new(&device, &queue, config.format);
+        let text_renderer = TextRenderer::new(
+            &mut text_atlas,
+            &device,
+            wgpu::MultisampleState::default(),
+            None,
+        );
+
+        let text_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/text_shader.wgsl").into()),
+        });
+
+        let ui_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("ui render pipeline layout"),
+                bind_group_layouts: &[],
+                push_constant_ranges: &[],
+            });
+
+        let ui_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("ui render pipeline"),
+            layout: Some(&ui_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &text_shader,
+                entry_point: "vertex",
+                buffers: &[VertexUi::desc()],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &text_shader,
+                entry_point: "fragment",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Bgra8UnormSrgb,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            multisample: wgpu::MultisampleState::default(),
+            depth_stencil: None,
+            multiview: None,
+        });
 
         // Camera
         // we set up the camera
@@ -350,8 +386,8 @@ impl App {
 
         // instances
         // this will define a list of instances and setting their position/rotation automatically bassed on the constants especified
-        let instances = (0..NUM_INSTANCES_PER_ROW).flat_map(|z| {
-            (0..NUM_INSTANCES_PER_ROW).map(move |x| {
+        let instances = (0..1).flat_map(|z| {
+            (0..1).map(move |x| {
                 let position = cgmath::Vector3 { x: 0.0, y: 0.0, z: 0.0 };
                 let rotation = cgmath::Quaternion::from_axis_angle(cgmath::Vector3::unit_y(), cgmath::Deg(90.0));
                 let scale = cgmath::Vector3 { x: 1.0, y: 1.0, z: 1.0 };
@@ -375,7 +411,7 @@ impl App {
         // instances
         let obj_model = resources::load_model("F14.obj", &device, &queue, &texture_bind_group_layout).await.unwrap();
         let water = resources::load_model("water.obj", &device, &queue, &texture_bind_group_layout).await.unwrap();
-        let mountain = resources::load_model("mountains.obj", &device, &queue, &texture_bind_group_layout).await.unwrap();
+        let mountain = resources::load_model("tower.obj", &device, &queue, &texture_bind_group_layout).await.unwrap();
 
 
         let water_instance = Instance {
@@ -394,9 +430,9 @@ impl App {
         );
 
         let mountain_instance = Instance {
-            position: cgmath::Vector3 { x: 0.0, y: -30.0, z: 0.0 },
+            position: cgmath::Vector3 { x: 0.0, y: 200.0, z: 0.0 },
             rotation: cgmath::Quaternion::from_axis_angle(cgmath::Vector3::unit_z(), cgmath::Deg(0.0)),
-            scale: cgmath::Vector3 { x: 1000.0, y: 1000.0, z: 1000.0 },
+            scale: cgmath::Vector3 { x: 150.0, y: 150.0, z: 150.0 },
         };
 
         let mountain_instance_data = mountain_instance.to_raw();
@@ -410,12 +446,34 @@ impl App {
 
         let depth_render = DepthRender::new(&device, &config);
 
+        let button = button::Button::new(
+            button::ButtonConfig {
+                rect_pos: RectPos {
+                    top: 10,
+                    left: 10,
+                    bottom: 50,
+                    right: 200,
+                },
+                fill_color: [0.0, 0.0, 0.0, 0.0],
+                fill_color_active: [0.0, 0.0, 0.0, 0.0],
+                border_color: [0.0, 1.0, 0.29411764705882354, 1.0],
+                border_color_active: [0.0, 1.0, 0.29411764705882354, 1.0],
+                text: "ALT:",
+                text_color: Color::rgba(0, 255, 75, 255),
+                text_color_active: Color::rgba(0, 255, 75, 000),
+            },
+            &mut font_system,
+        );
+
+        let components = vec![
+            button,
+        ];
+
         App {
             last_frame: Instant::now(),
             current_display,
             context,
-            width,
-            height,
+            size: Size {width, height},
             canvas,
             texture_creator,
             surface,
@@ -423,6 +481,7 @@ impl App {
             device,
             config,
             render_pipeline,
+            ui_pipeline,
             index_buffer,
             camera,
             instances,
@@ -437,7 +496,15 @@ impl App {
             mountain_instance,
             mountain,
             mountain_instance_buffer,
-            controller_subsystem
+            controller_subsystem,
+            text: Text {
+                text_renderer,
+                text_cache,
+                font_system,
+                text_atlas
+            },
+            components,
+            mouse_pos: MousePos { x: 0.0, y: 0.0 }
         }
     }
 
@@ -447,12 +514,67 @@ impl App {
 
         self.surface.configure(&self.device, &self.config);
         self.depth_render.resize(&self.device, &self.config);
-        self.camera.projection.resize(self.width, self.height);
+        self.camera.projection.resize(self.size.width, self.size.height);
 
         self.depth_texture = Texture::create_depth_texture(&self.device, &self.config, "depth_texture");
     }
 
-    pub fn render(&self) -> Result<(), wgpu::SurfaceError> {
+    pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+        // UI
+
+
+        let mut text_areas: Vec<TextArea> = Vec::new();
+        let mut num_vertices = 0;
+        let mut num_indices = 0;
+
+        
+        let mut vertices: Vec<VertexUi> = Vec::new();
+        let mut indices: Vec<u16> = Vec::new();
+
+        for button in self.components.iter_mut() {
+
+            let button_active = button.is_hovered(&self.mouse_pos);
+            let button_vertices = button.rectangle.vertices(button_active, &self.size);
+
+            vertices.extend_from_slice(&button_vertices);
+            indices.extend_from_slice(&button.rectangle.indices(num_vertices));
+
+            num_vertices += button_vertices.len() as u16;
+            num_indices += rectangle::NUM_INDICES;
+
+            text_areas.push(button.text.text_area(button_active));
+        }
+        
+
+        let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(vertices.as_slice()),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        self.text.text_renderer
+            .prepare(
+                &self.device,
+                &self.queue,
+                &mut self.text.font_system,
+                &mut self.text.text_atlas,
+                Resolution {
+                    width: self.size.width,
+                    height: self.size.height,
+                },
+                text_areas,
+                &mut self.text.text_cache,
+            )
+            .unwrap();
+
+        // UI
+
         // WGPU
         let output = self.surface.get_current_texture()?;
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default()); // this let us to control how render code interacts with textures
@@ -491,8 +613,8 @@ impl App {
                 timestamp_writes: None,
             });
 
-            render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
             render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
             render_pass.draw_model_instanced(&self.obj_model, 0..self.instances.len() as u32, &self.camera.bind_group);
 
             // make a water object who creates a vertex buffer
@@ -503,6 +625,30 @@ impl App {
             render_pass.draw_model_instanced(&self.mountain, 0..1 as u32, &self.camera.bind_group);
         }
 
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("UI Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load, // Load to preserve 3D rendering results
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None, // No depth-stencil for UI
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+    
+            render_pass.set_pipeline(&self.ui_pipeline);
+            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.draw_indexed(0..num_indices, 0, 0..1);
+    
+            self.text.text_renderer.render(&self.text.text_atlas, &mut render_pass).unwrap();
+        }
+
         if self.show_depth_map {
             self.depth_render.render(&view, &mut encoder);
         }
@@ -510,6 +656,7 @@ impl App {
         // we have the render pass inside the {} so we can do the submit to the queue, we can also drop the render pass if you prefeer
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
+        self.text.text_atlas.trim();
 
         Ok(())
     }
@@ -519,23 +666,8 @@ impl App {
         let mut app_state = AppState { is_running: true, state: GameState::Playing};
         let mut event_pump = self.context.event_pump().unwrap();
 
-        // we define a font for our text
-        let ttf_context = sdl2::ttf::init().unwrap(); // we create a "context"
-        let use_font = "./assets/fonts/Inter-Thin.ttf";
-        let mut _font = ttf_context.load_font(use_font, 20).unwrap();
-
         // here we define the initial state of our game states
         let mut play = play::GameLogic::new(&mut self, 5.0);
-
-        let example_button = Button::new(
-        GameObject{ active: true, x: 0.0, y: 0.0, width: 100.0, height: 20.0 }, 
-        Some("Example".to_owned()), 
-        Color::RGB(100, 100, 100), 
-        Color::RGB(0, 0, 0), 
-        Color::RGB(0, 0, 0), 
-        Color::RGB(0, 0, 0), 
-        None, 
-        crate::input::button_module::TextAlign::Center);
 
         let camera_state = CameraState::Normal;
         let mut target: Point3<f32>;
@@ -543,13 +675,14 @@ impl App {
 
         let controller = Self::open_first_available_controller(&self.controller_subsystem);
 
+        let mut base_vector = Vector3::new(0.0, 1.0, -3.0);
+        let mut yaw = 0.0;
+        let mut pitch = 0.0;
         // main game loop
         while app_state.is_running { 
             let delta_time = self.delta_time().as_secs_f32();
             self.canvas.clear();
-            example_button.render(&mut self.canvas, &self.texture_creator, &_font);
-
-            play.update(&_font, &mut app_state, &mut event_pump, &mut self, &controller);
+            play.update( &mut app_state, &mut event_pump, &mut self, &controller);
 
             match self.render() {
                 Ok(_) => {},
@@ -558,64 +691,35 @@ impl App {
                 }
                 Err(e) => eprintln!("Error: {}", e),
             }
+            
+            
+            // (vec1.y - vec2.y).abs();
 
             match app_state.state {
                 GameState::Playing => {
                     for instance in &mut self.instances {
+                        self.components[0].text.set_text(&mut self.text.font_system, &format!("ALT: {}", ((instance.position.y - self.water_instance.position.y) / 19.0).round())); 
                         self.camera.camera.up = instance.rotation * Vector3::unit_y();
-
                         match camera_state {
                             CameraState::Normal => {
-                                let mut base_vector = Vector3::new(0.0 , 1.0, -3.0);
-                                let mut rotation_mod = Quaternion::one();
-
-                                
-
-                                if play.controller.ry > 0.1 || play.controller.ry < -0.1 {
-                                    base_vector.x = 0.0;
-                                    base_vector.z = 0.0;
-                                    base_vector.y = 1.0;
+                                let base_target_vector = Vector3::new(0.0, 0.0, 10.0);
+                                if play.controller.rx.abs() > play.controller.rs_deathzone || play.controller.ry.abs() > play.controller.rs_deathzone {
+                                    base_vector = Self::lerp_vector3(base_vector, Vector3::new(0.0, 0.0, -5.0), delta_time * 5.0);
+                                    yaw = -play.controller.rx * std::f32::consts::PI;
+                                    pitch = -play.controller.ry * (std::f32::consts::PI / 2.1); // Limit pitch to -90 to 90 degrees
+                                } else {
+                                    base_vector = Vector3::new(0.0, 1.0, -3.0);
+                                    yaw = 0.0;
+                                    pitch = 0.0;
                                 }
 
-                                if play.controller.rx > 0.1 || play.controller.rx < -0.1 {
-                                    base_vector.x = 0.0;
-                                    base_vector.z = 0.0;
-                                    base_vector.y = 1.0;
-                                    
-                                }
-
-                                camera_position = Point3::new(instance.position.x, instance.position.y, instance.position.z) + ((instance.rotation * rotation_mod) * base_vector);
-                                target = Point3::new(instance.position.x, instance.position.y, instance.position.z) + (instance.rotation * Vector3::new(0.0, 0.0, 10.0));
+                                let rotation_mod = Quaternion::from_axis_angle(Vector3::unit_y(), Rad(yaw)) * Quaternion::from_axis_angle(Vector3::unit_x(), Rad(pitch));
+                                camera_position = Point3::new(instance.position.x, instance.position.y, instance.position.z) + (instance.rotation * rotation_mod * base_vector);
+                                target = Point3::new(instance.position.x, instance.position.y, instance.position.z) + (instance.rotation * rotation_mod * base_target_vector);
                                 self.camera.camera.position = camera_position;
                                 self.camera.camera.look_at(target);
                                 
-                                println!("{}", self.camera.camera.pitch.0);
-
-
-                                if play.controller.rx > 0.1 || play.controller.rx < -0.1 || play.controller.ry > 0.1 || play.controller.ry < -0.1 {
-                                    
-                                    // self.camera.camera.yaw = play.controller.rx;
-
-                                    // self.camera.camera.pitch = Rad(1.5 * play.controller.ry);
-                                }
-
-                                    
-                                    /* 
-                                if play.controller.rx > 0.1 || play.controller.rx < -0.1 {
-                                    self.camera.camera.look_at(target);
-                                }
-                                */
-
-
-                                // let rotation_view = instance.rotation * Vector3::new(-play.controller.rx, play.controller.ry, 0.0) * 30.0;
-
-                                // let edited = target + rotation_view;
-                                // let pos = instance.position + Quaternion::between_vectors(Vector3::unit_z(), (self.mountain_instance.position - instance.position).normalize()) * (Vector3::new(0.0, 0.0, -5.0));
-                                // self.camera.camera.position = (pos.x, pos.y, pos.z).into();
-
-
-
-                                // self.camera.camera.look_at((10.0 * play.controller.rx, 10.0 * play.controller.ry, 0.0).into());
+                                println!("{}", instance.rotation.v.y);
                             },
                             CameraState::Front => {
                                 camera_position = Point3::new(instance.position.x, instance.position.y, instance.position.z) + (instance.rotation * Vector3::new(0.0, 1.0, 0.0));
@@ -633,8 +737,6 @@ impl App {
                             let pos = instance.position + Quaternion::between_vectors(Vector3::unit_z(), (self.mountain_instance.position - instance.position).normalize()) * (Vector3::new(0.0, 0.0, -5.0));
                             self.camera.camera.position = (pos.x, pos.y, pos.z).into();
                         }
-
-                        // self.camera.camera.position = Self::lerp_point3(self.camera.camera.position, camera_position, delta_time * 20.0);
 
                         // Camera Relative Rendering
                         self.mountain_instance.position -= instance.rotation * play.velocity * delta_time;
@@ -667,6 +769,14 @@ impl App {
 
     fn lerp_point3(start: Point3<f32>, end: Point3<f32>, t: f32) -> Point3<f32> {
         Point3::new(
+            start.x + (end.x - start.x) * t,
+            start.y + (end.y - start.y) * t,
+            start.z + (end.z - start.z) * t
+        )
+    }
+
+    fn lerp_vector3(start: Vector3<f32>, end: Vector3<f32>, t: f32) -> Vector3<f32> {
+        Vector3::new(
             start.x + (end.x - start.x) * t,
             start.y + (end.y - start.y) * t,
             start.z + (end.z - start.z) * t

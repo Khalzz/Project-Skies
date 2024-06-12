@@ -1,7 +1,6 @@
 use wgpu::{util::DeviceExt, BindGroup, BindGroupLayout, BindGroupLayoutDescriptor, Buffer, Device, RenderPipeline, SurfaceConfiguration};
 
-use crate::app::ManualVertex;
-
+use crate::primitive::manual_vertex::ManualVertex;
 use super::textures::Texture;
 
 const DEPTH_VERTICES: &[ManualVertex] = &[
