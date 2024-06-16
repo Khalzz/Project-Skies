@@ -13,43 +13,38 @@ pub struct TextWidth {
 #[derive(Debug)]
 pub struct Text {
     buffer: Buffer,
-    rect_pos: RectPos,
-    color: Color,
-    color_active: Color,
-}
-
-#[derive(Debug)]
-pub struct TextField {
-    pub text: Text,
-    pub rectangle: Rectangle,
-    pub content: String,
-    pub active: bool,
-    pub last_cursor_blink: Option<SystemTime>,
+    pub rect_pos: RectPos,
+    pub color: Color,
+    pub color_active: Color,
+    text_data: String,
 }
 
 const FONT_SIZE: f32 = 20.0;
 const LINE_HEIGHT: f32 = 10.0;
 
 impl Text {
-    pub fn new(font_system: &mut FontSystem, rect_pos: RectPos, text: &str, color: Color, color_active: Color) -> Self {
+    pub fn new(font_system: &mut FontSystem, rect_pos: RectPos, text: &str, color: Color, color_active: Color, text_data: String) -> Self {
         let mut buffer = Buffer::new(font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
 
-        buffer.set_size( font_system, (rect_pos.right - rect_pos.left) as f32, (rect_pos.bottom - rect_pos.top) as f32,);
-        buffer.set_text(font_system, text, Attrs::new().family(Family::SansSerif), Shaping::Advanced);
+        if text != "" {
+            buffer.set_size( font_system, (rect_pos.right - rect_pos.left) as f32, (rect_pos.bottom - rect_pos.top) as f32,);
+            buffer.set_text(font_system, text, Attrs::new().family(Family::SansSerif), Shaping::Advanced);
 
-        buffer.lines.iter_mut().for_each(|line| {
-            line.set_align(Some(glyphon::cosmic_text::Align::Center));
-        });
+            buffer.lines.iter_mut().for_each(|line| {
+                line.set_align(Some(glyphon::cosmic_text::Align::Center));
+            });
 
-        buffer.set_wrap(font_system, glyphon::Wrap::None);
+            buffer.set_wrap(font_system, glyphon::Wrap::None);
 
-        buffer.shape_until_scroll(font_system);
+            buffer.shape_until_scroll(font_system);
+        }
 
         Self {
             buffer,
             rect_pos,
             color,
             color_active,
+            text_data
         }
     }
     
@@ -98,6 +93,16 @@ impl Text {
     }
 
     pub fn set_text(&mut self, font_system: &mut FontSystem, text: &str) {
-        self.buffer.set_text(font_system, text, Attrs::new().family(Family::SansSerif), Shaping::Advanced);
+        if text != self.text_data {
+            self.text_data = text.to_owned();
+            self.buffer.set_text(font_system, text, Attrs::new().family(Family::SansSerif), Shaping::Advanced);
+
+            self.buffer.lines.iter_mut().for_each(|line| {
+                line.set_align(Some(glyphon::cosmic_text::Align::Center));
+            });
+
+            self.buffer.set_wrap(font_system, glyphon::Wrap::None);
+            self.buffer.shape_until_scroll(font_system);
+        }
     }
 }

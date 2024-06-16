@@ -1,8 +1,9 @@
 use std::io::{BufReader, Cursor};
 
-use wgpu::util::DeviceExt;
+use cgmath::{Quaternion, Vector3, Zero};
+use wgpu::{util::DeviceExt, Buffer};
 
-use crate::rendering::{model::{self, Material, Model, Vertex}, textures::Texture};
+use crate::{rendering::{model::{self, Material, Model, Vertex}, textures::Texture}, transform::Transform};
 
 pub async fn load_string(file_name: &str) -> anyhow::Result<String> {
     let path = std::path::Path::new(env!("OUT_DIR")).join("res").join(file_name);
@@ -23,7 +24,7 @@ pub async fn load_texture(file_name: &str, device: &wgpu::Device, queue: &wgpu::
     Texture::from_bytes(&data, device, queue, file_name)
 }
 
-pub async fn load_model(file_name: &str, device: &wgpu::Device, queue: &wgpu::Queue, layout: &wgpu::BindGroupLayout,) -> anyhow::Result<model::Model> {
+pub async fn load_model(file_name: &str, device: &wgpu::Device, queue: &wgpu::Queue, layout: &wgpu::BindGroupLayout, transform_bind_group_layout: &wgpu::BindGroupLayout) -> anyhow::Result<model::Model> {
     let obj_text = load_string(file_name).await?;
     let obj_cursor = Cursor::new(obj_text);
     let mut obj_reader = BufReader::new(obj_cursor);
@@ -128,12 +129,35 @@ pub async fn load_model(file_name: &str, device: &wgpu::Device, queue: &wgpu::Qu
                 usage: wgpu::BufferUsages::INDEX,
             });
 
+            
+            let transform = Transform::new(Vector3::zero(), Quaternion::zero(), Vector3::new(1.0, 1.0, 1.0));
+            let transform_matrix = transform.to_matrix_bufferable();
+            let transform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("Transform Buffer")),
+                contents: bytemuck::cast_slice(&[transform_matrix]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+
+            let transform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("transform bind group"),
+                layout: &transform_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: transform_buffer.as_entire_binding(),
+                    },
+                ],
+            });
+
             model::Mesh {
                 name: file_name.to_string(),
                 vertex_buffer,
                 index_buffer,
                 num_elements: m.mesh.indices.len() as u32,
                 material: m.mesh.material_id.unwrap_or(0),
+                transform,
+                transform_bind_group,
+                transform_buffer
             }
         })
         .collect::<Vec<_>>();

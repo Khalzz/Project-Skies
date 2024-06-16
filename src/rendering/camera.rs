@@ -67,6 +67,41 @@ impl CameraRenderizable {
 
         return CameraRenderizable { camera, projection, uniform, buffer, bind_group, bind_group_layout };
     }
+
+    pub fn world_to_screen(&self, pos_world: Point3<f32>, screen_width: u32, screen_height: u32) -> Option<Point> {
+        // Check if the point is within the camera's view direction
+        let camera_to_point = pos_world - self.camera.position;
+        let forward = self.camera.calc_forward_direction();
+
+        if camera_to_point.dot(forward) < 0.0 {
+            return None; // The point is behind the camera
+        }
+
+        // Get the combined view-projection matrix
+        let view_proj = Matrix4::from(self.uniform.view_proj);
+
+        // Convert the 3D position to homogeneous coordinates
+        let pos_homogeneous = view_proj * pos_world.to_homogeneous();
+
+        // Perform the perspective divide
+        if pos_homogeneous.w != 0.0 {
+            let ndc = pos_homogeneous.truncate() / pos_homogeneous.w;
+
+            // Check if the position is within the normalized device coordinates range [-1, 1] for x and y,
+            // and between 0 and 1 for z to ensure it's in front of the camera
+            if ndc.x.abs() <= 1.0 && ndc.y.abs() <= 1.0 && ndc.z >= 0.0 && ndc.z <= 1.0 {
+                // Convert NDC to screen coordinates
+                let x = ((ndc.x + 1.0) * 0.5) * screen_width as f32;
+                let y = ((1.0 - (ndc.y + 1.0) * 0.5)) * screen_height as f32; // Invert Y-axis
+
+                Some(Point::new(x as i32, y as i32))
+            } else {
+                None // The point is outside the view frustum
+            }
+        } else {
+            None // The point is not visible
+        }
+    }
 }
 
 // we create the values that make our camera position and view angle
@@ -90,6 +125,12 @@ impl Camera {
             up: Vector3::unit_y(),
             rotation_modifier: Quaternion::one()
         }    
+    }
+
+    pub fn calc_forward_direction(&self) -> Vector3<f32> {
+        let (sin_pitch, cos_pitch) = self.pitch.0.sin_cos();
+        let (sin_yaw, cos_yaw) = self.yaw.0.sin_cos();
+        Vector3::new(cos_pitch * cos_yaw, sin_pitch, cos_pitch * sin_yaw).normalize()
     }
 
     pub fn calc_matrix(&self) -> Matrix4<f32> {

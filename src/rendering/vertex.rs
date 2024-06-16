@@ -31,7 +31,7 @@ impl VertexUi {
                 wgpu::VertexAttribute {
                     offset: std::mem::size_of::<[f32; 11]>() as wgpu::BufferAddress,
                     shader_location: 3,
-                    format: wgpu::VertexFormat::Float32x3,
+                    format: wgpu::VertexFormat::Float32x4,
                 },
             ],
         }

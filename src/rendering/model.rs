@@ -1,4 +1,9 @@
-use std::{mem, ops::Range};
+use std::{default, mem, ops::Range};
+
+
+use wgpu::BindGroup;
+
+use crate::transform::Transform;
 
 use super::textures::Texture;
 
@@ -56,11 +61,26 @@ pub struct Mesh {
     pub index_buffer: wgpu::Buffer,
     pub num_elements: u32,
     pub material: usize,
+    pub transform_buffer: wgpu::Buffer,
+    pub transform_bind_group: wgpu::BindGroup,
+    pub transform: Transform
 }
 
 pub struct Model {
     pub meshes: Vec<Mesh>,
     pub materials: Vec<Material>
+}
+
+impl Mesh {
+    pub fn update_transform(&self, queue: &wgpu::Queue) {
+        let transform_data = Transform::new(self.transform.position, self.transform.rotation, self.transform.scale);
+
+        queue.write_buffer(
+            &self.transform_buffer,
+            0, // Offset, assuming you are updating the entire buffer
+            bytemuck::cast_slice(&[transform_data.to_matrix_bufferable()]),
+        );
+    }
 }
 
 pub trait DrawModel<'a> {
@@ -101,6 +121,7 @@ where
         self.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         self.set_bind_group(0, &material.bind_group, &[]);
         self.set_bind_group(1, camera_bind_group, &[]);
+        self.set_bind_group(2, &mesh.transform_bind_group, &[]);
         self.draw_indexed(0..mesh.num_elements, 0, instances);
     }
 

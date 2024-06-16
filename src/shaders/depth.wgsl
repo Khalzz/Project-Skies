@@ -2,8 +2,15 @@ struct CameraUniform {
     view_proj: mat4x4<f32>,
 };
 
-@group(1) @binding(0) // on our render pipeline layout we have 2 values, the first is the texture and the second is the camera, thats why the camera is group 0 instead of 1
+struct Transform {
+    model_matrix: mat4x4<f32>,
+};
+
+@group(1) @binding(0)
 var<uniform> camera: CameraUniform;
+
+@group(2) @binding(0)
+var<uniform> transform: Transform;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -33,7 +40,7 @@ fn vs_main(model: VertexInput, instance: InstanceInput,) -> VertexOutput {
 
     var out: VertexOutput;
     out.tex_coords = model.tex_coords;
-    out.clip_position = camera.view_proj * model_matrix * vec4<f32>(model.position, 1.0);
+    out.clip_position = camera.view_proj * model_matrix * transform.model_matrix * vec4<f32>(model.position, 1.0) ;
     return out;
 }
 

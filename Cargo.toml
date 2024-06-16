@@ -11,12 +11,12 @@ tokio = { version = "*", features = ["full"] }
 bytemuck = { version = "*", features = [ "derive" ] }
 image = { version = "*", default-features = false, features = ["png", "jpeg"] }
 anyhow = "*"
-cgmath = "*"
 fs_extra = "*"
 glob = "*"
 tobj = { version = "*", features = ["async"]}
 rand = "0.8"
 glyphon = "0.4"
+cgmath = "*"
 
 [build-dependencies]
 anyhow = "*"

@@ -2,10 +2,11 @@ use app::App;
 
 mod app;
 mod game_object;
+mod transform;
 mod resources;
 
 mod ui {
-    pub mod text;
+    pub mod button;
 }
 
 mod input {
@@ -13,6 +14,7 @@ mod input {
 }
 
 mod gameplay {
+    pub mod controller;
     pub mod play;
 }
 
@@ -20,7 +22,6 @@ mod primitive {
     pub mod manual_vertex;
     pub mod rectangle;
     pub mod text;
-    pub mod button;
 }
 
 mod rendering {
@@ -31,11 +32,14 @@ mod rendering {
     pub mod depth_renderer;
 }
 
+mod utils {
+    pub mod lerps;
+}
 
 // this tokio trait means that main WILL AND CAN be asyncronous (without tokio this is not achievable)
 #[tokio::main]
 async fn main() -> Result<(), String> {
-    let app = App::new("Pankarta Software", Some(1280), Some(720));
+    let app = App::new("Pankarta Software", None, None);
     app.await.update();
     Ok(())
 }

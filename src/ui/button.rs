@@ -1,11 +1,4 @@
-use std::path::Component;
-
-use glyphon::{FontSystem, SwashCache, TextAtlas, TextRenderer};
-use sdl2::sys::Window;
-
-use crate::app::{MousePos, Size};
-
-use super::{rectangle::{RectPos, Rectangle}, text::Text};
+use crate::{app::MousePos, primitive::{rectangle::{RectPos, Rectangle}, text::Text}};
 
 pub struct Button {
     pub text: Text,
@@ -33,20 +26,8 @@ pub struct ButtonConfig {
 impl Button {
     pub fn new(cfg: ButtonConfig, font_system: &mut glyphon::FontSystem) -> Self {
         Self {
-            rectangle: Rectangle::new(
-                cfg.rect_pos,
-                cfg.fill_color,
-                cfg.fill_color_active,
-                cfg.border_color,
-                cfg.border_color_active,
-            ),
-            text: Text::new(
-                font_system,
-                cfg.rect_pos,
-                cfg.text,
-                cfg.text_color,
-                cfg.text_color_active,
-            ),
+            rectangle: Rectangle::new(cfg.rect_pos, cfg.fill_color, cfg.fill_color_active, cfg.border_color, cfg.border_color_active),
+            text: Text::new(font_system, cfg.rect_pos, cfg.text, cfg.text_color, cfg.text_color_active, "".to_owned()),
             // on_click: cfg.on_click,
         }
     }

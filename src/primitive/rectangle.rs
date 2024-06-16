@@ -15,9 +15,9 @@ pub struct RectPos {
 #[derive(Debug, Clone)]
 pub struct Rectangle {
     pub position: RectPos,
-    color: [f32; 4],
+    pub color: [f32; 4],
     color_active: [f32; 4],
-    border_color: [f32; 4],
+    pub border_color: [f32; 4],
     border_color_active: [f32; 4],
 }
 
@@ -37,7 +37,6 @@ impl Rectangle {
     }
 
     pub fn vertices( &mut self, is_active: bool, size: &Size ) -> [VertexUi; 4] {
-
         // We define the position of each object based on the height defined
         let top = 1.0 - (self.position.top as f32 / (size.height as f32 / 2.0));
         let left = (self.position.left as f32 / (size.width as f32 / 2.0)) - 1.0;
@@ -54,7 +53,6 @@ impl Rectangle {
         let mut color = self.color;
         let mut border_color = self.border_color;
 
-        
         if is_active {
             color = self.color_active;
             border_color = self.border_color_active;
