@@ -92,17 +92,20 @@ impl Text {
         (self.rect_pos.bottom - (self.rect_pos.bottom - self.rect_pos.top) / 2) as f32 - (self.buffer.metrics().line_height / 2.0)
     }
 
-    pub fn set_text(&mut self, font_system: &mut FontSystem, text: &str) {
+    pub fn set_text(&mut self, font_system: &mut FontSystem, text: &str, realign: bool) {
         if text != self.text_data {
             self.text_data = text.to_owned();
+            // self.buffer.set_size( font_system, (self.rect_pos.right - self.rect_pos.left) as f32, (self.rect_pos.bottom - self.rect_pos.top) as f32,);
             self.buffer.set_text(font_system, text, Attrs::new().family(Family::SansSerif), Shaping::Advanced);
 
-            self.buffer.lines.iter_mut().for_each(|line| {
-                line.set_align(Some(glyphon::cosmic_text::Align::Center));
-            });
+            if realign {
+                self.buffer.lines.iter_mut().for_each(|line| {
+                    line.set_align(Some(glyphon::cosmic_text::Align::Center));
+                }); 
 
-            self.buffer.set_wrap(font_system, glyphon::Wrap::None);
-            self.buffer.shape_until_scroll(font_system);
+                self.buffer.set_wrap(font_system, glyphon::Wrap::None);
+                self.buffer.shape_until_scroll(font_system);
+            }
         }
     }
 }

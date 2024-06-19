@@ -4,6 +4,7 @@ mod app;
 mod game_object;
 mod transform;
 mod resources;
+mod resources_obj;
 
 mod ui {
     pub mod button;

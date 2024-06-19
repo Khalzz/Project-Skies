@@ -18,6 +18,10 @@ rand = "0.8"
 glyphon = "0.4"
 cgmath = "*"
 
+[dependencies.gltf]
+version = "1.4"
+features = ["extras", "names", "utils"]
+
 [build-dependencies]
 anyhow = "*"
 cgmath = "*"

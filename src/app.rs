@@ -7,9 +7,10 @@ use cgmath::{Matrix4, Quaternion, Rotation3, Vector3, Zero};
 use glyphon::{Color, Font, FontSystem, Resolution, SwashCache, TextArea, TextAtlas, TextRenderer};
 use rand::Rng;
 use sdl2::controller::GameController;
+use sdl2::haptic::Haptic;
 use sdl2::render::TextureCreator;
 use sdl2::video::{DisplayMode, WindowContext};
-use sdl2::GameControllerSubsystem;
+use sdl2::{GameControllerSubsystem, HapticSubsystem};
 use sdl2::{video::Window, Sdl, render::Canvas};
 use wgpu::util::DeviceExt;
 use wgpu::{BindGroup, BindGroupLayout, BindGroupLayoutDescriptor, Buffer, DepthBiasState, Device, DeviceDescriptor, Features, InstanceDescriptor, Limits, PipelineLayout, Queue, RenderPassDepthStencilAttachment, RenderPipeline, StencilState, Surface, SurfaceConfiguration, TextureUsages};
@@ -153,6 +154,7 @@ pub struct App {
     depth_render: DepthRender,
     pub show_depth_map: bool,
     pub controller_subsystem: GameControllerSubsystem,
+    pub haptic_subsystem: HapticSubsystem,
     pub text: Text,
     pub components: Vec<Button>,
     pub dynamic_ui_components: Vec<Button>,
@@ -169,6 +171,8 @@ impl App {
         let video_susbsystem = context.video().expect("The Video subsystem wasn't initialized");
         
         let controller_subsystem = context.game_controller().unwrap();
+        let haptic_subsystem = context.haptic().unwrap();
+        
 
         let current_display = video_susbsystem.current_display_mode(0).unwrap();
         
@@ -419,11 +423,11 @@ impl App {
         let texture_creator = canvas.texture_creator();
 
         // instances
-        let f14 = resources::load_model("F14.obj", &device, &queue, &texture_bind_group_layout, &transform_bind_group_layout).await.unwrap();
-        let water = resources::load_model("water.obj", &device, &queue, &texture_bind_group_layout, &transform_bind_group_layout).await.unwrap();
-        let tower = resources::load_model("tower.obj", &device, &queue, &texture_bind_group_layout, &transform_bind_group_layout).await.unwrap();
-        let tower2 = resources::load_model("tower2.obj", &device, &queue, &texture_bind_group_layout, &transform_bind_group_layout).await.unwrap();
-        let crane = resources::load_model("crane.obj", &device, &queue, &texture_bind_group_layout, &transform_bind_group_layout).await.unwrap();
+        let f14 = resources::load_model_gltf("F14.gltf", &device, &queue, &transform_bind_group_layout).await.unwrap();
+        let water = resources::load_model_gltf("water.gltf", &device, &queue, &transform_bind_group_layout).await.unwrap();
+        let tower = resources::load_model_gltf("tower.gltf", &device, &queue, &transform_bind_group_layout).await.unwrap();
+        let tower2 = resources::load_model_gltf("tower2.gltf", &device, &queue, &transform_bind_group_layout).await.unwrap();
+        let crane = resources::load_model_gltf("crane.gltf", &device, &queue, &transform_bind_group_layout).await.unwrap();
 
         let f14_instance = Instance {
             position: cgmath::Vector3 { x: 0.0, y: 150.0, z: 0.0 },
@@ -432,6 +436,7 @@ impl App {
         };
         let f14_data = Self::create_instance(f14_instance, &device, f14);
 
+        
         let water_instance = Instance {
             position: cgmath::Vector3 { x: 0.0, y: 0.0, z: 0.0 },
             rotation: cgmath::Quaternion::from_axis_angle(cgmath::Vector3::unit_z(), cgmath::Deg(0.0)),
@@ -459,7 +464,7 @@ impl App {
             scale: cgmath::Vector3 { x: 100.0, y: 100.0, z: 100.0 },
         };
         let crane_data = Self::create_instance(crane_instance, &device, crane);
-        
+
         let mut renderizable_instances = HashMap::new();
         renderizable_instances.insert("f14".to_owned(), f14_data);
         renderizable_instances.insert("water".to_owned(), water_data);
@@ -518,7 +523,8 @@ impl App {
             renderizable_instances,
             dynamic_ui_components,
             throttling: Throttling { last_ui_update: Instant::now(), ui_update_interval: Duration::from_secs_f32(1.0/60.0), last_controller_update: Instant::now(), controller_update_interval: Duration::from_secs_f32(1.0/400.0) },
-            ui_rendering
+            ui_rendering,
+            haptic_subsystem
         }
     }
 
@@ -532,7 +538,7 @@ impl App {
 
         self.depth_texture = Texture::create_depth_texture(&self.device, &self.config, "depth_texture");
     }
-
+    
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         // UI
         let mut text_areas: Vec<TextArea> = Vec::new();
@@ -677,14 +683,16 @@ impl App {
         let mut event_pump = self.context.event_pump().unwrap();
 
         let mut play = play::GameLogic::new(&mut self, 5.0);
-        let controller = Self::open_first_available_controller(&self.controller_subsystem);
+        let mut controller = Self::open_first_available_controller(&self.controller_subsystem);
+        
+        
 
         while app_state.is_running { 
             let delta_time = self.delta_time().as_secs_f32();
             self.canvas.clear();
 
             // let mut start_time = Instant::now(); // benchmarking            
-            play.update( &mut app_state, &mut event_pump, &mut self, &controller);
+            play.update( &mut app_state, &mut event_pump, &mut self, &mut controller);
             // println!("Vertex and index buffers generation: {}", start_time.elapsed().as_micros());
 
 
@@ -701,7 +709,7 @@ impl App {
                     let plane_rot = self.renderizable_instances.get("f14").unwrap().instance.rotation;
                     self.camera.camera.up = self.renderizable_instances.get("f14").unwrap().instance.rotation * Vector3::unit_y();
                     play.camera_data.look_at = Some(self.renderizable_instances.get("tower").unwrap().instance.position);
-                    play.altitude.altitude = (((self.renderizable_instances.get("f14").unwrap().instance.position.y - self.renderizable_instances.get("water").unwrap().instance.position.y) / 19.0) * 3.8).round();
+                    play.altitude.altitude = ((self.renderizable_instances.get("f14").unwrap().instance.position.y - self.renderizable_instances.get("water").unwrap().instance.position.y)).round();
                     
                     for (key, renderizable) in &mut self.renderizable_instances {
                         self.queue.write_buffer(&renderizable.instance_buffer, 0, bytemuck::cast_slice(&[renderizable.instance.to_raw()]));

@@ -2,6 +2,7 @@ use std::{f64::consts::PI, time::{Duration, Instant}};
 
 use cgmath::{InnerSpace, Point3, Quaternion, Rad, Rotation, Rotation3, Vector3};
 use glyphon::Color;
+use rand::{random, rngs::ThreadRng, Rng};
 use sdl2::controller::GameController;
 use tokio::io::ReadBuf;
 use crate::{app::{App, AppState, InstanceData}, primitive::rectangle::RectPos, ui::button::{self, Button, ButtonConfig}, utils::lerps::{lerp, lerp_quaternion, lerp_vector3}};
@@ -19,6 +20,8 @@ pub struct CameraData {
     position: Point3<f32>,
     mod_yaw: f32,
     mod_pitch: f32,
+    mod_pos_x: f32,
+    mod_pos_y: f32,
     base_position: Vector3<f32>,
     pub look_at: Option<Vector3<f32>>
 }
@@ -45,10 +48,12 @@ pub struct GameLogic { // here we define the data we use on our script
     pub start_time: Instant,
     pub controller: Controller,
     pub velocity: Vector3<f32>,
+    pub max_speed: f32,
     rotation: Vector3<f32>,
     pub camera_data: CameraData,
     pub altitude: AltitudeUi,
-    pub plane_systems: PlaneSystems
+    pub plane_systems: PlaneSystems,
+    rng: ThreadRng
 } 
 
 impl GameLogic {
@@ -156,6 +161,8 @@ impl GameLogic {
             position: Point3::new(0.0, 0.0, 0.0), 
             mod_yaw: 0.0, 
             mod_pitch: 0.0, 
+            mod_pos_x: 0.0,
+            mod_pos_y: 0.0,
             base_position: Vector3::new(0.0, 13.0, -35.0), 
             look_at: None 
         };
@@ -164,27 +171,31 @@ impl GameLogic {
             bandits: vec![app.renderizable_instances.get("tower").unwrap().instance.position, app.renderizable_instances.get("crane").unwrap().instance.position, app.renderizable_instances.get("tower2").unwrap().instance.position],
         };
 
+        let rng = rand::thread_rng();
+
         Self {
             fps: 0,
             last_frame: Instant::now(),
             start_time: Instant::now(),
             frame_count: 0,
             frame_timer: Duration::new(0, 0),
-            controller: Controller::new(0.3, 0.1),
+            controller: Controller::new(0.3, 0.2),
             velocity,
             rotation,
+            max_speed: 2485.0,
             camera_data,
             altitude: AltitudeUi { altitude: 0.0, alert_state: false, time_alert: 0.0 },
-            plane_systems
+            plane_systems,
+            rng
         }
     }
 
     // this is called every frame
-    pub fn update(&mut self, mut app_state: &mut AppState, mut event_pump: &mut sdl2::EventPump, app: &mut App, controller: &Option<GameController>) {
+    pub fn update(&mut self, mut app_state: &mut AppState, mut event_pump: &mut sdl2::EventPump, app: &mut App, controller: &mut Option<GameController>) {
         let delta_time_duration = self.delta_time();
         let delta_time = delta_time_duration.as_secs_f32();
         self.display_framerate(delta_time_duration, app);
-        self.plane_movement(app, delta_time);
+        self.plane_movement(app, delta_time, controller);
         self.camera_control(app, delta_time);
         self.ui_control(app, delta_time);
         Self::event_handler(self, &mut app_state, &mut event_pump, app, controller);
@@ -217,62 +228,74 @@ impl GameLogic {
         }
 
         let fps_text = format!("FPS: {}", self.fps);
-        app.components[4].text.set_text(&mut app.text.font_system, &fps_text);
+        app.components[4].text.set_text(&mut app.text.font_system, &fps_text, true);
     }
 
-    fn map_to_range(x: f64, in_min: f64, in_max: f64, out_min: f64, out_max: f64) -> f64 {
-        (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min
-    }
+    
 
-    fn plane_movement (&mut self, app: &mut App, delta_time: f32) {
+    fn plane_movement (&mut self, app: &mut App, delta_time: f32, controller: &mut Option<GameController>) {
         let plane = app.renderizable_instances.get_mut("f14").unwrap();
-
-        // plane.model.meshes[1].transform.rotation = lerp_quaternion(plane.model.meshes[1].transform.rotation,Quaternion::from_angle_x(Rad(0.2) * self.controller.x), delta_time * 5.0);
         let mut angle = 0.0;
-        let mut high_g_mode = false;
 
-        if self.velocity.z < 1800.0 {
-            high_g_mode = true;
+        if self.velocity.z < 1000.0 {
             angle = 0.5
         }
+        
+        
+        
         plane.model.meshes[3].transform.rotation = lerp_quaternion(plane.model.meshes[3].transform.rotation,Quaternion::from_angle_y(Rad(-angle)), delta_time);
         plane.model.meshes[2].transform.rotation = lerp_quaternion(plane.model.meshes[2].transform.rotation,Quaternion::from_angle_y(Rad(angle)), delta_time);
         plane.model.meshes[3].update_transform(&app.queue);
         plane.model.meshes[2].update_transform(&app.queue);
 
+        /* 
+        plane.model.meshes[4].transform.rotation = lerp_quaternion(plane.model.meshes[4].transform.rotation, Quaternion::from_angle_x(Rad(0.3 * -self.controller.x)), delta_time * 7.0);
+        plane.model.meshes[6].transform.rotation = lerp_quaternion(plane.model.meshes[6].transform.rotation, Quaternion::from_angle_x(Rad(0.3 * self.controller.x)), delta_time * 7.0);
+        plane.model.meshes[4].update_transform(&app.queue);
+        plane.model.meshes[6].update_transform(&app.queue);
+        */
 
-        let throttle = if self.controller.power > 0.1 {
-            app.camera.projection.fovy = lerp(app.camera.projection.fovy, 70.0, delta_time);
-            if self.velocity.z < 2485.0 {
+        if self.controller.power > 0.1 {
+            match controller {
+                Some(control) => {
+                    if control.has_rumble() {
+                        control.set_rumble(0xFFFF, 0xFFFF, 100).unwrap();
+                    }
+                },
+                None => {},
+            }
+            let random_x: f32 = self.rng.gen_range(-3.0..=3.0);
+            let random_y: f32 = self.rng.gen_range(-3.0..=3.0);
+            app.camera.projection.fovy = lerp(app.camera.projection.fovy, 70.0, delta_time * 7.0);
+            self.camera_data.mod_pos_x = lerp(self.camera_data.mod_pos_x, random_x, delta_time * 7.0);
+            self.camera_data.mod_pos_y = lerp(self.camera_data.mod_pos_y, random_y, delta_time * 7.0);
+            if self.velocity.z < self.max_speed {
                 self.velocity.z += 200.0 * delta_time;
             }
-            1.0 
         } else if self.controller.power < -0.1 {
+            match controller {
+                Some(control) => {
+                    if control.has_rumble() {
+                        control.set_rumble(0xFFFF, 0xFFFF, 100).unwrap();
+                    }
+                },
+                None => {},
+            }
             app.camera.projection.fovy = lerp(app.camera.projection.fovy, 45.0, delta_time);
             if self.velocity.z > 0.0 {
                 self.velocity.z -= 400.0 * delta_time;
             }
-            -1.0 
         } else {
             app.camera.projection.fovy = lerp(app.camera.projection.fovy, 60.0, delta_time);
             if self.velocity.z > 0.0 {
-                self.velocity.z -= 2.0 * delta_time;
+                self.velocity.z -= self.calculate_deceleration(150.0) * delta_time;
             }
-            0.0
         };
-
+        
         let x = if self.controller.y > 0.2 { 
-            if high_g_mode {
-                0.8
-            } else {
-                0.4
-            }
+            Self::calculate_turning(self.velocity.z, self.max_speed, 0.3, 0.8)
         } else if self.controller.y < -0.2 {
-            if high_g_mode {
-                -1.0
-            } else {
-                -0.7
-            }
+            Self::calculate_turning(self.velocity.z, self.max_speed, -0.7, -1.1)
         } else { 0.0 };
 
         let y = 0.5 * -self.controller.yaw;
@@ -303,7 +326,7 @@ impl GameLogic {
                 if self.controller.rx.abs() > self.controller.rs_deathzone || self.controller.ry.abs() > self.controller.rs_deathzone {
                     self.camera_data.base_position = lerp_vector3(self.camera_data.base_position, Vector3::new(0.0, 0.0, -60.0), delta_time * 5.0);
                     self.camera_data.mod_yaw = -self.controller.rx * std::f32::consts::PI;
-                    self.camera_data.mod_pitch = -self.controller.ry * (std::f32::consts::PI / 2.1); // Limit pitch to -90 to 90 degrees
+                    self.camera_data.mod_pitch = -self.controller.ry * (std::f32::consts::PI / 2.1);
                 } else {
                     self.camera_data.base_position = Vector3::new(0.0, 13.0, -40.0);
                     self.camera_data.mod_yaw = 0.0;
@@ -313,6 +336,8 @@ impl GameLogic {
                 let rotation_mod = Quaternion::from_axis_angle(Vector3::unit_y(), Rad(self.camera_data.mod_yaw)) * Quaternion::from_axis_angle(Vector3::unit_x(), Rad(self.camera_data.mod_pitch));
                 self.camera_data.position = Point3::new(plane.position.x, plane.position.y, plane.position.z) + (plane.rotation * rotation_mod * self.camera_data.base_position);
                 self.camera_data.target = Point3::new(plane.position.x, plane.position.y, plane.position.z) + (plane.rotation * rotation_mod * base_target_vector);
+                self.camera_data.position.x = self.camera_data.position.x + self.camera_data.mod_pos_x;
+                self.camera_data.position.y = self.camera_data.position.y + self.camera_data.mod_pos_y;
                 app.camera.camera.position = self.camera_data.position;
                 app.camera.camera.look_at(self.camera_data.target);
             },
@@ -342,8 +367,8 @@ impl GameLogic {
 
     fn ui_control(&mut self, app: &mut App, delta_time: f32) {
         if app.throttling.last_ui_update.elapsed() >= app.throttling.ui_update_interval {
-            app.components[0].text.set_text(&mut app.text.font_system, &format!("ALT: {}", self.altitude.altitude));
-            app.components[1].text.set_text(&mut app.text.font_system, &format!("SPEED: {}", self.velocity.z.round()));
+            app.components[0].text.set_text(&mut app.text.font_system, &format!("ALT: {}", self.altitude.altitude), true);
+            app.components[1].text.set_text(&mut app.text.font_system, &format!("SPEED: {}", self.velocity.z.round()), true);
 
             let rotation = Self::map_to_range(app.camera.camera.yaw.0.into(), -PI, PI, 0.0, 360.0).round();
             let text_compass = if rotation >= 355.0 || rotation <= 5.0 {
@@ -358,7 +383,7 @@ impl GameLogic {
                 rotation.round().to_string() + "°"
             };
 
-            app.components[2].text.set_text(&mut app.text.font_system, &format!("{}", text_compass).to_string());
+            app.components[2].text.set_text(&mut app.text.font_system, &format!("{}", text_compass).to_string(), true);
             app.throttling.last_ui_update = Instant::now();
         }
 
@@ -433,5 +458,18 @@ impl GameLogic {
                 },
             }
         }
+    }
+
+    fn calculate_turning(speed: f32, speed_max: f32, turning_min: f32, turning_max: f32) -> f32 {
+        turning_min + (turning_max - turning_min) * (1.0 - (speed / speed_max))
+    }
+
+    fn map_to_range(x: f64, in_min: f64, in_max: f64, out_min: f64, out_max: f64) -> f64 {
+        (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min
+    }
+
+    fn calculate_deceleration(&self, base_deceleration: f32) -> f32 {
+        let speed_ratio = self.velocity.z / self.max_speed;
+        base_deceleration * speed_ratio * speed_ratio
     }
 }

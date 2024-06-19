@@ -7,8 +7,8 @@ use crate::app::{self, App, AppState};
 
 pub struct Controller {
     pub yaw: f32, // rotate on the y axis
-    pub throttle: bool,
-    pub brake: bool,
+    pub throttle: f32,
+    pub brake: f32,
     pub x: f32, // rotate on the z axis
     pub y: f32, // rotate on the x axis
     pub ls_deathzone: f32,
@@ -24,8 +24,8 @@ impl Controller {
     pub fn new(ls_deathzone: f32, rs_deathzone: f32) -> Self {
         Self {
             yaw: 0.0,
-            throttle: false,
-            brake: false,
+            throttle: 0.0,
+            brake: 0.0,
             x: 0.0,
             y: 0.0,
             ls_deathzone,
@@ -104,9 +104,9 @@ impl Controller {
                         self.ry = -y;
                     },
                     Axis::TriggerLeft | Axis::TriggerRight => {
-                        let left = -(controller.as_ref().map_or(0, |c| c.axis(Axis::TriggerLeft)) as f32 / 32767.0);
-                        let right = controller.as_ref().map_or(0, |c| c.axis(Axis::TriggerRight)) as f32 / 32767.0;
-                        self.power = left + right;
+                        self.throttle = -controller.as_ref().map_or(0, |c| c.axis(Axis::TriggerLeft)) as f32 / 32767.0;
+                        self.brake = controller.as_ref().map_or(0, |c| c.axis(Axis::TriggerRight)) as f32 / 32767.0;
+                        self.power = self.brake + self.throttle;
                     },
                     _ => {}
                 }
