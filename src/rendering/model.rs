@@ -63,7 +63,7 @@ pub struct Mesh {
     pub material: usize,
     pub transform_buffer: wgpu::Buffer,
     pub transform_bind_group: wgpu::BindGroup,
-    pub transform: Transform
+    pub transform: Transform,
 }
 
 pub struct Model {

@@ -235,24 +235,28 @@ impl GameLogic {
 
     fn plane_movement (&mut self, app: &mut App, delta_time: f32, controller: &mut Option<GameController>) {
         let plane = app.renderizable_instances.get_mut("f14").unwrap();
-        let mut angle = 0.0;
+        
+        let mut angle = 0.8;
 
         if self.velocity.z < 1000.0 {
-            angle = 0.5
+             angle = 0.0;
         }
         
         
         
-        plane.model.meshes[3].transform.rotation = lerp_quaternion(plane.model.meshes[3].transform.rotation,Quaternion::from_angle_y(Rad(-angle)), delta_time);
-        plane.model.meshes[2].transform.rotation = lerp_quaternion(plane.model.meshes[2].transform.rotation,Quaternion::from_angle_y(Rad(angle)), delta_time);
+        plane.model.meshes[3].transform.rotation = lerp_quaternion(plane.model.meshes[3].transform.rotation,Quaternion::from_angle_y(Rad(angle)), delta_time);
         plane.model.meshes[3].update_transform(&app.queue);
+
+        plane.model.meshes[2].transform.rotation = lerp_quaternion(plane.model.meshes[2].transform.rotation,Quaternion::from_angle_y(Rad(-angle)), delta_time);
         plane.model.meshes[2].update_transform(&app.queue);
 
-        /* 
-        plane.model.meshes[4].transform.rotation = lerp_quaternion(plane.model.meshes[4].transform.rotation, Quaternion::from_angle_x(Rad(0.3 * -self.controller.x)), delta_time * 7.0);
-        plane.model.meshes[6].transform.rotation = lerp_quaternion(plane.model.meshes[6].transform.rotation, Quaternion::from_angle_x(Rad(0.3 * self.controller.x)), delta_time * 7.0);
-        plane.model.meshes[4].update_transform(&app.queue);
-        plane.model.meshes[6].update_transform(&app.queue);
+        /*
+        // alerons
+        plane.model.meshes[5].transform.rotation = lerp_quaternion(plane.model.meshes[5].transform.rotation, Quaternion::from_angle_y(Rad(angle)) * Quaternion::from_angle_x(Rad(0.3 * -self.controller.x)), delta_time * 7.0);
+        plane.model.meshes[5].update_transform(&app.queue);
+
+        plane.model.meshes[3].transform.rotation = lerp_quaternion(plane.model.meshes[3].transform.rotation, Quaternion::from_angle_y(Rad(-angle)) * Quaternion::from_angle_x(Rad(0.3 * self.controller.x)), delta_time * 7.0);
+        plane.model.meshes[3].update_transform(&app.queue);
         */
 
         if self.controller.power > 0.1 {
