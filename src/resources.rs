@@ -147,7 +147,7 @@ pub async fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgp
 
     for scene in gltf.scenes() {
         for node in scene.nodes() {
-            traverse_node(node, &buffer_data, device, queue, transform_bind_group_layout, &mut meshes, file_name)?;
+            traverse_node(node, &buffer_data, device, queue, transform_bind_group_layout, &mut meshes, file_name, None)?;
         }
     }
 
@@ -157,38 +157,41 @@ pub async fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgp
     })
 }
 
-fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::Device, queue: &wgpu::Queue, transform_bind_group_layout: &wgpu::BindGroupLayout, meshes: &mut Vec<model::Mesh>, file_name: &str) -> anyhow::Result<()> {
+fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::Device, queue: &wgpu::Queue, transform_bind_group_layout: &wgpu::BindGroupLayout, meshes: &mut Vec<model::Mesh>, file_name: &str, parent_transform: Option<([f32; 3], [f32; 4], [f32; 3])>) -> anyhow::Result<()> {
         let mesh = node.mesh().expect("Got mesh");
         let primitives = mesh.primitives();
         primitives.for_each(|primitive| {
             let reader = primitive.reader(|buffer| Some(&buffer_data[buffer.index()]));
 
             let mut vertices = Vec::new();
-            if let Some(vertex_attribute) = reader.read_positions() {
-                vertex_attribute.for_each(|vertex| {
-                    vertices.push(ModelVertex {
-                        position: vertex,
-                        tex_coords: Default::default(),
-                        normal: Default::default(),
-                    })
-                });
-            }
-            if let Some(normal_attribute) = reader.read_normals() {
-                let mut normal_index = 0;
-                normal_attribute.for_each(|normal| {
-                    vertices[normal_index].normal = normal;
+                if let Some(vertex_attribute) = reader.read_positions() {
+                    vertex_attribute.for_each(|vertex| {
+                        // dbg!(vertex);
+                        vertices.push(ModelVertex {
+                            position: vertex,
+                            tex_coords: Default::default(),
+                            normal: Default::default(),
+                        })
+                    });
+                }
+                if let Some(normal_attribute) = reader.read_normals() {
+                    let mut normal_index = 0;
+                    normal_attribute.for_each(|normal| {
+                        //dbg!(normal);
+                        vertices[normal_index].normal = normal;
 
-                    normal_index += 1;
-                });
-            }
-            if let Some(tex_coord_attribute) = reader.read_tex_coords(0).map(|v| v.into_f32()) {
-                let mut tex_coord_index = 0;
-                tex_coord_attribute.for_each(|tex_coord| {
-                    vertices[tex_coord_index].tex_coords = tex_coord;
+                        normal_index += 1;
+                    });
+                }
+                if let Some(tex_coord_attribute) = reader.read_tex_coords(0).map(|v| v.into_f32()) {
+                    let mut tex_coord_index = 0;
+                    tex_coord_attribute.for_each(|tex_coord| {
+                        //dbg!(tex_coord);
+                        vertices[tex_coord_index].tex_coords = tex_coord;
 
-                    tex_coord_index += 1;
-                });
-            }
+                        tex_coord_index += 1;
+                    });
+                }
 
             let mut indices = Vec::new();
             if let Some(indices_raw) = reader.read_indices() {
@@ -206,7 +209,21 @@ fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::D
                 usage: wgpu::BufferUsages::INDEX,
             });
 
-            let transform = Transform::new(Vector3::new(node.transform().decomposed().0[0], node.transform().decomposed().0[1], node.transform().decomposed().0[2]), Quaternion::zero(), Vector3::new(1.0, 1.0, 1.0));
+            let transform: Transform;
+            match parent_transform {
+                Some(parent_data) => {
+                    let (parent_translation, parent_rotation, parent_scale) = parent_data;
+                    let (translation, rotation, scale) = node.transform().decomposed();
+
+                    let position = Vector3::from(parent_translation) + Vector3::from(translation);
+                    let rotation = Quaternion::from(parent_rotation) * Quaternion::from(rotation);
+                    transform = Transform::new(position, rotation, Vector3::new(1.0, 1.0, 1.0));
+                },
+                None => {
+                    transform = Transform::new(Vector3::new(node.transform().decomposed().0[0], node.transform().decomposed().0[1], node.transform().decomposed().0[2]), Quaternion::zero(), Vector3::new(1.0, 1.0, 1.0));
+                },
+            }
+
             let transform_matrix = transform.to_matrix_bufferable();
             let transform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(&format!("Transform Buffer")),
@@ -239,7 +256,7 @@ fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::D
 
 
     for child in node.children() {
-        // traverse_node(child, buffer_data, device, queue, transform_bind_group_layout, meshes, file_name)?;
+        traverse_node(child, buffer_data, device, queue, transform_bind_group_layout, meshes, file_name, Some(node.transform().decomposed()))?;
     }
 
     Ok(())

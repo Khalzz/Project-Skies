@@ -1,6 +1,6 @@
 use std::{f64::consts::PI, time::{Duration, Instant}};
 
-use cgmath::{InnerSpace, Point3, Quaternion, Rad, Rotation, Rotation3, Vector3};
+use cgmath::{ElementWise, InnerSpace, Point3, Quaternion, Rad, Rotation, Rotation3, Vector3};
 use glyphon::Color;
 use rand::{random, rngs::ThreadRng, Rng};
 use sdl2::controller::GameController;
@@ -231,60 +231,60 @@ impl GameLogic {
         app.components[4].text.set_text(&mut app.text.font_system, &fps_text, true);
     }
 
-    
-
     fn plane_movement (&mut self, app: &mut App, delta_time: f32, controller: &mut Option<GameController>) {
         let plane = app.renderizable_instances.get_mut("f14").unwrap();
-        
         let mut angle = 0.8;
 
         if self.velocity.z < 1000.0 {
-             angle = 0.0;
+            angle = 0.0;
         }
-        
-        
-        
-        plane.model.meshes[3].transform.rotation = lerp_quaternion(plane.model.meshes[3].transform.rotation,Quaternion::from_angle_y(Rad(angle)), delta_time);
-        plane.model.meshes[3].update_transform(&app.queue);
+
+        plane.model.meshes[4].transform.rotation = lerp_quaternion(plane.model.meshes[4].transform.rotation,Quaternion::from_angle_y(Rad(angle)), delta_time);
+        plane.model.meshes[4].update_transform(&app.queue);
 
         plane.model.meshes[2].transform.rotation = lerp_quaternion(plane.model.meshes[2].transform.rotation,Quaternion::from_angle_y(Rad(-angle)), delta_time);
         plane.model.meshes[2].update_transform(&app.queue);
 
-        /*
         // alerons
         plane.model.meshes[5].transform.rotation = lerp_quaternion(plane.model.meshes[5].transform.rotation, Quaternion::from_angle_y(Rad(angle)) * Quaternion::from_angle_x(Rad(0.3 * -self.controller.x)), delta_time * 7.0);
         plane.model.meshes[5].update_transform(&app.queue);
 
         plane.model.meshes[3].transform.rotation = lerp_quaternion(plane.model.meshes[3].transform.rotation, Quaternion::from_angle_y(Rad(-angle)) * Quaternion::from_angle_x(Rad(0.3 * self.controller.x)), delta_time * 7.0);
         plane.model.meshes[3].update_transform(&app.queue);
-        */
+        // alerons
 
+        let random_x: f32 = self.rng.gen_range(-3.0..=3.0);
+        let random_y: f32 = self.rng.gen_range(-3.0..=3.0);
         if self.controller.power > 0.1 {
+            self.camera_data.mod_pos_x = lerp(self.camera_data.mod_pos_x, random_x * 0.5, delta_time * 7.0);
+            self.camera_data.mod_pos_y = lerp(self.camera_data.mod_pos_y, random_y * 0.5, delta_time * 7.0);
+
             match controller {
                 Some(control) => {
                     if control.has_rumble() {
-                        control.set_rumble(0xFFFF, 0xFFFF, 100).unwrap();
+                        control.set_rumble(u16::MAX / 4, u16::MAX / 4, 100).unwrap();
                     }
                 },
                 None => {},
             }
-            let random_x: f32 = self.rng.gen_range(-3.0..=3.0);
-            let random_y: f32 = self.rng.gen_range(-3.0..=3.0);
+            
             app.camera.projection.fovy = lerp(app.camera.projection.fovy, 70.0, delta_time * 7.0);
-            self.camera_data.mod_pos_x = lerp(self.camera_data.mod_pos_x, random_x, delta_time * 7.0);
-            self.camera_data.mod_pos_y = lerp(self.camera_data.mod_pos_y, random_y, delta_time * 7.0);
             if self.velocity.z < self.max_speed {
                 self.velocity.z += 200.0 * delta_time;
             }
         } else if self.controller.power < -0.1 {
+            self.camera_data.mod_pos_x = lerp(self.camera_data.mod_pos_x, random_x, delta_time * 7.0);
+            self.camera_data.mod_pos_y = lerp(self.camera_data.mod_pos_y, random_y, delta_time * 7.0);
+
             match controller {
                 Some(control) => {
                     if control.has_rumble() {
-                        control.set_rumble(0xFFFF, 0xFFFF, 100).unwrap();
+                        control.set_rumble(u16::MAX / 2, u16::MAX / 2, 100).unwrap();
                     }
                 },
                 None => {},
             }
+
             app.camera.projection.fovy = lerp(app.camera.projection.fovy, 45.0, delta_time);
             if self.velocity.z > 0.0 {
                 self.velocity.z -= 400.0 * delta_time;
@@ -475,5 +475,24 @@ impl GameLogic {
     fn calculate_deceleration(&self, base_deceleration: f32) -> f32 {
         let speed_ratio = self.velocity.z / self.max_speed;
         base_deceleration * speed_ratio * speed_ratio
+    }
+
+    fn apply_parent_transform(
+        parent_position: Vector3<f32>, 
+        parent_rotation: Quaternion<f32>, 
+        parent_scale: Vector3<f32>, 
+        child_position: Vector3<f32>
+    ) -> Vector3<f32> {
+        // Translate child position relative to parent
+        let relative_position = child_position - parent_position;
+    
+        // Rotate relative position with parent's rotation
+        let rotated_position = parent_rotation * relative_position;
+    
+        // Apply scale
+        let scaled_position = rotated_position.mul_element_wise(parent_scale);
+    
+        // Translate back to world coordinates
+        parent_position + scaled_position
     }
 }

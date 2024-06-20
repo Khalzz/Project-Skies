@@ -15,8 +15,8 @@ pub trait Vertex {
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ModelVertex {
     pub position: [f32; 3],
-    pub normal: [f32; 3],
     pub tex_coords: [f32; 2],
+    pub normal: [f32; 3],
 }
 
 impl Vertex for ModelVertex {
@@ -63,7 +63,7 @@ pub struct Mesh {
     pub material: usize,
     pub transform_buffer: wgpu::Buffer,
     pub transform_bind_group: wgpu::BindGroup,
-    pub transform: Transform,
+    pub transform: Transform
 }
 
 pub struct Model {
