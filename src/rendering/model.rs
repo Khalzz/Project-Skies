@@ -1,6 +1,7 @@
 use std::{default, mem, ops::Range};
 
 
+use cgmath::Rotation;
 use wgpu::BindGroup;
 
 use crate::transform::Transform;
@@ -63,7 +64,8 @@ pub struct Mesh {
     pub material: usize,
     pub transform_buffer: wgpu::Buffer,
     pub transform_bind_group: wgpu::BindGroup,
-    pub transform: Transform
+    pub transform: Transform,
+    pub parent_transform: Option<Transform>
 }
 
 pub struct Model {
@@ -73,13 +75,25 @@ pub struct Model {
 
 impl Mesh {
     pub fn update_transform(&self, queue: &wgpu::Queue) {
-        let transform_data = Transform::new(self.transform.position, self.transform.rotation, self.transform.scale);
+        let transform_data: Transform;
 
-        queue.write_buffer(
-            &self.transform_buffer,
-            0, // Offset, assuming you are updating the entire buffer
-            bytemuck::cast_slice(&[transform_data.to_matrix_bufferable()]),
-        );
+        match &self.parent_transform {
+            Some(parent_transform) => {
+                transform_data = Transform::new(parent_transform.position + parent_transform.rotation.rotate_vector(self.transform.position - parent_transform.position), parent_transform.rotation * self.transform.rotation, parent_transform.scale)
+            },
+            None => {
+                transform_data = Transform::new(self.transform.position, self.transform.rotation, self.transform.scale)
+            },
+        }
+
+        queue.write_buffer(&self.transform_buffer, 0, bytemuck::cast_slice(&[transform_data.to_matrix_bufferable()]));
+    }
+
+    pub fn change_transform(&mut self, queue: &wgpu::Queue, transform: Transform) {
+        if transform.position != self.transform.position || transform.rotation != self.transform.rotation || transform.scale != self.transform.scale {
+            self.transform = transform;
+            self.update_transform(queue);
+        }
     }
 }
 

@@ -157,7 +157,7 @@ pub struct App {
     pub haptic_subsystem: HapticSubsystem,
     pub text: Text,
     pub components: Vec<Button>,
-    pub dynamic_ui_components: Vec<Button>,
+    pub dynamic_ui_components: HashMap<String, Vec<Button>>,
     pub mouse_pos: MousePos,
     pub renderizable_instances: HashMap<String, InstanceData>,
     pub throttling: Throttling,
@@ -436,7 +436,6 @@ impl App {
         };
         let f14_data = Self::create_instance(f14_instance, &device, f14);
 
-        
         let water_instance = Instance {
             position: cgmath::Vector3 { x: 0.0, y: 0.0, z: 0.0 },
             rotation: cgmath::Quaternion::from_axis_angle(cgmath::Vector3::unit_z(), cgmath::Deg(0.0)),
@@ -476,7 +475,12 @@ impl App {
         let depth_render = DepthRender::new(&device, &config);
 
         let components = vec![];
-        let dynamic_ui_components = vec![];
+        
+        let mut dynamic_ui_components = HashMap::new();
+        dynamic_ui_components.insert("bandits".to_owned(), vec![]);
+        
+        // Dynamic static is for objects that move in the screen but their main position is based on something that never changes
+        dynamic_ui_components.insert("dynamic_static".to_owned(), vec![]); 
 
         let ui_rendering = UiRendering {
             vertex_buffer: device.create_buffer(&wgpu::BufferDescriptor {
@@ -547,8 +551,6 @@ impl App {
         let mut num_vertices = 0;
         let mut num_indices = 0;
 
-
-
         for button in self.components.iter_mut() {
             let button_active = button.is_hovered(&self.mouse_pos);
             let button_vertices = button.rectangle.vertices(button_active, &self.size);
@@ -562,35 +564,24 @@ impl App {
             text_areas.push(button.text.text_area(button_active));
         }
 
-        for button in self.dynamic_ui_components.iter_mut() {
-            let button_active = button.is_hovered(&self.mouse_pos);
-            let button_vertices = button.rectangle.vertices(button_active, &self.size);
+        for (key, list) in self.dynamic_ui_components.iter_mut() {
+            for button in list {
+                let button_active = button.is_hovered(&self.mouse_pos);
+                let button_vertices = button.rectangle.vertices(button_active, &self.size);
 
-            vertices.extend_from_slice(&button_vertices);
-            indices.extend_from_slice(&button.rectangle.indices(num_vertices));
+                vertices.extend_from_slice(&button_vertices);
+                indices.extend_from_slice(&button.rectangle.indices(num_vertices));
 
-            num_vertices += button_vertices.len() as u16;
-            num_indices += rectangle::NUM_INDICES;
+                num_vertices += button_vertices.len() as u16;
+                num_indices += rectangle::NUM_INDICES;
 
-            text_areas.push(button.text.text_area(button_active));
+                text_areas.push(button.text.text_area(button_active));
+            }
         }
 
         self.queue.write_buffer(&self.ui_rendering.vertex_buffer, 0, bytemuck::cast_slice(vertices.as_slice()));
         self.queue.write_buffer(&self.ui_rendering.index_buffer, 0, bytemuck::cast_slice(&indices));
-        self.text.text_renderer
-            .prepare(
-                &self.device,
-                &self.queue,
-                &mut self.text.font_system,
-                &mut self.text.text_atlas,
-                Resolution {
-                    width: self.size.width,
-                    height: self.size.height,
-                },
-                text_areas,
-                &mut self.text.text_cache,
-            )
-            .unwrap();
+        self.text.text_renderer.prepare(&self.device, &self.queue, &mut self.text.font_system, &mut self.text.text_atlas, Resolution {width: self.size.width,height: self.size.height},text_areas,&mut self.text.text_cache,).unwrap();
         // UI
 
         // WGPU
@@ -600,7 +591,6 @@ impl App {
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render Encoder"),
         });
-
 
         {
             // we make a render pass, this will have all the methods for drawing in the screen
@@ -630,9 +620,8 @@ impl App {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
-
             render_pass.set_pipeline(&self.render_pipeline);
-            
+
             for (key, renderizable) in &self.renderizable_instances {
                 render_pass.set_vertex_buffer(1, renderizable.instance_buffer.slice(..));
                 render_pass.draw_model_instanced(&renderizable.model, 0..1 as u32, &self.camera.bind_group);
@@ -662,14 +651,12 @@ impl App {
     
             self.text.text_renderer.render(&self.text.text_atlas, &mut render_pass).unwrap();
         }
-
         
         if self.show_depth_map {
             self.depth_render.render(&view, &mut encoder);
         }
 
         // we have the render pass inside the {} so we can do the submit to the queue, we can also drop the render pass if you prefeer
-
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
         self.text.text_atlas.trim();
@@ -684,18 +671,14 @@ impl App {
 
         let mut play = play::GameLogic::new(&mut self, 5.0);
         let mut controller = Self::open_first_available_controller(&self.controller_subsystem);
-        
-        
 
         while app_state.is_running { 
             let delta_time = self.delta_time().as_secs_f32();
             self.canvas.clear();
 
-            // let mut start_time = Instant::now(); // benchmarking            
             play.update( &mut app_state, &mut event_pump, &mut self, &mut controller);
-            // println!("Vertex and index buffers generation: {}", start_time.elapsed().as_micros());
-
-
+            
+            // let mut start_time = Instant::now(); // benchmarking            
             match self.render() {
                 Ok(_) => {},
                 Err(wgpu::SurfaceError::Outdated) => { 
@@ -703,12 +686,14 @@ impl App {
                 }
                 Err(e) => eprintln!("Error: {}", e),
             }
+            // println!("--- Total: {}", start_time.elapsed().as_micros());
 
+            // start_time = Instant::now(); // benchmarking            
             match app_state.state {
                 GameState::Playing => {
                     let plane_rot = self.renderizable_instances.get("f14").unwrap().instance.rotation;
                     self.camera.camera.up = self.renderizable_instances.get("f14").unwrap().instance.rotation * Vector3::unit_y();
-                    play.camera_data.look_at = Some(self.renderizable_instances.get("tower").unwrap().instance.position);
+                    // play.camera_data.look_at = Some(self.renderizable_instances.get("tower").unwrap().instance.position);
                     play.altitude.altitude = ((self.renderizable_instances.get("f14").unwrap().instance.position.y - self.renderizable_instances.get("water").unwrap().instance.position.y)).round();
                     
                     for (key, renderizable) in &mut self.renderizable_instances {
@@ -723,7 +708,6 @@ impl App {
                     self.queue.write_buffer(&self.camera.buffer, 0, bytemuck::cast_slice(&[self.camera.uniform]));
                 }
             }
-
         }
     }
 

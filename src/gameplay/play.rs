@@ -1,17 +1,21 @@
 use std::{f64::consts::PI, time::{Duration, Instant}};
 
-use cgmath::{ElementWise, InnerSpace, Point3, Quaternion, Rad, Rotation, Rotation3, Vector3};
+use cgmath::{ElementWise, InnerSpace, Point3, Quaternion, Rad, Rotation, Rotation3, Vector2, Vector3};
 use glyphon::Color;
-use rand::{random, rngs::ThreadRng, Rng};
+use rand::{rngs::ThreadRng, Rng};
 use sdl2::controller::GameController;
-use tokio::io::ReadBuf;
-use crate::{app::{App, AppState, InstanceData}, primitive::rectangle::RectPos, ui::button::{self, Button, ButtonConfig}, utils::lerps::{lerp, lerp_quaternion, lerp_vector3}};
+use crate::{app::{App, AppState}, primitive::rectangle::RectPos, transform::Transform, ui::button::{self, Button, ButtonConfig}, utils::lerps::{lerp, lerp_quaternion, lerp_vector3}};
 
 use super::controller::Controller;
 
 pub enum CameraState {
     Normal,
     Front,
+}
+
+pub struct Bandit {
+    tag: String,
+    locked: bool,
 }
 
 pub struct CameraData {
@@ -23,7 +27,9 @@ pub struct CameraData {
     mod_pos_x: f32,
     mod_pos_y: f32,
     base_position: Vector3<f32>,
-    pub look_at: Option<Vector3<f32>>
+    pub look_at: Option<Vector3<f32>>,
+    pub next_look_at: Option<Vector3<f32>>,
+    pub bandit_index: usize
 }
 
 pub struct AltitudeUi {
@@ -37,7 +43,7 @@ pub struct Ui {
 }
 
 pub struct PlaneSystems {
-    bandits: Vec<Vector3<f32>>
+    bandits: Vec<Bandit>
 }
 
 pub struct GameLogic { // here we define the data we use on our script
@@ -144,6 +150,20 @@ impl GameLogic {
             &mut app.text.font_system,
         );
 
+        let crosshair = button::Button::new(
+            button::ButtonConfig {
+                rect_pos: RectPos { top: 10, left:10, bottom: 10, right:10 },
+                fill_color: [0.0, 0.0, 0.0, 0.0],
+                fill_color_active: [0.0, 0.0, 0.0, 0.0],
+                border_color: [0.0, 1.0, 0.0, 1.0],
+                border_color_active: [0.0, 1.0, 0.0, 1.0],
+                text: "",
+                text_color: Color::rgba(0, 255, 0, 255),
+                text_color_active: Color::rgba(0, 0, 75, 000),
+            },
+            &mut app.text.font_system,
+        );
+
         app.components = vec![];
         app.components.push(altitude);
         app.components.push(speed);
@@ -151,6 +171,10 @@ impl GameLogic {
         app.components.push(altitude_alert);
         app.components.push(framerate);
         app.components.push(throttle);
+        
+        // app.components.push(crosshair);
+        app.dynamic_ui_components.get_mut("dynamic_static").unwrap().clear();
+        app.dynamic_ui_components.get_mut("dynamic_static").unwrap().push(crosshair);
 
         let velocity = Vector3::new(0.0, 0.0, 500.0);
         let rotation = Vector3::new(0.0, 0.0, 0.0);
@@ -164,11 +188,28 @@ impl GameLogic {
             mod_pos_x: 0.0,
             mod_pos_y: 0.0,
             base_position: Vector3::new(0.0, 13.0, -35.0), 
-            look_at: None 
+            look_at: None,
+            next_look_at: None,
+            bandit_index: 0
+        };
+
+        let tower = Bandit {
+            tag: "tower".to_owned(),
+            locked: true,
+        };
+
+        let tower2 = Bandit {
+            tag: "tower2".to_owned(),
+            locked: false,
+        };
+
+        let crane = Bandit {
+            tag: "crane".to_owned(),
+            locked: false,
         };
 
         let plane_systems = PlaneSystems {
-            bandits: vec![app.renderizable_instances.get("tower").unwrap().instance.position, app.renderizable_instances.get("crane").unwrap().instance.position, app.renderizable_instances.get("tower2").unwrap().instance.position],
+            bandits: vec![tower, tower2, crane],
         };
 
         let rng = rand::thread_rng();
@@ -198,17 +239,9 @@ impl GameLogic {
         self.plane_movement(app, delta_time, controller);
         self.camera_control(app, delta_time);
         self.ui_control(app, delta_time);
-        Self::event_handler(self, &mut app_state, &mut event_pump, app, controller);
+        self.controller.update(&mut app_state, &mut event_pump, app, controller, delta_time);
     }
 
-    fn event_handler(&mut self, app_state: &mut AppState, event_pump: &mut sdl2::EventPump, app: &mut App, controller: &Option<GameController>) {
-        if app.throttling.last_controller_update.elapsed() >= app.throttling.controller_update_interval {
-            for event in event_pump.poll_iter() {
-                self.controller.update(event, app, app_state, controller)
-            }
-            app.throttling.last_controller_update = Instant::now();
-        }
-    }
 
     fn delta_time(&mut self) -> Duration {
         let current_time = Instant::now();
@@ -239,26 +272,34 @@ impl GameLogic {
             angle = 0.0;
         }
 
-        plane.model.meshes[4].transform.rotation = lerp_quaternion(plane.model.meshes[4].transform.rotation,Quaternion::from_angle_y(Rad(angle)), delta_time);
-        plane.model.meshes[4].update_transform(&app.queue);
+        // wings
+        let l_wing_rotation = lerp_quaternion(plane.model.meshes[4].transform.rotation,Quaternion::from_angle_y(Rad(angle)), delta_time);
+        let l_wing = Transform::new(plane.model.meshes[4].transform.position, l_wing_rotation, plane.model.meshes[2].transform.scale);
+        plane.model.meshes[4].change_transform(&app.queue, l_wing);
 
-        plane.model.meshes[2].transform.rotation = lerp_quaternion(plane.model.meshes[2].transform.rotation,Quaternion::from_angle_y(Rad(-angle)), delta_time);
-        plane.model.meshes[2].update_transform(&app.queue);
+        let r_wing_rotation = lerp_quaternion(plane.model.meshes[2].transform.rotation,Quaternion::from_angle_y(Rad(-angle)), delta_time);
+        let r_wing = Transform::new(plane.model.meshes[2].transform.position, r_wing_rotation, plane.model.meshes[2].transform.scale);
+        plane.model.meshes[2].change_transform(&app.queue, r_wing);
+        // 
 
         // alerons
-        plane.model.meshes[5].transform.rotation = lerp_quaternion(plane.model.meshes[5].transform.rotation, Quaternion::from_angle_y(Rad(angle)) * Quaternion::from_angle_x(Rad(0.3 * -self.controller.x)), delta_time * 7.0);
-        plane.model.meshes[5].update_transform(&app.queue);
+        let l_aleron_rotation = lerp_quaternion(plane.model.meshes[5].transform.rotation, Quaternion::from_angle_x(Rad(0.3 * -self.controller.x)), delta_time * 7.0);
+        let l_aleron = Transform::new(plane.model.meshes[5].transform.position, l_aleron_rotation, plane.model.meshes[5].transform.scale);
+        plane.model.meshes[5].parent_transform = Some(Transform::new(plane.model.meshes[4].transform.position, plane.model.meshes[4].transform.rotation, plane.model.meshes[4].transform.scale));
+        plane.model.meshes[5].change_transform(&app.queue, l_aleron);
 
-        plane.model.meshes[3].transform.rotation = lerp_quaternion(plane.model.meshes[3].transform.rotation, Quaternion::from_angle_y(Rad(-angle)) * Quaternion::from_angle_x(Rad(0.3 * self.controller.x)), delta_time * 7.0);
-        plane.model.meshes[3].update_transform(&app.queue);
+        let r_aleron_rotation = lerp_quaternion(plane.model.meshes[3].transform.rotation, Quaternion::from_angle_x(Rad(0.3 * self.controller.x)), delta_time * 7.0);
+        let r_aleron = Transform::new(plane.model.meshes[3].transform.position, r_aleron_rotation, plane.model.meshes[3].transform.scale);
+        plane.model.meshes[3].parent_transform = Some(Transform::new(plane.model.meshes[2].transform.position, plane.model.meshes[2].transform.rotation, plane.model.meshes[2].transform.scale));
+        plane.model.meshes[3].change_transform(&app.queue, r_aleron);
         // alerons
-
+        
         let random_x: f32 = self.rng.gen_range(-3.0..=3.0);
         let random_y: f32 = self.rng.gen_range(-3.0..=3.0);
         if self.controller.power > 0.1 {
             self.camera_data.mod_pos_x = lerp(self.camera_data.mod_pos_x, random_x * 0.5, delta_time * 7.0);
             self.camera_data.mod_pos_y = lerp(self.camera_data.mod_pos_y, random_y * 0.5, delta_time * 7.0);
-
+            
             match controller {
                 Some(control) => {
                     if control.has_rumble() {
@@ -275,7 +316,7 @@ impl GameLogic {
         } else if self.controller.power < -0.1 {
             self.camera_data.mod_pos_x = lerp(self.camera_data.mod_pos_x, random_x, delta_time * 7.0);
             self.camera_data.mod_pos_y = lerp(self.camera_data.mod_pos_y, random_y, delta_time * 7.0);
-
+            
             match controller {
                 Some(control) => {
                     if control.has_rumble() {
@@ -284,7 +325,7 @@ impl GameLogic {
                 },
                 None => {},
             }
-
+            
             app.camera.projection.fovy = lerp(app.camera.projection.fovy, 45.0, delta_time);
             if self.velocity.z > 0.0 {
                 self.velocity.z -= 400.0 * delta_time;
@@ -301,10 +342,10 @@ impl GameLogic {
         } else if self.controller.y < -0.2 {
             Self::calculate_turning(self.velocity.z, self.max_speed, -0.7, -1.1)
         } else { 0.0 };
-
+        
         let y = 0.5 * -self.controller.yaw;
         let z = 5.5 * self.controller.x;
-
+        
         if self.controller.x < 0.2 && self.controller.x > -0.2 {
             self.rotation.z = lerp(self.rotation.z,z, delta_time * 5.0);
         } else {
@@ -312,7 +353,7 @@ impl GameLogic {
         }
         self.rotation.x = lerp(self.rotation.x, x, delta_time * 3.0);
         self.rotation.y = lerp(self.rotation.y, y, delta_time);
-
+        
         let amount_x = cgmath::Quaternion::from_angle_x(cgmath::Rad(self.rotation.x) * delta_time);
         let amount_y = cgmath::Quaternion::from_angle_y(cgmath::Rad(self.rotation.y) * delta_time);
         let amount_z = cgmath::Quaternion::from_angle_z(cgmath::Rad(self.rotation.z) * delta_time);
@@ -322,8 +363,8 @@ impl GameLogic {
     }
 
     fn camera_control(&mut self, app: &mut App, delta_time: f32) {
-        let plane = &app.renderizable_instances.get_mut("f14").unwrap().instance;
-
+        let plane = &app.renderizable_instances.get("f14").unwrap().instance;
+        
         match self.camera_data.camera_state {
             CameraState::Normal => {
                 let base_target_vector = Vector3::new(0.0, 0.0, 100.0);
@@ -355,17 +396,19 @@ impl GameLogic {
                 app.camera.camera.look_at((edited.x, edited.y, edited.z).into());
             },
         }
-
-        match self.camera_data.look_at {
-            Some(look_at) => {
-                if self.controller.fix_view {
-                    app.camera.camera.look_at(Point3::new(look_at.x, look_at.y, look_at.z));
-                    let pos = plane.position + Quaternion::between_vectors(Vector3::unit_z(), (look_at - plane.position).normalize()) * (Vector3::new(0.0, 0.0, -60.0));
-                    let final_pos = pos + (plane.rotation * Vector3::new(0.0, 20.0, 0.0));
-                    app.camera.camera.position = (final_pos.x, final_pos.y, final_pos.z).into();
+        
+        for lockable in &self.plane_systems.bandits {
+            if lockable.locked && self.controller.fix_view.pressed && self.controller.fix_view.time_pressed > self.controller.fix_view_hold_window {
+                match app.renderizable_instances.get(&lockable.tag) {
+                    Some(look_at) => {
+                        app.camera.camera.look_at(Point3::new(look_at.instance.position.x, look_at.instance.position.y, look_at.instance.position.z));
+                        let pos = plane.position + Quaternion::between_vectors(Vector3::unit_z(), (look_at.instance.position - plane.position).normalize()) * (Vector3::new(0.0, 0.0, -60.0));
+                        let final_pos = pos + (plane.rotation * Vector3::new(0.0, 20.0, 0.0));
+                        app.camera.camera.position = (final_pos.x, final_pos.y, final_pos.z).into();
+                    },
+                    None => {},
                 }
-            },
-            None => {},
+            }
         }
     }
 
@@ -419,17 +462,24 @@ impl GameLogic {
 
         app.components[5].rectangle.position.top = (app.config.height / 2) - ((app.config.height as f32 / 2.0 * self.controller.power) - 100.0) as u32;
         app.components[5].rectangle.position.bottom = (app.config.height / 2) + ((app.config.height as f32 / 2.0 * -self.controller.power) - 100.0) as u32;
-
         self.targeting_system(app);
     }
 
     fn targeting_system(&mut self, app: &mut App) {
-        self.plane_systems.bandits = vec![app.renderizable_instances.get("tower").unwrap().instance.position, app.renderizable_instances.get("crane").unwrap().instance.position, app.renderizable_instances.get("tower2").unwrap().instance.position];
+        // we set the position of all the bandits
+        let mut bandits_target = vec![];
+        for markable in &self.plane_systems.bandits {
+            match app.renderizable_instances.get(&markable.tag) {
+                Some(bandit) => bandits_target.push(bandit.instance.position),
+                None => continue,
+            }
+        }
 
-        if self.plane_systems.bandits.len() != app.dynamic_ui_components.len() {
-            app.dynamic_ui_components = vec![];
+        // make the buttons for each bandit ONLY when the length of the ui components and the length of the bandits its the same
+        if self.plane_systems.bandits.len() != app.dynamic_ui_components.get("bandits").unwrap().len() {
+            app.dynamic_ui_components.get_mut("bandits").unwrap().clear();
 
-            for _ in self.plane_systems.bandits.iter() {
+            for (i, target) in bandits_target.iter().enumerate() {
                 let crosshair: Button = Button::new(
                     ButtonConfig {
                         rect_pos: RectPos { top: 50, left: 50, bottom: 50, right: 50 },
@@ -443,24 +493,75 @@ impl GameLogic {
                     },
                     &mut app.text.font_system,
                 );
-                app.dynamic_ui_components.push(crosshair);
+                app.dynamic_ui_components.get_mut("bandits").unwrap().push(crosshair);
             }
         }
 
-        for (i, bandit) in self.plane_systems.bandits.iter().enumerate() {
-            let lock_position = app.camera.world_to_screen(Point3::new(bandit.x, bandit.y, bandit.z), app.config.width, app.config.height);
-            match lock_position {
+        /*
+        // changing the locked target 
+        let mut diff_vectors: f32 = 1000.0;
+        if (Vector2::new((app.config.width / 2) as f32, (app.config.height / 2) as f32) - (Vector2::new(lock_pos.x as f32, lock_pos.y as f32))).magnitude() < diff_vectors {
+            diff_vectors = (Vector2::new((app.config.width / 2) as f32, (app.config.height / 2) as f32) - Vector2::new(lock_pos.x as f32, lock_pos.y as f32)).magnitude();
+            self.camera_data.next_look_at = Some(*bandit_position);
+        }
+        */
+
+        let mut diff_magnitude = f32::MAX;
+        let mut closest_index: usize = 0;
+        // for each position of the bandit we set a screen position and move the button
+        for (i, bandit_position) in bandits_target.iter().enumerate() {
+            let target_position = app.camera.world_to_screen(Point3::new(bandit_position.x, bandit_position.y, bandit_position.z), app.config.width, app.config.height);
+
+            match target_position {
                 Some(lock_pos) => {
-                    app.dynamic_ui_components[i].rectangle.border_color = [0.0, 1.0, 0.0, 1.0];
-                    app.dynamic_ui_components[i].rectangle.position.left = (lock_pos.x() - 20) as u32;
-                    app.dynamic_ui_components[i].rectangle.position.right = (lock_pos.x() + 20)  as u32;
-                    app.dynamic_ui_components[i].rectangle.position.top = (lock_pos.y() - 20) as u32;
-                    app.dynamic_ui_components[i].rectangle.position.bottom = (lock_pos.y() + 20) as u32;
+                    if !self.plane_systems.bandits[i].locked {
+                        let screen_middle = Vector2::new((app.config.width / 2) as f32, (app.config.height / 2) as f32);
+                        let target_pos = Vector2::new(lock_pos.x as f32, lock_pos.y as f32);
+                        if (screen_middle - target_pos).magnitude() < diff_magnitude {
+                            closest_index = i;
+                            diff_magnitude = (screen_middle - target_pos).magnitude();
+                            self.camera_data.next_look_at = Some(*bandit_position);
+                        }
+                        // search for the closest element to the middle of the screen
+                    }
+
+                    app.dynamic_ui_components.get_mut("bandits").unwrap()[i].rectangle.border_color = if self.plane_systems.bandits[i].locked { [0.0, 0.0, 1.0, 1.0] } else { [0.0, 1.0, 0.0, 1.0] };
+                    app.dynamic_ui_components.get_mut("bandits").unwrap()[i].rectangle.position.left = (lock_pos.x() - 20) as u32;
+                    app.dynamic_ui_components.get_mut("bandits").unwrap()[i].rectangle.position.right = (lock_pos.x() + 20)  as u32;
+                    app.dynamic_ui_components.get_mut("bandits").unwrap()[i].rectangle.position.top = (lock_pos.y() - 20) as u32;
+                    app.dynamic_ui_components.get_mut("bandits").unwrap()[i].rectangle.position.bottom = (lock_pos.y() + 20) as u32;
                 },
                 None => {
-                    app.dynamic_ui_components[i].rectangle.border_color = [0.0, 1.0, 0.0, 0.0];
+                    app.dynamic_ui_components.get_mut("bandits").unwrap()[i].rectangle.border_color = [0.0, 1.0, 0.0, 0.0];
                 },
             }
+        }
+        
+        if self.controller.fix_view.up && self.controller.fix_view.time_pressed < self.controller.fix_view_hold_window {
+            for bandit in &mut self.plane_systems.bandits {
+                if bandit.locked {
+                    bandit.locked = false;
+                } else {
+                    continue;
+                }
+            }
+            self.plane_systems.bandits[closest_index].locked = true;
+            self.camera_data.look_at = self.camera_data.next_look_at;
+        }
+
+        let plane_direction = app.renderizable_instances.get_mut("f14").unwrap().instance.rotation * Vector3::new(0.0, 0.0, 1000000.0);
+        let plane_direction = app.camera.world_to_screen((plane_direction.x, plane_direction.y, plane_direction.z).into() , app.config.width, app.config.height);
+        match plane_direction {
+            Some(lock_pos) => {
+                app.dynamic_ui_components.get_mut("dynamic_static").unwrap()[0].rectangle.border_color = [0.0, 1.0, 0.0, 1.0];
+                app.dynamic_ui_components.get_mut("dynamic_static").unwrap()[0].rectangle.position.left = (lock_pos.x() as f32 - 1.0) as u32;
+                app.dynamic_ui_components.get_mut("dynamic_static").unwrap()[0].rectangle.position.right = (lock_pos.x() as f32 + 1.0)  as u32;
+                app.dynamic_ui_components.get_mut("dynamic_static").unwrap()[0].rectangle.position.top = (lock_pos.y() as f32 - 1.0) as u32;
+                app.dynamic_ui_components.get_mut("dynamic_static").unwrap()[0].rectangle.position.bottom = (lock_pos.y() as f32 + 1.0) as u32;
+            },
+            None => {
+                app.dynamic_ui_components.get_mut("dynamic_static").unwrap()[0].rectangle.border_color = [0.0, 1.0, 0.0, 0.0];
+            },
         }
     }
 
@@ -475,24 +576,5 @@ impl GameLogic {
     fn calculate_deceleration(&self, base_deceleration: f32) -> f32 {
         let speed_ratio = self.velocity.z / self.max_speed;
         base_deceleration * speed_ratio * speed_ratio
-    }
-
-    fn apply_parent_transform(
-        parent_position: Vector3<f32>, 
-        parent_rotation: Quaternion<f32>, 
-        parent_scale: Vector3<f32>, 
-        child_position: Vector3<f32>
-    ) -> Vector3<f32> {
-        // Translate child position relative to parent
-        let relative_position = child_position - parent_position;
-    
-        // Rotate relative position with parent's rotation
-        let rotated_position = parent_rotation * relative_position;
-    
-        // Apply scale
-        let scaled_position = rotated_position.mul_element_wise(parent_scale);
-    
-        // Translate back to world coordinates
-        parent_position + scaled_position
     }
 }

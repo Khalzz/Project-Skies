@@ -179,7 +179,6 @@ fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::D
                     normal_attribute.for_each(|normal| {
                         //dbg!(normal);
                         vertices[normal_index].normal = normal;
-
                         normal_index += 1;
                     });
                 }
@@ -188,7 +187,6 @@ fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::D
                     tex_coord_attribute.for_each(|tex_coord| {
                         //dbg!(tex_coord);
                         vertices[tex_coord_index].tex_coords = tex_coord;
-
                         tex_coord_index += 1;
                     });
                 }
@@ -210,6 +208,8 @@ fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::D
             });
 
             let transform: Transform;
+            let mut parent_values = None;
+
             match parent_transform {
                 Some(parent_data) => {
                     let (parent_translation, parent_rotation, parent_scale) = parent_data;
@@ -218,6 +218,7 @@ fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::D
                     let position = Vector3::from(parent_translation) + Vector3::from(translation);
                     let rotation = Quaternion::from(parent_rotation) * Quaternion::from(rotation);
                     transform = Transform::new(position, rotation, Vector3::new(1.0, 1.0, 1.0));
+                    parent_values = Some(Transform::new(parent_translation.into(), parent_rotation.into(), parent_scale.into()));
                 },
                 None => {
                     transform = Transform::new(Vector3::new(node.transform().decomposed().0[0], node.transform().decomposed().0[1], node.transform().decomposed().0[2]), Quaternion::zero(), Vector3::new(1.0, 1.0, 1.0));
@@ -251,10 +252,9 @@ fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::D
                 transform_buffer,
                 transform_bind_group,
                 transform,
+                parent_transform: parent_values
             });
         });
-
-
     for child in node.children() {
         traverse_node(child, buffer_data, device, queue, transform_bind_group_layout, meshes, file_name, Some(node.transform().decomposed()))?;
     }

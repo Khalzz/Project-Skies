@@ -13,7 +13,6 @@ image = { version = "*", default-features = false, features = ["png", "jpeg"] }
 anyhow = "*"
 fs_extra = "*"
 glob = "*"
-tobj = { version = "*", features = ["async"]}
 rand = "0.8"
 glyphon = "0.4"
 cgmath = "*"
@@ -27,4 +26,3 @@ anyhow = "*"
 cgmath = "*"
 fs_extra = "*"
 glob = "*"
-tobj = { version = "*", features = ["async"]}
