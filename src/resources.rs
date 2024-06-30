@@ -1,10 +1,10 @@
-use std::io::{BufReader, Cursor};
+use std::{collections::HashMap, io::{BufReader, Cursor}};
 
 use cgmath::{Quaternion, Vector3, Zero};
 use gltf::{image,  Gltf};
 use wgpu::util::DeviceExt;
 
-use crate::{rendering::{model::{self, Model, ModelVertex}, textures::Texture}, transform::Transform};
+use crate::{rendering::{model::{self, Mesh, Model, ModelVertex}, textures::Texture}, transform::Transform};
 
 pub async fn load_string(file_name: &str) -> anyhow::Result<String> {
     let path = std::path::Path::new(env!("OUT_DIR")).join("res").join(file_name);
@@ -143,7 +143,7 @@ pub async fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgp
         };
     }
 
-    let mut meshes = Vec::new();
+    let mut meshes = HashMap::new();
 
     for scene in gltf.scenes() {
         for node in scene.nodes() {
@@ -157,7 +157,7 @@ pub async fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgp
     })
 }
 
-fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::Device, queue: &wgpu::Queue, transform_bind_group_layout: &wgpu::BindGroupLayout, meshes: &mut Vec<model::Mesh>, file_name: &str, parent_transform: Option<([f32; 3], [f32; 4], [f32; 3])>) -> anyhow::Result<()> {
+fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::Device, queue: &wgpu::Queue, transform_bind_group_layout: &wgpu::BindGroupLayout, meshes: &mut HashMap<String, Mesh>, file_name: &str, parent_transform: Option<([f32; 3], [f32; 4], [f32; 3])>) -> anyhow::Result<()> {
         let mesh = node.mesh().expect("Got mesh");
         let primitives = mesh.primitives();
         primitives.for_each(|primitive| {
@@ -221,7 +221,7 @@ fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::D
                     parent_values = Some(Transform::new(parent_translation.into(), parent_rotation.into(), parent_scale.into()));
                 },
                 None => {
-                    transform = Transform::new(Vector3::new(node.transform().decomposed().0[0], node.transform().decomposed().0[1], node.transform().decomposed().0[2]), Quaternion::zero(), Vector3::new(1.0, 1.0, 1.0));
+                    transform = Transform::new(node.transform().decomposed().0.into(), node.transform().decomposed().1.into(), Vector3::new(1.0, 1.0, 1.0));
                 },
             }
 
@@ -243,7 +243,7 @@ fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::D
                 ],
             });
 
-            meshes.push(model::Mesh {
+            meshes.insert(node.name().unwrap().to_owned(), model::Mesh {
                 name: file_name.to_string(),
                 vertex_buffer,
                 index_buffer,
@@ -254,6 +254,7 @@ fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::D
                 transform,
                 parent_transform: parent_values
             });
+
         });
     for child in node.children() {
         traverse_node(child, buffer_data, device, queue, transform_bind_group_layout, meshes, file_name, Some(node.transform().decomposed()))?;

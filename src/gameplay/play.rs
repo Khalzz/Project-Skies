@@ -1,16 +1,17 @@
 use std::{f64::consts::PI, time::{Duration, Instant}};
 
-use cgmath::{ElementWise, InnerSpace, Point3, Quaternion, Rad, Rotation, Rotation3, Vector2, Vector3};
+use cgmath::{Deg, ElementWise, InnerSpace, Point3, Quaternion, Rad, Rotation, Rotation3, Vector2, Vector3};
 use glyphon::Color;
 use rand::{rngs::ThreadRng, Rng};
 use sdl2::controller::GameController;
-use crate::{app::{App, AppState}, primitive::rectangle::RectPos, transform::Transform, ui::button::{self, Button, ButtonConfig}, utils::lerps::{lerp, lerp_quaternion, lerp_vector3}};
+use crate::{app::{self, App, AppState, Instance}, primitive::rectangle::RectPos, transform::Transform, ui::button::{self, Button, ButtonConfig}, utils::lerps::{lerp, lerp_quaternion, lerp_vector3}};
 
 use super::controller::Controller;
 
 pub enum CameraState {
     Normal,
     Front,
+    Cockpit
 }
 
 pub struct Bandit {
@@ -271,17 +272,41 @@ impl GameLogic {
         if self.velocity.z < 1000.0 {
             angle = 0.0;
         }
+        
+        // elevators
+        let l_elevator = plane.model.meshes.get_mut("left_elevator").unwrap();
+        let l_elevator_rotation = lerp_quaternion(l_elevator.transform.rotation, Quaternion::from_angle_x(Rad(0.15 * (-self.controller.y + -self.controller.x))), delta_time * 7.0);
+        let l_elevator_transform = Transform::new(l_elevator.transform.position, l_elevator_rotation, l_elevator.transform.scale);
+        l_elevator.change_transform(&app.queue, l_elevator_transform);
+
+        let r_elevator = plane.model.meshes.get_mut("right_elevator").unwrap();
+        let r_elevator_rotation = lerp_quaternion(r_elevator.transform.rotation, Quaternion::from_angle_x(Rad(0.15 * (-self.controller.y + self.controller.x))), delta_time * 7.0);
+        let r_elevator_transform = Transform::new(r_elevator.transform.position, r_elevator_rotation, r_elevator.transform.scale);
+        r_elevator.change_transform(&app.queue, r_elevator_transform);
 
         // wings
-        let l_wing_rotation = lerp_quaternion(plane.model.meshes[4].transform.rotation,Quaternion::from_angle_y(Rad(angle)), delta_time);
-        let l_wing = Transform::new(plane.model.meshes[4].transform.position, l_wing_rotation, plane.model.meshes[2].transform.scale);
-        plane.model.meshes[4].change_transform(&app.queue, l_wing);
+        let l_wing = plane.model.meshes.get_mut("left_wing").unwrap();
+        let l_wing_rotation = lerp_quaternion(l_wing.transform.rotation,Quaternion::from_angle_y(Rad(angle)), delta_time);
+        let l_wing_transform = Transform::new(l_wing.transform.position, l_wing_rotation, l_wing.transform.scale);
+        l_wing.change_transform(&app.queue, l_wing_transform);
 
-        let r_wing_rotation = lerp_quaternion(plane.model.meshes[2].transform.rotation,Quaternion::from_angle_y(Rad(-angle)), delta_time);
-        let r_wing = Transform::new(plane.model.meshes[2].transform.position, r_wing_rotation, plane.model.meshes[2].transform.scale);
-        plane.model.meshes[2].change_transform(&app.queue, r_wing);
-        // 
+        let r_wing = plane.model.meshes.get_mut("right_wing").unwrap();
+        let r_wing_rotation = lerp_quaternion(r_wing.transform.rotation,Quaternion::from_angle_y(Rad(-angle)), delta_time);
+        let r_wing_transform = Transform::new(r_wing.transform.position, r_wing_rotation, r_wing.transform.scale);
+        r_wing.change_transform(&app.queue, r_wing_transform);
 
+        // rudders
+        let l_rudder = plane.model.meshes.get_mut("left_rudder").unwrap();
+        let l_rudder_rotation = lerp_quaternion(l_rudder.transform.rotation, Quaternion::from_angle_x(Deg(-28.4493)) * Quaternion::from_angle_y(Rad(0.5 * self.controller.yaw)), delta_time * 7.0);
+        let l_rudder_transform = Transform::new(l_rudder.transform.position, l_rudder_rotation, l_rudder.transform.scale);
+        l_rudder.change_transform(&app.queue, l_rudder_transform);
+
+        let r_rudder = plane.model.meshes.get_mut("right_rudder").unwrap();
+        let r_rudder_rotation = lerp_quaternion(r_rudder.transform.rotation, Quaternion::from_angle_x(Deg(-28.4493)) * Quaternion::from_angle_y(Rad(0.5 * self.controller.yaw)), delta_time * 7.0);
+        let r_rudder_transform = Transform::new(r_rudder.transform.position, r_rudder_rotation, r_rudder.transform.scale);
+        r_rudder.change_transform(&app.queue, r_rudder_transform);
+
+        /* 
         // alerons
         let l_aleron_rotation = lerp_quaternion(plane.model.meshes[5].transform.rotation, Quaternion::from_angle_x(Rad(0.3 * -self.controller.x)), delta_time * 7.0);
         let l_aleron = Transform::new(plane.model.meshes[5].transform.position, l_aleron_rotation, plane.model.meshes[5].transform.scale);
@@ -293,7 +318,8 @@ impl GameLogic {
         plane.model.meshes[3].parent_transform = Some(Transform::new(plane.model.meshes[2].transform.position, plane.model.meshes[2].transform.rotation, plane.model.meshes[2].transform.scale));
         plane.model.meshes[3].change_transform(&app.queue, r_aleron);
         // alerons
-        
+        */
+
         let random_x: f32 = self.rng.gen_range(-3.0..=3.0);
         let random_y: f32 = self.rng.gen_range(-3.0..=3.0);
         if self.controller.power > 0.1 {
@@ -359,23 +385,39 @@ impl GameLogic {
         let amount_z = cgmath::Quaternion::from_angle_z(cgmath::Rad(self.rotation.z) * delta_time);
         
         app.camera.camera.position.y = self.controller.ry;
-        plane.instance.rotation = plane.instance.rotation * (amount_x * amount_z * amount_y);
+        
+        let final_rotation = plane.instance.rotation * (amount_x * amount_z * amount_y);
+        let final_position = plane.instance.position;
+        
+        plane.instance.rotation = final_rotation;
+        self.cockpit(app,  final_position, final_rotation);
+    
+    }
+
+    fn cockpit(&mut self, app: &mut App, position: Vector3<f32>, rotation: Quaternion<f32>) {
+        // app.renderizable_instances.get_mut("visor").unwrap().instance = Instance { position: position + (rotation * Vector3::new(0.0, 0.0, 0.0)), rotation: rotation, scale: Vector3::new(19.0, 19.0, 19.0) }
     }
 
     fn camera_control(&mut self, app: &mut App, delta_time: f32) {
-        let plane = &app.renderizable_instances.get("f14").unwrap().instance;
+        let plane = &mut app.renderizable_instances.get_mut("f14").unwrap().instance;
         
         match self.camera_data.camera_state {
             CameraState::Normal => {
+                app.camera.projection.znear = 0.1;
+
+                plane.scale = Vector3 {x: 19.0, y: 19.0, z: 19.0};
+
+
                 let base_target_vector = Vector3::new(0.0, 0.0, 100.0);
                 if self.controller.rx.abs() > self.controller.rs_deathzone || self.controller.ry.abs() > self.controller.rs_deathzone {
                     self.camera_data.base_position = lerp_vector3(self.camera_data.base_position, Vector3::new(0.0, 0.0, -60.0), delta_time * 5.0);
-                    self.camera_data.mod_yaw = -self.controller.rx * std::f32::consts::PI;
-                    self.camera_data.mod_pitch = -self.controller.ry * (std::f32::consts::PI / 2.1);
+
+                    self.camera_data.mod_yaw = lerp(self.camera_data.mod_yaw, -self.controller.rx * std::f32::consts::PI, delta_time * 10.0);
+                    self.camera_data.mod_pitch = lerp(self.camera_data.mod_pitch, -self.controller.ry * (std::f32::consts::PI / 2.1), delta_time * 10.0);
                 } else {
                     self.camera_data.base_position = Vector3::new(0.0, 13.0, -40.0);
-                    self.camera_data.mod_yaw = 0.0;
-                    self.camera_data.mod_pitch = 0.0;
+                    self.camera_data.mod_yaw = lerp(self.camera_data.mod_yaw, 0.0, delta_time * 10.0);
+                    self.camera_data.mod_pitch = lerp(self.camera_data.mod_pitch, 0.0, delta_time * 10.0);
                 }
 
                 let rotation_mod = Quaternion::from_axis_angle(Vector3::unit_y(), Rad(self.camera_data.mod_yaw)) * Quaternion::from_axis_angle(Vector3::unit_x(), Rad(self.camera_data.mod_pitch));
@@ -387,24 +429,73 @@ impl GameLogic {
                 app.camera.camera.look_at(self.camera_data.target);
             },
             CameraState::Front => {
-                self.camera_data.position = Point3::new(plane.position.x, plane.position.y, plane.position.z) + (plane.rotation * Vector3::new(0.0, 1.0, 0.0));
-                self.camera_data.target = Point3::new(plane.position.x, plane.position.y, plane.position.z) + (plane.rotation * Vector3::new(0.0, 0.0, 10.0));
+                plane.scale = Vector3 {x: 19.0, y: 19.0, z: 19.0};
+
+                self.camera_data.position = Point3::new(plane.position.x, plane.position.y, plane.position.z) + (plane.rotation * Vector3::new(0.0, 15.0, 0.0));
+                self.camera_data.target = Point3::new(plane.position.x, plane.position.y, plane.position.z) + (plane.rotation * Vector3::new(0.0, 0.0, 100.0));
 
                 app.camera.camera.position = self.camera_data.position;
                 let rotation_view = plane.rotation * Vector3::new(-self.controller.rx, self.controller.ry * 10.0, 0.0) * 30.0;
                 let edited = self.camera_data.target + rotation_view;
                 app.camera.camera.look_at((edited.x, edited.y, edited.z).into());
             },
+            CameraState::Cockpit => {
+
+                app.camera.camera.position = self.camera_data.position;
+                let rotation_view = plane.rotation * Vector3::new(-self.controller.rx, self.controller.ry * 10.0, 0.0) * 30.0;
+                let edited = self.camera_data.target + rotation_view;
+                app.camera.camera.look_at((edited.x, edited.y, edited.z).into());
+
+                // plane.scale = Vector3 {x: 0.0, y: 0.0, z: 0.0};
+
+
+                let base_target_vector = Vector3::new(0.0, 0.0, 100.0);
+                if self.controller.rx.abs() > self.controller.rs_deathzone || self.controller.ry.abs() > self.controller.rs_deathzone {
+                    self.camera_data.mod_yaw = lerp(self.camera_data.mod_yaw, -self.controller.rx * std::f32::consts::PI, delta_time * 7.0);
+                    self.camera_data.mod_pitch = lerp(self.camera_data.mod_pitch, -self.controller.ry * (std::f32::consts::PI / 2.3), delta_time * 7.0);
+                } else {
+                    self.camera_data.mod_yaw = lerp(self.camera_data.mod_yaw, 0.0, delta_time * 10.0);
+                    self.camera_data.mod_pitch = lerp(self.camera_data.mod_pitch, 0.0, delta_time * 10.0);
+                }
+
+                let rotation_mod = Quaternion::from_axis_angle(Vector3::unit_y(), Rad(self.camera_data.mod_yaw)) * Quaternion::from_axis_angle(Vector3::unit_x(), Rad(self.camera_data.mod_pitch));
+                self.camera_data.target = Point3::new(plane.position.x, plane.position.y, plane.position.z) + (plane.rotation * rotation_mod * base_target_vector);
+                let x_val = if self.controller.rx.abs() > self.controller.rs_deathzone { self.controller.rx * -1.0 } else { 0.0 };
+                app.camera.camera.position = Point3::new(plane.position.x, plane.position.y, plane.position.z) + (plane.rotation * Vector3::new(x_val, 3.2, 25.0));
+                app.camera.camera.look_at(self.camera_data.target);
+
+            },
         }
         
+        self.calculate_lockable(app);
+
+        if self.controller.change_camera.up {
+            self.next_camera();
+        }
+    }
+
+    fn calculate_lockable(&mut self, app: &mut App) {
+        let plane = &app.renderizable_instances.get("f14").unwrap().instance;
+
         for lockable in &self.plane_systems.bandits {
             if lockable.locked && self.controller.fix_view.pressed && self.controller.fix_view.time_pressed > self.controller.fix_view_hold_window {
                 match app.renderizable_instances.get(&lockable.tag) {
                     Some(look_at) => {
                         app.camera.camera.look_at(Point3::new(look_at.instance.position.x, look_at.instance.position.y, look_at.instance.position.z));
-                        let pos = plane.position + Quaternion::between_vectors(Vector3::unit_z(), (look_at.instance.position - plane.position).normalize()) * (Vector3::new(0.0, 0.0, -60.0));
-                        let final_pos = pos + (plane.rotation * Vector3::new(0.0, 20.0, 0.0));
-                        app.camera.camera.position = (final_pos.x, final_pos.y, final_pos.z).into();
+
+                        match self.camera_data.camera_state {
+                            CameraState::Normal => {
+                                let pos = plane.position + Quaternion::between_vectors(Vector3::unit_z(), (look_at.instance.position - plane.position).normalize()) * (Vector3::new(0.0, 0.0, -60.0));
+                                let final_pos = pos + (plane.rotation * Vector3::new(0.0, 20.0, 0.0));
+                                app.camera.camera.position = (final_pos.x, final_pos.y, final_pos.z).into();
+                            },
+                            CameraState::Front => {
+                                let pos = plane.position + Quaternion::between_vectors(Vector3::unit_z(), (look_at.instance.position - plane.position).normalize()) * (Vector3::new(0.0, 0.0, -60.0));
+                                let final_pos = pos + (plane.rotation * Vector3::new(0.0, 20.0, 0.0));
+                                app.camera.camera.position = (final_pos.x, final_pos.y, final_pos.z).into();
+                            },
+                            CameraState::Cockpit => {},
+                        }
                     },
                     None => {},
                 }
@@ -576,5 +667,13 @@ impl GameLogic {
     fn calculate_deceleration(&self, base_deceleration: f32) -> f32 {
         let speed_ratio = self.velocity.z / self.max_speed;
         base_deceleration * speed_ratio * speed_ratio
+    }
+
+    fn next_camera(&mut self) {
+        match self.camera_data.camera_state {
+            CameraState::Normal => self.camera_data.camera_state = CameraState::Front,
+            CameraState::Front => self.camera_data.camera_state = CameraState::Cockpit,
+            CameraState::Cockpit => self.camera_data.camera_state = CameraState::Normal,
+        }
     }
 }

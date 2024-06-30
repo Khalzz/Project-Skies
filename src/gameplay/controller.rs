@@ -26,6 +26,7 @@ pub struct Controller {
     pub power: f32,
     pub fix_view: Input,
     pub fix_view_hold_window: f32,
+    pub change_camera: Input,
     pub look_back: bool,
 }
 
@@ -44,6 +45,7 @@ impl Controller {
             power: 0.0,
             fix_view: Input { pressed: false, up: false, time_pressed: 0.0 },
             fix_view_hold_window: 0.2,
+            change_camera: Input { pressed: false, up: false, time_pressed: 0.0 },
             look_back: false,
         }
     }
@@ -54,6 +56,11 @@ impl Controller {
         } else {
             self.fix_view.up = false;
         }
+
+        if !self.change_camera.pressed {
+            self.change_camera.up = false;
+        }
+
         if app.throttling.last_controller_update.elapsed() >= app.throttling.controller_update_interval {
             for event in event_pump.poll_iter() {
                 match event {
@@ -67,7 +74,7 @@ impl Controller {
                                 // change camera
                             },
                             sdl2::controller::Button::RightStick => {
-                                self.look_back = true
+                                self.change_camera.pressed = true;
                             },
                             sdl2::controller::Button::LeftShoulder => {
                                 self.yaw = -1.0
@@ -88,7 +95,8 @@ impl Controller {
                                 // change camera
                             },
                             sdl2::controller::Button::RightStick => {
-                                self.look_back = false
+                                self.change_camera.pressed = false;
+                                self.change_camera.up = true;
                             },
                             sdl2::controller::Button::LeftShoulder => {
                                 self.yaw = 0.0

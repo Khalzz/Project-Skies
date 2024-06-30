@@ -172,7 +172,6 @@ impl App {
         
         let controller_subsystem = context.game_controller().unwrap();
         let haptic_subsystem = context.haptic().unwrap();
-        
 
         let current_display = video_susbsystem.current_display_mode(0).unwrap();
         
@@ -319,16 +318,16 @@ impl App {
                     format: wgpu::TextureFormat::Bgra8UnormSrgb,
                     blend: Some(wgpu::BlendState {
                         color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            src_factor: wgpu::BlendFactor::One,
                             dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
                             operation: wgpu::BlendOperation::Add,
                         },
                         alpha: wgpu::BlendComponent {
                             src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Max,
                         },
-                    }),
+                    };),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -381,7 +380,18 @@ impl App {
                 entry_point: "fs_main",
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -396,10 +406,10 @@ impl App {
             },
             depth_stencil: Some(wgpu::DepthStencilState { 
                 format: Texture::DEPTH_FORMAT,
-                depth_write_enabled: true, 
-                depth_compare: wgpu::CompareFunction::Less, // this sets what pixels to draw in wich order, the less says that pixels will be drawn front to back.
-                stencil: StencilState::default(), 
-                bias: DepthBiasState::default() 
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState {
                 count: 1,
@@ -424,6 +434,7 @@ impl App {
 
         // instances
         let f14 = resources::load_model_gltf("F14.gltf", &device, &queue, &transform_bind_group_layout).await.unwrap();
+        // let visor = resources::load_model_gltf("cockpit.gltf", &device, &queue, &transform_bind_group_layout).await.unwrap();
         let water = resources::load_model_gltf("water.gltf", &device, &queue, &transform_bind_group_layout).await.unwrap();
         let tower = resources::load_model_gltf("tower.gltf", &device, &queue, &transform_bind_group_layout).await.unwrap();
         let tower2 = resources::load_model_gltf("tower2.gltf", &device, &queue, &transform_bind_group_layout).await.unwrap();
@@ -435,6 +446,15 @@ impl App {
             scale: cgmath::Vector3 { x: 19.0, y: 19.0, z: 19.0 },
         };
         let f14_data = Self::create_instance(f14_instance, &device, f14);
+
+        /* 
+        let visor_instance = Instance {
+            position: cgmath::Vector3 { x: 0.0, y: 150.0, z: 0.0 },
+            rotation: cgmath::Quaternion::from_axis_angle(cgmath::Vector3::unit_z(), cgmath::Deg(0.0)),
+            scale: cgmath::Vector3 { x: 19.0, y: 19.0, z: 19.0 },
+        };
+        let visor_data = Self::create_instance(visor_instance, &device, visor);
+        */
 
         let water_instance = Instance {
             position: cgmath::Vector3 { x: 0.0, y: 0.0, z: 0.0 },
@@ -465,11 +485,12 @@ impl App {
         let crane_data = Self::create_instance(crane_instance, &device, crane);
 
         let mut renderizable_instances = HashMap::new();
-        renderizable_instances.insert("f14".to_owned(), f14_data);
+        // renderizable_instances.insert("visor".to_owned(), visor_data);
         renderizable_instances.insert("water".to_owned(), water_data);
         renderizable_instances.insert("tower".to_owned(), tower_data);
         renderizable_instances.insert("tower2".to_owned(), tower2_data);
         renderizable_instances.insert("crane".to_owned(), crane_data);
+        renderizable_instances.insert("f14".to_owned(), f14_data);
         // instances
 
         let depth_render = DepthRender::new(&device, &config);

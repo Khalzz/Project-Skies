@@ -1,4 +1,4 @@
-use std::{default, mem, ops::Range};
+use std::{collections::HashMap, default, mem, ops::Range};
 
 
 use cgmath::Rotation;
@@ -69,7 +69,7 @@ pub struct Mesh {
 }
 
 pub struct Model {
-    pub meshes: Vec<Mesh>,
+    pub meshes: HashMap<String, Mesh>,
     pub materials: Vec<Material>
 }
 
@@ -144,7 +144,7 @@ where
     }
 
     fn draw_model_instanced(&mut self, model: &'b Model, instances: Range<u32>, camera_bind_group: &'b wgpu::BindGroup) {
-        for mesh in &model.meshes {
+        for (key, mesh) in &model.meshes {
             let material = &model.materials[mesh.material];
             self.draw_mesh_instanced(mesh, material, instances.clone(), camera_bind_group);
         }

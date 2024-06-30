@@ -207,7 +207,7 @@ impl CameraUniform {
 pub struct Projection {
     aspect: f32,
     pub fovy: f32,
-    znear: f32,
+    pub znear: f32,
     zfar: f32
 }
 
