@@ -25,7 +25,7 @@ pub struct CameraRenderizable {
 impl CameraRenderizable {
     pub fn new(device: &Device, config: &wgpu::SurfaceConfiguration) -> Self {
         let camera = Camera::new((-590.0, 10.0, 0.0), cgmath::Deg(-90.0), cgmath::Deg(-20.0));
-        let projection = Projection::new(config.width, config.height, 45.0, 0.1, 100.0);
+        let projection = Projection::new(config.width, config.height, 45.0, 0.001, 100.0);
 
         // we create the 4x4 matrix of the camera
         let uniform = CameraUniform::new();

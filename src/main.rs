@@ -16,6 +16,7 @@ mod input {
 mod gameplay {
     pub mod controller;
     pub mod play;
+    pub mod main_menu;
 }
 
 mod primitive {
@@ -30,6 +31,7 @@ mod rendering {
     pub mod model;
     pub mod vertex;
     pub mod depth_renderer;
+    pub mod ui;
 }
 
 mod utils {

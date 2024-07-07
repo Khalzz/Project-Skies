@@ -2,6 +2,7 @@ use std::{collections::HashMap, default, mem, ops::Range};
 
 
 use cgmath::Rotation;
+use gltf::material::AlphaMode;
 use wgpu::BindGroup;
 
 use crate::transform::Transform;
@@ -65,7 +66,8 @@ pub struct Mesh {
     pub transform_buffer: wgpu::Buffer,
     pub transform_bind_group: wgpu::BindGroup,
     pub transform: Transform,
-    pub parent_transform: Option<Transform>
+    pub parent_transform: Option<Transform>,
+    pub alpha_mode: AlphaMode
 }
 
 pub struct Model {
@@ -120,6 +122,14 @@ pub trait DrawModel<'a> {
         instances: Range<u32>,
         camera_bind_group: &'a wgpu::BindGroup,
     );
+
+    // New function to draw only transparent objects
+    fn draw_transparent_model_instanced(
+        &mut self,
+        model: &'a Model,
+        instances: Range<u32>,
+        camera_bind_group: &'a wgpu::BindGroup,
+    );
 }
 
 impl<'a, 'b> DrawModel<'b> for wgpu::RenderPass<'a>
@@ -144,9 +154,21 @@ where
     }
 
     fn draw_model_instanced(&mut self, model: &'b Model, instances: Range<u32>, camera_bind_group: &'b wgpu::BindGroup) {
-        for (key, mesh) in &model.meshes {
+        let _ = &model.meshes.iter()
+        .filter(|(_key, mesh)| mesh.alpha_mode != gltf::material::AlphaMode::Blend && mesh.alpha_mode != gltf::material::AlphaMode::Mask)
+        .for_each(|(_key, mesh)| {
             let material = &model.materials[mesh.material];
             self.draw_mesh_instanced(mesh, material, instances.clone(), camera_bind_group);
-        }
+        });
+    }
+    
+    fn draw_transparent_model_instanced( &mut self, model: &'b Model, instances: Range<u32>, camera_bind_group: &'b wgpu::BindGroup,) {
+        let _ = &model.meshes.iter()
+        .for_each(|(_key, mesh)| {
+            if mesh.alpha_mode == gltf::material::AlphaMode::Blend || mesh.alpha_mode == gltf::material::AlphaMode::Mask {
+                let material = &model.materials[mesh.material];
+                self.draw_mesh_instanced(mesh, material, instances.clone(), camera_bind_group);
+            } 
+        });
     }
 }

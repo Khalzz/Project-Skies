@@ -65,7 +65,7 @@ pub struct GameLogic { // here we define the data we use on our script
 
 impl GameLogic {
     // this is called once
-    pub fn new(app: &mut App, speed: f64) -> Self {
+    pub fn new(app: &mut App) -> Self {
         // UI ELEMENTS AND LIST
         let altitude = button::Button::new(
             button::ButtonConfig {
@@ -78,7 +78,7 @@ impl GameLogic {
                 text_color: Color::rgba(0, 255, 75, 255),
                 text_color_active: Color::rgba(0, 255, 75, 000),
             },
-            &mut app.text.font_system,
+            &mut app.ui.text.font_system,
         );
 
         let speed = button::Button::new(
@@ -92,7 +92,7 @@ impl GameLogic {
                 text_color: Color::rgba(0, 255, 75, 255),
                 text_color_active: Color::rgba(0, 255, 75, 000),
             },
-            &mut app.text.font_system,
+            &mut app.ui.text.font_system,
         );
 
         let altitude_alert = button::Button::new(
@@ -106,7 +106,7 @@ impl GameLogic {
                 text_color: Color::rgba(255, 0, 0, 255),
                 text_color_active: Color::rgba(0, 0, 75, 000),
             },
-            &mut app.text.font_system,
+            &mut app.ui.text.font_system,
         );
 
         let compass: Button = button::Button::new(
@@ -120,7 +120,7 @@ impl GameLogic {
                 text_color: Color::rgba(0, 255, 0, 255),
                 text_color_active: Color::rgba(0, 0, 75, 000),
             },
-            &mut app.text.font_system,
+            &mut app.ui.text.font_system,
         );
 
         let framerate: Button = button::Button::new(
@@ -134,7 +134,7 @@ impl GameLogic {
                 text_color: Color::rgba(0, 255, 0, 255),
                 text_color_active: Color::rgba(0, 0, 75, 000),
             },
-            &mut app.text.font_system,
+            &mut app.ui.text.font_system,
         );
 
         let throttle: Button = button::Button::new(
@@ -148,7 +148,7 @@ impl GameLogic {
                 text_color: Color::rgba(0, 255, 0, 255),
                 text_color_active: Color::rgba(0, 0, 75, 000),
             },
-            &mut app.text.font_system,
+            &mut app.ui.text.font_system,
         );
 
         let crosshair = button::Button::new(
@@ -162,22 +162,22 @@ impl GameLogic {
                 text_color: Color::rgba(0, 255, 0, 255),
                 text_color_active: Color::rgba(0, 0, 75, 000),
             },
-            &mut app.text.font_system,
+            &mut app.ui.text.font_system,
         );
 
-        app.components = vec![];
-        app.components.push(altitude);
-        app.components.push(speed);
-        app.components.push(compass);
-        app.components.push(altitude_alert);
-        app.components.push(framerate);
-        app.components.push(throttle);
+        app.components.clear();
+        app.components.insert("altitude".to_owned(),altitude);
+        app.components.insert("speed".to_owned(),speed);
+        app.components.insert("compass".to_owned(),compass);
+        app.components.insert("altitude_alert".to_owned(),altitude_alert);
+        app.components.insert("framerate".to_owned(),framerate);
+        app.components.insert("throttle".to_owned(),throttle);
         
         // app.components.push(crosshair);
         app.dynamic_ui_components.get_mut("dynamic_static").unwrap().clear();
         app.dynamic_ui_components.get_mut("dynamic_static").unwrap().push(crosshair);
 
-        let velocity = Vector3::new(0.0, 0.0, 500.0);
+        let velocity = Vector3::new(0.0, 0.0, 1300.0);
         let rotation = Vector3::new(0.0, 0.0, 0.0);
 
         let camera_data = CameraData { 
@@ -262,7 +262,7 @@ impl GameLogic {
         }
 
         let fps_text = format!("FPS: {}", self.fps);
-        app.components[4].text.set_text(&mut app.text.font_system, &fps_text, true);
+        app.components.get_mut("framerate").unwrap().text.set_text(&mut app.ui.text.font_system, &fps_text, true);
     }
 
     fn plane_movement (&mut self, app: &mut App, delta_time: f32, controller: &mut Option<GameController>) {
@@ -305,20 +305,6 @@ impl GameLogic {
         let r_rudder_rotation = lerp_quaternion(r_rudder.transform.rotation, Quaternion::from_angle_x(Deg(-28.4493)) * Quaternion::from_angle_y(Rad(0.5 * self.controller.yaw)), delta_time * 7.0);
         let r_rudder_transform = Transform::new(r_rudder.transform.position, r_rudder_rotation, r_rudder.transform.scale);
         r_rudder.change_transform(&app.queue, r_rudder_transform);
-
-        /* 
-        // alerons
-        let l_aleron_rotation = lerp_quaternion(plane.model.meshes[5].transform.rotation, Quaternion::from_angle_x(Rad(0.3 * -self.controller.x)), delta_time * 7.0);
-        let l_aleron = Transform::new(plane.model.meshes[5].transform.position, l_aleron_rotation, plane.model.meshes[5].transform.scale);
-        plane.model.meshes[5].parent_transform = Some(Transform::new(plane.model.meshes[4].transform.position, plane.model.meshes[4].transform.rotation, plane.model.meshes[4].transform.scale));
-        plane.model.meshes[5].change_transform(&app.queue, l_aleron);
-
-        let r_aleron_rotation = lerp_quaternion(plane.model.meshes[3].transform.rotation, Quaternion::from_angle_x(Rad(0.3 * self.controller.x)), delta_time * 7.0);
-        let r_aleron = Transform::new(plane.model.meshes[3].transform.position, r_aleron_rotation, plane.model.meshes[3].transform.scale);
-        plane.model.meshes[3].parent_transform = Some(Transform::new(plane.model.meshes[2].transform.position, plane.model.meshes[2].transform.rotation, plane.model.meshes[2].transform.scale));
-        plane.model.meshes[3].change_transform(&app.queue, r_aleron);
-        // alerons
-        */
 
         let random_x: f32 = self.rng.gen_range(-3.0..=3.0);
         let random_y: f32 = self.rng.gen_range(-3.0..=3.0);
@@ -460,15 +446,13 @@ impl GameLogic {
 
                 let rotation_mod = Quaternion::from_axis_angle(Vector3::unit_y(), Rad(self.camera_data.mod_yaw)) * Quaternion::from_axis_angle(Vector3::unit_x(), Rad(self.camera_data.mod_pitch));
                 self.camera_data.target = Point3::new(plane.position.x, plane.position.y, plane.position.z) + (plane.rotation * rotation_mod * base_target_vector);
-                let x_val = if self.controller.rx.abs() > self.controller.rs_deathzone { self.controller.rx * -1.0 } else { 0.0 };
+                let x_val = if self.controller.rx.abs() > self.controller.rs_deathzone { self.controller.rx * -0.7 } else { 0.0 };
                 app.camera.camera.position = Point3::new(plane.position.x, plane.position.y, plane.position.z) + (plane.rotation * Vector3::new(x_val, 3.2, 25.0));
                 app.camera.camera.look_at(self.camera_data.target);
-
             },
         }
         
         self.calculate_lockable(app);
-
         if self.controller.change_camera.up {
             self.next_camera();
         }
@@ -505,8 +489,8 @@ impl GameLogic {
 
     fn ui_control(&mut self, app: &mut App, delta_time: f32) {
         if app.throttling.last_ui_update.elapsed() >= app.throttling.ui_update_interval {
-            app.components[0].text.set_text(&mut app.text.font_system, &format!("ALT: {}", self.altitude.altitude), true);
-            app.components[1].text.set_text(&mut app.text.font_system, &format!("SPEED: {}", self.velocity.z.round()), true);
+            app.components.get_mut("altitude").unwrap().text.set_text(&mut app.ui.text.font_system, &format!("ALT: {}", self.altitude.altitude), true);
+            app.components.get_mut("speed").unwrap().text.set_text(&mut app.ui.text.font_system, &format!("SPEED: {}", self.velocity.z.round()), true);
 
             let rotation = Self::map_to_range(app.camera.camera.yaw.0.into(), -PI, PI, 0.0, 360.0).round();
             let text_compass = if rotation >= 355.0 || rotation <= 5.0 {
@@ -521,7 +505,7 @@ impl GameLogic {
                 rotation.round().to_string() + "°"
             };
 
-            app.components[2].text.set_text(&mut app.text.font_system, &format!("{}", text_compass).to_string(), true);
+            app.components.get_mut("compass").unwrap().text.set_text(&mut app.ui.text.font_system, &format!("{}", text_compass).to_string(), true);
             app.throttling.last_ui_update = Instant::now();
         }
 
@@ -544,21 +528,22 @@ impl GameLogic {
         }
 
         if self.altitude.alert_state {
-            app.components[3].rectangle.border_color = [1.0, 0.0, 0.0, 1.0];
-            app.components[3].text.color = Color::rgba(255, 0, 0, 255);
+            app.components.get_mut("altitude_alert").unwrap().rectangle.border_color = [1.0, 0.0, 0.0, 1.0];
+            app.components.get_mut("altitude_alert").unwrap().text.color = Color::rgba(255, 0, 0, 255);
         } else {
-            app.components[3].rectangle.border_color = [0.0, 0.0, 0.0, 0.0];
-            app.components[3].text.color = Color::rgba(0, 0, 0, 0);
+            app.components.get_mut("altitude_alert").unwrap().rectangle.border_color = [0.0, 0.0, 0.0, 0.0];
+            app.components.get_mut("altitude_alert").unwrap().text.color = Color::rgba(0, 0, 0, 0);
         }
 
-        app.components[5].rectangle.position.top = (app.config.height / 2) - ((app.config.height as f32 / 2.0 * self.controller.power) - 100.0) as u32;
-        app.components[5].rectangle.position.bottom = (app.config.height / 2) + ((app.config.height as f32 / 2.0 * -self.controller.power) - 100.0) as u32;
+        app.components.get_mut("throttle").unwrap().rectangle.position.top = (app.config.height / 2) - ((app.config.height as f32 / 2.0 * self.controller.power) - 100.0) as u32;
+        app.components.get_mut("throttle").unwrap().rectangle.position.bottom = (app.config.height / 2) + ((app.config.height as f32 / 2.0 * -self.controller.power) - 100.0) as u32;
         self.targeting_system(app);
     }
 
     fn targeting_system(&mut self, app: &mut App) {
         // we set the position of all the bandits
         let mut bandits_target = vec![];
+        
         for markable in &self.plane_systems.bandits {
             match app.renderizable_instances.get(&markable.tag) {
                 Some(bandit) => bandits_target.push(bandit.instance.position),
@@ -570,7 +555,7 @@ impl GameLogic {
         if self.plane_systems.bandits.len() != app.dynamic_ui_components.get("bandits").unwrap().len() {
             app.dynamic_ui_components.get_mut("bandits").unwrap().clear();
 
-            for (i, target) in bandits_target.iter().enumerate() {
+            let _ = &bandits_target.iter().for_each(|_target| {
                 let crosshair: Button = Button::new(
                     ButtonConfig {
                         rect_pos: RectPos { top: 50, left: 50, bottom: 50, right: 50 },
@@ -582,10 +567,10 @@ impl GameLogic {
                         text_color: Color::rgba(0, 255, 0, 255),
                         text_color_active: Color::rgba(0, 0, 75, 000),
                     },
-                    &mut app.text.font_system,
+                    &mut app.ui.text.font_system,
                 );
                 app.dynamic_ui_components.get_mut("bandits").unwrap().push(crosshair);
-            }
+            });
         }
 
         /*

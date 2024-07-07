@@ -1,49 +1,40 @@
+use std::time::{Duration, Instant};
 use std::collections::HashMap;
 use std::env;
-use std::time::{Duration, Instant};
 
-
-use cgmath::{Matrix4, Quaternion, Rotation3, Vector3, Zero};
-use glyphon::{Color, Font, FontSystem, Resolution, SwashCache, TextArea, TextAtlas, TextRenderer};
-use rand::Rng;
+use sdl2::{GameControllerSubsystem, HapticSubsystem, video::Window, Sdl, render::Canvas};
 use sdl2::controller::GameController;
-use sdl2::haptic::Haptic;
 use sdl2::render::TextureCreator;
 use sdl2::video::{DisplayMode, WindowContext};
-use sdl2::{GameControllerSubsystem, HapticSubsystem};
-use sdl2::{video::Window, Sdl, render::Canvas};
+use wgpu::{BindGroupLayoutDescriptor, Buffer, Device, DeviceDescriptor, Features, InstanceDescriptor, Limits, Queue, RenderPassDepthStencilAttachment, Surface, SurfaceConfiguration, TextureUsages};
 use wgpu::util::DeviceExt;
-use wgpu::{BindGroup, BindGroupLayout, BindGroupLayoutDescriptor, Buffer, DepthBiasState, Device, DeviceDescriptor, Features, InstanceDescriptor, Limits, PipelineLayout, Queue, RenderPassDepthStencilAttachment, RenderPipeline, StencilState, Surface, SurfaceConfiguration, TextureUsages};
-use crate::game_object::GameObject;
-use crate::gameplay::play;
-use crate::primitive::rectangle::{self, RectPos};
-use crate::rendering::camera::{Camera, CameraRenderizable};
+use cgmath::{Matrix4, Rotation3, Vector3};
+use glyphon::{Resolution, TextArea};
+
+
+use crate::rendering::camera::CameraRenderizable;
 use crate::rendering::depth_renderer::DepthRender;
 use crate::rendering::model::{self, DrawModel, Model, Vertex};
-
 use crate::rendering::textures::Texture;
+use crate::rendering::ui::UI;
 use crate::rendering::vertex::VertexUi;
+
 use crate::resources;
-use crate::transform::Transform;
 use crate::ui::button::Button;
+use crate::gameplay::{main_menu, play};
+use crate::primitive::rectangle;
+
+const NUM_BLEND_PASSES: u32 = 3;
 
 pub enum GameState {
     Playing,
-}
-
-
-
-pub struct Text {
-    pub text_renderer: TextRenderer,
-    pub text_cache: SwashCache,
-    pub font_system: FontSystem,
-    pub text_atlas: TextAtlas
-
+    MainMenu
 }
 
 pub struct AppState {
     pub is_running: bool,
     pub state: GameState,
+    pub reset: bool
 }
 
 pub struct InstanceData {
@@ -130,10 +121,7 @@ pub struct Throttling {
     pub controller_update_interval: Duration,
 }
 
-pub struct UiRendering {
-    vertex_buffer: Buffer,
-    index_buffer: Buffer
-}
+
 
 pub struct App {
     last_frame: Instant,
@@ -146,8 +134,10 @@ pub struct App {
     pub queue: Queue,
     pub device: Device,
     pub config: SurfaceConfiguration,
+    pub opaque_pipeline: wgpu::RenderPipeline,
+    pub transparent_pipeline: wgpu::RenderPipeline,
     pub render_pipeline: wgpu::RenderPipeline,
-    pub ui_pipeline: wgpu::RenderPipeline,
+    pub ui: UI,
     pub index_buffer: wgpu::Buffer,
     pub camera: CameraRenderizable,
     depth_texture: Texture,
@@ -155,13 +145,13 @@ pub struct App {
     pub show_depth_map: bool,
     pub controller_subsystem: GameControllerSubsystem,
     pub haptic_subsystem: HapticSubsystem,
-    pub text: Text,
-    pub components: Vec<Button>,
+    pub components: HashMap<String, Button>, // we should transform this to a hashmap to have a better access on what is inside of it
     pub dynamic_ui_components: HashMap<String, Vec<Button>>,
-    pub mouse_pos: MousePos,
     pub renderizable_instances: HashMap<String, InstanceData>,
+    pub mouse_pos: MousePos,
     pub throttling: Throttling,
-    pub ui_rendering: UiRendering
+    pub blend_color_texture: Texture,
+    pub blend_weight_texture: Texture,
 }
 
 impl App {
@@ -230,9 +220,7 @@ impl App {
         let depth_texture = Texture::create_depth_texture(&device, &config, "depth_texture");
         // depth
 
-
-        let transform = Transform::new(Vector3::zero(), Quaternion::zero(), Vector3::new(1.0, 1.0, 1.0));
-        let transform_matrix = transform.to_matrix_bufferable();
+        
 
         let transform_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("transform_bind_group_layout"),
@@ -278,72 +266,9 @@ impl App {
         // we have to create a bind group for each texture since the fact that the layout and the group are separated is because we can swap the bind group on runtime
         // Textures
 
-        let mut font_system = FontSystem::new();
-        let font = include_bytes!("../assets/fonts/Inter-Thin.ttf");
-        font_system.db_mut().load_font_data(font.to_vec());
+        
 
-        let text_cache = SwashCache::new();
-        let mut text_atlas = TextAtlas::new(&device, &queue, config.format);
-        let text_renderer = TextRenderer::new(
-            &mut text_atlas,
-            &device,
-            wgpu::MultisampleState::default(),
-            None,
-        );
-
-        let text_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/text_shader.wgsl").into()),
-        });
-
-        let ui_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("ui render pipeline layout"),
-                bind_group_layouts: &[],
-                push_constant_ranges: &[],
-            });
-
-        let ui_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("ui render pipeline"),
-            layout: Some(&ui_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &text_shader,
-                entry_point: "vertex",
-                buffers: &[VertexUi::desc()],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &text_shader,
-                entry_point: "fragment",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Bgra8UnormSrgb,
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                        alpha: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::One,
-                            operation: wgpu::BlendOperation::Max,
-                        },
-                    };),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                unclipped_depth: false,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                conservative: false,
-            },
-            multisample: wgpu::MultisampleState::default(),
-            depth_stencil: None,
-            multiview: None,
-        });
+        let ui = UI::new(&device, &queue, &config);
 
         // Camera
         // we set up the camera
@@ -364,6 +289,136 @@ impl App {
                 &transform_bind_group_layout
             ],
             push_constant_ranges: &[],
+        });
+
+        // blend color textures
+        let blend_color_texture = Texture::create_texture(&device, wgpu::TextureDescriptor {
+            label: Some("blend_color"),
+            size: wgpu::Extent3d {
+                width: config.width,
+                height: config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Bgra8UnormSrgb,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+
+        let blend_weight_texture = Texture::create_texture(&device, wgpu::TextureDescriptor {
+            label: Some("Blend Weight Texture"),
+            size: wgpu::Extent3d {
+                width: config.width,
+                height: config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+
+        // Create shader modules
+        let opaque_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Opaque Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/base_shader.wgsl").into()),
+        });
+
+        let transparent_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Transparent Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/base_shader.wgsl").into()),
+        });
+
+        let opaque_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Opaque Pipeline"),
+            layout: Some(&render_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &opaque_shader,
+                entry_point: "vs_main",
+                buffers: &[model::ModelVertex::desc(), InstanceRaw::desc()],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &opaque_shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Bgra8UnormSrgb,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+
+        let transparent_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Transparent Pipeline"),
+            layout: Some(&render_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &transparent_shader,
+                entry_point: "vs_main",
+                buffers: &[model::ModelVertex::desc(), InstanceRaw::desc()],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &transparent_shader,
+                entry_point: "fs_main",
+                targets: &[
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Bgra8UnormSrgb,
+                        blend: Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::SrcAlpha,
+                                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                            alpha: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::One,
+                                dst_factor: wgpu::BlendFactor::Zero,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                        }),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::R32Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                ],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: Texture::DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
         });
 
         // here we define elements that will be sent to the gpu
@@ -486,37 +541,22 @@ impl App {
 
         let mut renderizable_instances = HashMap::new();
         // renderizable_instances.insert("visor".to_owned(), visor_data);
-        renderizable_instances.insert("water".to_owned(), water_data);
+        renderizable_instances.insert("f14".to_owned(), f14_data);
         renderizable_instances.insert("tower".to_owned(), tower_data);
         renderizable_instances.insert("tower2".to_owned(), tower2_data);
         renderizable_instances.insert("crane".to_owned(), crane_data);
-        renderizable_instances.insert("f14".to_owned(), f14_data);
+        renderizable_instances.insert("water".to_owned(), water_data);
         // instances
 
         let depth_render = DepthRender::new(&device, &config);
 
-        let components = vec![];
+        let components = HashMap::new();
         
         let mut dynamic_ui_components = HashMap::new();
         dynamic_ui_components.insert("bandits".to_owned(), vec![]);
         
         // Dynamic static is for objects that move in the screen but their main position is based on something that never changes
         dynamic_ui_components.insert("dynamic_static".to_owned(), vec![]); 
-
-        let ui_rendering = UiRendering {
-            vertex_buffer: device.create_buffer(&wgpu::BufferDescriptor {
-                label: None,
-                size: 5000,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }),
-            index_buffer: device.create_buffer(&wgpu::BufferDescriptor {
-                label: None,
-                size: 5000,
-                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            })
-        };
 
         App {
             last_frame: Instant::now(),
@@ -529,27 +569,24 @@ impl App {
             queue,
             device,
             config,
+            transparent_pipeline,
+            opaque_pipeline,
             render_pipeline,
-            ui_pipeline,
+            ui,
             index_buffer,
             camera,
             depth_texture,
             depth_render,
             show_depth_map: false,
             controller_subsystem,
-            text: Text {
-                text_renderer,
-                text_cache,
-                font_system,
-                text_atlas
-            },
             components,
             mouse_pos: MousePos { x: 0.0, y: 0.0 },
             renderizable_instances,
             dynamic_ui_components,
             throttling: Throttling { last_ui_update: Instant::now(), ui_update_interval: Duration::from_secs_f32(1.0/60.0), last_controller_update: Instant::now(), controller_update_interval: Duration::from_secs_f32(1.0/400.0) },
-            ui_rendering,
-            haptic_subsystem
+            haptic_subsystem,
+            blend_color_texture,
+            blend_weight_texture
         }
     }
 
@@ -563,7 +600,7 @@ impl App {
 
         self.depth_texture = Texture::create_depth_texture(&self.device, &self.config, "depth_texture");
     }
-    
+
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         // UI
         let mut text_areas: Vec<TextArea> = Vec::new();
@@ -572,20 +609,17 @@ impl App {
         let mut num_vertices = 0;
         let mut num_indices = 0;
 
-        for button in self.components.iter_mut() {
+        for (_key, button) in self.components.iter_mut() {
             let button_active = button.is_hovered(&self.mouse_pos);
             let button_vertices = button.rectangle.vertices(button_active, &self.size);
-
             vertices.extend_from_slice(&button_vertices);
             indices.extend_from_slice(&button.rectangle.indices(num_vertices));
-
             num_vertices += button_vertices.len() as u16;
             num_indices += rectangle::NUM_INDICES;
-
             text_areas.push(button.text.text_area(button_active));
         }
 
-        for (key, list) in self.dynamic_ui_components.iter_mut() {
+        for (_key, list) in self.dynamic_ui_components.iter_mut() {
             for button in list {
                 let button_active = button.is_hovered(&self.mouse_pos);
                 let button_vertices = button.rectangle.vertices(button_active, &self.size);
@@ -600,9 +634,9 @@ impl App {
             }
         }
 
-        self.queue.write_buffer(&self.ui_rendering.vertex_buffer, 0, bytemuck::cast_slice(vertices.as_slice()));
-        self.queue.write_buffer(&self.ui_rendering.index_buffer, 0, bytemuck::cast_slice(&indices));
-        self.text.text_renderer.prepare(&self.device, &self.queue, &mut self.text.font_system, &mut self.text.text_atlas, Resolution {width: self.size.width,height: self.size.height},text_areas,&mut self.text.text_cache,).unwrap();
+        self.queue.write_buffer(&self.ui.ui_rendering.vertex_buffer, 0, bytemuck::cast_slice(vertices.as_slice()));
+        self.queue.write_buffer(&self.ui.ui_rendering.index_buffer, 0, bytemuck::cast_slice(&indices));
+        self.ui.text.text_renderer.prepare(&self.device, &self.queue, &mut self.ui.text.font_system, &mut self.ui.text.text_atlas, Resolution {width: self.size.width,height: self.size.height},text_areas,&mut self.ui.text.text_cache,).unwrap();
         // UI
 
         // WGPU
@@ -612,16 +646,15 @@ impl App {
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render Encoder"),
         });
-
+        
         {
-            // we make a render pass, this will have all the methods for drawing in the screen
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor { 
                 label: Some("Render Pass"), 
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment { // here we will define the base colors of the screen
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                        load: wgpu::LoadOp::Clear(wgpu::Color { // nuestro render pass limpia la pantalla y setea un color de fondo
                             r: 0.1,
                             g: 0.2,
                             b: 0.3,
@@ -633,7 +666,7 @@ impl App {
                 depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
                     view: &self.depth_render.texture.view,
                     depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
+                        load: wgpu::LoadOp::Clear(1.0), // limpiamos nuestro "depth stencil para este estado"
                         store: wgpu::StoreOp::Store,
                     }),
                     stencil_ops: None,
@@ -641,14 +674,49 @@ impl App {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
+            
             render_pass.set_pipeline(&self.render_pipeline);
 
-            for (key, renderizable) in &self.renderizable_instances {
+            let _ = &self.renderizable_instances.iter().for_each(|(_key ,renderizable)| {
                 render_pass.set_vertex_buffer(1, renderizable.instance_buffer.slice(..));
-                render_pass.draw_model_instanced(&renderizable.model, 0..1 as u32, &self.camera.bind_group);
-            }
+                render_pass.draw_model_instanced(&renderizable.model, 0..1 as u32, &self.camera.bind_group); // usamos la funcion que renderiza los objetos opacos
+            });
+        }
+        
+        // transparency render pass
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor { 
+                label: Some("Render Pass"), 
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load, // se carga el color anteriormente seteado
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                    view: &self.depth_render.texture.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load, // cargamos la informacion de profundidad anteriormente definida
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+            
+            render_pass.set_pipeline(&self.render_pipeline);
+
+
+            let _ = &self.renderizable_instances.iter().for_each(|(_key ,renderizable)| {
+                render_pass.set_vertex_buffer(1, renderizable.instance_buffer.slice(..));
+                render_pass.draw_transparent_model_instanced(&renderizable.model, 0..1 as u32, &self.camera.bind_group); // usamos la funcion que renderiza los objetos opacos
+            });
         }
 
+        // Ui Pass
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("UI Render Pass"),
@@ -665,12 +733,12 @@ impl App {
                 timestamp_writes: None,
             });
     
-            render_pass.set_pipeline(&self.ui_pipeline);
-            render_pass.set_vertex_buffer(0, self.ui_rendering.vertex_buffer.slice(..));
-            render_pass.set_index_buffer(self.ui_rendering.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.set_pipeline(&self.ui.ui_pipeline);
+            render_pass.set_vertex_buffer(0, self.ui.ui_rendering.vertex_buffer.slice(..));
+            render_pass.set_index_buffer(self.ui.ui_rendering.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
             render_pass.draw_indexed(0..num_indices, 0, 0..1);
     
-            self.text.text_renderer.render(&self.text.text_atlas, &mut render_pass).unwrap();
+            self.ui.text.text_renderer.render(&self.ui.text.text_atlas, &mut render_pass).unwrap();
         }
         
         if self.show_depth_map {
@@ -680,38 +748,35 @@ impl App {
         // we have the render pass inside the {} so we can do the submit to the queue, we can also drop the render pass if you prefeer
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
-        self.text.text_atlas.trim();
+        self.ui.text.text_atlas.trim();
 
         Ok(())
     }
 
     pub fn update(mut self) {
         // SDL2
-        let mut app_state = AppState { is_running: true, state: GameState::Playing};
+        let mut app_state = AppState { is_running: true, state: GameState::MainMenu, reset: true};
         let mut event_pump = self.context.event_pump().unwrap();
 
-        let mut play = play::GameLogic::new(&mut self, 5.0);
+        let mut play = play::GameLogic::new(&mut self);
+        let mut main_menu = main_menu::GameLogic::new(&mut self);
+
         let mut controller = Self::open_first_available_controller(&self.controller_subsystem);
 
         while app_state.is_running { 
             let delta_time = self.delta_time().as_secs_f32();
             self.canvas.clear();
-
-            play.update( &mut app_state, &mut event_pump, &mut self, &mut controller);
             
             // let mut start_time = Instant::now(); // benchmarking            
-            match self.render() {
-                Ok(_) => {},
-                Err(wgpu::SurfaceError::Outdated) => { 
-                    self.resize()
-                }
-                Err(e) => eprintln!("Error: {}", e),
-            }
             // println!("--- Total: {}", start_time.elapsed().as_micros());
-
-            // start_time = Instant::now(); // benchmarking            
             match app_state.state {
                 GameState::Playing => {
+                    if app_state.reset {
+                        play = play::GameLogic::new(&mut self);
+                        app_state.reset = false;
+                    }
+
+                    play.update( &mut app_state, &mut event_pump, &mut self, &mut controller);
                     let plane_rot = self.renderizable_instances.get("f14").unwrap().instance.rotation;
                     self.camera.camera.up = self.renderizable_instances.get("f14").unwrap().instance.rotation * Vector3::unit_y();
                     // play.camera_data.look_at = Some(self.renderizable_instances.get("tower").unwrap().instance.position);
@@ -727,7 +792,22 @@ impl App {
 
                     self.camera.uniform.update_view_proj(&self.camera.camera, &self.camera.projection);
                     self.queue.write_buffer(&self.camera.buffer, 0, bytemuck::cast_slice(&[self.camera.uniform]));
+                },
+                GameState::MainMenu => {
+                    if app_state.reset {
+                        main_menu = main_menu::GameLogic::new(&mut self);
+                        app_state.reset = false;
+                    }
+                    main_menu.update(&mut app_state, &mut event_pump, &mut self, &mut controller)
                 }
+            }
+
+            match self.render() {
+                Ok(_) => {},
+                Err(wgpu::SurfaceError::Outdated) => { 
+                    self.resize()
+                }
+                Err(e) => eprintln!("Error: {}", e),
             }
         }
     }

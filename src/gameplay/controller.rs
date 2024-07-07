@@ -9,6 +9,7 @@ use crate::app::{self, App, AppState};
 
 pub struct Input {
     pub pressed: bool,
+    pub just_pressed: bool,
     pub up: bool,
     pub time_pressed: f32,
 }
@@ -28,6 +29,9 @@ pub struct Controller {
     pub fix_view_hold_window: f32,
     pub change_camera: Input,
     pub look_back: bool,
+    pub ui_up: bool,
+    pub ui_down: bool,
+    pub ui_select: bool
 }
 
 impl Controller {
@@ -43,10 +47,13 @@ impl Controller {
             ry: 0.0,
             rs_deathzone,
             power: 0.0,
-            fix_view: Input { pressed: false, up: false, time_pressed: 0.0 },
+            fix_view: Input { pressed: false, just_pressed: false, up: false, time_pressed: 0.0 },
             fix_view_hold_window: 0.2,
-            change_camera: Input { pressed: false, up: false, time_pressed: 0.0 },
+            change_camera: Input { pressed: false, just_pressed: false, up: false, time_pressed: 0.0 },
             look_back: false,
+            ui_up: false,
+            ui_down: false,
+            ui_select: false,
         }
     }
 
@@ -59,6 +66,14 @@ impl Controller {
 
         if !self.change_camera.pressed {
             self.change_camera.up = false;
+        }
+
+        if self.ui_down == true {
+            self.ui_down = false;
+        }
+
+        if self.ui_up == true {
+            self.ui_up = false;
         }
 
         if app.throttling.last_controller_update.elapsed() >= app.throttling.controller_update_interval {
@@ -82,6 +97,15 @@ impl Controller {
                             sdl2::controller::Button::RightShoulder => {
                                 self.yaw = 1.0
                             },
+                            sdl2::controller::Button::DPadUp => {
+                                self.ui_up = true;
+                            },
+                            sdl2::controller::Button::DPadDown => {
+                                self.ui_down = true;
+                            },
+                            sdl2::controller::Button::A => {
+                                self.ui_select = true;
+                            },
                             _ => {}
                         }
                     }
@@ -103,6 +127,9 @@ impl Controller {
                             },
                             sdl2::controller::Button::RightShoulder => {
                                 self.yaw = 0.0
+                            },
+                            sdl2::controller::Button::A => {
+                                self.ui_select = false;
                             },
                             _ => {}
                         }

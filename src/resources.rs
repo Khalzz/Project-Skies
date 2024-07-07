@@ -49,7 +49,6 @@ pub async fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgp
     }
 
     // Load materials
-
     let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
@@ -243,7 +242,12 @@ fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::D
                 ],
             });
 
-            meshes.insert(node.name().unwrap().to_owned(), model::Mesh {
+            if primitive.material().alpha_mode() == gltf::material::AlphaMode::Blend || primitive.material().alpha_mode() == gltf::material::AlphaMode::Mask {
+                println!("The node {} has transparency", node.name().unwrap());
+            }
+            
+            meshes.insert(
+                node.name().unwrap().to_owned(), model::Mesh {
                 name: file_name.to_string(),
                 vertex_buffer,
                 index_buffer,
@@ -252,7 +256,8 @@ fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::D
                 transform_buffer,
                 transform_bind_group,
                 transform,
-                parent_transform: parent_values
+                parent_transform: parent_values,
+                alpha_mode: primitive.material().alpha_mode()
             });
 
         });
