@@ -1,6 +1,6 @@
 use std::{f64::consts::PI, time::{Duration, Instant}};
 
-use cgmath::{Deg, ElementWise, InnerSpace, Point3, Quaternion, Rad, Rotation, Rotation3, Vector2, Vector3};
+use cgmath::{Deg, ElementWise, InnerSpace, Point3, Quaternion, Rad, Rotation, Rotation3, Vector2, Vector3, Zero};
 use glyphon::Color;
 use rand::{rngs::ThreadRng, Rng};
 use sdl2::controller::GameController;
@@ -72,6 +72,7 @@ impl GameLogic {
                 text: "",
                 text_color: Color::rgba(0, 255, 75, 255),
                 text_color_active: Color::rgba(0, 255, 75, 000),
+                rotation: Quaternion::zero()
             },
             &mut app.ui.text.font_system,
         );
@@ -144,6 +145,7 @@ impl GameLogic {
                             text: "Play",
                             text_color: Color::rgba(0, 255, 75, 255),
                             text_color_active: Color::rgba(0, 255, 75, 000),
+                            rotation: Quaternion::zero()
                         },
                         &mut app.ui.text.font_system,
                     );
@@ -178,6 +180,7 @@ impl GameLogic {
                             text: "Exit",
                             text_color: Color::rgba(0, 255, 75, 255),
                             text_color_active: Color::rgba(0, 255, 75, 000),
+                            rotation: Quaternion::zero()
                         },
                         &mut app.ui.text.font_system,
                     );

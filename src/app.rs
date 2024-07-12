@@ -134,8 +134,6 @@ pub struct App {
     pub queue: Queue,
     pub device: Device,
     pub config: SurfaceConfiguration,
-    pub opaque_pipeline: wgpu::RenderPipeline,
-    pub transparent_pipeline: wgpu::RenderPipeline,
     pub render_pipeline: wgpu::RenderPipeline,
     pub ui: UI,
     pub index_buffer: wgpu::Buffer,
@@ -150,8 +148,6 @@ pub struct App {
     pub renderizable_instances: HashMap<String, InstanceData>,
     pub mouse_pos: MousePos,
     pub throttling: Throttling,
-    pub blend_color_texture: Texture,
-    pub blend_weight_texture: Texture,
 }
 
 impl App {
@@ -290,137 +286,7 @@ impl App {
             ],
             push_constant_ranges: &[],
         });
-
-        // blend color textures
-        let blend_color_texture = Texture::create_texture(&device, wgpu::TextureDescriptor {
-            label: Some("blend_color"),
-            size: wgpu::Extent3d {
-                width: config.width,
-                height: config.height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Bgra8UnormSrgb,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-
-        let blend_weight_texture = Texture::create_texture(&device, wgpu::TextureDescriptor {
-            label: Some("Blend Weight Texture"),
-            size: wgpu::Extent3d {
-                width: config.width,
-                height: config.height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-
-        // Create shader modules
-        let opaque_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Opaque Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/base_shader.wgsl").into()),
-        });
-
-        let transparent_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Transparent Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/base_shader.wgsl").into()),
-        });
-
-        let opaque_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Opaque Pipeline"),
-            layout: Some(&render_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &opaque_shader,
-                entry_point: "vs_main",
-                buffers: &[model::ModelVertex::desc(), InstanceRaw::desc()],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &opaque_shader,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Bgra8UnormSrgb,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-        });
-
-        let transparent_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Transparent Pipeline"),
-            layout: Some(&render_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &transparent_shader,
-                entry_point: "vs_main",
-                buffers: &[model::ModelVertex::desc(), InstanceRaw::desc()],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &transparent_shader,
-                entry_point: "fs_main",
-                targets: &[
-                    Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Bgra8UnormSrgb,
-                        blend: Some(wgpu::BlendState {
-                            color: wgpu::BlendComponent {
-                                src_factor: wgpu::BlendFactor::SrcAlpha,
-                                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                                operation: wgpu::BlendOperation::Add,
-                            },
-                            alpha: wgpu::BlendComponent {
-                                src_factor: wgpu::BlendFactor::One,
-                                dst_factor: wgpu::BlendFactor::Zero,
-                                operation: wgpu::BlendOperation::Add,
-                            },
-                        }),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::R32Float,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                ],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                unclipped_depth: false,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: Texture::DEPTH_FORMAT,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview: None,
-        });
-
+        
         // here we define elements that will be sent to the gpu
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Render Pipeline"),
@@ -569,8 +435,6 @@ impl App {
             queue,
             device,
             config,
-            transparent_pipeline,
-            opaque_pipeline,
             render_pipeline,
             ui,
             index_buffer,
@@ -585,8 +449,6 @@ impl App {
             dynamic_ui_components,
             throttling: Throttling { last_ui_update: Instant::now(), ui_update_interval: Duration::from_secs_f32(1.0/60.0), last_controller_update: Instant::now(), controller_update_interval: Duration::from_secs_f32(1.0/400.0) },
             haptic_subsystem,
-            blend_color_texture,
-            blend_weight_texture
         }
     }
 
@@ -778,7 +640,6 @@ impl App {
 
                     play.update( &mut app_state, &mut event_pump, &mut self, &mut controller);
                     let plane_rot = self.renderizable_instances.get("f14").unwrap().instance.rotation;
-                    self.camera.camera.up = self.renderizable_instances.get("f14").unwrap().instance.rotation * Vector3::unit_y();
                     // play.camera_data.look_at = Some(self.renderizable_instances.get("tower").unwrap().instance.position);
                     play.altitude.altitude = ((self.renderizable_instances.get("f14").unwrap().instance.position.y - self.renderizable_instances.get("water").unwrap().instance.position.y)).round();
                     

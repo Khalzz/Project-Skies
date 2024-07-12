@@ -1,3 +1,5 @@
+use cgmath::Quaternion;
+
 use crate::{app::MousePos, primitive::{rectangle::{RectPos, Rectangle}, text::Text}};
 
 pub struct Button {
@@ -20,13 +22,14 @@ pub struct ButtonConfig {
     pub text: &'static str,
     pub text_color: glyphon::Color,
     pub text_color_active: glyphon::Color,
+    pub rotation: Quaternion<f32>
     // pub on_click: Box<dyn Fn()>,
 }
 
 impl Button {
     pub fn new(cfg: ButtonConfig, font_system: &mut glyphon::FontSystem) -> Self {
         Self {
-            rectangle: Rectangle::new(cfg.rect_pos, cfg.fill_color, cfg.fill_color_active, cfg.border_color, cfg.border_color_active),
+            rectangle: Rectangle::new(cfg.rect_pos, cfg.fill_color, cfg.fill_color_active, cfg.border_color, cfg.border_color_active, cfg.rotation),
             text: Text::new(font_system, cfg.rect_pos, cfg.text, cfg.text_color, cfg.text_color_active, "".to_owned()),
             // on_click: cfg.on_click,
         }
