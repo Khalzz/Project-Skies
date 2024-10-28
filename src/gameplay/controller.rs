@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use sdl2::{controller::{self, Axis, GameController}, event::{Event, EventPollIterator}, keyboard::Keycode};
 
-use crate::app::{self, App, AppState};
+use crate::{app::{self, App, AppState}, ui::button};
 
 pub struct Input {
     pub pressed: bool,
@@ -133,6 +133,37 @@ impl Controller {
                             },
                             _ => {}
                         }
+                    },
+                    Event::JoyAxisMotion { timestamp, which, axis_idx, value } => {
+                        // println!("Joystick {} Axis {} moved to {}", which, axis_idx, value);
+                        if axis_idx == 0 {
+                            self.x = value as f32 / 32767.0;                                    
+                        } else if axis_idx == 1 {
+                            self.y = -(value as f32 / 32767.0);
+                        } else if axis_idx == 2 {
+                            self.power = (value as i32 - 32767).abs() as f32 / 65536.0;
+                        } else if axis_idx == 5 {
+                            self.yaw = -(value as f32 / 32767.0);
+                        }
+                    }
+                    Event::JoyButtonDown { timestamp, which, button_idx } => {
+                        // println!("Joystick {} Button {} pressed", which, button_idx);
+                        if button_idx == 19 {
+                            self.fix_view.pressed = true;
+                            self.fix_view.time_pressed = 0.0;
+                        } else if button_idx == 3 {
+                            self.change_camera.pressed = true;
+                        }
+                    }
+                    Event::JoyButtonUp { timestamp, which, button_idx } => {
+                        // println!("Joystick {} Button {} pressed", which, button_idx);
+                        if button_idx == 19 {
+                            self.fix_view.pressed = false;
+                            self.fix_view.up = true;
+                        } else if button_idx == 3 {
+                            self.change_camera.pressed = false;
+                            self.change_camera.up = true;
+                        }
                     }
                     Event::ControllerAxisMotion { axis, .. } => {
                         match axis {
@@ -162,7 +193,6 @@ impl Controller {
                                 self.brake = controller.as_ref().map_or(0, |c| c.axis(Axis::TriggerRight)) as f32 / 32767.0;
                                 self.power = self.brake + self.throttle;
                             },
-                            _ => {}
                         }
                     }
                     Event::KeyDown { keycode, .. } => {
@@ -178,6 +208,23 @@ impl Controller {
                             Some(Keycode::D) => self.x = 1.0,
                             Some(Keycode::S) => self.y = -1.0,
                             Some(Keycode::W) => self.y = 1.0,
+                            Some(Keycode::C) => self.change_camera.pressed = true,
+                            Some(Keycode::O) => {
+                                println!("near: {}, far: {}", app.depth_render.near_far_uniform.near, app.depth_render.near_far_uniform.far);
+                                if self.fix_view.pressed {
+                                    app.depth_render.near_far_uniform.far += 1.0;
+                                } else {
+                                    app.depth_render.near_far_uniform.near += 1.0;
+                                }
+                            },
+                            Some(Keycode::L) => {
+                                println!("near: {}, far: {}", app.depth_render.near_far_uniform.near, app.depth_render.near_far_uniform.far);
+                                if self.fix_view.pressed {
+                                    app.depth_render.near_far_uniform.far -= 1.0;
+                                } else {
+                                    app.depth_render.near_far_uniform.near -= 1.0;
+                                }
+                            },
                             _ => {},
                         }
                     },
@@ -192,6 +239,10 @@ impl Controller {
                             Some(Keycode::D) => self.x = 0.0,
                             Some(Keycode::S) => self.y = 0.0,
                             Some(Keycode::W) => self.y = 0.0,
+                            Some(Keycode::C) => {
+                                self.change_camera.pressed = false;
+                                self.change_camera.up = true;
+                            },
                             _ => {},
                         }
                     },

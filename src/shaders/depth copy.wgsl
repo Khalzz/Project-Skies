@@ -1,7 +1,3 @@
-// Define near and far planes for the depth calculation
-const NEAR: f32 = 0.1;  // Near plane distance
-const FAR: f32 = 10000.0;  // Far plane distance
-
 struct CameraUniform {
     view_proj: mat4x4<f32>,
 };
@@ -31,11 +27,10 @@ struct InstanceInput {
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) tex_coords: vec2<f32>,
-    @location(1) depth: f32,  // Pass depth to the fragment shader
 }
 
 @vertex
-fn vs_main(model: VertexInput, instance: InstanceInput) -> VertexOutput {
+fn vs_main(model: VertexInput, instance: InstanceInput,) -> VertexOutput {
     let model_matrix = mat4x4<f32>(
         instance.model_matrix_0,
         instance.model_matrix_1,
@@ -45,24 +40,7 @@ fn vs_main(model: VertexInput, instance: InstanceInput) -> VertexOutput {
 
     var out: VertexOutput;
     out.tex_coords = model.tex_coords;
-
-    // Calculate world space position
-    let world_position = transform.model_matrix * vec4<f32>(model.position, 1.0);
-    
-    // Clip space position (with view-projection matrix)
-    let clip_position = camera.view_proj * model_matrix * world_position;
-
-    // Get linear depth in normalized device coordinates (NDC)
-    let z = clip_position.z / clip_position.w;
-
-    // Adjust the depth range for logarithmic depth and avoid precision issues
-    let log_depth = log2(max(z - NEAR + 1.0, 1e-6));
-
-    // Normalize depth to [0, 1] based on the near and far planes
-    out.depth = (log_depth - log2(NEAR)) / (log2(FAR + 1.0) - log2(NEAR + 1.0));
-
-    // Set the clip position as usual
-    out.clip_position = vec4<f32>(clip_position.xy, clip_position.z, clip_position.w);
+    out.clip_position = camera.view_proj * model_matrix * transform.model_matrix * vec4<f32>(model.position, 1.0);
     return out;
 }
 

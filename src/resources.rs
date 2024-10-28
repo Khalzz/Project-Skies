@@ -8,6 +8,7 @@ use crate::{rendering::{model::{self, Mesh, Model, ModelVertex}, textures::Textu
 
 pub async fn load_string(file_name: &str) -> anyhow::Result<String> {
     let path = std::path::Path::new(env!("OUT_DIR")).join("res").join(file_name);
+    println!("{}", file_name);
     let txt = std::fs::read_to_string(path).unwrap();
 
     Ok(txt)
@@ -75,6 +76,9 @@ pub async fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgp
     for material in gltf.materials() {
         let pbr = material.pbr_metallic_roughness();
         let base_color_texture = &pbr.base_color_texture();
+
+        // println!("{}", );
+
         let texture_source = &pbr
             .base_color_texture()
             .map(|tex| {

@@ -13,6 +13,13 @@ pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::new(
 
 const SAFE_FRAC_PI_2: f32 = FRAC_PI_2 - 0.0001;
 
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct NearFarUniform {
+    pub near: f32,
+    pub far: f32,
+}
+
 pub struct CameraRenderizable {
     pub camera: Camera,
     pub projection: Projection,
@@ -24,11 +31,17 @@ pub struct CameraRenderizable {
 
 impl CameraRenderizable {
     pub fn new(device: &Device, config: &wgpu::SurfaceConfiguration) -> Self {
-        let camera = Camera::new((-590.0, 10.0, 0.0), cgmath::Deg(-90.0), cgmath::Deg(-20.0));
-        let projection = Projection::new(config.width, config.height, 45.0, 0.1, 100.0);
+
+        let near_far_uniform = NearFarUniform {
+            near: 0.1,
+            far: 10000.0
+        };
+
+        let camera = Camera::new((-100000.0, 10.0, 0.0), cgmath::Deg(-90.0), cgmath::Deg(-20.0));
+        let projection = Projection::new(config.width, config.height, 45.0, near_far_uniform.near, near_far_uniform.far);
 
         // we create the 4x4 matrix of the camera
-        let uniform = CameraUniform::new();
+        let uniform = CameraUniform::new(near_far_uniform);
 
         // we create a buffer and a bind group
         let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -142,7 +155,7 @@ impl Camera {
         let modified_direction = self.rotation_modifier * direction;
         let modified_up = self.rotation_modifier * self.up;
 
-        return Matrix4::look_to_rh(self.position, direction, self.up)
+        return Matrix4::look_to_rh(self.position, modified_direction, modified_up)
     }
 
     pub fn look_at(&mut self, target: Point3<f32>) {
@@ -186,13 +199,17 @@ impl Camera {
 pub struct CameraUniform {
     view_proj: [[f32; 4]; 4],
     view_position: [f32; 4],
+    near: f32,
+    far: f32
 }
 
 impl CameraUniform {
-    pub fn new() -> Self {
+    pub fn new(near_far: NearFarUniform) -> Self {
         Self {
             view_proj: cgmath::Matrix4::identity().into(),
             view_position: [0.0; 4],
+            near: near_far.near,
+            far: near_far.far
         }
     }
 

@@ -24,6 +24,12 @@ const DEPTH_VERTICES: &[ManualVertex] = &[
 
 const DEPTH_INDICES: &[u16] = &[0, 1, 2, 0, 2, 3];
 
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct NearFarUniform {
+    pub near: f32,
+    pub far: f32,
+}
 
 pub struct DepthRender {
     pub texture: Texture,
@@ -32,11 +38,24 @@ pub struct DepthRender {
     pub render_pipeline: RenderPipeline,
     pub vertex_buffer: Buffer,
     pub index_buffer: Buffer,
+    pub near_far_buffer: Buffer,
+    pub near_far_uniform: NearFarUniform
 }
 
 impl DepthRender {
     pub fn new(device: &Device, config: &SurfaceConfiguration) -> Self {
         let texture = Texture::create_depth_texture_non_comparison_sampler(&device, &config, "depth_texture");
+
+        let near_far_uniform = NearFarUniform {
+            near: 0.1,
+            far: 10.0,
+        };
+
+        let near_far_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Near and Far Uniform Buffer"),
+            contents: bytemuck::cast_slice(&[near_far_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
 
         let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("texture_bind_group_layout"),
@@ -59,6 +78,17 @@ impl DepthRender {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
+                // for changing the near and far in the depth texture
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -75,7 +105,11 @@ impl DepthRender {
                     wgpu::BindGroupEntry {
                         binding: 1,
                         resource: wgpu::BindingResource::Sampler(&texture.sampler),
-                    }
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: near_far_buffer.as_entire_binding(),
+                    },
                 ],
             }
         );
@@ -147,6 +181,8 @@ impl DepthRender {
             render_pipeline,
             vertex_buffer,
             index_buffer,
+            near_far_buffer,
+            near_far_uniform,
         }
     }
 
@@ -166,6 +202,10 @@ impl DepthRender {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&self.texture.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.near_far_buffer.as_entire_binding(),
                 },
             ],
             label: Some("depth_pass.bind_group"),

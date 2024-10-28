@@ -16,6 +16,7 @@ glob = "*"
 rand = "0.8"
 glyphon = "0.4"
 cgmath = "*"
+csv = "*"
 
 [dependencies.gltf]
 version = "1.4"

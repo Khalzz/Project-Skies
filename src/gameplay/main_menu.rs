@@ -1,58 +1,14 @@
-use std::{f64::consts::PI, time::{Duration, Instant}};
+use std::time::{Duration, Instant};
 
-use cgmath::{Deg, ElementWise, InnerSpace, Point3, Quaternion, Rad, Rotation, Rotation3, Vector2, Vector3, Zero};
+use cgmath::{Quaternion, Zero};
 use glyphon::Color;
-use rand::{rngs::ThreadRng, Rng};
 use sdl2::controller::GameController;
-use crate::{app::{self, App, AppState, GameState, Instance}, primitive::rectangle::RectPos, transform::Transform, ui::button::{self, Button, ButtonConfig}, utils::lerps::{lerp, lerp_quaternion, lerp_vector3}};
+use crate::{app::{App, AppState, GameState}, primitive::rectangle::RectPos, ui::button};
 
 use super::controller::Controller;
 
-pub enum CameraState {
-    Normal,
-    Front,
-    Cockpit
-}
-
-pub struct Bandit {
-    tag: String,
-    locked: bool,
-}
-
-pub struct CameraData {
-    camera_state: CameraState,
-    target: Point3<f32>,
-    position: Point3<f32>,
-    mod_yaw: f32,
-    mod_pitch: f32,
-    mod_pos_x: f32,
-    mod_pos_y: f32,
-    base_position: Vector3<f32>,
-    pub look_at: Option<Vector3<f32>>,
-    pub next_look_at: Option<Vector3<f32>>,
-    pub bandit_index: usize
-}
-
-pub struct AltitudeUi {
-    pub altitude: f32,
-    alert_state: bool,
-    time_alert: f32
-}
-
-pub struct Ui {
-    altitude: Button
-}
-
-pub struct PlaneSystems {
-    bandits: Vec<Bandit>
-}
-
 pub struct GameLogic { // here we define the data we use on our script
-    fps: u32,
     last_frame: Instant,
-    frame_count: u32,
-    frame_timer: Duration,
-    pub start_time: Instant,
     pub controller: Controller,
     pub timer: f32,
     pub selected: u8,
@@ -61,31 +17,11 @@ pub struct GameLogic { // here we define the data we use on our script
 impl GameLogic {
     // this is called once
     pub fn new(app: &mut App) -> Self {
-        // UI ELEMENTS AND LIST
-        let background = button::Button::new(
-            button::ButtonConfig {
-                rect_pos: RectPos { top: 0, left: 0, bottom: app.config.height, right: app.config.width },
-                fill_color: [0.0, 0.0, 0.0, 1.0],
-                fill_color_active: [0.0, 0.0, 0.0, 0.0],
-                border_color: [0.0, 0.0, 0.0, 1.0],
-                border_color_active: [0.0, 0.0, 0.0, 0.0],
-                text: "",
-                text_color: Color::rgba(0, 255, 75, 255),
-                text_color_active: Color::rgba(0, 255, 75, 000),
-                rotation: Quaternion::zero()
-            },
-            &mut app.ui.text.font_system,
-        );
-
         app.components.clear();
         // app.components.insert("background".to_owned(), background);
 
         Self {
-            fps: 0,
             last_frame: Instant::now(),
-            start_time: Instant::now(),
-            frame_count: 0,
-            frame_timer: Duration::new(0, 0),
             controller: Controller::new(0.3, 0.2),
             timer: 0.0,
             selected: 0

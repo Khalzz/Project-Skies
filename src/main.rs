@@ -32,6 +32,7 @@ mod rendering {
     pub mod vertex;
     pub mod depth_renderer;
     pub mod ui;
+    pub mod instance_management;
 }
 
 mod utils {

@@ -26,18 +26,28 @@ fn vs_main(
 var t_shadow: texture_2d<f32>;
 @group(0) @binding(1)
 var s_shadow: sampler;
+// Define a uniform structure for near and far values
+@group(0) @binding(2)
+var<uniform> u_near_far: vec2<f32>; // u_near_far.x = near, u_near_far.y = far
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let near = 5.0;
-    let far = 300.0;
+    let near = u_near_far.x; // Get near value from uniform
+    let far = u_near_far.y;   // Get far value from uniform
+    
+    // Sample the depth texture
     let depth = textureSample(t_shadow, s_shadow, in.tex_coords).x;
-     // Linearize the depth
-    let z_ndc = depth * 2.0; // Convert depth back to NDC space (-1 to 1)
-    let z_view = 2.0 * near * far / (far + near - z_ndc * (far - near)); // Linearize the depth value
+
+    // Linearize the depth value from the depth texture
+    let z_ndc = depth * 2.0 - 1.0; // Convert depth back to NDC space (-1 to 1)
+    let z_view = (2.0 * near * far) / (far + near - z_ndc * (far - near)); // Linearize the depth value
 
     // Normalize the depth to [0, 1] for visualization
     let depth_normalized = (z_view - near) / (far - near);
+    
+    // Clamp the normalized depth to [0, 1] to avoid negative values
+    let depth_clamped = clamp(depth_normalized, 0.0, 1.0);
 
-    return vec4<f32>(vec3<f32>(depth_normalized), 1.0);
+    // Return the depth value as a grayscale color
+    return vec4<f32>(vec3<f32>(depth_clamped), 1.0);
 }

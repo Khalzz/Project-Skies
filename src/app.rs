@@ -1,19 +1,28 @@
+use std::fs::File;
+use std::hash::Hash;
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
 use std::env;
 
+use csv::{ReaderBuilder, StringRecord};
+use sdl2::joystick::Joystick;
+use sdl2::{joystick, JoystickSubsystem};
 use sdl2::{GameControllerSubsystem, HapticSubsystem, video::Window, Sdl, render::Canvas};
 use sdl2::controller::GameController;
 use sdl2::render::TextureCreator;
 use sdl2::video::{DisplayMode, WindowContext};
-use wgpu::{BindGroupLayoutDescriptor, Buffer, Device, DeviceDescriptor, Features, InstanceDescriptor, Limits, Queue, RenderPassDepthStencilAttachment, Surface, SurfaceConfiguration, TextureUsages};
+use tokio::runtime::Runtime;
+use tokio::task;
+use wgpu::{BindGroupLayout, BindGroupLayoutDescriptor, Buffer, Device, DeviceDescriptor, Features, InstanceDescriptor, Limits, Queue, RenderPassDepthStencilAttachment, Surface, SurfaceConfiguration, TextureUsages};
 use wgpu::util::DeviceExt;
-use cgmath::{Matrix4, Rotation3, Vector3};
+use cgmath::{Deg, Euler, Matrix4, Quaternion, Rotation3, Vector3};
 use glyphon::{Resolution, TextArea};
 
 
+use crate::gameplay::play::GameLogic;
 use crate::rendering::camera::CameraRenderizable;
 use crate::rendering::depth_renderer::DepthRender;
+use crate::rendering::instance_management::{Instance, InstanceData, InstanceRaw, LevelDataCsv, ModelDataInstance};
 use crate::rendering::model::{self, DrawModel, Model, Vertex};
 use crate::rendering::textures::Texture;
 use crate::rendering::ui::UI;
@@ -23,8 +32,6 @@ use crate::resources;
 use crate::ui::button::Button;
 use crate::gameplay::{main_menu, play};
 use crate::primitive::rectangle;
-
-const NUM_BLEND_PASSES: u32 = 3;
 
 pub enum GameState {
     Playing,
@@ -36,74 +43,6 @@ pub struct AppState {
     pub state: GameState,
     pub reset: bool
 }
-
-pub struct InstanceData {
-    pub instance: Instance,
-    pub instance_raw: InstanceRaw,
-    pub instance_buffer: Buffer,
-    pub model: Model
-}
-
-pub struct Instance {
-    pub position: cgmath::Vector3<f32>,
-    pub rotation: cgmath::Quaternion<f32>,
-    pub scale: cgmath::Vector3<f32>,
-}
-
-impl Instance {
-    pub fn to_raw(&self) -> InstanceRaw {
-        let translation = cgmath::Matrix4::from_translation(self.position.cast::<f32>().unwrap());
-        let rotation = cgmath::Matrix4::from(self.rotation.cast::<f32>().unwrap());
-        let scale = cgmath::Matrix4::from_nonuniform_scale(self.scale.x as f32, self.scale.y as f32, self.scale.z as f32);
-        let model: Matrix4<f32> = translation * Matrix4::from(rotation) * scale;
-
-        InstanceRaw {
-            model: model.into(),
-        }
-    }
-}
-
-// quaternions are not very usable in wgpu so instead of doing math in the shader we are gonna save the raw instance here directly
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct InstanceRaw {
-    model: [[f32; 4]; 4],
-}
-
-impl InstanceRaw {
-    // we create a vertexBuffer
-    fn desc() -> wgpu::VertexBufferLayout<'static> {
-        use std::mem;
-        wgpu::VertexBufferLayout {
-            array_stride: mem::size_of::<InstanceRaw>() as wgpu::BufferAddress, // the vertexbuffer is of type instance raw it means that our shader will only change to use the next instance
-            step_mode: wgpu::VertexStepMode::Instance,
-            attributes: &[
-                // A mat 4 is basically a vec4 of vec4's so we have to define every vec4 of it
-                wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 5,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-                wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
-                    shader_location: 6,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-                wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 8]>() as wgpu::BufferAddress,
-                    shader_location: 7,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-                wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 12]>() as wgpu::BufferAddress,
-                    shader_location: 8,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-            ],
-        }
-    }
-}
-// Instancing
 
 pub struct Size {
     pub width: u32,
@@ -121,33 +60,32 @@ pub struct Throttling {
     pub controller_update_interval: Duration,
 }
 
-
-
 pub struct App {
     last_frame: Instant,
     pub context: Sdl,
     pub size: Size,
     pub canvas: Canvas<Window>,
     pub current_display: DisplayMode,
-    pub texture_creator: TextureCreator<WindowContext>,
     pub surface: Surface,
     pub queue: Queue,
     pub device: Device,
     pub config: SurfaceConfiguration,
     pub render_pipeline: wgpu::RenderPipeline,
     pub ui: UI,
-    pub index_buffer: wgpu::Buffer,
     pub camera: CameraRenderizable,
-    depth_texture: Texture,
-    depth_render: DepthRender,
+    pub depth_texture: Texture,
+    pub depth_render: DepthRender,
     pub show_depth_map: bool,
     pub controller_subsystem: GameControllerSubsystem,
-    pub haptic_subsystem: HapticSubsystem,
+    pub joystick_subsystem: JoystickSubsystem,
+    pub _haptic_subsystem: HapticSubsystem,
     pub components: HashMap<String, Button>, // we should transform this to a hashmap to have a better access on what is inside of it
     pub dynamic_ui_components: HashMap<String, Vec<Button>>,
     pub renderizable_instances: HashMap<String, InstanceData>,
     pub mouse_pos: MousePos,
     pub throttling: Throttling,
+    pub transform_bind_group_layout: BindGroupLayout,
+    pub game_models: HashMap<String, ModelDataInstance>
 }
 
 impl App {
@@ -157,6 +95,7 @@ impl App {
         let video_susbsystem = context.video().expect("The Video subsystem wasn't initialized");
         
         let controller_subsystem = context.game_controller().unwrap();
+        let joystick_subsystem = context.joystick().unwrap();
         let haptic_subsystem = context.haptic().unwrap();
 
         let current_display = video_susbsystem.current_display_mode(0).unwrap();
@@ -170,15 +109,13 @@ impl App {
             None => current_display.h as u32,
         };
 
-        env::set_var("SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS", "0"); // this is highly needed so the sdl2 can alt tab without generating bugs
+        env::set_var("SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS", "0");
 
         let window: Window = video_susbsystem.window(title, width, height as u32).vulkan().fullscreen().build().expect("The window wasn't created");
         
-        // WGPU INSTANCES AND SURFACE
         let instance = wgpu::Instance::new(InstanceDescriptor::default());
-        let surface = unsafe { instance.create_surface(&window).unwrap() }; // the surface is where we draw stuff created based on a raw window handle
+        let surface = unsafe { instance.create_surface(&window).unwrap() };
 
-        // The adapter will let us get information and data from our graphics card (for example the name of it)
         let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             ..Default::default() // remember that this set every other parameter as their default values
@@ -186,7 +123,6 @@ impl App {
 
         println!("{}", adapter.get_info().name);
         println!("{}", adapter.get_info().backend.to_str());
-
 
         let (device, queue) = adapter.request_device(
             &DeviceDescriptor { 
@@ -215,8 +151,6 @@ impl App {
         // depth
         let depth_texture = Texture::create_depth_texture(&device, &config, "depth_texture");
         // depth
-
-        
 
         let transform_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("transform_bind_group_layout"),
@@ -259,19 +193,13 @@ impl App {
             ],
         });
 
-        // we have to create a bind group for each texture since the fact that the layout and the group are separated is because we can swap the bind group on runtime
         // Textures
-
-        
-
         let ui = UI::new(&device, &queue, &config);
 
         // Camera
-        // we set up the camera
         let camera = CameraRenderizable::new(&device, &config);
 
         // SHADERING PROCESS 
-        // we get access to our shader file
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/depth.wgsl").into()),
@@ -287,14 +215,13 @@ impl App {
             push_constant_ranges: &[],
         });
         
-        // here we define elements that will be sent to the gpu
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Render Pipeline"),
             layout: Some(&render_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: "vs_main",
-                buffers: &[model::ModelVertex::desc(), InstanceRaw::desc()], // we set the values of the instance for the render pipeline
+                buffers: &[model::ModelVertex::desc(), InstanceRaw::desc()],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader, 
@@ -340,85 +267,15 @@ impl App {
             multiview: None,
         });
 
-        let index_buffer = device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("Index Buffer"),
-                contents: bytemuck::cast_slice(&[0,1,2]),
-                usage: wgpu::BufferUsages::INDEX,
-            }
-        );
-
         let mut canvas = window.into_canvas().accelerated().build().expect("the canvas wasn't builded");
 
         canvas.set_blend_mode(sdl2::render::BlendMode::Blend);
-        let texture_creator = canvas.texture_creator();
-
-        // instances
-        let f14 = resources::load_model_gltf("F14.gltf", &device, &queue, &transform_bind_group_layout).await.unwrap();
-        // let visor = resources::load_model_gltf("cockpit.gltf", &device, &queue, &transform_bind_group_layout).await.unwrap();
-        let water = resources::load_model_gltf("water.gltf", &device, &queue, &transform_bind_group_layout).await.unwrap();
-        let tower = resources::load_model_gltf("tower.gltf", &device, &queue, &transform_bind_group_layout).await.unwrap();
-        let tower2 = resources::load_model_gltf("tower2.gltf", &device, &queue, &transform_bind_group_layout).await.unwrap();
-        let crane = resources::load_model_gltf("crane.gltf", &device, &queue, &transform_bind_group_layout).await.unwrap();
-
-        let f14_instance = Instance {
-            position: cgmath::Vector3 { x: 0.0, y: 150.0, z: 0.0 },
-            rotation: cgmath::Quaternion::from_axis_angle(cgmath::Vector3::unit_z(), cgmath::Deg(0.0)),
-            scale: cgmath::Vector3 { x: 19.0, y: 19.0, z: 19.0 },
-        };
-        let f14_data = Self::create_instance(f14_instance, &device, f14);
-
-        /* 
-        let visor_instance = Instance {
-            position: cgmath::Vector3 { x: 0.0, y: 150.0, z: 0.0 },
-            rotation: cgmath::Quaternion::from_axis_angle(cgmath::Vector3::unit_z(), cgmath::Deg(0.0)),
-            scale: cgmath::Vector3 { x: 19.0, y: 19.0, z: 19.0 },
-        };
-        let visor_data = Self::create_instance(visor_instance, &device, visor);
-        */
-
-        let water_instance = Instance {
-            position: cgmath::Vector3 { x: 0.0, y: 0.0, z: 0.0 },
-            rotation: cgmath::Quaternion::from_axis_angle(cgmath::Vector3::unit_z(), cgmath::Deg(0.0)),
-            scale: cgmath::Vector3 { x: 100000.0, y: 0.0, z: 100000.0 },
-        };
-        let water_data = Self::create_instance(water_instance, &device, water);
-
-        let tower_instance = Instance {
-            position: cgmath::Vector3 { x: 0.0, y: 400.0, z: 0.0 },
-            rotation: cgmath::Quaternion::from_axis_angle(cgmath::Vector3::unit_z(), cgmath::Deg(0.0)),
-            scale: cgmath::Vector3 { x: 150.0, y: 150.0, z: 150.0 },
-        };
-        let tower_data = Self::create_instance(tower_instance, &device, tower);
-
-        let tower2_instance = Instance {
-            position: cgmath::Vector3 { x: 1300.0, y: 300.0, z: 500.0 },
-            rotation: cgmath::Quaternion::from_axis_angle(cgmath::Vector3::unit_z(), cgmath::Deg(0.0)),
-            scale: cgmath::Vector3 { x: 150.0, y: 150.0, z: 150.0 },
-        };
-        let tower2_data = Self::create_instance(tower2_instance, &device, tower2);
-
-        let crane_instance = Instance {
-            position: cgmath::Vector3 { x: 1300.0, y: 500.0, z: 500.0 },
-            rotation: cgmath::Quaternion::from_axis_angle(cgmath::Vector3::unit_z(), cgmath::Deg(0.0)),
-            scale: cgmath::Vector3 { x: 100.0, y: 100.0, z: 100.0 },
-        };
-        let crane_data = Self::create_instance(crane_instance, &device, crane);
-
-        let mut renderizable_instances = HashMap::new();
-        // renderizable_instances.insert("visor".to_owned(), visor_data);
-        renderizable_instances.insert("f14".to_owned(), f14_data);
-        renderizable_instances.insert("tower".to_owned(), tower_data);
-        renderizable_instances.insert("tower2".to_owned(), tower2_data);
-        renderizable_instances.insert("crane".to_owned(), crane_data);
-        renderizable_instances.insert("water".to_owned(), water_data);
-        // instances
-
+        let renderizable_instances = HashMap::new();
+        let game_models = HashMap::new();
         let depth_render = DepthRender::new(&device, &config);
-
         let components = HashMap::new();
-        
         let mut dynamic_ui_components = HashMap::new();
+
         dynamic_ui_components.insert("bandits".to_owned(), vec![]);
         
         // Dynamic static is for objects that move in the screen but their main position is based on something that never changes
@@ -430,25 +287,26 @@ impl App {
             context,
             size: Size {width, height},
             canvas,
-            texture_creator,
             surface,
             queue,
             device,
             config,
             render_pipeline,
             ui,
-            index_buffer,
             camera,
             depth_texture,
             depth_render,
             show_depth_map: false,
             controller_subsystem,
+            joystick_subsystem,
             components,
             mouse_pos: MousePos { x: 0.0, y: 0.0 },
             renderizable_instances,
             dynamic_ui_components,
             throttling: Throttling { last_ui_update: Instant::now(), ui_update_interval: Duration::from_secs_f32(1.0/60.0), last_controller_update: Instant::now(), controller_update_interval: Duration::from_secs_f32(1.0/400.0) },
-            haptic_subsystem,
+            _haptic_subsystem: haptic_subsystem,
+            transform_bind_group_layout,
+            game_models
         }
     }
 
@@ -508,7 +366,7 @@ impl App {
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render Encoder"),
         });
-        
+
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor { 
                 label: Some("Render Pass"), 
@@ -538,10 +396,15 @@ impl App {
             });
             
             render_pass.set_pipeline(&self.render_pipeline);
-
+            
             let _ = &self.renderizable_instances.iter().for_each(|(_key ,renderizable)| {
-                render_pass.set_vertex_buffer(1, renderizable.instance_buffer.slice(..));
-                render_pass.draw_model_instanced(&renderizable.model, 0..1 as u32, &self.camera.bind_group); // usamos la funcion que renderiza los objetos opacos
+                match self.game_models.get(&renderizable.model_ref) {
+                    Some(model_data) => {
+                        render_pass.set_vertex_buffer(1, model_data.instance_buffer.slice(..));
+                        render_pass.draw_model_instanced(&model_data.model, 0..model_data.instance_count as u32, &self.camera.bind_group); // usamos la funcion que renderiza los objetos opacos
+                    },
+                    None => todo!(),
+                }
             });
         }
         
@@ -571,10 +434,14 @@ impl App {
             
             render_pass.set_pipeline(&self.render_pipeline);
 
-
             let _ = &self.renderizable_instances.iter().for_each(|(_key ,renderizable)| {
-                render_pass.set_vertex_buffer(1, renderizable.instance_buffer.slice(..));
-                render_pass.draw_transparent_model_instanced(&renderizable.model, 0..1 as u32, &self.camera.bind_group); // usamos la funcion que renderiza los objetos opacos
+                match self.game_models.get(&renderizable.model_ref) {
+                    Some(model_data) => {
+                        render_pass.set_vertex_buffer(1, model_data.instance_buffer.slice(..));
+                        render_pass.draw_transparent_model_instanced(&model_data.model , 0..model_data.instance_count as u32, &self.camera.bind_group); // usamos la funcion que renderiza los objetos opacos
+                    },
+                    None => todo!(),
+                }
             });
         }
 
@@ -617,42 +484,59 @@ impl App {
 
     pub fn update(mut self) {
         // SDL2
-        let mut app_state = AppState { is_running: true, state: GameState::MainMenu, reset: true};
+        let mut app_state = AppState { is_running: true, state: GameState::Playing, reset: true};
         let mut event_pump = self.context.event_pump().unwrap();
 
         let mut play = play::GameLogic::new(&mut self);
         let mut main_menu = main_menu::GameLogic::new(&mut self);
 
         let mut controller = Self::open_first_available_controller(&self.controller_subsystem);
+        let _joystick = Self::open_first_avalible_joystick(&self.joystick_subsystem);
+        let mut delta_time: f32;
 
         while app_state.is_running { 
-            let delta_time = self.delta_time().as_secs_f32();
+            delta_time = self.delta_time().as_secs_f32();
             self.canvas.clear();
             
-            // let mut start_time = Instant::now(); // benchmarking            
-            // println!("--- Total: {}", start_time.elapsed().as_micros());
             match app_state.state {
                 GameState::Playing => {
                     if app_state.reset {
+                        self.load_level("./assets/levels/test_chamber/data.csv".to_owned());
                         play = play::GameLogic::new(&mut self);
                         app_state.reset = false;
-                    }
-
-                    play.update( &mut app_state, &mut event_pump, &mut self, &mut controller);
-                    let plane_rot = self.renderizable_instances.get("f14").unwrap().instance.rotation;
-                    // play.camera_data.look_at = Some(self.renderizable_instances.get("tower").unwrap().instance.position);
-                    play.altitude.altitude = ((self.renderizable_instances.get("f14").unwrap().instance.position.y - self.renderizable_instances.get("water").unwrap().instance.position.y)).round();
-                    
-                    for (key, renderizable) in &mut self.renderizable_instances {
-                        self.queue.write_buffer(&renderizable.instance_buffer, 0, bytemuck::cast_slice(&[renderizable.instance.to_raw()]));
-
-                        if key != "f14" {
-                            renderizable.instance.position -= plane_rot * play.velocity * delta_time;
+                    } else {
+                        play.plane_systems.altitude = ((self.renderizable_instances.get("player").unwrap().instance.position.y - self.renderizable_instances.get("world").unwrap().instance.position.y)).round();
+                        if play.plane_systems.altitude < 0.0 {
+                            app_state.reset = true
                         }
-                    }
 
-                    self.camera.uniform.update_view_proj(&self.camera.camera, &self.camera.projection);
-                    self.queue.write_buffer(&self.camera.buffer, 0, bytemuck::cast_slice(&[self.camera.uniform]));
+                        play.update( &mut app_state, &mut event_pump, &mut self, &mut controller);
+                        self.renderizable_instances.get_mut("fellow_aviator").unwrap().transform.position.z += 1000.0 * delta_time;
+                        let plane_rot = self.renderizable_instances.get("player").unwrap().instance.rotation;
+                        let plane_pos = self.renderizable_instances.get("player").unwrap().transform.position;
+
+                        for (model_key, model) in &self.game_models {
+                            let mut offset_index = 0;
+
+                            for (key, renderizable) in &mut self.renderizable_instances {
+                                if renderizable.model_ref == *model_key {
+                                    let offset = offset_index as u64 * std::mem::size_of::<InstanceRaw>() as u64;
+
+                                    self.queue.write_buffer(
+                                        &model.instance_buffer,
+                                        offset,
+                                        bytemuck::cast_slice(&[renderizable.instance.to_raw()]),
+                                    );
+                                    offset_index += 1
+                                }
+                                renderizable.instance.position = renderizable.transform.position - plane_pos;
+                            }
+                        }
+
+                        self.camera.uniform.update_view_proj(&self.camera.camera, &self.camera.projection);
+                        self.queue.write_buffer(&self.camera.buffer, 0, bytemuck::cast_slice(&[self.camera.uniform]));
+                        self.queue.write_buffer(&self.depth_render.near_far_buffer, 0, bytemuck::cast_slice(&[self.depth_render.near_far_uniform]));
+                    }
                 },
                 GameState::MainMenu => {
                     if app_state.reset {
@@ -673,6 +557,72 @@ impl App {
         }
     }
 
+    fn load_level(&mut self, level_path: String) {
+        self.renderizable_instances = HashMap::new();
+
+        for (_key, model) in &mut self.game_models {
+            model.instance_count = 0;
+        }
+
+        let instances_data_to_load = Self::load_instances(level_path);
+        match instances_data_to_load {
+            Some(instances) => {
+                let mut models: Vec<String> = vec![];
+
+                for data in &instances {
+                    if !models.contains(&data.model.to_string()) {
+                        models.push(data.model.to_string())
+                    }
+                }
+
+                for model_name in &models {
+                    let mut ids: Vec<String> = vec![];
+                    let mut model_instances:Vec<Instance> = vec![];
+
+                    for instance in &instances {
+                        if &instance.model == model_name {
+                            ids.push(instance.id.clone());
+                            model_instances.push(instance.instance.clone());
+                        }
+                    }
+
+                    for (i, instance_data) in model_instances.iter().enumerate() {
+                        match self.game_models.get_mut(model_name) {
+                            Some(model_data) => {
+                                model_data.instance_count += 1;
+                                model_data.instance_buffer = Self::create_instance_buffer(&model_instances, &self.device);
+                            },
+                            None => {
+                                let model = task::block_in_place(|| {
+                                    tokio::runtime::Runtime::new()
+                                        .unwrap()
+                                        .block_on(resources::load_model_gltf(&model_name, &self.device, &self.queue, &self.transform_bind_group_layout))
+                                });
+
+                                match model {
+                                    Ok(correct_model) => {
+                                        self.game_models.insert(
+                                            model_name.to_string(), 
+                                            ModelDataInstance {
+                                                model: correct_model,
+                                                instance_count: 1,
+                                                instance_buffer: Self::create_instance_buffer(&model_instances, &self.device)
+                                            }
+                                        );
+                                    },
+                                    Err(e) => eprintln!("The element was not loaded as an instance: {}", e),
+                                }
+                            },
+                        }
+
+                        self.renderizable_instances.insert(ids[i].clone(), InstanceData { transform: instance_data.clone(), instance: instance_data.clone(), model_ref: model_name.clone() });
+                    }
+                }
+            },
+            None => eprintln!("The instance data was not correctly loaded"),
+        }
+    }
+
     fn delta_time(&mut self) -> Duration {
         let current_time = Instant::now();
         let delta_time = current_time.duration_since(self.last_frame); // this is our Time.deltatime
@@ -680,31 +630,90 @@ impl App {
         return delta_time
     }
 
-    // connect the first controller found
     fn open_first_available_controller(controller_subsystem: &GameControllerSubsystem) -> Option<GameController> {
         for id in 0..controller_subsystem.num_joysticks().unwrap() {
             if controller_subsystem.is_game_controller(id) {
+                println!("{}", controller_subsystem.name_for_index(id).unwrap());
                 return Some(controller_subsystem.open(id).unwrap());
             }
         }
         None
     }
 
-    fn create_instance(instance: Instance, device: &Device, model: Model) -> InstanceData {
-        let instance_raw = instance.to_raw();
-        let instance_buffer = device.create_buffer_init(
+    fn open_first_avalible_joystick(joystick_subsystem: &JoystickSubsystem) -> Option<Joystick> {
+        for index in 0..joystick_subsystem.num_joysticks().unwrap() {
+            let joy = joystick_subsystem.open(index).unwrap();
+            print!("{}: {}", index, joy.name());
+            return Some(joy)
+        }
+        None
+    }
+
+    fn create_instance_buffer(instances: &[Instance], device: &Device) -> Buffer {
+        let raw_instances: Vec<InstanceRaw> = instances.iter()
+        .map(|instance| instance.to_raw())
+        .collect();
+
+        device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
                 label: Some("Instance Buffer"),
-                contents: bytemuck::cast_slice(&[instance_raw]),
+                contents: bytemuck::cast_slice(&raw_instances),
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             }
-        );
+        )
+    }
 
-        InstanceData {
-            instance,
-            instance_raw,
-            instance_buffer,
-            model
+    fn load_instances(path: String) -> Option<Vec<LevelDataCsv>> {
+        let file = File::open(path);
+
+        match file {
+            Ok(data_file) => {
+                let mut reader = ReaderBuilder::new().has_headers(true).from_reader(data_file);
+                let mut game_objects_to_instance: Vec<LevelDataCsv> = vec![];
+
+                // create a list of all the models to load
+                for result in reader.records() {
+                    match result {
+                        Ok(record) => {
+
+                            let rotation_values = Vector3::new(
+                                record[5].parse::<f32>().unwrap_or(0.0), 
+                                record[6].parse::<f32>().unwrap_or(0.0), 
+                                record[7].parse::<f32>().unwrap_or(0.0)
+                            );
+
+                            let euler_radians: Euler<Deg<f32>> = Euler::new(
+                                Deg(rotation_values.x),
+                                Deg(rotation_values.y),
+                                Deg(rotation_values.z),
+                            );
+
+                            game_objects_to_instance.push(LevelDataCsv {
+                                id: record[0].to_string(),
+                                model: record[1].to_string(),
+                                instance: Instance {
+                                    position: Vector3::new(
+                                        record[2].parse::<f32>().unwrap_or(0.0), 
+                                        record[3].parse::<f32>().unwrap_or(0.0), 
+                                        record[4].parse::<f32>().unwrap_or(0.0)
+                                    ), 
+                                    rotation: euler_radians.into(), 
+                                    scale: Vector3::new(
+                                        record[8].parse::<f32>().unwrap_or(0.0), 
+                                        record[9].parse::<f32>().unwrap_or(0.0), 
+                                        record[10].parse::<f32>().unwrap_or(0.0)
+                                )},
+                            })
+                        },
+                        Err(e) => eprintln!("Error reading record: {}", e)
+                    }
+                }
+                return Some(game_objects_to_instance)
+            },
+            Err(e) => {
+                eprintln!("The file was not found: {}", e);
+            }
         }
+        return None
     }
 }

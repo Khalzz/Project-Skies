@@ -87,15 +87,11 @@ impl Rectangle {
     
     pub fn rotate_from_center(vector: Vector3<f32>, center: Vector3<f32>, rotation: Quaternion<f32>) -> [f32; 3] {
         // Translate the vector to the origin (center point becomes the origin)
-
         let plane_rot = rotation.conjugate();
         let world_rot: Quaternion<f32> = Quaternion::zero();
 
         let result =  plane_rot - world_rot;
-
-
         let euler: cgmath::Euler<Rad<f32>> = result.conjugate().into();
-
 
         let translated_vector = vector - center;
 
