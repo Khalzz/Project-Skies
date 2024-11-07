@@ -1,11 +1,17 @@
+use std::collections::HashMap;
+
 use cgmath::Matrix4;
+use serde::Deserialize;
 use wgpu::Buffer;
+
+use crate::game_object::{GameObject, GameObject2D, Transform};
 
 use super::model::Model;
 
+// when moving player we move instance, when moving world object we move renderizable_transform
 pub struct InstanceData {
-    pub transform: Instance,
-    pub instance: Instance,
+    pub renderizable_transform: Transform,
+    pub instance: GameObject,
     pub model_ref: String,
 }
 
@@ -39,13 +45,21 @@ pub struct LevelDataCsv {
     pub id: String,
     pub model: String,
     pub instance: Instance,
+
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LevelData {
+    pub id: String,
+    pub description: String,
+    pub children: Vec<GameObject>,
 }
 
 // quaternions are not very usable in wgpu so instead of doing math in the shader we are gonna save the raw instance here directly
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct InstanceRaw {
-    model: [[f32; 4]; 4],
+    pub(crate) model: [[f32; 4]; 4],
 }
 
 impl InstanceRaw {

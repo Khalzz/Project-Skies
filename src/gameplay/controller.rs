@@ -31,6 +31,8 @@ pub struct Controller {
     pub look_back: bool,
     pub ui_up: bool,
     pub ui_down: bool,
+    pub ui_left: bool,
+    pub ui_right: bool,
     pub ui_select: bool
 }
 
@@ -53,6 +55,8 @@ impl Controller {
             look_back: false,
             ui_up: false,
             ui_down: false,
+            ui_left: false,
+            ui_right: false,
             ui_select: false,
         }
     }
@@ -74,6 +78,14 @@ impl Controller {
 
         if self.ui_up == true {
             self.ui_up = false;
+        }
+
+        if self.ui_left == true {
+            self.ui_left = false;
+        }
+
+        if self.ui_right == true {
+            self.ui_right = false;
         }
 
         if app.throttling.last_controller_update.elapsed() >= app.throttling.controller_update_interval {
@@ -102,6 +114,12 @@ impl Controller {
                             },
                             sdl2::controller::Button::DPadDown => {
                                 self.ui_down = true;
+                            },
+                            sdl2::controller::Button::DPadLeft => {
+                                self.ui_left = true;
+                            },
+                            sdl2::controller::Button::DPadRight => {
+                                self.ui_right = true;
                             },
                             sdl2::controller::Button::A => {
                                 self.ui_select = true;
@@ -204,8 +222,14 @@ impl Controller {
                             Some(Keycode::Up) => self.power = 1.0,
                             Some(Keycode::Q) => self.yaw = -1.0,
                             Some(Keycode::E) => self.yaw = 1.0,
-                            Some(Keycode::A) => self.x = -1.0,
-                            Some(Keycode::D) => self.x = 1.0,
+                            Some(Keycode::A) => {
+                                self.ui_left = true;
+                                self.x = -1.0;
+                            },
+                            Some(Keycode::D) => {
+                                self.ui_right = true;
+                                self.x = 1.0;
+                            },
                             Some(Keycode::S) => self.y = -1.0,
                             Some(Keycode::W) => self.y = 1.0,
                             Some(Keycode::C) => self.change_camera.pressed = true,

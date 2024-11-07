@@ -2,19 +2,19 @@ use sdl2::{render::{Canvas, TextureCreator, TextureQuery}, ttf::Font, video::{Wi
 use sdl2::pixels::Color;
 use sdl2::rect::Rect;
 
-use crate::game_object::GameObject;
+use crate::game_object::GameObject2D;
 
 #[derive(Clone)]
 
 pub struct Label {
-    pub game_object: GameObject,
+    pub game_object: GameObject2D,
     pub text: String,
     pub color: Color,
     pub text_color: Color,
 }
 
 impl Label {
-    pub fn new(game_object: GameObject, text: String, color: Color, text_color: Color) -> Self {
+    pub fn new(game_object: GameObject2D, text: String, color: Color, text_color: Color) -> Self {
         Label {
             game_object,
             text: text,

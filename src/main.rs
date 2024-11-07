@@ -17,6 +17,7 @@ mod gameplay {
     pub mod controller;
     pub mod play;
     pub mod main_menu;
+    pub mod plane_selection;
 }
 
 mod primitive {

@@ -2,7 +2,7 @@ use sdl2::{mouse::MouseButton, render::{Canvas, TextureCreator, TextureQuery}, t
 use sdl2::pixels::Color;
 use sdl2::rect::Rect;
 
-use crate::game_object::GameObject;
+use crate::game_object::GameObject2D;
 
 #[derive(Clone)]
 pub enum TextAlign {
@@ -13,7 +13,7 @@ pub enum TextAlign {
 #[derive(Clone)]
 
 pub struct Button {
-    pub game_object: GameObject,
+    pub game_object: GameObject2D,
     pub text: Option<String>,
     pub color: Color,
     pub text_color: Color,
@@ -28,7 +28,7 @@ pub struct Button {
 }
 
 impl Button {
-    pub fn new(game_object: GameObject, text: Option<String>, color: Color, text_color: Color, hover_color: Color, clicked_color: Color, toggle: Option<bool>, text_align: TextAlign) -> Self {
+    pub fn new(game_object: GameObject2D, text: Option<String>, color: Color, text_color: Color, hover_color: Color, clicked_color: Color, toggle: Option<bool>, text_align: TextAlign) -> Self {
         
         Button {
             game_object,

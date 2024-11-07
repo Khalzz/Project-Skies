@@ -1,6 +1,6 @@
 {
 	"asset":{
-		"generator":"Khronos glTF Blender I/O v4.1.63",
+		"generator":"Khronos glTF Blender I/O v4.2.70",
 		"version":"2.0"
 	},
 	"scene":0,
@@ -15,25 +15,25 @@
 	"nodes":[
 		{
 			"mesh":0,
-			"name":"Cube"
+			"name":"Land"
 		}
 	],
 	"materials":[
 		{
 			"doubleSided":true,
-			"name":"Material.007",
+			"name":"Material.001",
 			"pbrMetallicRoughness":{
 				"baseColorTexture":{
 					"index":0
 				},
 				"metallicFactor":0,
-				"roughnessFactor":0.3999999761581421
+				"roughnessFactor":0.5
 			}
 		}
 	],
 	"meshes":[
 		{
-			"name":"Cube.005",
+			"name":"Cube.001",
 			"primitives":[
 				{
 					"attributes":{
@@ -56,69 +56,69 @@
 	"images":[
 		{
 			"mimeType":"image/png",
-			"name":"red",
-			"uri":"red.png"
+			"name":"land",
+			"uri":"land.png"
 		}
 	],
 	"accessors":[
 		{
 			"bufferView":0,
 			"componentType":5126,
-			"count":700,
+			"count":104,
 			"max":[
-				2.8446240425109863,
-				8.048298835754395,
-				2.785907745361328
+				3.864398241043091,
+				0.09419789165258408,
+				11.963421821594238
 			],
 			"min":[
-				-8.653400421142578,
-				-0.17219708859920502,
-				-2.5918407440185547
+				-6.73654842376709,
+				-0.4593334496021271,
+				-6.3633131980896
 			],
 			"type":"VEC3"
 		},
 		{
 			"bufferView":1,
 			"componentType":5126,
-			"count":700,
+			"count":104,
 			"type":"VEC3"
 		},
 		{
 			"bufferView":2,
 			"componentType":5126,
-			"count":700,
+			"count":104,
 			"type":"VEC2"
 		},
 		{
 			"bufferView":3,
 			"componentType":5123,
-			"count":1140,
+			"count":288,
 			"type":"SCALAR"
 		}
 	],
 	"bufferViews":[
 		{
 			"buffer":0,
-			"byteLength":8400,
+			"byteLength":1248,
 			"byteOffset":0,
 			"target":34962
 		},
 		{
 			"buffer":0,
-			"byteLength":8400,
-			"byteOffset":8400,
+			"byteLength":1248,
+			"byteOffset":1248,
 			"target":34962
 		},
 		{
 			"buffer":0,
-			"byteLength":5600,
-			"byteOffset":16800,
+			"byteLength":832,
+			"byteOffset":2496,
 			"target":34962
 		},
 		{
 			"buffer":0,
-			"byteLength":2280,
-			"byteOffset":22400,
+			"byteLength":576,
+			"byteOffset":3328,
 			"target":34963
 		}
 	],
@@ -130,8 +130,8 @@
 	],
 	"buffers":[
 		{
-			"byteLength":24680,
-			"uri":"crane.bin"
+			"byteLength":3904,
+			"uri":"island.bin"
 		}
 	]
 }

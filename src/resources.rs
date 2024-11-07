@@ -1,4 +1,4 @@
-use std::{collections::HashMap, io::{BufReader, Cursor}};
+use std::{collections::HashMap, io::{BufReader, Cursor}, path::Path};
 
 use cgmath::{Quaternion, Vector3, Zero};
 use gltf::{image,  Gltf};
@@ -8,7 +8,6 @@ use crate::{rendering::{model::{self, Mesh, Model, ModelVertex}, textures::Textu
 
 pub async fn load_string(file_name: &str) -> anyhow::Result<String> {
     let path = std::path::Path::new(env!("OUT_DIR")).join("res").join(file_name);
-    println!("{}", file_name);
     let txt = std::fs::read_to_string(path).unwrap();
 
     Ok(txt)
@@ -27,7 +26,126 @@ pub async fn load_texture(file_name: &str, device: &wgpu::Device, queue: &wgpu::
     Texture::from_bytes(&data, device, queue, file_name)
 }
 
+pub async fn load_model_glb(file_name: &str, device: &wgpu::Device, queue: &wgpu::Queue, transform_bind_group_layout: &wgpu::BindGroupLayout) -> anyhow::Result<Model> {
+    let glb_data = load_binary(file_name).await.unwrap();
+    let gltf = Gltf::from_slice(&glb_data).unwrap();
+
+    // Load buffers from the binary data
+    let mut buffer_data = Vec::new();
+    for buffer in gltf.buffers() {
+        match buffer.source() {
+            gltf::buffer::Source::Bin => {
+                if let Some(blob) = gltf.blob.as_deref() {
+                    buffer_data.push(blob.to_vec());
+                }
+            }
+            gltf::buffer::Source::Uri(uri) => {
+                let bin = load_binary(uri).await?;
+                buffer_data.push(bin);
+            }
+        }
+    }
+
+    // Load materials
+    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    multisampled: false,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+        label: Some("texture_bind_group_layout"),
+    });
+            
+    let mut materials = Vec::new();
+    for material in gltf.materials() {
+        let pbr = material.pbr_metallic_roughness();
+        let texture_source = &pbr.base_color_texture()
+            .map(|tex| tex.texture().source().source())
+            .expect("texture");
+
+        match texture_source {
+            gltf::image::Source::View { view, .. } => {
+                let diffuse_texture = Texture::from_bytes(
+                    &buffer_data[view.buffer().index()],
+                    device,
+                    queue,
+                    file_name,
+                )
+                .expect("Couldn't load diffuse");
+
+                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    layout: &bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&diffuse_texture.view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&diffuse_texture.sampler),
+                        },
+                    ],
+                    label: None,
+                });
+
+                materials.push(model::Material {
+                    name: material.name().unwrap_or("Default Material").to_string(),
+                    diffuse_texture,
+                    bind_group,
+                });
+            }
+            image::Source::Uri { uri, mime_type: _ } => {
+                let diffuse_texture = load_texture(uri, device, queue).await?;
+
+                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    layout: &bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&diffuse_texture.view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&diffuse_texture.sampler),
+                        },
+                    ],
+                    label: None,
+                });
+
+                materials.push(model::Material {
+                    name: material.name().unwrap_or("Default Material").to_string(),
+                    diffuse_texture,
+                    bind_group,
+                });
+            }
+        };
+    }
+
+    let mut meshes = HashMap::new();
+    for scene in gltf.scenes() {
+        for node in scene.nodes() {
+            traverse_node(node, &buffer_data, device, queue, transform_bind_group_layout, &mut meshes, file_name, None)?;
+        }
+    }
+
+    Ok(model::Model { meshes, materials })
+}
+
 pub async fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgpu::Queue, transform_bind_group_layout: &wgpu::BindGroupLayout) -> anyhow::Result<Model> {
+    
     let gltf_text = load_string(file_name).await.unwrap();
     let gltf_cursor = Cursor::new(gltf_text);
     let gltf_reader = BufReader::new(gltf_cursor);
@@ -43,7 +161,9 @@ pub async fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgp
                 }
             }
             gltf::buffer::Source::Uri(uri) => {
-                let bin = load_binary(uri).await?;
+                let file_dir = Path::new(file_name).parent().unwrap_or(Path::new(""));
+                let full_path = file_dir.join(uri);
+                let bin = load_binary(full_path.to_str().unwrap()).await?;
                 buffer_data.push(bin);
             }
         }
@@ -71,13 +191,11 @@ pub async fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgp
                 ],
                 label: Some("texture_bind_group_layout"),
             });
-            
+    
     let mut materials = Vec::new();
     for material in gltf.materials() {
         let pbr = material.pbr_metallic_roughness();
         let base_color_texture = &pbr.base_color_texture();
-
-        // println!("{}", );
 
         let texture_source = &pbr
             .base_color_texture()
@@ -120,7 +238,11 @@ pub async fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgp
                     });
                 }
             image::Source::Uri { uri, mime_type } => {
-                let diffuse_texture = load_texture(uri, device, queue).await?;
+                let file_dir = Path::new(file_name).parent().unwrap_or(Path::new(""));
+
+                // Join the GLTF directory with the URI to get the correct path.
+                let full_path = file_dir.join(uri);
+                let diffuse_texture = load_texture(full_path.to_str().unwrap(), device, queue).await?;
 
                 let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     layout: &bind_group_layout,

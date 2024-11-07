@@ -1,0 +1,32 @@
+{
+    "id": "Selecting plane",
+    "description": "Here the player will select his plane to play",
+    "children": [
+        {
+            "id": "f16",
+            "model": "f16.gltf",
+            "transform": {
+                "position": { "x": 0.0, "y": 0.0, "z": 0.0},
+                "rotation": { "x": 0.0, "y": 0.0, "z": 0.0},
+                "scale": { "x": 14.0, "y": 14.0, "z": 14.0}
+            },
+            "children": [],
+            "metadata": {
+                "cockpit_camera": [0.0, 2.0, 13.3]
+            }
+        },
+        {
+            "id": "f14",
+            "model": "F14/f14.gltf",
+            "transform": {
+                "position": { "x": 0.0, "y": 0.0, "z": 0.0},
+                "rotation": { "x": 0.0, "y": 0.0, "z": 0.0},
+                "scale": { "x": 19.0, "y": 19.0, "z": 19.0}
+            },
+            "children": [],
+            "metadata": {
+                "cockpit_camera": [0.0, 3.2, 25.0]
+            }
+        }
+    ]
+}

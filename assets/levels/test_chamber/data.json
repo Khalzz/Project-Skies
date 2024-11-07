@@ -4,18 +4,20 @@
     "children": [
         {
             "id": "player",
-            "model": "f14.gltf",
+            "model": "F16/f16.gltf",
             "transform": {
-                "position": { "x": 0.0, "y": 1000.0, "z": 0.0},
+                "position": { "x": 0.0, "y": 1000.0, "z": -5000.0},
                 "rotation": { "x": 0.0, "y": 0.0, "z": 0.0},
-                "scale": { "x": 19.0, "y": 19.0, "z": 19.0}
+                "scale": { "x": 14.0, "y": 14.0, "z": 14.0} 
             },
             "children": [],
-            "metadata": {}
+            "metadata": {
+                "cockpit_camera": [0.0, 2.0, 13.3]
+            }
         },
         {
             "id": "fellow_aviator",
-            "model": "f14.gltf",
+            "model": "F14/f14.gltf",
             "transform": {
                 "position": { "x": 100.0, "y": 100.0, "z": 100.0},
                 "rotation": { "x": 0.0, "y": 0.0, "z": 0.0},
@@ -25,8 +27,8 @@
             "metadata": {}
         },
         {
-            "id": "water",
-            "model": "water.gltf",
+            "id": "world",
+            "model": "Water/water.gltf",
             "transform": {
                 "position": { "x": 0.0, "y": 0.0, "z": 0.0},
                 "rotation": { "x": 0.0, "y": 0.0, "z": 0.0},
@@ -37,7 +39,7 @@
         },
         {
             "id": "tower",
-            "model": "tower.gltf",
+            "model": "Tower/tower.gltf",
             "transform": {
                 "position": { "x": 0.0, "y": 400.0, "z": 0.0},
                 "rotation": { "x": 0.0, "y": 45.0, "z": 0.0},
@@ -47,8 +49,8 @@
             "metadata": {}
         },
         {
-            "id": "tower_2",
-            "model": "tower2.gltf",
+            "id": "tower2",
+            "model": "Tower_2/tower2.gltf",
             "transform": {
                 "position": { "x": 1300.0, "y": 300.0, "z": 500.0},
                 "rotation": { "x": 0.0, "y": 45.0, "z": 0.0},
@@ -58,11 +60,22 @@
             "metadata": {}
         },
         {
-            "id": "tower_2",
-            "model": "tower2.gltf",
+            "id": "crane",
+            "model": "Crane/crane.gltf",
             "transform": {
                 "position": { "x": 1300.0, "y": 500.0, "z": 500.0},
                 "rotation": { "x": 0.0, "y": 0.0, "z": 0.0},
+                "scale": { "x": 100.0, "y": 100.0, "z": 100.0}
+            },
+            "children": [],
+            "metadata": {}
+        },
+        {
+            "id": "island",
+            "model": "Island/island.gltf",
+            "transform": {
+                "position": { "x": 1600.0, "y": 0.0, "z": 1500.0},
+                "rotation": { "x": 0.0, "y": 20.0, "z": 0.0},
                 "scale": { "x": 100.0, "y": 100.0, "z": 100.0}
             },
             "children": [],

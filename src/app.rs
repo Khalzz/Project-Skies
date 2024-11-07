@@ -19,10 +19,11 @@ use cgmath::{Deg, Euler, Matrix4, Quaternion, Rotation3, Vector3};
 use glyphon::{Resolution, TextArea};
 
 
+use crate::game_object::{self, GameObject, Transform};
 use crate::gameplay::play::GameLogic;
 use crate::rendering::camera::CameraRenderizable;
 use crate::rendering::depth_renderer::DepthRender;
-use crate::rendering::instance_management::{Instance, InstanceData, InstanceRaw, LevelDataCsv, ModelDataInstance};
+use crate::rendering::instance_management::{Instance, InstanceData, InstanceRaw, LevelData, LevelDataCsv, ModelDataInstance};
 use crate::rendering::model::{self, DrawModel, Model, Vertex};
 use crate::rendering::textures::Texture;
 use crate::rendering::ui::UI;
@@ -30,12 +31,13 @@ use crate::rendering::vertex::VertexUi;
 
 use crate::resources;
 use crate::ui::button::Button;
-use crate::gameplay::{main_menu, play};
+use crate::gameplay::{main_menu, plane_selection, play};
 use crate::primitive::rectangle;
 
 pub enum GameState {
     Playing,
-    MainMenu
+    MainMenu,
+    SelectingPlane
 }
 
 pub struct AppState {
@@ -303,7 +305,7 @@ impl App {
             mouse_pos: MousePos { x: 0.0, y: 0.0 },
             renderizable_instances,
             dynamic_ui_components,
-            throttling: Throttling { last_ui_update: Instant::now(), ui_update_interval: Duration::from_secs_f32(1.0/60.0), last_controller_update: Instant::now(), controller_update_interval: Duration::from_secs_f32(1.0/400.0) },
+            throttling: Throttling { last_ui_update: Instant::now(), ui_update_interval: Duration::from_secs_f32(1.0/400.0), last_controller_update: Instant::now(), controller_update_interval: Duration::from_secs_f32(1.0/400.0) },
             _haptic_subsystem: haptic_subsystem,
             transform_bind_group_layout,
             game_models
@@ -403,7 +405,7 @@ impl App {
                         render_pass.set_vertex_buffer(1, model_data.instance_buffer.slice(..));
                         render_pass.draw_model_instanced(&model_data.model, 0..model_data.instance_count as u32, &self.camera.bind_group); // usamos la funcion que renderiza los objetos opacos
                     },
-                    None => todo!(),
+                    None => {},
                 }
             });
         }
@@ -440,7 +442,7 @@ impl App {
                         render_pass.set_vertex_buffer(1, model_data.instance_buffer.slice(..));
                         render_pass.draw_transparent_model_instanced(&model_data.model , 0..model_data.instance_count as u32, &self.camera.bind_group); // usamos la funcion que renderiza los objetos opacos
                     },
-                    None => todo!(),
+                    None => {},
                 }
             });
         }
@@ -488,48 +490,54 @@ impl App {
         let mut event_pump = self.context.event_pump().unwrap();
 
         let mut play = play::GameLogic::new(&mut self);
+
         let mut main_menu = main_menu::GameLogic::new(&mut self);
+        let mut selecting_plane = plane_selection::GameLogic::new(&mut self);
 
         let mut controller = Self::open_first_available_controller(&self.controller_subsystem);
         let _joystick = Self::open_first_avalible_joystick(&self.joystick_subsystem);
         let mut delta_time: f32;
 
-        while app_state.is_running { 
+        while app_state.is_running {
             delta_time = self.delta_time().as_secs_f32();
             self.canvas.clear();
             
             match app_state.state {
                 GameState::Playing => {
                     if app_state.reset {
-                        self.load_level("./assets/levels/test_chamber/data.csv".to_owned());
+                        self.load_level("./assets/levels/test_chamber/data.json".to_owned());
                         play = play::GameLogic::new(&mut self);
                         app_state.reset = false;
                     } else {
-                        play.plane_systems.altitude = ((self.renderizable_instances.get("player").unwrap().instance.position.y - self.renderizable_instances.get("world").unwrap().instance.position.y)).round();
+                        play.plane_systems.altitude = ((self.renderizable_instances.get("player").unwrap().instance.transform.position.y - self.renderizable_instances.get("world").unwrap().instance.transform.position.y)).round();
                         if play.plane_systems.altitude < 0.0 {
                             app_state.reset = true
                         }
 
                         play.update( &mut app_state, &mut event_pump, &mut self, &mut controller);
-                        self.renderizable_instances.get_mut("fellow_aviator").unwrap().transform.position.z += 1000.0 * delta_time;
-                        let plane_rot = self.renderizable_instances.get("player").unwrap().instance.rotation;
-                        let plane_pos = self.renderizable_instances.get("player").unwrap().transform.position;
+                        self.renderizable_instances.get_mut("fellow_aviator").unwrap().renderizable_transform.position.z += 1000.0 * delta_time;
+                        let plane_rot = self.renderizable_instances.get("player").unwrap().instance.transform.rotation;
+                        let plane_pos = self.renderizable_instances.get("player").unwrap().renderizable_transform.position ;
 
                         for (model_key, model) in &self.game_models {
                             let mut offset_index = 0;
 
                             for (key, renderizable) in &mut self.renderizable_instances {
                                 if renderizable.model_ref == *model_key {
-                                    let offset = offset_index as u64 * std::mem::size_of::<InstanceRaw>() as u64;
 
+
+                                    renderizable.instance.transform.position = renderizable.renderizable_transform.position - plane_pos;
+                                    
+                                    let offset = offset_index as u64 * std::mem::size_of::<InstanceRaw>() as u64;
                                     self.queue.write_buffer(
                                         &model.instance_buffer,
                                         offset,
-                                        bytemuck::cast_slice(&[renderizable.instance.to_raw()]),
+                                        bytemuck::cast_slice(&[renderizable.instance.transform.to_raw()]),
                                     );
                                     offset_index += 1
                                 }
-                                renderizable.instance.position = renderizable.transform.position - plane_pos;
+
+                                // renderizable.instance.transform.position = renderizable.instance.transform.position - plane_pos;
                             }
                         }
 
@@ -544,6 +552,36 @@ impl App {
                         app_state.reset = false;
                     }
                     main_menu.update(&mut app_state, &mut event_pump, &mut self, &mut controller)
+                },
+                GameState::SelectingPlane => {
+                    if app_state.reset {
+                        self.load_level("./assets/levels/selecting_plane/data.json".to_owned());
+                        selecting_plane = plane_selection::GameLogic::new(&mut self);
+                        app_state.reset = false;
+                    }
+                    selecting_plane.update(&mut app_state, &mut event_pump, &mut self, &mut controller);
+                    
+                    for (model_key, model) in &self.game_models {
+                        let mut offset_index = 0;
+
+                        for (key, renderizable) in &mut self.renderizable_instances {
+                            if renderizable.model_ref == *model_key {
+                                let offset = offset_index as u64 * std::mem::size_of::<InstanceRaw>() as u64;
+
+                                self.queue.write_buffer(
+                                    &model.instance_buffer,
+                                    offset,
+                                    bytemuck::cast_slice(&[renderizable.instance.transform.to_raw()]),
+                                );
+                                offset_index += 1
+                            }
+                            // renderizable.renderizable_transform.position = renderizable.instance.transform.position - plane_pos;
+                        }
+                    }
+
+                    self.camera.uniform.update_view_proj(&self.camera.camera, &self.camera.projection);
+                    self.queue.write_buffer(&self.camera.buffer, 0, bytemuck::cast_slice(&[self.camera.uniform]));
+                    self.queue.write_buffer(&self.depth_render.near_far_buffer, 0, bytemuck::cast_slice(&[self.depth_render.near_far_uniform]));
                 }
             }
 
@@ -558,6 +596,7 @@ impl App {
     }
 
     fn load_level(&mut self, level_path: String) {
+        // i get the json data
         self.renderizable_instances = HashMap::new();
 
         for (_key, model) in &mut self.game_models {
@@ -567,22 +606,29 @@ impl App {
         let instances_data_to_load = Self::load_instances(level_path);
         match instances_data_to_load {
             Some(instances) => {
+                // when i get the game objects i
+                    // load a list of models to preload
+
+
+                // models to load
                 let mut models: Vec<String> = vec![];
 
                 for data in &instances {
+                    dbg!("{}", data);
                     if !models.contains(&data.model.to_string()) {
                         models.push(data.model.to_string())
                     }
                 }
 
+                // we get all data id and game_objects
                 for model_name in &models {
                     let mut ids: Vec<String> = vec![];
-                    let mut model_instances:Vec<Instance> = vec![];
+                    let mut model_instances:Vec<&GameObject> = vec![];
 
-                    for instance in &instances {
-                        if &instance.model == model_name {
-                            ids.push(instance.id.clone());
-                            model_instances.push(instance.instance.clone());
+                    for game_object in &instances {
+                        if &game_object.model == model_name {
+                            ids.push(game_object.id.clone());
+                            model_instances.push(game_object);
                         }
                     }
 
@@ -593,7 +639,7 @@ impl App {
                                 model_data.instance_buffer = Self::create_instance_buffer(&model_instances, &self.device);
                             },
                             None => {
-                                let model = task::block_in_place(|| {
+                                let model = task::block_in_place( || {
                                     tokio::runtime::Runtime::new()
                                         .unwrap()
                                         .block_on(resources::load_model_gltf(&model_name, &self.device, &self.queue, &self.transform_bind_group_layout))
@@ -615,7 +661,8 @@ impl App {
                             },
                         }
 
-                        self.renderizable_instances.insert(ids[i].clone(), InstanceData { transform: instance_data.clone(), instance: instance_data.clone(), model_ref: model_name.clone() });
+                        println!("loaded data: {}", ids[i]);
+                        self.renderizable_instances.insert(ids[i].clone(), InstanceData { renderizable_transform: instance_data.transform.clone(), instance: (**instance_data).clone(), model_ref: model_name.clone() });
                     }
                 }
             },
@@ -649,9 +696,9 @@ impl App {
         None
     }
 
-    fn create_instance_buffer(instances: &[Instance], device: &Device) -> Buffer {
+    pub fn create_instance_buffer(instances: &Vec<&GameObject>, device: &Device) -> Buffer {
         let raw_instances: Vec<InstanceRaw> = instances.iter()
-        .map(|instance| instance.to_raw())
+        .map(|instance| instance.transform.to_raw())
         .collect();
 
         device.create_buffer_init(
@@ -663,56 +710,16 @@ impl App {
         )
     }
 
-    fn load_instances(path: String) -> Option<Vec<LevelDataCsv>> {
-        let file = File::open(path);
-
-        match file {
-            Ok(data_file) => {
-                let mut reader = ReaderBuilder::new().has_headers(true).from_reader(data_file);
-                let mut game_objects_to_instance: Vec<LevelDataCsv> = vec![];
-
-                // create a list of all the models to load
-                for result in reader.records() {
-                    match result {
-                        Ok(record) => {
-
-                            let rotation_values = Vector3::new(
-                                record[5].parse::<f32>().unwrap_or(0.0), 
-                                record[6].parse::<f32>().unwrap_or(0.0), 
-                                record[7].parse::<f32>().unwrap_or(0.0)
-                            );
-
-                            let euler_radians: Euler<Deg<f32>> = Euler::new(
-                                Deg(rotation_values.x),
-                                Deg(rotation_values.y),
-                                Deg(rotation_values.z),
-                            );
-
-                            game_objects_to_instance.push(LevelDataCsv {
-                                id: record[0].to_string(),
-                                model: record[1].to_string(),
-                                instance: Instance {
-                                    position: Vector3::new(
-                                        record[2].parse::<f32>().unwrap_or(0.0), 
-                                        record[3].parse::<f32>().unwrap_or(0.0), 
-                                        record[4].parse::<f32>().unwrap_or(0.0)
-                                    ), 
-                                    rotation: euler_radians.into(), 
-                                    scale: Vector3::new(
-                                        record[8].parse::<f32>().unwrap_or(0.0), 
-                                        record[9].parse::<f32>().unwrap_or(0.0), 
-                                        record[10].parse::<f32>().unwrap_or(0.0)
-                                )},
-                            })
-                        },
-                        Err(e) => eprintln!("Error reading record: {}", e)
-                    }
-                }
-                return Some(game_objects_to_instance)
+    fn load_instances(path: String) -> Option<Vec<GameObject>> {
+        match std::fs::read_to_string(path) {
+            Ok(file_contents) => {
+                let level: LevelData = serde_json::from_str(&file_contents).unwrap();
+                println!("--------------------------------------- Level open ---------------------------------------");
+                println!("{}", level.id);
+                println!("{}", level.description);
+                return Some(level.children);
             },
-            Err(e) => {
-                eprintln!("The file was not found: {}", e);
-            }
+            _ => {}
         }
         return None
     }

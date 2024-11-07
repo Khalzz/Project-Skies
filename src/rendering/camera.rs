@@ -37,7 +37,7 @@ impl CameraRenderizable {
             far: 10000.0
         };
 
-        let camera = Camera::new((-100000.0, 10.0, 0.0), cgmath::Deg(-90.0), cgmath::Deg(-20.0));
+        let camera = Camera::new((-0.0, 0.0, 0.0), cgmath::Deg(-90.0), cgmath::Deg(-20.0));
         let projection = Projection::new(config.width, config.height, 45.0, near_far_uniform.near, near_far_uniform.far);
 
         // we create the 4x4 matrix of the camera
