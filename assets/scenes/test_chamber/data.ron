@@ -1,0 +1,101 @@
+(
+    id: "test chamber",
+    description: "This level is a testing place, where the player could fly freely, this is set mainly to test mechanics",
+    children: [
+        (
+            id: "sun",
+            model: "F16/f16.gltf",
+            transform: (
+                position: ( x: 1000.0, y: 1000000.0, z: 1000.0 ),
+                rotation: ( x: 0.0, y: 0.0, z: 0.0 ),
+                scale: ( x: 1.0, y: 1.0, z: 1.0 ),
+            ),
+            children: [],
+            metadata: (
+                lighting: Some(
+                    (
+                        intensity: 1.0,
+                        color: (x: 0.7, y: 0.7, z: 0.8),
+                    ),
+                ),
+            ),
+        ),
+        (
+            id: "player",
+            model: "F16/f16.gltf",
+            transform: (
+                position: (x: 0.0, y: 10.0, z: 0.0),
+                rotation: (x: 0.0, y: 0.0, z: 0.0),
+                scale: (x: 14.0, y: 14.0, z: 14.0),
+            ),
+            children: [],
+            metadata: (
+                camera_data: Some((
+                    cockpit_camera: (x: 0.0, y: 1.8, z: 13.5),
+                    cinematic_camera: (x: -10.0, y: 3.0, z: 0.0),
+                    frontal_camera: (x: 0.0, y: 6.0, z: 26.0),
+                )),
+                physics: Some((
+                    rigidbody: ( 
+                        is_static: false, 
+                        mass: 9000.0, 
+                        initial_velocity: (0.0, 0.0, 10.0),
+                    ),
+                    collider: Some( Cuboid (
+                        half_extents: (7.0, 6.0, 7.0)
+                    ))     
+                )),
+            ),
+        ),
+        (
+            id: "fellow_aviator",
+            model: "F14/f14.gltf",
+            transform: (
+                position: (x: 1000.0, y: 100.0, z: 0.0),
+                rotation: (x: 0.0, y: 0.0, z: 0.0),
+                scale: (x: 19.0, y: 19.0, z: 19.0),
+            ),
+            children: [],
+            metadata: (
+                physics: Some((
+                    rigidbody: ( 
+                        is_static: true, 
+                        mass: 9000.0, 
+                        initial_velocity: (0.0, 0.0, 0.0)
+                    ),
+                    collider: Some( Cuboid (
+                            half_extents: (1.0, 1.0, 1.0)
+                    ))     
+                )),
+                camera_data: Some((
+                    cockpit_camera: (x: 0.0, y: 2.3, z: 14.3),
+                    cinematic_camera: (x: -10.0, y: 3.0, z: 0.0),
+                    frontal_camera: (x: 0.0, y: 6.0, z: 26.0),
+                ))
+            ),
+        ),
+        (
+            id: "world",
+            model: "Water/water.gltf",
+            transform: (
+                position: (x: 0.0, y: 0.0, z: 0.0),
+                rotation: (x: 0.0, y: 0.0, z: 0.0),
+                scale: (x: 100000.0, y: 1.0, z: 100000.0),
+            ),
+            children: [],
+            metadata: (
+                physics: Some((
+                    rigidbody: ( 
+                        is_static: true, 
+                        mass: 0.0, 
+                        initial_velocity: (0.0, 0.0, 0.0),
+                    ),
+                    collider: Some( HalfSpace (
+                            normal: (0.0, 1.0, 0.0)
+                    ))  
+                ))
+            ),
+        )
+        // more game objects if needed
+    ]   
+)

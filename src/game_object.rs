@@ -3,7 +3,8 @@
 
 use std::collections::HashMap;
 
-use cgmath::{Deg, Euler, Matrix4, Quaternion, Rad, Vector3};
+use cgmath::{Deg, Euler, Matrix3, Matrix4, Quaternion, Rad, Vector3};
+use rapier3d::prelude::Collider;
 use serde::{Deserialize, Deserializer};
 
 use crate::{rendering::instance_management::{Instance, InstanceRaw}, transform};
@@ -18,15 +19,6 @@ pub struct GameObject2D {
     pub height: f32,
 }
 
-#[derive(Debug, Deserialize, Clone)]
-pub enum Metadata {
-    Int(i32),
-    Str(String),
-    Bool(bool),
-    Vector3(Vector3<f32>),
-    FloatArray(Vec<f32>),
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct Transform {
     pub position: Vector3<f32>,
@@ -34,17 +26,89 @@ pub struct Transform {
     pub scale: Vector3<f32>
 }
 
+/* 
+
+(
+    id: "world",
+    model: "Water/water.gltf",
+    transform: (
+        position: (x: 0.0, y: 0.0, z: 0.0),
+        rotation: (x: 0.0, y: 0.0, z: 0.0),
+        scale: (x: 100000.0, y: 1.0, z: 100000.0),
+    ),
+    children: [],
+    metadata: (
+        physics: Some(
+            rigidbody: (
+                is_static: true,
+                mass: 0,
+                initial_velocity: (0.0, 0.0, 550.0),
+            ),
+            collider: Some((
+                    shape: Cuboid {  10.0, 0.1, 10.0 }
+            ))
+        )
+    ),
+)
+
+*/
+
 #[derive(Debug, Deserialize, Clone)]
-// GameObject
-    // this struct contains 2 transform values:
-        // 1. render_transform: represents the rendered transform (what the renderer will show in screen)
-        // 2. transform: represents the "position" of an object "world relative" so is entirely based on what there is in the json files
+pub struct Lighting {
+    pub intensity: f32,
+    pub color: Vector3<f32>
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub enum ColliderType {
+    Cuboid { half_extents: (f32, f32, f32) },
+    Ball { radius: f32 },
+    Cylinder { half_height: f32, radius: f32 },
+    HeightField { heights: Vec<Vec<f32>>, scale_x: f32, scale_y: f32 },
+    HalfSpace { normal:  nalgebra::Vector3<f32> }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct RigidBodyData {
+    pub is_static: bool,
+    pub mass: f32,
+    pub initial_velocity: nalgebra::Vector3<f32>
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct Physics {
+    pub rigidbody: RigidBodyData,
+    pub collider: Option<ColliderType>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct CameraData {
+    pub cockpit_camera: Vector3<f32>,
+    pub cinematic_camera: Vector3<f32>,
+    pub frontal_camera: Vector3<f32>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct MetaData {
+    pub physics: Option<Physics>,
+    pub cameras: Option<CameraData>,
+    pub lighting: Option<Lighting>
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct Scene {
+    pub id: String,
+    pub description: String,
+    pub children: Vec<GameObject>
+}
+
+#[derive(Debug, Deserialize, Clone)]
 pub struct GameObject {
     pub id: String,
     pub model: String,
     pub transform: Transform,
     pub children: Vec<GameObject>,
-    pub metadata: HashMap<String, serde_json::Value>
+    pub metadata: MetaData
 }
 
 #[derive(Debug, Deserialize, Clone, Copy)]
@@ -64,6 +128,7 @@ impl Transform {
     
         InstanceRaw {
             model: model.into(),
+            normal: Matrix3::from(self.rotation).into()
         }
     }
 

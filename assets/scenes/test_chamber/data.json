@@ -3,28 +3,53 @@
     "description": "This level is a testing place, where the player could fly freely, this is setted mainly to test mechanics",
     "children": [
         {
-            "id": "player",
+            "id": "sun",
             "model": "F16/f16.gltf",
             "transform": {
-                "position": { "x": 0.0, "y": 1000.0, "z": -5000.0},
+                "position": { "x": 1000.0, "y": 1000000.0, "z": 1000.0},
                 "rotation": { "x": 0.0, "y": 0.0, "z": 0.0},
-                "scale": { "x": 14.0, "y": 14.0, "z": 14.0} 
+                "scale": { "x": 0.0, "y": 0.0, "z": 0.0}
             },
             "children": [],
             "metadata": {
-                "cockpit_camera": [0.0, 2.0, 13.3]
+                "intensity": 1.0,
+                "color": [0.7, 0.7, 0.8]
+            }
+        },
+        {
+            "id": "player",
+            "model": "F16/f16.gltf",
+            "transform": {
+                "position": { "x": 0.0, "y": 10.0, "z": 0.0},
+                "rotation": { "x": 0.0, "y": 0.0, "z": 0.0},
+                "scale": { "x": 14.0, "y": 14.0, "z": 14.0}
+            },
+            "children": [],
+            "metadata": {
+                "cockpit_camera": [0.0, 1.8, 13.5],
+                "cinematic_camera": [-10.0, 3.0, 0.0],
+                "frontal_camera": [0.0, 6.0, 26.0],
+                "physics": {
+                    "is_static": false,
+                    "mass": 0,
+                    "initial_velocity": [0.0, 0.0, 550.0]
+                }
             }
         },
         {
             "id": "fellow_aviator",
             "model": "F14/f14.gltf",
             "transform": {
-                "position": { "x": 100.0, "y": 100.0, "z": 100.0},
+                "position": { "x": 0.0, "y": 100.0, "z": 0.0},
                 "rotation": { "x": 0.0, "y": 0.0, "z": 0.0},
-                "scale": { "x": 19.0, "y": 19.0, "z": 19.0}
+                "scale": { "x": 14.0, "y": 14.0, "z": 14.0} 
             },
             "children": [],
-            "metadata": {}
+            "metadata": {
+                "cockpit_camera": [0.0, 2.3, 14.3],
+                "cinematic_camera": [-10.0, 3.0, 0.0],
+                "frontal_camera": [0.0, 6.0, 26.0]
+            }
         },
         {
             "id": "world",
@@ -35,7 +60,11 @@
                 "scale": { "x": 100000.0, "y": 1.0, "z": 100000.0}
             },
             "children": [],
-            "metadata": {}
+            "metadata": {
+                "physics": {
+                    "is_static": true
+                }
+            }
         },
         {
             "id": "tower",

@@ -2,6 +2,7 @@ use std::{collections::HashMap, io::{BufReader, Cursor}, path::Path};
 
 use cgmath::{Quaternion, Vector3, Zero};
 use gltf::{image,  Gltf};
+use rapier3d::{math::Point, prelude::ColliderBuilder};
 use wgpu::util::DeviceExt;
 
 use crate::{rendering::{model::{self, Mesh, Model, ModelVertex}, textures::Texture}, transform::Transform};
@@ -382,8 +383,9 @@ fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::D
                 transform_buffer,
                 transform_bind_group,
                 transform,
+                base_transform: transform,
                 parent_transform: parent_values,
-                alpha_mode: primitive.material().alpha_mode()
+                alpha_mode: primitive.material().alpha_mode(),
             });
 
         });

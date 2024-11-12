@@ -66,6 +66,7 @@ pub struct Mesh {
     pub transform_buffer: wgpu::Buffer,
     pub transform_bind_group: wgpu::BindGroup,
     pub transform: Transform,
+    pub base_transform: Transform,
     pub parent_transform: Option<Transform>,
     pub alpha_mode: AlphaMode
 }
@@ -101,7 +102,7 @@ impl Mesh {
 
 pub trait DrawModel<'a> {
     // Draw a single mesh of the model
-    fn draw_mesh(&mut self, mesh: &'a Mesh, material: &'a Material, camera_bind_group: &'a wgpu::BindGroup);
+    fn draw_mesh(&mut self, mesh: &'a Mesh, material: &'a Material, camera_bind_group: &'a wgpu::BindGroup, light_bind_group: &'a wgpu::BindGroup);
     
     // Draw multiple instances of a single mesh
     fn draw_mesh_instanced(
@@ -110,10 +111,11 @@ pub trait DrawModel<'a> {
         material: &'a Material,
         instances: Range<u32>,
         camera_bind_group: &'a wgpu::BindGroup,
+        light_bind_group: &'a wgpu::BindGroup
     );
 
     // Draw all meshes of the model
-    fn draw_model(&mut self, model: &'a Model, camera_bind_group: &'a wgpu::BindGroup);
+    fn draw_model(&mut self, model: &'a Model, camera_bind_group: &'a wgpu::BindGroup, light_bind_group: &'a wgpu::BindGroup);
 
     // Draw multiple instances of the entire model
     fn draw_model_instanced(
@@ -121,6 +123,7 @@ pub trait DrawModel<'a> {
         model: &'a Model,
         instances: Range<u32>,
         camera_bind_group: &'a wgpu::BindGroup,
+        light_bind_group: &'a wgpu::BindGroup
     );
 
     // New function to draw only transparent objects
@@ -129,6 +132,7 @@ pub trait DrawModel<'a> {
         model: &'a Model,
         instances: Range<u32>,
         camera_bind_group: &'a wgpu::BindGroup,
+        light_bind_group: &'a wgpu::BindGroup
     );
 }
 
@@ -136,39 +140,119 @@ impl<'a, 'b> DrawModel<'b> for wgpu::RenderPass<'a>
 where
     'b: 'a,
 {
-    fn draw_mesh(&mut self, mesh: &'b Mesh, material: &'b Material, camera_bind_group: &'b wgpu::BindGroup) {
-        self.draw_mesh_instanced(mesh, material, 0..1, camera_bind_group);
+    fn draw_mesh(&mut self, mesh: &'b Mesh, material: &'b Material, camera_bind_group: &'b wgpu::BindGroup, light_bind_group: &'a wgpu::BindGroup) {
+        self.draw_mesh_instanced(mesh, material, 0..1, camera_bind_group, &light_bind_group);
     }
 
-    fn draw_mesh_instanced(&mut self, mesh: &'b Mesh, material: &'b Material, instances: Range<u32>, camera_bind_group: &'b wgpu::BindGroup) {
+    fn draw_mesh_instanced(&mut self, mesh: &'b Mesh, material: &'b Material, instances: Range<u32>, camera_bind_group: &'b wgpu::BindGroup, light_bind_group: &'a wgpu::BindGroup) {
         self.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
         self.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         self.set_bind_group(0, &material.bind_group, &[]);
         self.set_bind_group(1, camera_bind_group, &[]);
         self.set_bind_group(2, &mesh.transform_bind_group, &[]);
+        self.set_bind_group(3, &light_bind_group, &[]);
         self.draw_indexed(0..mesh.num_elements, 0, instances);
     }
 
-    fn draw_model(&mut self, model: &'b Model, camera_bind_group: &'b wgpu::BindGroup) {
-        self.draw_model_instanced(model, 0..1, camera_bind_group);
+    fn draw_model(&mut self, model: &'b Model, camera_bind_group: &'b wgpu::BindGroup, light_bind_group: &'a wgpu::BindGroup) {
+        self.draw_model_instanced(model, 0..1, camera_bind_group, &light_bind_group);
     }
 
-    fn draw_model_instanced(&mut self, model: &'b Model, instances: Range<u32>, camera_bind_group: &'b wgpu::BindGroup) {
+    fn draw_model_instanced(&mut self, model: &'b Model, instances: Range<u32>, camera_bind_group: &'b wgpu::BindGroup, light_bind_group: &'a wgpu::BindGroup) {
         let _ = &model.meshes.iter()
         .filter(|(_key, mesh)| mesh.alpha_mode != gltf::material::AlphaMode::Blend && mesh.alpha_mode != gltf::material::AlphaMode::Mask)
         .for_each(|(_key, mesh)| {
             let material = &model.materials[mesh.material];
-            self.draw_mesh_instanced(mesh, material, instances.clone(), camera_bind_group);
+            self.draw_mesh_instanced(mesh, material, instances.clone(), camera_bind_group, light_bind_group);
         });
     }
     
-    fn draw_transparent_model_instanced( &mut self, model: &'b Model, instances: Range<u32>, camera_bind_group: &'b wgpu::BindGroup,) {
+    fn draw_transparent_model_instanced( &mut self, model: &'b Model, instances: Range<u32>, camera_bind_group: &'b wgpu::BindGroup, light_bind_group: &'a wgpu::BindGroup) {
         let _ = &model.meshes.iter()
         .for_each(|(_key, mesh)| {
             if mesh.alpha_mode == gltf::material::AlphaMode::Blend || mesh.alpha_mode == gltf::material::AlphaMode::Mask {
                 let material = &model.materials[mesh.material];
-                self.draw_mesh_instanced(mesh, material, instances.clone(), camera_bind_group);
+                self.draw_mesh_instanced(mesh, material, instances.clone(), camera_bind_group, light_bind_group);
             } 
         });
+    }
+}
+
+// This trait will entirely be dedicated to draw the lighting of the scene
+pub trait DrawLight<'a> {
+    fn draw_light_mesh(
+        &mut self,
+        mesh: &'a Mesh,
+        camera_bind_group: &'a wgpu::BindGroup,
+        light_bind_group: &'a wgpu::BindGroup,
+    );
+    fn draw_light_mesh_instanced(
+        &mut self,
+        mesh: &'a Mesh,
+        instances: Range<u32>,
+        camera_bind_group: &'a wgpu::BindGroup,
+        light_bind_group: &'a wgpu::BindGroup,
+    );
+
+    fn draw_light_model(
+        &mut self,
+        model: &'a Model,
+        camera_bind_group: &'a wgpu::BindGroup,
+        light_bind_group: &'a wgpu::BindGroup,
+    );
+    fn draw_light_model_instanced(
+        &mut self,
+        model: &'a Model,
+        instances: Range<u32>,
+        camera_bind_group: &'a wgpu::BindGroup,
+        light_bind_group: &'a wgpu::BindGroup,
+    );
+}
+
+impl<'a, 'b> DrawLight<'b> for wgpu::RenderPass<'a>
+where
+    'b: 'a,
+{
+    fn draw_light_mesh(
+        &mut self,
+        mesh: &'b Mesh,
+        camera_bind_group: &'b wgpu::BindGroup,
+        light_bind_group: &'b wgpu::BindGroup,
+    ) {
+        self.draw_light_mesh_instanced(mesh, 0..1, camera_bind_group, light_bind_group);
+    }
+
+    fn draw_light_mesh_instanced(
+        &mut self,
+        mesh: &'b Mesh,
+        instances: Range<u32>,
+        camera_bind_group: &'b wgpu::BindGroup,
+        light_bind_group: &'b wgpu::BindGroup,
+    ) {
+        self.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+        self.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        self.set_bind_group(0, camera_bind_group, &[]);
+        self.set_bind_group(1, light_bind_group, &[]);
+        self.draw_indexed(0..mesh.num_elements, 0, instances);
+    }
+
+    fn draw_light_model(
+        &mut self,
+        model: &'b Model,
+        camera_bind_group: &'b wgpu::BindGroup,
+        light_bind_group: &'b wgpu::BindGroup,
+    ) {
+        self.draw_light_model_instanced(model, 0..1, camera_bind_group, light_bind_group);
+    }
+    fn draw_light_model_instanced(
+        &mut self,
+        model: &'b Model,
+        instances: Range<u32>,
+        camera_bind_group: &'b wgpu::BindGroup,
+        light_bind_group: &'b wgpu::BindGroup,
+    ) {
+        for mesh in &model.meshes {
+            self.draw_light_mesh_instanced(mesh.1, instances.clone(), camera_bind_group, light_bind_group);
+        }
     }
 }

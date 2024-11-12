@@ -16,9 +16,14 @@ glob = "*"
 rand = "0.8"
 glyphon = "0.4"
 cgmath = { version = "*", features = ["serde"] }
-csv = "*"
 serde_json = "*"
 serde = { version = "1.0", features = ["derive"] }
+
+# Physics
+rapier3d = { version = "*", features = [ "simd-stable", "serde-serialize" ] }
+nalgebra = "*"
+
+ron = "*"
 
 [dependencies.gltf]
 version = "1.4"

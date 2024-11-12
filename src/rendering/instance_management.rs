@@ -1,15 +1,20 @@
-use std::collections::HashMap;
 
-use cgmath::Matrix4;
+use cgmath::{Matrix3, Matrix4};
+use rapier3d::prelude::RigidBodyHandle;
 use serde::Deserialize;
 use wgpu::Buffer;
 
-use crate::game_object::{GameObject, GameObject2D, Transform};
+use crate::game_object::{GameObject, Transform};
 
 use super::model::Model;
 
+pub struct PhysicsData {
+    pub rigidbody_handle: RigidBodyHandle
+}
+
 // when moving player we move instance, when moving world object we move renderizable_transform
 pub struct InstanceData {
+    pub physics_data: Option<PhysicsData>,
     pub renderizable_transform: Transform,
     pub instance: GameObject,
     pub model_ref: String,
@@ -31,6 +36,7 @@ impl Instance {
 
         InstanceRaw {
             model: model.into(),
+            normal: Matrix3::from(self.rotation).into()
         }
     }
 }
@@ -39,13 +45,6 @@ pub struct ModelDataInstance {
     pub model: Model,
     pub instance_buffer: Buffer,
     pub instance_count: u32,
-}
-
-pub struct LevelDataCsv {
-    pub id: String,
-    pub model: String,
-    pub instance: Instance,
-
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,6 +59,7 @@ pub struct LevelData {
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct InstanceRaw {
     pub(crate) model: [[f32; 4]; 4],
+    pub(crate) normal: [[f32; 3]; 3]
 }
 
 impl InstanceRaw {
@@ -90,6 +90,22 @@ impl InstanceRaw {
                     offset: mem::size_of::<[f32; 12]>() as wgpu::BufferAddress,
                     shader_location: 8,
                     format: wgpu::VertexFormat::Float32x4,
+                },
+                // these are for the rotation of ilumination normals
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 16]>() as wgpu::BufferAddress,
+                    shader_location: 9,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 19]>() as wgpu::BufferAddress,
+                    shader_location: 10,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 22]>() as wgpu::BufferAddress,
+                    shader_location: 11,
+                    format: wgpu::VertexFormat::Float32x3,
                 },
             ],
         }
