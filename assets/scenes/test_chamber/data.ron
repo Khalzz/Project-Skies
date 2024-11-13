@@ -24,7 +24,7 @@
             id: "player",
             model: "F16/f16.gltf",
             transform: (
-                position: (x: 0.0, y: 10.0, z: 0.0),
+                position: (x: 0.0, y: 1000.0, z: 0.0),
                 rotation: (x: 0.0, y: 0.0, z: 0.0),
                 scale: (x: 14.0, y: 14.0, z: 14.0),
             ),
@@ -39,7 +39,7 @@
                     rigidbody: ( 
                         is_static: false, 
                         mass: 9000.0, 
-                        initial_velocity: (0.0, 0.0, 10.0),
+                        initial_velocity: (0.0, 0.0, 550.0),
                     ),
                     collider: Some( Cuboid (
                         half_extents: (7.0, 6.0, 7.0)

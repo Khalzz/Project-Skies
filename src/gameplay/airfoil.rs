@@ -34,25 +34,26 @@ impl AirFoil {
 
     // Sample function to get Cl and Cd based on alpha
     pub fn sample(&self, alpha: f32) -> (f32, f32) {
-        // Scale alpha to find index
-        let scaled_index = self.scale(alpha);
-
-        // Clamp index to ensure it's within bounds
-        let i = scaled_index.clamp(0, self.data.len() as isize - 1) as usize;
-
-        // Return Cl and Cd from data
-        (self.data[i].y, self.data[i].z)
+        // Get the scaled index and clamp it within bounds
+        let scaled_index = self.alpha_to_index(alpha);
+        let clamped_index = scaled_index.clamp(0, self.data.len() - 1);
+    
+        // Access and return Cl and Cd values from data
+        let data_point = &self.data[clamped_index];
+        (data_point.y, data_point.z)
     }
 
-    // Scale method similar to C++ version
-    fn scale(&self, alpha: f32) -> isize {
-        let range = self.max_alpha - self.min_alpha;
+    fn alpha_to_index(&self, alpha: f32) -> usize {
+        // we get the range between the maximum alpha on the data and the minimum
+        let range: f32 = self.max_alpha - self.min_alpha;
+
+        // if the range is 0, means that the max and min alpha are equal in numerical value
         if range == 0.0 {
             return 0; // Avoid division by zero
         }
         
-        // Scale alpha to index range
-        let scaled_value = ((alpha - self.min_alpha) / range * (self.data.len() as f32 - 1.0)).round();
-        scaled_value as isize
+        let normalized_alpha = (alpha - self.min_alpha) / range;
+        let scaled_index = (normalized_alpha * (self.data.len() as f32 - 1.0)).round();
+        scaled_index as usize
     }
 }

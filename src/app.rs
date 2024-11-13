@@ -1,3 +1,4 @@
+use std::f32::consts::PI;
 use std::fs::File;
 use std::hash::Hash;
 use std::time::{Duration, Instant};
@@ -5,7 +6,7 @@ use std::collections::HashMap;
 use std::env;
 
 use cgmath::Vector3;
-use nalgebra::{Matrix3, Unit};
+use nalgebra::{Matrix3, Unit, UnitQuaternion};
 use rapier3d::na::{vector, Vector};
 use rapier3d::prelude::{BroadPhase, CCDSolver, ColliderBuilder, ColliderSet, CollisionPipeline, DefaultBroadPhase, ImpulseJointSet, IntegrationParameters, IslandManager, MultibodyJointSet, NarrowPhase, PhysicsPipeline, QueryPipeline, RigidBody, RigidBodyBuilder, RigidBodySet};
 use ron::from_str;
@@ -18,16 +19,19 @@ use sdl2::video::{DisplayMode, WindowContext};
 use serde_json::{Map, Value};
 use tokio::runtime::Runtime;
 use tokio::task;
-use wgpu::{BindGroup, BindGroupLayout, BindGroupLayoutDescriptor, Buffer, Device, DeviceDescriptor, Features, InstanceDescriptor, Limits, Queue, RenderPassDepthStencilAttachment, RenderPipeline, Surface, SurfaceConfiguration, TextureUsages};
+use wgpu::{BindGroup, BindGroupLayout, BindGroupLayoutDescriptor, Buffer, BufferDescriptor, Device, DeviceDescriptor, Features, InstanceDescriptor, Limits, Queue, RenderPassDepthStencilAttachment, RenderPipeline, Surface, SurfaceConfiguration, TextureUsages, VertexBufferLayout};
 use wgpu::util::DeviceExt;
 use glyphon::{Resolution, TextArea};
 
 
 use crate::game_object::{self, GameObject, Scene, Transform};
+use crate::primitive::manual_vertex::ManualVertex;
 use crate::rendering::camera::CameraRenderizable;
 use crate::rendering::depth_renderer::DepthRender;
 use crate::rendering::instance_management::{InstanceData, InstanceRaw, LevelData, ModelDataInstance, PhysicsData};
 use crate::rendering::model::{self, DrawLight, DrawModel, Vertex};
+use crate::rendering::physics_rendering::RenderPhysics;
+use crate::rendering::rendering_utils;
 use crate::rendering::textures::Texture;
 use crate::rendering::ui::UI;
 use crate::rendering::vertex::VertexUi;
@@ -119,6 +123,8 @@ pub struct App {
     pub physics: Physics
 }
 
+
+
 pub struct Physics {
     pub physics_pipeline: PhysicsPipeline,
     pub colission_pipeline: CollisionPipeline,
@@ -127,6 +133,9 @@ pub struct Physics {
     // This values will save the rigidbodies and colliders
     pub rigidbody_set: RigidBodySet, 
     pub collider_set: ColliderSet,
+
+    // for rendering forces
+    pub render_physics: RenderPhysics,
 }
 
 
@@ -301,7 +310,7 @@ impl App {
                 source: wgpu::ShaderSource::Wgsl(include_str!("shaders/depth.wgsl").into()),
             };
             
-            Self::create_render_pipeline(
+            rendering_utils::create_render_pipeline(
                 &device,
                 &render_pipeline_layout,
                 config.format,
@@ -321,9 +330,9 @@ impl App {
             let shader = wgpu::ShaderModuleDescriptor {
                 label: Some("Light Shader"),
                 source: wgpu::ShaderSource::Wgsl(include_str!("shaders/light.wgsl").into()),
-            };Self::
+            };
             
-            create_render_pipeline(
+            rendering_utils::create_render_pipeline(
                 &device,
                 &layout,
                 config.format,
@@ -348,15 +357,20 @@ impl App {
         // Dynamic static is for objects that move in the screen but their main position is based on something that never changes
         dynamic_ui_components.insert("dynamic_static".to_owned(), vec![]); 
 
+        // physics rendering
+        let render_physics = RenderPhysics::new(&device, &config, &camera);
+
         // Physics data
-        let mut physics = Physics {
+        let physics = Physics {
             physics_pipeline: PhysicsPipeline::new(),
             colission_pipeline: CollisionPipeline::new(),
             gravity: Vector3::new(0.0, -9.81, 0.0),
             rigidbody_set: RigidBodySet::new(),
             collider_set: ColliderSet::new(),
+            render_physics,
         };
 
+        
 
         App {
             last_frame: Instant::now(),
@@ -389,64 +403,7 @@ impl App {
         }
     }
 
-    fn create_render_pipeline(device: &wgpu::Device, layout: &wgpu::PipelineLayout, color_format: wgpu::TextureFormat, depth_format: Option<wgpu::TextureFormat>, vertex_layouts: &[wgpu::VertexBufferLayout], shader: wgpu::ShaderModuleDescriptor,) -> RenderPipeline {
-        let shader = device.create_shader_module(shader);
-
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render Pipeline"),
-            layout: Some(layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: "vs_main",
-                buffers: vertex_layouts,
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                        format: color_format,
-                        blend: Some(wgpu::BlendState {
-                            color: wgpu::BlendComponent {
-                                src_factor: wgpu::BlendFactor::SrcAlpha,
-                                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                                operation: wgpu::BlendOperation::Add,
-                            },
-                            alpha: wgpu::BlendComponent {
-                                src_factor: wgpu::BlendFactor::One,
-                                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                                operation: wgpu::BlendOperation::Add,
-                            },
-                        }),
-                        write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
-                polygon_mode: wgpu::PolygonMode::Fill,
-                // Requires Features::DEPTH_CLIP_CONTROL
-                unclipped_depth: false,
-                // Requires Features::CONSERVATIVE_RASTERIZATION
-                conservative: false,
-            },
-            depth_stencil: depth_format.map(|format| wgpu::DepthStencilState {
-                format,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview: None,
-        })
-    }
+    
 
     pub fn resize(&mut self) {
         self.config.width = self.current_display.w as u32;
@@ -598,6 +555,80 @@ impl App {
             });
         }
 
+        // physics render
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Physics Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                    view: &self.depth_render.texture.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+    
+            // Set up the pipeline for physics rendering
+            render_pass.set_pipeline(&self.physics.render_physics.render_pipeline);
+            render_pass.set_bind_group(0, &self.physics.render_physics.bind_group, &[]);
+            render_pass.set_bind_group(1, &self.camera.bind_group, &[]);
+    
+            // Prepare vertex and index buffers specifically for physics rendering
+            let vertices: Vec<ManualVertex> = self.physics.render_physics.renderizable_lines.iter()
+                .flat_map(|line| line.to_vec()) // Flatten pairs of vertices into a single vector
+                .collect();
+    
+            if !vertices.is_empty() {
+                // Update vertex buffer only if there are vertices
+                self.physics.render_physics.vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Updated ManualVertex Buffer"),
+                    contents: bytemuck::cast_slice(&vertices),
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                });
+    
+                // Update index buffer for all lines
+                let mut indices = Vec::new();
+                for i in 0..self.physics.render_physics.renderizable_lines.len() {
+                    let base_index = (i * 2) as u16; // Each line has two vertices
+                    indices.push(base_index);
+                    indices.push(base_index + 1);
+                }
+    
+                if !indices.is_empty() {
+                    self.physics.render_physics.index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Index Buffer"),
+                        contents: bytemuck::cast_slice(&indices),
+                        usage: wgpu::BufferUsages::INDEX,
+                    });
+    
+                    // Set vertex and index buffers once before drawing
+                    render_pass.set_vertex_buffer(0, self.physics.render_physics.vertex_buffer.slice(..));
+                    render_pass.set_index_buffer(self.physics.render_physics.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+    
+                    // Draw all lines
+                    render_pass.draw_indexed(0..(indices.len() as u32), 0, 0..1);
+                }
+            }
+    
+            // Clear the line vertices after drawing
+            self.physics.render_physics.renderizable_lines.clear();
+        }
+
+        if self.show_depth_map {
+            self.depth_render.render(&view, &mut encoder);
+        }
+        
         // Ui Pass
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -742,6 +773,8 @@ impl App {
                         self.camera.uniform.update_view_proj(&self.camera.camera, &self.camera.projection);
                         self.queue.write_buffer(&self.camera.buffer, 0, bytemuck::cast_slice(&[self.camera.uniform]));
                         self.queue.write_buffer(&self.depth_render.near_far_buffer, 0, bytemuck::cast_slice(&[self.depth_render.near_far_uniform]));
+
+
                     }
                 },
                 GameState::MainMenu => {
@@ -900,11 +933,15 @@ impl App {
                                 
 
                                 // i had to do this
-                                let principal_inertia = nalgebra::Vector3::new(408531.0, 256608.0, 211333.0);
+                                let principal_inertia = nalgebra::Vector3::new(48531.0, 256608.0, 211333.0);
 
                                 RigidBodyBuilder::dynamic()
+                                // .additional_mass(physics_obj_data.rigidbody.mass)
                                 .additional_mass_properties(rapier3d::prelude::MassProperties::new(vector![0.0, 0.0, 0.0].into(), physics_obj_data.rigidbody.mass, principal_inertia))
-                                .translation(vector![instance_data.transform.position.x, instance_data.transform.position.y, instance_data.transform.position.z]).build()
+                                .translation(vector![instance_data.transform.position.x, instance_data.transform.position.y, instance_data.transform.position.z])
+                                // .rotation(instance_data.transform.rotation)
+                                .build()
+                                
                                 
                             };
 

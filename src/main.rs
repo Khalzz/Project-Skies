@@ -19,6 +19,7 @@ mod gameplay {
     pub mod main_menu;
     pub mod plane_selection;
     pub mod airfoil;
+    pub mod wing;
 }
 
 mod primitive {
@@ -35,6 +36,8 @@ mod rendering {
     pub mod depth_renderer;
     pub mod ui;
     pub mod instance_management;
+    pub mod physics_rendering;
+    pub mod rendering_utils;
 }
 
 mod utils {

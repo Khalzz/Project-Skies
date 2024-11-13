@@ -1,22 +1,22 @@
 use wgpu::{util::DeviceExt, BindGroup, BindGroupLayout, BindGroupLayoutDescriptor, Buffer, Device, RenderPipeline, SurfaceConfiguration};
 
-use crate::primitive::manual_vertex::ManualVertex;
+use crate::primitive::manual_vertex::ManualVertexTexturized;
 use super::textures::Texture;
 
-const DEPTH_VERTICES: &[ManualVertex] = &[
-    ManualVertex {
+const DEPTH_VERTICES: &[ManualVertexTexturized] = &[
+    ManualVertexTexturized {
         position: [-1.0, -1.0, 0.0],
         tex_coords: [0.0, 1.0],
     },
-    ManualVertex {
+    ManualVertexTexturized {
         position: [1.0, -1.0, 0.0],
         tex_coords: [1.0, 1.0],
     },
-    ManualVertex {
+    ManualVertexTexturized {
         position: [1.0, 1.0, 0.0],
         tex_coords: [1.0, 0.0],
     },
-    ManualVertex {
+    ManualVertexTexturized {
         position: [-1.0, 1.0, 0.0],
         tex_coords: [0.0, 0.0],
     },
@@ -142,7 +142,7 @@ impl DepthRender {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: "vs_main",
-                buffers: &[ManualVertex::desc()],
+                buffers: &[ManualVertexTexturized::desc()],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,

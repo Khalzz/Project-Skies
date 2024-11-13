@@ -7,9 +7,9 @@ use rand::{rngs::ThreadRng, Rng};
 use rapier3d::{control, parry::transformation::utils::push_degenerate_top_ring_indices, prelude::RigidBody};
 use ron::from_str;
 use sdl2::controller::GameController;
-use crate::{app::{App, AppState}, primitive::rectangle::RectPos, transform::Transform, ui::button::{self, Button, ButtonConfig}, utils::lerps::{lerp, lerp_quaternion, lerp_vector3}};
+use crate::{app::{App, AppState}, primitive::{manual_vertex::ManualVertex, rectangle::RectPos}, transform::Transform, ui::button::{self, Button, ButtonConfig}, utils::lerps::{lerp, lerp_quaternion, lerp_vector3}};
 
-use super::{airfoil::AirFoil, controller::Controller};
+use super::{airfoil::AirFoil, controller::Controller, wing::Wing};
 
 pub enum CameraState {
     Normal,
@@ -64,91 +64,6 @@ pub struct PlaneSystems {
     pub base_rotations: BaseRotations,
     pub flap_ratio: f32,
     pub wings: Vec<Wing>
-}
-
-/// We construct our plane as a "amount of wings"
-pub struct Wing {
-    pub pressure_center: nalgebra::Vector3<f32>,
-    pub wing_area: f32,
-    pub wing_span: f32,
-    pub aspect_ratio: f32,
-    pub chord: f32,
-    pub air_foil: AirFoil,
-    pub normal: nalgebra::Vector3<f32>,
-    pub flap_ratio: f32,
-    pub efficiency_factor: f32,
-    pub control_input: f32
-}
-
-impl Wing {
-    pub fn new(pressure_center: nalgebra::Vector3<f32>, wing_span: f32, wing_area: f32, chord: f32, air_foil: AirFoil, normal: nalgebra::Vector3<f32>, flap_ratio: f32) -> Self {
-        Self { 
-            wing_area, 
-            wing_span, 
-            chord,
-            air_foil, 
-            normal, 
-            flap_ratio,
-            pressure_center,
-            aspect_ratio: wing_span.powi(2) / wing_area,
-            efficiency_factor: 0.1,
-            control_input: 0.0
-        }
-    }
-    /* 
-    pub fn get_point_velocity(point: nalgebra::Vector3) -> nalgebra::Vector3<f32> {
-        return 
-    }
-    */
-
-    pub fn physics_force(&mut self, rigidbody: &mut RigidBody) {    
-
-        let inverse_transform_direction = rigidbody.rotation().inverse() * rigidbody.linvel();
-        let local_velocity = inverse_transform_direction + rigidbody.angvel().cross(&self.pressure_center);
-
-        let speed = local_velocity.magnitude();
-
-        println!("local velocity: {}", local_velocity);
-        println!("speed: {}", speed);
-
-        if speed <= 1.0 {
-            return
-        }
-
-        let drag_direction = -local_velocity.normalize();
-        println!("drag direction: {}", drag_direction);
-
-        // lift direction
-        // glm::vec3 lift_direction = glm::normalize(glm::cross(glm::cross(drag_direction, normal), drag_direction));
-        let lift_direction = drag_direction.cross(&self.normal).cross(&drag_direction).normalize();
-        println!("lift_direction: {}", lift_direction);
-
-        let angle_of_attack = drag_direction.dot(&self.normal).asin().to_degrees();
-
-        let (mut lift_coeff, mut drag_coeff) = self.air_foil.sample(angle_of_attack);
-
-        if self.flap_ratio > 0.0 {
-            let cl_max = 1.1039;
-
-            let deflection_rato = self.control_input;
-
-            let delta_lift_coeff = self.flap_ratio.sqrt() * cl_max * deflection_rato;
-            lift_coeff += delta_lift_coeff;
-        }
-
-        let induced_drag_coeff = lift_coeff.powi(2) / (PI * self.aspect_ratio * self.efficiency_factor);
-        drag_coeff += induced_drag_coeff;
-
-        let air_density = 1.255;
-
-        let dynamic_pressure = 0.5 * speed.powi(2) * air_density * self.wing_area;
-
-        let lift = lift_direction * lift_coeff * dynamic_pressure;
-        let drag = drag_direction * drag_coeff * dynamic_pressure;
-
-
-        rigidbody.add_force_at_point(lift + drag, self.pressure_center.into(), true);
-    }
 }
 
 pub struct GameLogic { // here we define the data we use on our script
@@ -386,18 +301,14 @@ impl GameLogic {
             Ok(file_contents) => {
                 match from_str::<Vec<nalgebra::Vector3<f32>>>(&file_contents) {
                     Ok(data) => {
-                        println!("info");
                         data
                     },
                     Err(e) => {
-                        println!("error when reading info: {}", e);
-                        // Handle the error if deserialization fails
                         vec![]
                     }
                 }
             },
             _ => {
-                println!("error when loading file");
                 vec![]
             }
         };
@@ -405,10 +316,10 @@ impl GameLogic {
         let airfoil = AirFoil::new(curve);
 
         let wings = vec![
-            Wing::new(nalgebra::vector![-0.2, 0.0, -2.7], 6.96, 2.50, 0.0, airfoil.clone(), vector![0.0, 1.0, 0.0], 0.20), // left wing
-            Wing::new(nalgebra::vector![-0.2, 0.0, 2.7], 6.96, 2.50, 0.0, airfoil.clone(), vector![0.0, 1.0, 0.0], 0.20), // right wing
-            Wing::new(nalgebra::vector![-4.6, 0.0, -7.0], 6.96, 2.50, 0.0, airfoil.clone(), vector![0.0, 1.0, 0.0], 1.0), // elevator wing
-            Wing::new(nalgebra::vector![-4.6, 1.0, -7.0], 6.96, 2.50, 0.0, airfoil.clone(), vector![1.0, 0.0, 0.0], 0.15) // rudder wing
+            Wing::new(nalgebra::vector![8.5, 0.0, 1.0], 6.96, 2.50, 0.0, airfoil.clone(), vector![0.0, 1.0, 0.0], 0.04), // left wing
+            Wing::new(nalgebra::vector![-8.5, 0.0, 1.0], 6.96, 2.50, 0.0, airfoil.clone(), vector![0.0, 1.0, 0.0], 0.04), // right wing
+            Wing::new(nalgebra::vector![0.0, 0.0, -9.0], 6.96, 2.50, 0.0, airfoil.clone(), vector![0.0, 1.0, 0.0], 0.2), // elevator wing
+            Wing::new(nalgebra::vector![0.0, 1.0, -9.0], 6.96, 2.50, 0.0, airfoil.clone(), vector![1.0, 0.0, 0.0], 0.15) // rudder wing
         ];
 
         let plane_systems = PlaneSystems {
@@ -493,12 +404,7 @@ impl GameLogic {
 
     fn plane_movement (&mut self, app: &mut App, delta_time: f32, controller: &mut Option<GameController>) {
         let plane = app.renderizable_instances.get_mut("player").unwrap();
-        let mut angle = 0.8;
-
-        if self.velocity.z < 1000.0 {
-            angle = 0.0;
-        }
-
+        
         // elevators
         let l_elevator = app.game_models.get_mut(&plane.model_ref).unwrap().model.meshes.get_mut("left_elevator").unwrap();
         let l_elevator_rotation = lerp_quaternion(l_elevator.transform.rotation, Quaternion::from_angle_x(Rad(0.15 * -self.controller.y)), delta_time * 7.0);
@@ -595,18 +501,27 @@ impl GameLogic {
 
                     // Thrust                    
                     let max_thrust = 131000.0; // newtons of force generated by engine
-                    let plane_forward = rigidbody.rotation() * nalgebra::Vector3::new(0.0, 0.0, 1.0);
-                    rigidbody.add_force(self.controller.power * max_thrust * plane_forward, true);
+                    let power_value = rigidbody.rotation() * nalgebra::Vector3::new(0.0, 0.0, 131000.0) * self.controller.power;
+                    rigidbody.add_force(rigidbody.rotation() * nalgebra::Vector3::new(0.0, 0.0, 131000.0) * self.controller.power, true);
+
+                    app.physics.render_physics.renderizable_lines.push([ManualVertex {
+                        position: [rigidbody.translation().x, rigidbody.translation().y, rigidbody.translation().z],
+                        color: [0.5, 1.0, 0.5],
+                    }, ManualVertex {
+                        position: (-power_value).into(),
+                        color: [0.5, 1.0, 0.5],
+                    }]);
+
                     // Thrust
 
                     // This is generating a bug, if the plane direction is tisted on the x axis can generate infinite acceleration, 
                     self.plane_systems.wings[0].control_input = self.controller.x;
-                    self.plane_systems.wings[1].control_input = self.controller.x;
+                    self.plane_systems.wings[1].control_input = -self.controller.x;
                     self.plane_systems.wings[2].control_input = self.controller.y;
                     self.plane_systems.wings[3].control_input = self.controller.yaw;
 
                     for wing in &mut self.plane_systems.wings {
-                        wing.physics_force(rigidbody);
+                        wing.physics_force(rigidbody, &mut app.physics.render_physics.renderizable_lines);
                     }
 
                     
@@ -1049,4 +964,19 @@ impl GameLogic {
         min_speed + (speed / 3000.0) * (max_speed - min_speed)
     }
 
+    fn calculate_force_line(rigidbody_position: rapier3d::na::Vector3<f32>, force: rapier3d::na::Vector3<f32>) -> (ManualVertex, ManualVertex) {
+        let start = rigidbody_position;
+        let end = start + force; // Scale for visualization, if needed
+    
+        let start_vertex = ManualVertex {
+            position: start.into(),
+            color: [0.0, 1.0, 0.0], // e.g., green for force vectors
+        };
+        let end_vertex = ManualVertex {
+            position: end.into(),
+            color: [0.0, 1.0, 0.0],
+        };
+    
+        (start_vertex, end_vertex)
+    }
 }
