@@ -5,8 +5,7 @@ use std::time::{Duration, Instant};
 use std::collections::HashMap;
 use std::env;
 
-use cgmath::{Vector3, Zero};
-use nalgebra::{Matrix3, Unit, UnitQuaternion};
+use nalgebra::{Matrix3, Quaternion, Unit, UnitQuaternion, Vector3};
 use rapier3d::na::{vector, Vector};
 use rapier3d::prelude::{BroadPhase, CCDSolver, ColliderBuilder, ColliderSet, CollisionPipeline, DefaultBroadPhase, ImpulseJointSet, IntegrationParameters, IslandManager, MultibodyJointSet, NarrowPhase, PhysicsPipeline, QueryPipeline, RigidBody, RigidBodyBuilder, RigidBodySet};
 use ron::from_str;
@@ -706,7 +705,6 @@ impl App {
                     } else {
                         play.plane_systems.altitude = ((self.renderizable_instances.get("player").unwrap().instance.transform.position.y - self.renderizable_instances.get("world").unwrap().instance.transform.position.y)).round();
 
-                        play.update( &mut app_state, &mut event_pump, &mut self, &mut controller);
 
                         self.physics.physics_pipeline.step(
                             &gravity,
@@ -724,6 +722,8 @@ impl App {
                             &event_handler,
                         );
 
+                        play.update( &mut app_state, &mut event_pump, &mut self, &mut controller);
+
                         for (model_key, model) in &self.game_models {
                             let mut offset_index = 0;
                             
@@ -732,8 +732,8 @@ impl App {
                                     match &renderizable.physics_data {
                                         Some(physics_info) => {
                                             if let Some(rigid_body) = self.physics.rigidbody_set.get(physics_info.rigidbody_handle) {
-                                                renderizable.instance.transform.position = cgmath::Vector3::new(rigid_body.position().translation.x, rigid_body.position().translation.y, rigid_body.position().translation.z);
-                                                renderizable.instance.transform.rotation = cgmath::Quaternion::new(rigid_body.position().rotation.w, rigid_body.position().rotation.i, rigid_body.position().rotation.j, rigid_body.position().rotation.k);
+                                                renderizable.instance.transform.position = *rigid_body.translation();
+                                                renderizable.instance.transform.rotation = *rigid_body.rotation();
                                             }
                                         },
                                         None => {},
@@ -748,8 +748,6 @@ impl App {
                                 
                             }
                         }
-
-                        
                         
                         // lighting update
                         if let Some(sun) = self.renderizable_instances.get("sun") {
@@ -804,8 +802,8 @@ impl App {
                             match &renderizable.physics_data {
                                 Some(physics_info) => {
                                     if let Some(rigid_body) = self.physics.rigidbody_set.get(physics_info.rigidbody_handle) {
-                                        renderizable.instance.transform.position = cgmath::Vector3::new(rigid_body.translation().x, rigid_body.translation().y, rigid_body.translation().z);
-                                        renderizable.instance.transform.rotation = cgmath::Quaternion::new(rigid_body.rotation().w, rigid_body.rotation().coords.x, rigid_body.rotation().coords.y, rigid_body.rotation().coords.z);
+                                        renderizable.instance.transform.position = Vector3::new(rigid_body.translation().x, rigid_body.translation().y, rigid_body.translation().z);
+                                        renderizable.instance.transform.rotation = *rigid_body.rotation();
                                     }
                                 },
                                 None => {

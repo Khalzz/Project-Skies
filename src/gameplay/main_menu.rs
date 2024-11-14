@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
-use cgmath::{Quaternion, Zero};
 use glyphon::Color;
+use nalgebra::Quaternion;
 use sdl2::controller::GameController;
 use crate::{app::{App, AppState, GameState}, primitive::rectangle::RectPos, ui::button};
 
@@ -81,7 +81,7 @@ impl GameLogic {
                             text: "Play",
                             text_color: Color::rgba(0, 255, 75, 255),
                             text_color_active: Color::rgba(0, 255, 75, 000),
-                            rotation: Quaternion::zero()
+                            rotation: Quaternion::identity()
                         },
                         &mut app.ui.text.font_system,
                     );
@@ -116,7 +116,7 @@ impl GameLogic {
                             text: "Exit",
                             text_color: Color::rgba(0, 255, 75, 255),
                             text_color_active: Color::rgba(0, 255, 75, 000),
-                            rotation: Quaternion::zero()
+                            rotation: Quaternion::identity()
                         },
                         &mut app.ui.text.font_system,
                     );

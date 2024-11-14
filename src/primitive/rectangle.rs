@@ -1,6 +1,7 @@
 
 pub const NUM_INDICES: u32 = 6;
-use cgmath::{Deg, InnerSpace, Quaternion, Rad, Rotation, Rotation3, Vector2, Vector3, Zero};
+
+use nalgebra::{vector, Quaternion, UnitQuaternion, Vector3};
 
 use crate::{app::Size, rendering::vertex::VertexUi};
 
@@ -65,12 +66,12 @@ impl Rectangle {
         let x_center = left + ((right - left) / 2.0);
         let y_center = top + ((bottom - top) / 2.0);
 
-        let center = Vector3::new(x_center, y_center, 0.0);
+        let center = vector![x_center, y_center, 0.0];
 
-        let left_top = Self::rotate_from_center(Vector3::new(left, top, 0.0), center, self.rotation);
-        let left_bottom = Self::rotate_from_center(Vector3::new(left, bottom, 0.0), center, self.rotation);
-        let right_top = Self::rotate_from_center(Vector3::new(right, top, 0.0), center, self.rotation);
-        let right_bottom = Self::rotate_from_center(Vector3::new(right, bottom, 0.0), center, self.rotation);
+        let left_top = Self::rotate_from_center(vector![left, top, 0.0], center, self.rotation);
+        let left_bottom = Self::rotate_from_center(vector![left, bottom, 0.0], center, self.rotation);
+        let right_top = Self::rotate_from_center(vector![right, top, 0.0], center, self.rotation);
+        let right_bottom = Self::rotate_from_center(vector![right, bottom, 0.0], center, self.rotation);
 
         // let left_top = [left, top, 0.0];
         // let left_bottom = [left, bottom, 0.0];
@@ -88,15 +89,15 @@ impl Rectangle {
     pub fn rotate_from_center(vector: Vector3<f32>, center: Vector3<f32>, rotation: Quaternion<f32>) -> [f32; 3] {
         // Translate the vector to the origin (center point becomes the origin)
         let plane_rot = rotation.conjugate();
-        let world_rot: Quaternion<f32> = Quaternion::zero();
+        let world_rot: Quaternion<f32> = Quaternion::identity();
 
         let result =  plane_rot - world_rot;
-        let euler: cgmath::Euler<Rad<f32>> = result.conjugate().into();
+        let euler = UnitQuaternion::from_quaternion(result.conjugate()).euler_angles();
 
         let translated_vector = vector - center;
 
         // Rotate the translated vector
-        let rotated_vector = Quaternion::from_angle_z(euler.z).rotate_vector(translated_vector);
+        let rotated_vector = UnitQuaternion::from_axis_angle(&Vector3::z_axis(), euler.2).transform_vector(&translated_vector);
 
         // Translate back to the original position
         let final_vector = rotated_vector + center;

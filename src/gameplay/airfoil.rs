@@ -1,4 +1,5 @@
 use nalgebra::Vector3;
+use ron::from_str;
 
 /// # Air Foil
 ///
@@ -28,7 +29,23 @@ pub struct AirFoil {
 
 impl AirFoil {
     // this is called once
-    pub fn new(curve: Vec<Vector3<f32>>) -> Self {
+    pub fn new(data_path: String) -> Self {
+        let curve = match std::fs::read_to_string(data_path) {
+            Ok(file_contents) => {
+                match from_str::<Vec<nalgebra::Vector3<f32>>>(&file_contents) {
+                    Ok(data) => {
+                        data
+                    },
+                    Err(e) => {
+                        vec![]
+                    }
+                }
+            },
+            _ => {
+                vec![]
+            }
+        };
+
         AirFoil { min_alpha: curve[0].x, max_alpha: curve[curve.len() - 1].x, data: curve }
     }
 

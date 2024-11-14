@@ -1,8 +1,8 @@
 use std::{collections::HashMap, default, mem, ops::Range};
 
 
-use cgmath::Rotation;
 use gltf::material::AlphaMode;
+use nalgebra::UnitQuaternion;
 use wgpu::BindGroup;
 
 use crate::transform::Transform;
@@ -82,7 +82,11 @@ impl Mesh {
 
         match &self.parent_transform {
             Some(parent_transform) => {
-                transform_data = Transform::new(parent_transform.position + parent_transform.rotation.rotate_vector(self.transform.position - parent_transform.position), parent_transform.rotation * self.transform.rotation, parent_transform.scale)
+                transform_data = Transform::new(
+                    parent_transform.position + UnitQuaternion::from_quaternion(parent_transform.rotation) * (self.transform.position - parent_transform.position),
+                    parent_transform.rotation * self.transform.rotation,
+                    parent_transform.scale,
+                );
             },
             None => {
                 transform_data = Transform::new(self.transform.position, self.transform.rotation, self.transform.scale)

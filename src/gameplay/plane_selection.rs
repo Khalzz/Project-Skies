@@ -1,14 +1,9 @@
-use std::{collections::HashMap, f64::consts::PI, hash::Hash, time::{Duration, Instant}};
-
-use cgmath::{num_traits::{real::Real, Float}, point3, Deg, EuclideanSpace, Euler, InnerSpace, Matrix2, One, Point3, Quaternion, Rad, Rotation, Rotation3, Vector2, Vector3, Zero};
-use glyphon::{cosmic_text::rustybuzz::ttf_parser::ankr::Point, Color};
-use image::imageops::flip_horizontal;
-use rand::{rngs::ThreadRng, Rng};
+use nalgebra::{ AbstractRotation, Point3, Quaternion, Rotation2, Unit, UnitQuaternion, Vector2, Vector3};
+use std::{f64::consts::PI, time::{Duration, Instant}};
 use sdl2::controller::GameController;
-use tokio::task;
-use crate::{app::{App, AppState}, primitive::rectangle::RectPos, rendering::instance_management::ModelDataInstance, resources, transform::Transform, ui::button::{self, Button, ButtonConfig}, utils::lerps::{lerp, lerp_euler, lerp_quaternion, lerp_vector3}};
-use serde::{de, Deserialize, Serialize};
-use serde_json;
+use glyphon::Color;
+
+use crate::{app::{App, AppState}, primitive::rectangle::RectPos, transform::Transform, ui::button, utils::lerps::{lerp_quaternion, lerp_vector3}};
 
 use super::controller::Controller;
 
@@ -78,7 +73,7 @@ impl GameLogic {
                 text: "Plane Name",
                 text_color: Color::rgba(0, 255, 75, 255),
                 text_color_active: Color::rgba(0, 255, 75, 000),
-                rotation: Quaternion::zero()
+                rotation: Quaternion::identity()
             },
             &mut app.ui.text.font_system,
         );
@@ -122,8 +117,9 @@ impl GameLogic {
         }
 
         // display plane
-        let angle = Rad(1.0 * delta_time * 3.0);
-        let rotation_matrix = Matrix2::from_angle(angle);
+        let angle = 1.0 * delta_time * 3.0;
+        let binding = Rotation2::new(angle);
+        let rotation_matrix = binding.matrix();
         self.controller_simulation = rotation_matrix * self.controller_simulation;
 
 
@@ -131,27 +127,28 @@ impl GameLogic {
             if let Some(plane) = app.renderizable_instances.get_mut(plane) {
                 if let Some(plane_model) = app.game_models.get_mut(&plane.model_ref) {
                     if let Some(aleron) = plane_model.model.meshes.get_mut("left_aleron") {
-                        let dependent = aleron.base_transform.rotation.clone() * Quaternion::from_angle_x(Rad(0.5 * -self.controller_simulation.x));
+
+                        let dependent = aleron.base_transform.rotation.clone() * *UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.5 * -self.controller_simulation.x);
                         let aleron_rotation = lerp_quaternion(aleron.transform.rotation,  dependent, delta_time * 7.0);
                         let aleron_transform = Transform::new(aleron.transform.position, aleron_rotation, aleron.transform.scale);
                         aleron.change_transform(&app.queue, aleron_transform);
                     }
 
                     if let Some(aleron) = plane_model.model.meshes.get_mut("right_aleron") {
-                        let dependent = aleron.base_transform.rotation.clone() * Quaternion::from_angle_x(Rad(0.5 * self.controller_simulation.x));
+                        let dependent = aleron.base_transform.rotation.clone() * *UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.5 * self.controller_simulation.x);
                         let aleron_rotation = lerp_quaternion(aleron.transform.rotation,  dependent, delta_time * 7.0);
                         let aleron_transform = Transform::new(aleron.transform.position, aleron_rotation, aleron.transform.scale);
                         aleron.change_transform(&app.queue, aleron_transform);
                     }
 
                     if let Some(elevator) = plane_model.model.meshes.get_mut("left_elevator") {
-                        let elevator_rotation = lerp_quaternion(elevator.transform.rotation, Quaternion::from_angle_x(Rad(0.2 * -self.controller_simulation.y)), delta_time * 7.0);
+                        let elevator_rotation = lerp_quaternion(elevator.transform.rotation, *UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.2 * -self.controller_simulation.y), delta_time * 7.0);
                         let elevator_transform = Transform::new(elevator.transform.position, elevator_rotation, elevator.transform.scale);
                         elevator.change_transform(&app.queue, elevator_transform);
                     }
 
                     if let Some(elevator) = plane_model.model.meshes.get_mut("right_elevator") {
-                        let elevator_rotation = lerp_quaternion(elevator.transform.rotation, Quaternion::from_angle_x(Rad(0.2 * -self.controller_simulation.y)), delta_time * 7.0);
+                        let elevator_rotation = lerp_quaternion(elevator.transform.rotation, *UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.2 * -self.controller_simulation.y), delta_time * 7.0);
                         let elevator_transform = Transform::new(elevator.transform.position, elevator_rotation, elevator.transform.scale);
                         elevator.change_transform(&app.queue, elevator_transform);
                     }
@@ -184,9 +181,9 @@ impl GameLogic {
     }
 
     fn camera_control(&mut self, app: &mut App, delta_time: f32) {
-        let new_position = Self::rotate_camera_position(app.camera.camera.position.to_vec(), Vector3::zero(), 40.0, Vector3::new(0.0, 1.0, 0.0), delta_time);
+        let new_position = Self::rotate_camera_position(app.camera.camera.position.coords, Vector3::zeros(), 40.0, Vector3::new(0.0, 1.0, 0.0), delta_time);
 
-        app.camera.camera.position = point3(new_position.x, new_position.y, new_position.z);
+        app.camera.camera.position = Point3::new(new_position.x, new_position.y, new_position.z);
         app.camera.camera.look_at([0.0, 0.0, 0.0].into());
 
         if self.controller.ui_left && self.plane_list.index > 0 {
@@ -199,11 +196,11 @@ impl GameLogic {
     }
 
     fn rotate_camera_position(base_position: Vector3<f32>, pivot: Vector3<f32>, rotation_speed: f32, rotation_axis: Vector3<f32>, delta_time: f32) -> Vector3<f32> {
-        let angle = Deg(rotation_speed * delta_time);        
-        let rotation = Quaternion::from_axis_angle(rotation_axis, angle);
+        let angle = rotation_speed * delta_time;
+        let rotation = UnitQuaternion::from_axis_angle(&Unit::new_normalize(rotation_axis), angle);
         let relative_position = base_position - pivot;
-        let rotated_position = rotation.rotate_vector(relative_position);
-
+        let rotated_position = rotation.transform_vector(&relative_position);
+    
         rotated_position + pivot
     }
 }

@@ -1,7 +1,7 @@
 use std::{collections::HashMap, io::{BufReader, Cursor}, path::Path};
 
-use cgmath::{Quaternion, Vector3, Zero};
 use gltf::{image,  Gltf};
+use nalgebra::{Quaternion, Vector3};
 use rapier3d::{math::Point, prelude::ColliderBuilder};
 use wgpu::util::DeviceExt;
 

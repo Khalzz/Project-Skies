@@ -1,4 +1,4 @@
-use cgmath::Quaternion;
+use nalgebra::Quaternion;
 
 use crate::{app::MousePos, primitive::{rectangle::{RectPos, Rectangle}, text::Text}};
 

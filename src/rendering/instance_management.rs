@@ -1,18 +1,16 @@
-
-use cgmath::{Matrix3, Matrix4};
+use nalgebra::{Matrix3, Matrix4, Vector3, UnitQuaternion};
 use rapier3d::prelude::RigidBodyHandle;
 use serde::Deserialize;
 use wgpu::Buffer;
 
 use crate::game_object::{GameObject, Transform};
-
 use super::model::Model;
 
 pub struct PhysicsData {
-    pub rigidbody_handle: RigidBodyHandle
+    pub rigidbody_handle: RigidBodyHandle,
 }
 
-// when moving player we move instance, when moving world object we move renderizable_transform
+// When moving player we move instance; when moving world object we move renderizable_transform
 pub struct InstanceData {
     pub physics_data: Option<PhysicsData>,
     pub renderizable_transform: Transform,
@@ -22,21 +20,21 @@ pub struct InstanceData {
 
 #[derive(Clone)]
 pub struct Instance {
-    pub position: cgmath::Vector3<f32>,
-    pub rotation: cgmath::Quaternion<f32>,
-    pub scale: cgmath::Vector3<f32>,
+    pub position: Vector3<f32>,
+    pub rotation: UnitQuaternion<f32>,
+    pub scale: Vector3<f32>,
 }
 
 impl Instance {
     pub fn to_raw(&self) -> InstanceRaw {
-        let translation = cgmath::Matrix4::from_translation(self.position.cast::<f32>().unwrap());
-        let rotation = cgmath::Matrix4::from(self.rotation.cast::<f32>().unwrap());
-        let scale = cgmath::Matrix4::from_nonuniform_scale(self.scale.x as f32, self.scale.y as f32, self.scale.z as f32);
-        let model: Matrix4<f32> = translation * Matrix4::from(rotation) * scale;
+        let translation = Matrix4::new_translation(&self.position);
+        let rotation = self.rotation.to_homogeneous();
+        let scale = Matrix4::new_nonuniform_scaling(&self.scale);
+        let model: Matrix4<f32> = translation * rotation * scale;
 
         InstanceRaw {
             model: model.into(),
-            normal: Matrix3::from(self.rotation).into()
+            normal: (*self.rotation.to_rotation_matrix().matrix()).into(),
         }
     }
 }
@@ -54,23 +52,23 @@ pub struct LevelData {
     pub children: Vec<GameObject>,
 }
 
-// quaternions are not very usable in wgpu so instead of doing math in the shader we are gonna save the raw instance here directly
+// Quaternions are not very usable in wgpu, so we save the raw instance here directly
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct InstanceRaw {
     pub(crate) model: [[f32; 4]; 4],
-    pub(crate) normal: [[f32; 3]; 3]
+    pub(crate) normal: [[f32; 3]; 3],
 }
 
 impl InstanceRaw {
-    // we create a vertexBuffer
+    // Create a vertex buffer layout for InstanceRaw
     pub fn desc() -> wgpu::VertexBufferLayout<'static> {
         use std::mem;
         wgpu::VertexBufferLayout {
-            array_stride: mem::size_of::<InstanceRaw>() as wgpu::BufferAddress, // the vertexbuffer is of type instance raw it means that our shader will only change to use the next instance
+            array_stride: mem::size_of::<InstanceRaw>() as wgpu::BufferAddress, // Instance raw means shader will change per instance
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &[
-                // A mat 4 is basically a vec4 of vec4's so we have to define every vec4 of it
+                // Define each vec4 in a mat4
                 wgpu::VertexAttribute {
                     offset: 0,
                     shader_location: 5,
@@ -91,7 +89,7 @@ impl InstanceRaw {
                     shader_location: 8,
                     format: wgpu::VertexFormat::Float32x4,
                 },
-                // these are for the rotation of ilumination normals
+                // Rotation for illumination normals
                 wgpu::VertexAttribute {
                     offset: mem::size_of::<[f32; 16]>() as wgpu::BufferAddress,
                     shader_location: 9,
@@ -111,4 +109,3 @@ impl InstanceRaw {
         }
     }
 }
-// Instancing

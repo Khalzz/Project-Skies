@@ -93,7 +93,7 @@ impl Wing {
                 color: [0.0, 0.0, 1.0],
             },
             ManualVertex {
-                position: (world_pressure_center - world_lift).into(),
+                position: (world_pressure_center - (world_lift.normalize() * lift_coeff)).into(),
                 color: [0.0, 0.0, 1.0],
             },
         ]);
@@ -122,23 +122,8 @@ impl Wing {
     
         // Apply forces at the rotated pressure center position in world coordinates
         rigidbody.add_force_at_point(world_lift + world_drag, world_pressure_center.into(), true);
-        
-    }
-
-    fn get_point_velocity(rigid_body: &RigidBody, point: &nalgebra::Vector3<f32>) -> nalgebra::Vector3<f32> {
-        // Get the rigid body's linear velocity
-        let linear_velocity = rigid_body.linvel();
-        
-        // Get the rigid body's angular velocity
-        let angular_velocity = rigid_body.angvel();
-        
-        // Calculate the point's position relative to the body's center of mass
-        let point_relative = point - &rigid_body.position().translation.vector;
-    
-        // Calculate the angular velocity effect using cross product
-        let angular_velocity_effect = angular_velocity.cross(&point_relative);
-    
-        // Total velocity at the point is the sum of linear and angular contributions
-        linear_velocity + angular_velocity_effect
+        let angular_velocity = rigidbody.angvel();
+        let angular_damping_factor = 0.99; // Adjust this factor based on how quickly you want to stop the spin
+        rigidbody.set_angvel(angular_velocity * angular_damping_factor, true);
     }
 }
