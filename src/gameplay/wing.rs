@@ -30,64 +30,63 @@ impl Wing {
             flap_ratio,
             pressure_center,
             aspect_ratio: wing_span.powi(2) / wing_area,
-            efficiency_factor: 0.1,
+            efficiency_factor: 1.0,
             control_input: 0.0
         }
     }
 
     // fix the fact that im setting all based on the orientation of the plane instead of the wing orientation
     pub fn physics_force(&mut self, rigidbody: &mut RigidBody, renderizable_lines: &mut Vec<[ManualVertex; 2]>) {    
-
+        // Transform the local pressure center into world space
+        let world_pressure_center = rigidbody.rotation() * self.pressure_center + rigidbody.translation();
+    
+        // Calculate local velocity in the wing's local space, adjusting for rotation
         let inverse_transform_direction = rigidbody.rotation().inverse() * rigidbody.linvel();
-        let local_velocity = inverse_transform_direction + rigidbody.angvel().cross(&self.pressure_center);
+        let local_velocity = inverse_transform_direction + rigidbody.angvel();
+        // let local_velocity = inverse_transform_direction + rigidbody.angvel().cross(&world_pressure_center);
+
+        // let local_velocity = Self::get_point_velocity(&rigidbody, &self.pressure_center);
 
         let speed = local_velocity.magnitude();
-
         if speed <= 1.0 {
-            return
+            return;
         }
-
+    
+        // Calculate drag and lift directions in the world space
         let drag_direction = -local_velocity.normalize();
-
         let lift_direction = drag_direction.cross(&self.normal).cross(&drag_direction).normalize();
+    
+        // Calculate the angle of attack, ensuring it is based on the plane's orientation
+        let angle_of_attack = (drag_direction.dot(&self.normal).asin().to_degrees()).clamp(self.air_foil.min_alpha, self.air_foil.max_alpha);
+    
 
-        let mut angle_of_attack = drag_direction.dot(&self.normal).asin().to_degrees();
-
-        if angle_of_attack > self.air_foil.max_alpha {
-            angle_of_attack = self.air_foil.max_alpha;
-        }
-
-        if angle_of_attack < self.air_foil.min_alpha {
-            angle_of_attack = self.air_foil.min_alpha;
-        }
-
+        // Sample the lift and drag coefficients based on the angle of attack
         let (mut lift_coeff, mut drag_coeff) = self.air_foil.sample(angle_of_attack);
-
+    
+        // Apply flap effects if any
         if self.flap_ratio > 0.0 {
             let cl_max = 1.1039;
-
-            let deflection_rato = self.control_input;
-
-            let delta_lift_coeff = self.flap_ratio.sqrt() * cl_max * deflection_rato;
+            let deflection_ratio = self.control_input;
+            let delta_lift_coeff = self.flap_ratio.sqrt() * cl_max * deflection_ratio;
             lift_coeff += delta_lift_coeff;
         }
 
+        // Calculate induced drag based on lift and wing characteristics
         let induced_drag_coeff = lift_coeff.powi(2) / (PI * self.aspect_ratio * self.efficiency_factor);
         drag_coeff += induced_drag_coeff;
-
+    
         let air_density = 1.255;
-
         let dynamic_pressure = 0.5 * speed.powi(2) * air_density * self.wing_area;
-
+    
+        // Calculate lift and drag forces in local space
         let lift = lift_direction * lift_coeff * dynamic_pressure;
         let drag = drag_direction * drag_coeff * dynamic_pressure;
-
-        let world_pressure_center = rigidbody.rotation() * self.pressure_center + rigidbody.translation();
-
+    
+        // Rotate lift and drag forces into world space
         let world_drag = rigidbody.rotation() * drag;
         let world_lift = rigidbody.rotation() * lift;
-
-        // rendering of the lift direction
+    
+        // Render the lift and drag directions
         renderizable_lines.push([
             ManualVertex {
                 position: world_pressure_center.into(),
@@ -98,8 +97,7 @@ impl Wing {
                 color: [0.0, 0.0, 1.0],
             },
         ]);
-
-        // rendering of the drag direction
+    
         renderizable_lines.push([
             ManualVertex {
                 position: world_pressure_center.into(),
@@ -111,7 +109,36 @@ impl Wing {
             },
         ]);
 
-        // Add the force at the rotated pressure center position in world coordinates.
+        renderizable_lines.push([
+            ManualVertex {
+                position: world_pressure_center.into(),
+                color: [1.0, 1.0, 1.0],
+            },
+            ManualVertex {
+                position: (world_pressure_center + (rigidbody.rotation() * self.normal)).into(),
+                color: [1.0, 1.0, 1.0],
+            },
+        ]);
+    
+        // Apply forces at the rotated pressure center position in world coordinates
         rigidbody.add_force_at_point(world_lift + world_drag, world_pressure_center.into(), true);
+        
+    }
+
+    fn get_point_velocity(rigid_body: &RigidBody, point: &nalgebra::Vector3<f32>) -> nalgebra::Vector3<f32> {
+        // Get the rigid body's linear velocity
+        let linear_velocity = rigid_body.linvel();
+        
+        // Get the rigid body's angular velocity
+        let angular_velocity = rigid_body.angvel();
+        
+        // Calculate the point's position relative to the body's center of mass
+        let point_relative = point - &rigid_body.position().translation.vector;
+    
+        // Calculate the angular velocity effect using cross product
+        let angular_velocity_effect = angular_velocity.cross(&point_relative);
+    
+        // Total velocity at the point is the sum of linear and angular contributions
+        linear_velocity + angular_velocity_effect
     }
 }

@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use std::collections::HashMap;
 use std::env;
 
-use cgmath::Vector3;
+use cgmath::{Vector3, Zero};
 use nalgebra::{Matrix3, Unit, UnitQuaternion};
 use rapier3d::na::{vector, Vector};
 use rapier3d::prelude::{BroadPhase, CCDSolver, ColliderBuilder, ColliderSet, CollisionPipeline, DefaultBroadPhase, ImpulseJointSet, IntegrationParameters, IslandManager, MultibodyJointSet, NarrowPhase, PhysicsPipeline, QueryPipeline, RigidBody, RigidBodyBuilder, RigidBodySet};
@@ -707,39 +707,6 @@ impl App {
                         play.plane_systems.altitude = ((self.renderizable_instances.get("player").unwrap().instance.transform.position.y - self.renderizable_instances.get("world").unwrap().instance.transform.position.y)).round();
 
                         play.update( &mut app_state, &mut event_pump, &mut self, &mut controller);
-                        self.renderizable_instances.get_mut("fellow_aviator").unwrap().renderizable_transform.position.z += 1000.0 * delta_time;
-                        let plane_rot = self.renderizable_instances.get("player").unwrap().instance.transform.rotation;
-                        let plane_pos = self.renderizable_instances.get("player").unwrap().renderizable_transform.position ;
-
-                        for (model_key, model) in &self.game_models {
-                            let mut offset_index = 0;
-                            
-                            for (key, renderizable) in &mut self.renderizable_instances {
-                                if renderizable.model_ref == *model_key {
-
-                                    // instead of doing it from the plane position, do it from the "rigid_body" one
-                                    // renderizable.instance.transform.position = renderizable.renderizable_transform.position - plane_pos;
-                                    
-                                    let offset = offset_index as u64 * std::mem::size_of::<InstanceRaw>() as u64;
-                                    self.queue.write_buffer(
-                                        &model.instance_buffer,
-                                        offset,
-                                        bytemuck::cast_slice(&[renderizable.instance.transform.to_raw()]),
-                                    );
-                                    offset_index += 1
-                                }
-
-                                match &renderizable.physics_data {
-                                    Some(physics_info) => {
-                                        if let Some(rigid_body) = self.physics.rigidbody_set.get(physics_info.rigidbody_handle) {
-                                            renderizable.instance.transform.position = cgmath::Vector3::new(rigid_body.translation().x, rigid_body.translation().y, rigid_body.translation().z);
-                                            renderizable.instance.transform.rotation = cgmath::Quaternion::new(rigid_body.rotation().w, rigid_body.rotation().coords.x, rigid_body.rotation().coords.y, rigid_body.rotation().coords.z);
-                                        }
-                                    },
-                                    None => {},
-                                }
-                            }
-                        }
 
                         self.physics.physics_pipeline.step(
                             &gravity,
@@ -756,6 +723,33 @@ impl App {
                             &physics_hooks,
                             &event_handler,
                         );
+
+                        for (model_key, model) in &self.game_models {
+                            let mut offset_index = 0;
+                            
+                            for (key, renderizable) in &mut self.renderizable_instances {
+                                if renderizable.model_ref == *model_key {
+                                    match &renderizable.physics_data {
+                                        Some(physics_info) => {
+                                            if let Some(rigid_body) = self.physics.rigidbody_set.get(physics_info.rigidbody_handle) {
+                                                renderizable.instance.transform.position = cgmath::Vector3::new(rigid_body.position().translation.x, rigid_body.position().translation.y, rigid_body.position().translation.z);
+                                                renderizable.instance.transform.rotation = cgmath::Quaternion::new(rigid_body.position().rotation.w, rigid_body.position().rotation.i, rigid_body.position().rotation.j, rigid_body.position().rotation.k);
+                                            }
+                                        },
+                                        None => {},
+                                    }
+
+                                    
+                                    let offset = offset_index as u64 * std::mem::size_of::<InstanceRaw>() as u64;
+                                    self.queue.write_buffer(&model.instance_buffer, offset, bytemuck::cast_slice(&[renderizable.instance.transform.to_raw()]),);
+                                    offset_index += 1
+                                }
+
+                                
+                            }
+                        }
+
+                        
                         
                         // lighting update
                         if let Some(sun) = self.renderizable_instances.get("sun") {
@@ -939,7 +933,7 @@ impl App {
                                 // .additional_mass(physics_obj_data.rigidbody.mass)
                                 .additional_mass_properties(rapier3d::prelude::MassProperties::new(vector![0.0, 0.0, 0.0].into(), physics_obj_data.rigidbody.mass, principal_inertia))
                                 .translation(vector![instance_data.transform.position.x, instance_data.transform.position.y, instance_data.transform.position.z])
-                                // .rotation(instance_data.transform.rotation)
+                                // .rotation([0.0, 90.0, 0.0].into())
                                 .build()
                                 
                                 

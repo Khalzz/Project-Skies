@@ -82,7 +82,7 @@ pub struct Physics {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct CameraData {
+pub struct Cameras {
     pub cockpit_camera: Vector3<f32>,
     pub cinematic_camera: Vector3<f32>,
     pub frontal_camera: Vector3<f32>,
@@ -91,7 +91,7 @@ pub struct CameraData {
 #[derive(Debug, Deserialize, Clone)]
 pub struct MetaData {
     pub physics: Option<Physics>,
-    pub cameras: Option<CameraData>,
+    pub cameras: Option<Cameras>,
     pub lighting: Option<Lighting>
 }
 
