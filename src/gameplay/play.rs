@@ -4,17 +4,16 @@ use glyphon::Color;
 use nalgebra::{vector, ComplexField, Point3, Quaternion, Unit, UnitQuaternion, UnitVector3, Vector2, Vector3};
 use rand::{rngs::ThreadRng, Rng};
 use rapier3d::{control, parry::transformation::utils::push_degenerate_top_ring_indices, prelude::RigidBody};
-use ron::from_str;
 use sdl2::controller::GameController;
-use crate::{app::{App, AppState}, primitive::{manual_vertex::ManualVertex, rectangle::RectPos}, rendering::instance_management::InstanceData, transform::Transform, ui::button::{self, Button, ButtonConfig}, utils::lerps::{lerp, lerp_quaternion, lerp_vector3}};
-
-use super::{airfoil::AirFoil, controller::Controller, wing::Wing};
+use crate::{app::{App, AppState}, primitive::{manual_vertex::ManualVertex, rectangle::RectPos}, rendering::{camera::{Camera, CameraRenderizable}, instance_management::InstanceData}, transform::Transform, ui::button::{self, Button, ButtonConfig}, utils::lerps::{lerp, lerp_quaternion, lerp_vector3}};
+use super::{airfoil::AirFoil, controller::Controller, wing::Wing, wheel::Wheel};
 
 pub enum CameraState {
     Normal,
     Cockpit,
     Cinematic,
     Frontal,
+    Free,
 }
 
 pub struct Bandit {
@@ -34,7 +33,8 @@ pub struct CameraData {
     pub look_at: Option<Vector3<f32>>,
     pub next_look_at: Option<Vector3<f32>>,
     pub mod_vector: Vector3<f32>,
-    pub mod_up: Vector3<f32>
+    pub mod_up: Vector3<f32>,
+    pub mod_quaternion: UnitQuaternion<f32>
 }
 
 pub struct BlinkingAlert {
@@ -47,14 +47,6 @@ pub struct BaseRotations {
     right_aleron: Option<Quaternion<f32>>,
 }
 
-pub struct PlaneState {
-    velocity: nalgebra::Vector3<f32>,
-    local_velocity: nalgebra::Vector3<f32>,
-    local_angular_velocity: nalgebra::Vector3<f32>,
-    angle_of_attack_pitch: f32,
-    angle_of_attack_yaw: f32
-}
-
 pub struct PlaneSystems {
     bandits: Vec<Bandit>,
     stall: bool,
@@ -62,7 +54,9 @@ pub struct PlaneSystems {
     pub afterburner_value: f32,
     pub base_rotations: BaseRotations,
     pub flap_ratio: f32,
-    pub wings: Vec<Wing>
+    pub wings: Vec<Wing>,
+    pub wheels: Vec<Wheel>,
+    pub previous_velocity: Option<Vector3<f32>>
 }
 
 pub struct GameLogic { // here we define the data we use on our script
@@ -80,7 +74,6 @@ pub struct GameLogic { // here we define the data we use on our script
     rng: ThreadRng,
     pub final_rotation: Quaternion<f32>,
     pub plane_systems: PlaneSystems,
-    pub plane_state: PlaneState
 } 
 
 impl GameLogic {
@@ -269,7 +262,8 @@ impl GameLogic {
             look_at: None,
             next_look_at: None,
             mod_vector: Vector3::new(0.0, 0.0, 0.0),
-            mod_up: Vector3::identity()
+            mod_up: Vector3::identity(),
+            mod_quaternion: UnitQuaternion::identity(),
         };
 
         let fellow = Bandit {
@@ -300,10 +294,16 @@ impl GameLogic {
 
         // i have to also add left and right ailerons
         let wings = vec![
-            Wing::new(nalgebra::vector![8.5, 0.0, 1.0], 6.96, 2.50, 0.0, naca_2412.clone(), vector![0.0, 1.0, 0.0], 0.05), // left wing
-            Wing::new(nalgebra::vector![-8.5, 0.0, 1.0], 6.96, 2.50, 0.0, naca_2412.clone(), vector![0.0, 1.0, 0.0], 0.05), // right wing
-            Wing::new(nalgebra::vector![0.0, 0.0, -9.0], 6.54, 2.70, 0.0, naca_0012.clone(), vector![0.0, 1.0, 0.0], 0.1), // elevator wing
-            Wing::new(nalgebra::vector![0.0, 1.0, -9.0], 6.96, 2.50, 0.0, naca_0012.clone(), vector![1.0, 0.0, 0.0], 0.15) // rudder wing
+            Wing::new(vector![8.5, 0.0, 1.0], 6.96, 2.50, 0.0, naca_2412.clone(), vector![0.0, 1.0, 0.0], 0.05), // left wing
+            Wing::new(vector![-8.5, 0.0, 1.0], 6.96, 2.50, 0.0, naca_2412.clone(), vector![0.0, 1.0, 0.0], 0.05), // right wing
+            Wing::new(vector![0.0, 0.0, -9.0], 6.54, 2.70, 0.0, naca_0012.clone(), vector![0.0, 1.0, 0.0], 1.0), // elevator wing
+            Wing::new(vector![0.0, 1.0, -9.0], 6.96, 2.50, 0.0, naca_0012.clone(), vector![1.0, 0.0, 0.0], 0.15) // rudder wing
+        ];
+
+        let wheels = vec![
+            Wheel::new(vector![0.0, -0.0, 10.0], 4.0, 18000.0, 20000.0, "wheel-f".to_string()),
+            Wheel::new(vector![-3.0, -0.0, 0.0], 4.0, 20000.0, 20000.0, "wheel-lb".to_string()),
+            Wheel::new(vector![3.0, -0.0, 0.0], 4.0, 20000.0, 20000.0, "wheel-rb".to_string())
         ];
 
         let plane_systems = PlaneSystems {
@@ -313,7 +313,9 @@ impl GameLogic {
             afterburner_value: 0.0,
             base_rotations: BaseRotations { left_aleron: None, right_aleron: None },
             flap_ratio: 0.0,
-            wings
+            wings,
+            wheels,
+            previous_velocity: None,
         };
 
         let rng = rand::thread_rng();
@@ -322,14 +324,6 @@ impl GameLogic {
         let mut blinking_alerts: HashMap<String, BlinkingAlert> = HashMap::new();
         blinking_alerts.insert("altitude".to_owned(), BlinkingAlert { alert_state: false, time_alert: 0.0 });
         blinking_alerts.insert("stall".to_owned(), BlinkingAlert { alert_state: false, time_alert: 0.0 });
-
-        let plane_state = PlaneState { 
-            velocity: nalgebra::Vector3::zeros(),
-            local_velocity: nalgebra::Vector3::zeros(),
-            local_angular_velocity: nalgebra::Vector3::zeros(),
-            angle_of_attack_pitch: 0.0,
-            angle_of_attack_yaw: 0.0,
-        };
 
         Self {
             fps: 0,
@@ -346,7 +340,6 @@ impl GameLogic {
             plane_systems,
             rng,
             final_rotation,
-            plane_state
         }
     }
 
@@ -472,23 +465,15 @@ impl GameLogic {
             Some(physics_data) => {
                 if let Some(rigidbody) = app.physics.rigidbody_set.get_mut(physics_data.rigidbody_handle) {
 
-                    // set plane state
-                    self.plane_state.velocity = *rigidbody.linvel();
-                    self.plane_state.local_velocity = rigidbody.rotation().inverse() * self.plane_state.velocity;
-                    self.plane_state.local_angular_velocity = rigidbody.rotation().inverse() * rigidbody.angvel();
-
-                    // angle of attack of the pitch and the yaw
-                    self.plane_state.angle_of_attack_pitch = -self.plane_state.local_velocity.y.atan2(self.plane_state.local_velocity.z);
-                    self.plane_state.angle_of_attack_yaw = -self.plane_state.local_velocity.x.atan2(self.plane_state.local_velocity.z);
-
                     rigidbody.reset_torques(true);
                     rigidbody.reset_forces(true);
-
                     // Thrust                    
-                    let max_thrust = 131000.0; // newtons of force generated by engine
+                    let max_thrust = 60000.0; // newtons of force generated by engine
                     let power_value_world = rigidbody.rotation() * nalgebra::Vector3::new(0.0, 0.0, max_thrust * self.controller.power);
 
                     // Set up renderable line with consistent world space coordinates.
+                    /* 
+                    
                     app.physics.render_physics.renderizable_lines.push([
                         ManualVertex {
                             position: [rigidbody.translation().x, rigidbody.translation().y, rigidbody.translation().z],  // Start point of thrust line in world space.
@@ -499,7 +484,8 @@ impl GameLogic {
                             color: [0.5, 1.0, 0.5],
                         },
                     ]);
-
+                    */
+                        
                     // Apply the thrust force to the rigidbody.
                     rigidbody.add_force(power_value_world, true);
                     // Thrust
@@ -513,8 +499,6 @@ impl GameLogic {
                     for wing in &mut self.plane_systems.wings {
                         wing.physics_force(rigidbody, &mut app.physics.render_physics.renderizable_lines);
                     }
-
-                    
                     /*
                     
                     let y = self.controller.y * 10000.0;
@@ -523,9 +507,44 @@ impl GameLogic {
                     rigidbody.add_torque(rigidbody.rotation() * vector![y, yaw, z], true);
                     */
                     
-                    if let Some(aoa) = app.components.get_mut("aoa") {
-                        aoa.text.set_text(&mut app.ui.text.font_system, &format!("AoA: {}", self.plane_state.angle_of_attack_pitch), true);
-                    }  
+                    // G's
+                    let current_velocity = rigidbody.linvel();
+
+                    if let Some(prev_velocity) = self.plane_systems.previous_velocity {
+                        let acceleration = (current_velocity - prev_velocity) / delta_time;
+
+                        let total_acceleration = acceleration + app.physics.gravity;
+
+                        // Calculate G-forces
+                        let g_forces = total_acceleration.magnitude() / 9.81;
+
+                        // Update previous velocity
+                        self.plane_systems.previous_velocity = Some(*current_velocity);
+
+                        if let Some(aoa) = app.components.get_mut("aoa") {
+                            aoa.text.set_text(&mut app.ui.text.font_system, &format!("G: {:.2}", g_forces), true);
+                        }  
+                    }
+
+                    self.plane_systems.previous_velocity = Some(*current_velocity);
+
+                    let mass_center = rigidbody.mass_properties().local_mprops.local_com;
+                    let world_mc = rigidbody.mass_properties().world_com;
+
+                    // let result = rigidbody.translation() + (Vector3::new(mass_center.x, mass_center.y, mass_center.z) + Vector3::new(0.0, 2.0, 0.0));
+                    let result = (Vector3::new(world_mc.x, world_mc.y, world_mc.z) + Vector3::new(0.0, 2.0, 0.0));
+
+                    app.physics.render_physics.renderizable_lines.push([
+                        ManualVertex {
+                            position: (result).into(),
+                            color: [0.0, 0.0, 1.0],
+                        },
+                        ManualVertex {
+                            position: (Vector3::new(0.0, 0.0, 0.0)).into(),
+                            color: [1.0, 0.0, 0.0],
+                        },
+                    ]);
+                    
                     
                     let plane_direction = rigidbody.linvel().normalize() * 100000.0;
                     let plane_direction = app.camera.world_to_screen(plane_direction.into() , app.config.width, app.config.height);
@@ -542,8 +561,49 @@ impl GameLogic {
                         },
                     }
                 }
+
+                for wheel in &mut self.plane_systems.wheels {
+                    if let Some((suspension_force, suspension_origin, wheel_position)) = wheel.update_wheel(&physics_data, &mut app.physics.render_physics.renderizable_lines, &app.physics.collider_set, &mut app.physics.rigidbody_set, &app.physics.query_pipeline, &mut app.game_models) {
+                        if let Some(rigidbody) = app.physics.rigidbody_set.get_mut(physics_data.rigidbody_handle) {
+                            wheel.stiffness += if self.controller.ui_left {
+                                -10000.0 * delta_time
+                            } else if self.controller.ui_right {
+                                10000.0 * delta_time
+                            } else {
+                                0.0
+                            };
+                            
+                            if let Some(wheel) = app.game_models.get_mut(&plane.model_ref).unwrap().model.meshes.get_mut(&wheel.shape_name) {
+                                let final_pos =  rigidbody.rotation().inverse() * (wheel_position - rigidbody.translation());
+
+                                wheel.transform.position = Vector3::new(final_pos.x / plane.instance.transform.scale.x, final_pos.y / plane.instance.transform.scale.y, final_pos.z / plane.instance.transform.scale.z);
+                                println!("{}", wheel.transform.position);
+                                wheel.update_transform(&app.queue);
+                            }
+                            /* 
+                            app.physics.render_physics.renderizable_lines.push([
+                                ManualVertex {
+                                    position: (suspension_origin).into(),
+                                    color: [0.0, 0.0, 1.0],
+                                },
+                                ManualVertex {
+                                    position: ((rigidbody.translation()) + (rigidbody.rotation() * wheel_position)).into(),
+                                    color: [1.0, 0.0, 0.0],
+                                },
+                            ]);
+                            */
+
+                            println!("{}", wheel.stiffness);
+                            rigidbody.add_force_at_point(suspension_force, suspension_origin.into(), true);
+                        }
+                    }
+                }
+
+                
             },
-            None => todo!(),
+            None => {
+
+            },
         }
         
     }
@@ -657,6 +717,24 @@ impl GameLogic {
                                 }
                                 app.camera.camera.look_at((*rigidbody.translation()).into());
                             },
+                            CameraState::Free => {
+                                app.camera.projection.fovy = 60.0;
+                                app.camera.camera.yaw = -self.controller.mouse.x as f32;
+                                app.camera.camera.pitch = (self.controller.mouse.y as f32);
+
+                                // Clamp pitch to avoid flipping over
+                                let rotation_y = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), app.camera.camera.yaw.to_radians());
+                                let rotation_x = UnitQuaternion::from_axis_angle(&Vector3::x_axis(), app.camera.camera.pitch.to_radians());
+
+                                // Combine rotations
+                                self.camera_data.mod_quaternion = rotation_y * rotation_x;
+
+                                app.camera.camera.position = ((self.camera_data.mod_quaternion * Vector3::new(0.0, 0.0, -50.0)) + rigidbody.translation()).into();
+                                app.camera.camera.look_at((*rigidbody.translation()).into());
+
+                                // self.controller.mouse.x = 0;
+                                // self.controller.mouse.y = 0;
+                            },
                         }
                     }
                 },
@@ -668,41 +746,43 @@ impl GameLogic {
         
         self.calculate_lockable(app);
         if self.controller.change_camera.up {
-            self.next_camera();
+            self.next_camera(&mut app.camera);
         }
     }
 
     
-fn calculate_lockable(&mut self, app: &mut App) {
-    let plane = &app.renderizable_instances.get("player").unwrap().instance;
-    for lockable in &self.plane_systems.bandits {
-        if lockable.locked && self.controller.fix_view.pressed && self.controller.fix_view.time_pressed > self.controller.fix_view_hold_window {
-            match app.renderizable_instances.get(&lockable.tag) {
-                Some(look_at) => {
-                    let look_at_position = look_at.instance.transform.position;
-                    app.camera.camera.look_at(look_at_position.into());
-                    match self.camera_data.camera_state {
-                        CameraState::Normal => {
-                            let plane_pos = plane.transform.position;
-                            let direction = (look_at_position - plane_pos).normalize();
-                            let rotation = UnitQuaternion::from_axis_angle(&Vector3::z_axis(), direction.angle(&Vector3::z()));
-                            let pos = plane_pos + rotation * Vector3::new(0.0, 0.0, -50.0);
-                            let final_pos = pos + plane.transform.rotation * Vector3::new(0.0, 20.0, 0.0);
-                            app.camera.camera.position = Point3::from(final_pos);
-                        },
-                        CameraState::Cockpit => {
-                            // Here we will get the actual rotation of the camera and get the angle of the actual plane
-                            // so we can define a max value for the yaw and the pitch
-                        },
-                        CameraState::Cinematic => {},
-                        CameraState::Frontal => {},
-                    }
-                },
-                None => {},
+    
+    fn calculate_lockable(&mut self, app: &mut App) {
+        let plane = &app.renderizable_instances.get("player").unwrap().instance;
+        for lockable in &self.plane_systems.bandits {
+            if lockable.locked && self.controller.fix_view.pressed && self.controller.fix_view.time_pressed > self.controller.fix_view_hold_window {
+                match app.renderizable_instances.get(&lockable.tag) {
+                    Some(look_at) => {
+                        let look_at_position = look_at.instance.transform.position;
+                        app.camera.camera.look_at(look_at_position.into());
+                        match self.camera_data.camera_state {
+                            CameraState::Normal => {
+                                let plane_pos = plane.transform.position;
+                                let direction = (look_at_position - plane_pos).normalize();
+                                let rotation = UnitQuaternion::from_axis_angle(&Vector3::z_axis(), direction.angle(&Vector3::z()));
+                                let pos = plane_pos + rotation * Vector3::new(0.0, 0.0, -50.0);
+                                let final_pos = pos + plane.transform.rotation * Vector3::new(0.0, 20.0, 0.0);
+                                app.camera.camera.position = Point3::from(final_pos);
+                            },
+                            CameraState::Cockpit => {
+                                // Here we will get the actual rotation of the camera and get the angle of the actual plane
+                                // so we can define a max value for the yaw and the pitch
+                            },
+                            CameraState::Cinematic => {},
+                            CameraState::Frontal => {},
+                            CameraState::Free => {},
+                        }
+                    },
+                    None => {},
+                }
             }
         }
     }
-}
 
     fn ui_control(&mut self, app: &mut App, delta_time: f32) {
         let plane: &mut &mut InstanceData = &mut app.renderizable_instances.get_mut("player").unwrap();
@@ -901,12 +981,17 @@ fn calculate_lockable(&mut self, app: &mut App) {
         base_deceleration * speed_ratio * speed_ratio
     }
 
-    fn next_camera(&mut self) {
+    fn next_camera(&mut self, camera: &mut CameraRenderizable) {
         match self.camera_data.camera_state {
-            CameraState::Normal => self.camera_data.camera_state = CameraState::Cockpit,
+            CameraState::Normal => {
+                self.camera_data.camera_state = CameraState::Free;
+                camera.camera.yaw = 0.0;
+                camera.camera.pitch = 0.0;
+            },
             CameraState::Cockpit => self.camera_data.camera_state = CameraState::Cinematic,
             CameraState::Cinematic => self.camera_data.camera_state = CameraState::Frontal,
             CameraState::Frontal => self.camera_data.camera_state = CameraState::Normal,
+            CameraState::Free => self.camera_data.camera_state = CameraState::Cockpit,
 
         }
     }

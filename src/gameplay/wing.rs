@@ -122,6 +122,9 @@ impl Wing {
     
         // Apply forces at the rotated pressure center position in world coordinates
         rigidbody.add_force_at_point(world_lift + world_drag, world_pressure_center.into(), true);
+        
+        /* 
+        */
         let angular_velocity = rigidbody.angvel();
         let angular_damping_factor = 0.99; // Adjust this factor based on how quickly you want to stop the spin
         rigidbody.set_angvel(angular_velocity * angular_damping_factor, true);

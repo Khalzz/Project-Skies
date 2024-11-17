@@ -20,6 +20,7 @@ mod gameplay {
     pub mod plane_selection;
     pub mod airfoil;
     pub mod wing;
+    pub mod wheel;
 }
 
 mod primitive {

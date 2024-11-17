@@ -5,13 +5,19 @@ use std::time::Instant;
 
 use sdl2::{controller::{self, Axis, GameController}, event::{Event, EventPollIterator}, keyboard::Keycode};
 
-use crate::{app::{self, App, AppState}, ui::button};
+use crate::{app::{self, App, AppState}, ui::button, utils::lerps::lerp};
 
 pub struct Input {
     pub pressed: bool,
     pub just_pressed: bool,
     pub up: bool,
     pub time_pressed: f32,
+}
+
+pub struct Mouse {
+    pub x: i32,
+    pub y: i32,
+    pub sensitivity: f32
 }
 
 pub struct Controller {
@@ -33,7 +39,8 @@ pub struct Controller {
     pub ui_down: bool,
     pub ui_left: bool,
     pub ui_right: bool,
-    pub ui_select: bool
+    pub ui_select: bool,
+    pub mouse: Mouse
 }
 
 impl Controller {
@@ -58,6 +65,7 @@ impl Controller {
             ui_left: false,
             ui_right: false,
             ui_select: false,
+            mouse: Mouse { x: 0, y: 0, sensitivity: 0.5 },
         }
     }
 
@@ -87,6 +95,7 @@ impl Controller {
         if self.ui_right == true {
             self.ui_right = false;
         }
+
 
         if app.throttling.last_controller_update.elapsed() >= app.throttling.controller_update_interval {
             for event in event_pump.poll_iter() {
@@ -270,6 +279,12 @@ impl Controller {
                             _ => {},
                         }
                     },
+                    Event::MouseMotion { xrel, yrel, x, y, .. } => {
+                        self.mouse.x += xrel;
+
+                        let value = (self.mouse.y + yrel).clamp(-80, 80);
+                        self.mouse.y = value;
+                    }
                     Event::Quit { .. } => {
                         app_state.is_running = false;
                     },

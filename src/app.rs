@@ -10,7 +10,7 @@ use rapier3d::na::{vector, Vector};
 use rapier3d::prelude::{BroadPhase, CCDSolver, ColliderBuilder, ColliderSet, CollisionPipeline, DefaultBroadPhase, ImpulseJointSet, IntegrationParameters, IslandManager, MultibodyJointSet, NarrowPhase, PhysicsPipeline, QueryPipeline, RigidBody, RigidBodyBuilder, RigidBodySet};
 use ron::from_str;
 use sdl2::joystick::Joystick;
-use sdl2::{joystick, JoystickSubsystem};
+use sdl2::{joystick, mouse, JoystickSubsystem};
 use sdl2::{GameControllerSubsystem, HapticSubsystem, video::Window, Sdl, render::Canvas};
 use sdl2::controller::GameController;
 use sdl2::render::TextureCreator;
@@ -127,6 +127,7 @@ pub struct App {
 pub struct Physics {
     pub physics_pipeline: PhysicsPipeline,
     pub colission_pipeline: CollisionPipeline,
+    pub query_pipeline: QueryPipeline,
     pub gravity: Vector3<f32>,
     
     // This values will save the rigidbodies and colliders
@@ -137,13 +138,15 @@ pub struct Physics {
     pub render_physics: RenderPhysics,
 }
 
-
 impl App {
     pub async fn new(title: &str, ext_width: Option<u32>, ext_height: Option<u32>) -> App{
         // base sdl2
         let context = sdl2::init().expect("SDL2 wasn't initialized");
         let video_susbsystem = context.video().expect("The Video subsystem wasn't initialized");
         
+        // so the mouse position gets setted inside the camer (the  mouse can go further than the window size)
+        context.mouse().set_relative_mouse_mode(true);
+
         let controller_subsystem = context.game_controller().unwrap();
         let joystick_subsystem = context.joystick().unwrap();
         let haptic_subsystem = context.haptic().unwrap();
@@ -363,6 +366,7 @@ impl App {
         let physics = Physics {
             physics_pipeline: PhysicsPipeline::new(),
             colission_pipeline: CollisionPipeline::new(),
+            query_pipeline: QueryPipeline::new(),
             gravity: Vector3::new(0.0, -9.81, 0.0),
             rigidbody_set: RigidBodySet::new(),
             collider_set: ColliderSet::new(),
@@ -686,7 +690,6 @@ impl App {
         let mut impulse_joint_set = ImpulseJointSet::new();
         let mut multibody_joint_set = MultibodyJointSet::new();
         let mut ccd_solver = CCDSolver::new();
-        let mut query_pipeline = QueryPipeline::new();
         let physics_hooks = ();
         let event_handler = ();
 
@@ -717,23 +720,28 @@ impl App {
                             &mut impulse_joint_set,
                             &mut multibody_joint_set,
                             &mut ccd_solver,
-                            Some(&mut query_pipeline),
+                            Some(&mut self.physics.query_pipeline),
                             &physics_hooks,
                             &event_handler,
                         );
 
                         play.update( &mut app_state, &mut event_pump, &mut self, &mut controller);
+                        let plane_pos = self.renderizable_instances.get("player").unwrap().instance.transform.position;
 
                         for (model_key, model) in &self.game_models {
                             let mut offset_index = 0;
                             
+
+
                             for (key, renderizable) in &mut self.renderizable_instances {
+                                renderizable.instance.transform.position = renderizable.renderizable_transform.position - plane_pos;
                                 if renderizable.model_ref == *model_key {
                                     match &renderizable.physics_data {
                                         Some(physics_info) => {
                                             if let Some(rigid_body) = self.physics.rigidbody_set.get(physics_info.rigidbody_handle) {
                                                 renderizable.instance.transform.position = *rigid_body.translation();
                                                 renderizable.instance.transform.rotation = *rigid_body.rotation();
+                                                
                                             }
                                         },
                                         None => {},
@@ -824,7 +832,7 @@ impl App {
                         &mut impulse_joint_set,
                         &mut multibody_joint_set,
                         &mut ccd_solver,
-                        Some(&mut query_pipeline),
+                        Some(&mut self.physics.query_pipeline),
                         &physics_hooks,
                         &event_handler,
                     );
@@ -911,38 +919,23 @@ impl App {
                         let mut physics_data: Option<PhysicsData> = None;
 
                         if let Some(physics_obj_data) = &instance_data.metadata.physics {
-                            println!("is a physics object");
                             let mut rigid_body = if physics_obj_data.rigidbody.is_static {
                                 RigidBodyBuilder::fixed().additional_mass(physics_obj_data.rigidbody.mass).translation(vector![instance_data.transform.position.x, instance_data.transform.position.y, instance_data.transform.position.z]).build()
                             } else {
-                                
-                                // this was what you had on your cpp code
-                                let inertia_tensor = Matrix3::new(
-                                    48531.0 as f32, -1320.0, 0.0,
-                                    -1320.0, 256608.0, 0.0,
-                                    0.0, 0.0, 211333.0,
-                                );
-                                
-
                                 // i had to do this
-                                let principal_inertia = nalgebra::Vector3::new(48531.0, 256608.0, 211333.0);
+                                let principal_inertia = nalgebra::Vector3::new(44531.0, 256608.0, 191333.0);
 
                                 RigidBodyBuilder::dynamic()
-                                // .additional_mass(physics_obj_data.rigidbody.mass)
-                                .additional_mass_properties(rapier3d::prelude::MassProperties::new(vector![0.0, 0.0, 0.0].into(), physics_obj_data.rigidbody.mass, principal_inertia))
-                                .translation(vector![instance_data.transform.position.x, instance_data.transform.position.y, instance_data.transform.position.z])
-                                // .rotation([0.0, 90.0, 0.0].into())
+                                .additional_mass_properties(rapier3d::prelude::MassProperties::new(physics_obj_data.rigidbody.center_of_mass.into(), physics_obj_data.rigidbody.mass, principal_inertia))
+                                .translation(instance_data.transform.position)
                                 .build()
-                                
-                                
                             };
 
                             rigid_body.set_linvel(physics_obj_data.rigidbody.initial_velocity, true);
-
                             let rigidbody_handle = self.physics.rigidbody_set.insert(rigid_body);
 
                             // collisions
-                            match &physics_obj_data.collider {
+                            let collider_handle = match &physics_obj_data.collider {
                                 Some(collider_data) => {
                                     let collider = match collider_data {
                                         game_object::ColliderType::Cuboid { half_extents } => {
@@ -951,17 +944,17 @@ impl App {
                                         game_object::ColliderType::HalfSpace { normal } => {
                                             ColliderBuilder::halfspace(Unit::new_normalize(*normal)).build()
                                         },
-                                        game_object::ColliderType::Ball { radius } => todo!(),
-                                        game_object::ColliderType::Cylinder { half_height, radius } => todo!(),
-                                        game_object::ColliderType::HeightField { heights, scale_x, scale_y } => todo!(),
+                                        _ => todo!(),
                                     };
 
-                                    self.physics.collider_set.insert_with_parent(collider, rigidbody_handle, &mut self.physics.rigidbody_set);
+                                    Some(self.physics.collider_set.insert_with_parent(collider, rigidbody_handle, &mut self.physics.rigidbody_set))
                                 },
-                                None => todo!(),
-                            }
+                                None => {
+                                    None
+                                },
+                            };
 
-                            physics_data = Some(PhysicsData { rigidbody_handle })
+                            physics_data = Some(PhysicsData { rigidbody_handle, collider_handle });
                         };
 
                         println!("loaded data: {}", ids[i]);

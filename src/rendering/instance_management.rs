@@ -1,5 +1,5 @@
 use nalgebra::{Matrix3, Matrix4, Vector3, UnitQuaternion};
-use rapier3d::prelude::RigidBodyHandle;
+use rapier3d::prelude::{ColliderHandle, RigidBodyHandle};
 use serde::Deserialize;
 use wgpu::Buffer;
 
@@ -8,6 +8,7 @@ use super::model::Model;
 
 pub struct PhysicsData {
     pub rigidbody_handle: RigidBodyHandle,
+    pub collider_handle: Option<ColliderHandle>
 }
 
 // When moving player we move instance; when moving world object we move renderizable_transform

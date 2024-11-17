@@ -43,6 +43,7 @@ pub enum ColliderType {
 pub struct RigidBodyData {
     pub is_static: bool,
     pub mass: f32,
+    pub center_of_mass: Vector3<f32>,
     pub initial_velocity: Vector3<f32>,
 }
 
