@@ -6,16 +6,6 @@ use serde::{Deserialize, Deserializer};
 
 use crate::rendering::instance_management::InstanceRaw;
 
-// GameObject2D remains the same
-#[derive(Clone, Copy)]
-pub struct GameObject2D {
-    pub active: bool,
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-}
-
 // Transform struct
 #[derive(Debug, Clone, Copy)]
 pub struct Transform {
@@ -65,13 +55,6 @@ pub struct MetaData {
     pub physics: Option<Physics>,
     pub cameras: Option<Cameras>,
     pub lighting: Option<Lighting>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct Scene {
-    pub id: String,
-    pub description: String,
-    pub children: Vec<GameObject>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

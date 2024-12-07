@@ -1,8 +1,6 @@
 use std::{collections::HashMap, io::{BufReader, Cursor}, path::Path};
-
 use gltf::{image,  Gltf};
 use nalgebra::{Quaternion, Vector3};
-use rapier3d::{math::Point, prelude::ColliderBuilder};
 use wgpu::util::DeviceExt;
 
 use crate::{rendering::{model::{self, Mesh, Model, ModelVertex}, textures::Texture}, transform::Transform};
@@ -27,7 +25,7 @@ pub async fn load_texture(file_name: &str, device: &wgpu::Device, queue: &wgpu::
     Texture::from_bytes(&data, device, queue, file_name)
 }
 
-pub async fn load_model_glb(file_name: &str, device: &wgpu::Device, queue: &wgpu::Queue, transform_bind_group_layout: &wgpu::BindGroupLayout) -> anyhow::Result<Model> {
+pub async fn _load_model_glb(file_name: &str, device: &wgpu::Device, queue: &wgpu::Queue, transform_bind_group_layout: &wgpu::BindGroupLayout) -> anyhow::Result<Model> {
     let glb_data = load_binary(file_name).await.unwrap();
     let gltf = Gltf::from_slice(&glb_data).unwrap();
 
@@ -196,13 +194,11 @@ pub async fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgp
     let mut materials = Vec::new();
     for material in gltf.materials() {
         let pbr = material.pbr_metallic_roughness();
-        let base_color_texture = &pbr.base_color_texture();
+        let _base_color_texture = &pbr.base_color_texture();
 
         let texture_source = &pbr
             .base_color_texture()
             .map(|tex| {
-                // println!("Grabbing diffuse tex");
-                // dbg!(&tex.texture().source());
                 tex.texture().source().source()
             })
             .expect("texture");
@@ -238,7 +234,7 @@ pub async fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgp
                         bind_group
                     });
                 }
-            image::Source::Uri { uri, mime_type } => {
+            image::Source::Uri { uri, mime_type: _ } => {
                 let file_dir = Path::new(file_name).parent().unwrap_or(Path::new(""));
 
                 // Join the GLTF directory with the URI to get the correct path.
@@ -292,7 +288,6 @@ fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::D
             let mut vertices = Vec::new();
                 if let Some(vertex_attribute) = reader.read_positions() {
                     vertex_attribute.for_each(|vertex| {
-                        // dbg!(vertex);
                         vertices.push(ModelVertex {
                             position: vertex,
                             tex_coords: Default::default(),
@@ -303,7 +298,6 @@ fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::D
                 if let Some(normal_attribute) = reader.read_normals() {
                     let mut normal_index = 0;
                     normal_attribute.for_each(|normal| {
-                        //dbg!(normal);
                         vertices[normal_index].normal = normal;
                         normal_index += 1;
                     });
@@ -311,7 +305,6 @@ fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::D
                 if let Some(tex_coord_attribute) = reader.read_tex_coords(0).map(|v| v.into_f32()) {
                     let mut tex_coord_index = 0;
                     tex_coord_attribute.for_each(|tex_coord| {
-                        //dbg!(tex_coord);
                         vertices[tex_coord_index].tex_coords = tex_coord;
                         tex_coord_index += 1;
                     });
@@ -339,7 +332,7 @@ fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::D
             match parent_transform {
                 Some(parent_data) => {
                     let (parent_translation, parent_rotation, parent_scale) = parent_data;
-                    let (translation, rotation, scale) = node.transform().decomposed();
+                    let (translation, rotation, _scale) = node.transform().decomposed();
 
                     let position = Vector3::from(parent_translation) + Vector3::from(translation);
                     let rotation = Quaternion::from(parent_rotation) * Quaternion::from(rotation);

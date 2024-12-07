@@ -3,9 +3,9 @@
 
 use std::time::Instant;
 
-use sdl2::{controller::{self, Axis, GameController}, event::{Event, EventPollIterator}, keyboard::Keycode};
+use sdl2::{controller::{Axis, GameController}, event::Event, keyboard::Keycode};
 
-use crate::{app::{self, App, AppState}, ui::button, utils::lerps::lerp};
+use crate::app::{App, AppState};
 
 pub struct Input {
     pub pressed: bool,
@@ -161,7 +161,7 @@ impl Controller {
                             _ => {}
                         }
                     },
-                    Event::JoyAxisMotion { timestamp, which, axis_idx, value } => {
+                    Event::JoyAxisMotion { timestamp: _, which: _, axis_idx, value } => {
                         // println!("Joystick {} Axis {} moved to {}", which, axis_idx, value);
                         if axis_idx == 0 {
                             self.x = value as f32 / 32767.0;                                    
@@ -173,7 +173,7 @@ impl Controller {
                             self.yaw = -(value as f32 / 32767.0);
                         }
                     }
-                    Event::JoyButtonDown { timestamp, which, button_idx } => {
+                    Event::JoyButtonDown { timestamp: _, which: _, button_idx } => {
                         // println!("Joystick {} Button {} pressed", which, button_idx);
                         if button_idx == 19 {
                             self.fix_view.pressed = true;
@@ -182,7 +182,7 @@ impl Controller {
                             self.change_camera.pressed = true;
                         }
                     }
-                    Event::JoyButtonUp { timestamp, which, button_idx } => {
+                    Event::JoyButtonUp { timestamp: _, which: _, button_idx } => {
                         // println!("Joystick {} Button {} pressed", which, button_idx);
                         if button_idx == 19 {
                             self.fix_view.pressed = false;
@@ -279,7 +279,7 @@ impl Controller {
                             _ => {},
                         }
                     },
-                    Event::MouseMotion { xrel, yrel, x, y, .. } => {
+                    Event::MouseMotion { xrel, yrel, .. } => {
                         self.mouse.x += xrel;
 
                         let value = (self.mouse.y + yrel).clamp(-80, 80);

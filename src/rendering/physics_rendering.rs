@@ -68,7 +68,7 @@ impl RenderPhysics {
                 &device,
                 &layout,
                 config.format,
-                Some(Texture::DEPTH_FORMAT),
+                None,
                 &[ManualVertex::desc()],
                 shader,
             )

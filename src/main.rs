@@ -1,16 +1,25 @@
 use app::App;
 
 mod app;
-mod game_object;
 mod transform;
 mod resources;
 
+mod game_nodes {
+    pub mod game_object_2d;
+    pub mod game_object;
+    pub mod scene;
+    pub mod timing;
+}
+
 mod ui {
+    pub mod vertical_container;
+    pub mod ui_transform;
+    pub mod ui_node;
     pub mod button;
+    pub mod label;
 }
 
 mod input {
-    pub mod button_module;
 }
 
 mod gameplay {
@@ -25,11 +34,10 @@ mod gameplay {
 
 mod primitive {
     pub mod manual_vertex;
-    pub mod rectangle;
-    pub mod text;
 }
 
 mod rendering {
+    pub mod render_line;
     pub mod textures;
     pub mod camera;
     pub mod model;
@@ -39,6 +47,7 @@ mod rendering {
     pub mod instance_management;
     pub mod physics_rendering;
     pub mod rendering_utils;
+    pub mod light;
 }
 
 mod utils {

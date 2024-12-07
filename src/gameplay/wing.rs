@@ -2,7 +2,7 @@ use std::f32::consts::PI;
 
 use rapier3d::prelude::RigidBody;
 
-use crate::primitive::manual_vertex::ManualVertex;
+use crate::{primitive::manual_vertex::ManualVertex, rendering::render_line::render_basic_line};
 
 use super::airfoil::AirFoil;
 
@@ -86,47 +86,23 @@ impl Wing {
         let world_drag = rigidbody.rotation() * drag;
         let world_lift = rigidbody.rotation() * lift;
     
-        // Render the lift and drag directions
-        renderizable_lines.push([
-            ManualVertex {
-                position: world_pressure_center.into(),
-                color: [0.0, 0.0, 1.0],
-            },
-            ManualVertex {
-                position: (world_pressure_center - (world_lift.normalize() * lift_coeff)).into(),
-                color: [0.0, 0.0, 1.0],
-            },
-        ]);
-    
-        renderizable_lines.push([
-            ManualVertex {
-                position: world_pressure_center.into(),
-                color: [1.0, 0.0, 0.0],
-            },
-            ManualVertex {
-                position: (world_pressure_center - world_drag).into(),
-                color: [1.0, 0.0, 0.0],
-            },
-        ]);
+        // lift debug
+        render_basic_line(renderizable_lines, world_pressure_center.into(), [0.0, 0.0, 1.0],  (world_pressure_center - (world_lift.normalize() * lift_coeff)).into(), [0.0, 0.0, 1.0]);
 
-        renderizable_lines.push([
-            ManualVertex {
-                position: world_pressure_center.into(),
-                color: [1.0, 1.0, 1.0],
-            },
-            ManualVertex {
-                position: (world_pressure_center + (rigidbody.rotation() * self.normal)).into(),
-                color: [1.0, 1.0, 1.0],
-            },
-        ]);
+        // Drag debug
+        render_basic_line(renderizable_lines, world_pressure_center.into(), [1.0, 0.0, 0.0],  (world_pressure_center - world_drag).into(), [1.0, 0.0, 0.0]);
+
+        // Wing Direction debug
+        render_basic_line(renderizable_lines, world_pressure_center.into(), [1.0, 1.0, 1.0], (world_pressure_center + (rigidbody.rotation() * self.normal)).into(), [1.0, 1.0, 1.0]);
+
     
         // Apply forces at the rotated pressure center position in world coordinates
         rigidbody.add_force_at_point(world_lift + world_drag, world_pressure_center.into(), true);
         
-        /* 
-        */
+        
         let angular_velocity = rigidbody.angvel();
-        let angular_damping_factor = 0.99; // Adjust this factor based on how quickly you want to stop the spin
+        let angular_damping_factor = 0.99;
         rigidbody.set_angvel(angular_velocity * angular_damping_factor, true);
+        
     }
 }

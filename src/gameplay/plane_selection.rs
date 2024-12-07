@@ -1,9 +1,9 @@
 use nalgebra::{ AbstractRotation, Point3, Quaternion, Rotation2, Unit, UnitQuaternion, Vector2, Vector3};
-use std::{f64::consts::PI, time::{Duration, Instant}};
+use std::{collections::HashMap, f64::consts::PI, time::{Duration, Instant}};
 use sdl2::controller::GameController;
-use glyphon::Color;
+use glyphon::{cosmic_text::Align, Color};
 
-use crate::{app::{App, AppState}, primitive::rectangle::RectPos, transform::Transform, ui::button, utils::lerps::{lerp_quaternion, lerp_vector3}};
+use crate::{app::{App, AppState}, rendering::ui::UiContainer, transform::Transform, ui::{button, ui_node::{UiNode, UiNodeContent, UiNodeParameters, Visibility}, ui_transform::UiTransform}, utils::lerps::{lerp_quaternion, lerp_vector3}};
 
 use super::controller::Controller;
 
@@ -50,11 +50,6 @@ pub struct ListOfPlanes {
 }
 
 pub struct GameLogic { // here we define the data we use on our script
-    fps: u32,
-    last_frame: Instant,
-    pub start_time: Instant,
-    frame_count: u32,
-    frame_timer: Duration,
     pub controller: Controller,
     pub plane_list: ListOfPlanes,
     pub controller_simulation: Vector2<f32>
@@ -63,34 +58,30 @@ pub struct GameLogic { // here we define the data we use on our script
 impl GameLogic {
     // this is called once
     pub fn new(app: &mut App) -> Self {
-        let plane_name = button::Button::new(
-            button::ButtonConfig {
-                rect_pos: RectPos { top: app.config.height / 2 + 300, left: app.config.width / 2 - 100 , bottom: app.config.height / 2 + 415, right: app.config.width / 2 + 100 },
-                fill_color: [0.0, 0.0, 0.0, 0.0],
-                fill_color_active: [0.0, 0.0, 0.0, 0.0],
-                border_color: [0.0, 0.0, 0.0, 0.0],
-                border_color_active: [0.0, 0.0, 0.0, 0.0],
-                text: "Plane Name",
-                text_color: Color::rgba(0, 255, 75, 255),
-                text_color_active: Color::rgba(0, 255, 75, 000),
-                rotation: Quaternion::identity()
-            },
-            &mut app.ui.text.font_system,
+
+        let plane_name = UiNode::new(
+            UiTransform::new(0.0, 0.0, 50.0, 100.0, 0.0), 
+            Visibility::new([0.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.29, 1.0]),
+            UiNodeParameters::Text { text: "Plane Name", color: Color::rgba(0, 255, 75, 255), align: Align::Center, font_size: 20.0 }, 
+            app,
+            None
         );
 
-        app.components.clear();
-        app.components.insert("plane_name".to_owned(), plane_name);
+        app.ui.renderizable_elements.clear();
+        app.ui.renderizable_elements.insert("static".to_owned(), UiContainer::Tagged(HashMap::new()));
+
+        match app.ui.renderizable_elements.get_mut("static").unwrap() {
+            UiContainer::Tagged(hash_map) => {
+                hash_map.insert("plane_name".to_owned(), plane_name);
+            },
+            _ => {},
+        }
 
         app.camera.camera.position = [0.0, 7.0, 50.0].into();
 
         let plane_list = ListOfPlanes { list: vec!["f16".to_string(), "f14".to_string()], index: 0 };
 
         Self {
-            fps: 0,
-            last_frame: Instant::now(),
-            start_time: Instant::now(),
-            frame_count: 0,
-            frame_timer: Duration::new(0, 0),
             controller: Controller::new(0.3, 0.2),
             plane_list,
             controller_simulation: Vector2::new(0.0, 1.0)
@@ -99,10 +90,6 @@ impl GameLogic {
 
     // this is called every frame
     pub fn update(&mut self, mut app_state: &mut AppState, mut event_pump: &mut sdl2::EventPump, app: &mut App, controller: &mut Option<GameController>) {
-        let delta_time_duration = self.delta_time();
-        let delta_time = delta_time_duration.as_secs_f32();
-
-
         if let Some(plane) = app.renderizable_instances.get_mut(&self.plane_list.list[self.plane_list.index]) {
             if let Some(plane_model) = app.game_models.get_mut(&plane.instance.model) {
                 if let Some(afterburner) = plane_model.model.meshes.get_mut("Afterburner") {
@@ -112,12 +99,22 @@ impl GameLogic {
         }
 
         // ui plane name
-        if let Some(plane_name) = app.components.get_mut("plane_name") {
-            plane_name.text.set_text(&mut app.ui.text.font_system, &self.plane_list.list[self.plane_list.index], true);
+        match app.ui.renderizable_elements.get_mut("static").unwrap() {
+            UiContainer::Tagged(hash_map) => {
+                if let Some(plane_name) = hash_map.get_mut("plane_name") {
+                    match &mut plane_name.content {
+                        UiNodeContent::Text(label) => {
+                            label.set_text(&mut app.ui.text.font_system, &self.plane_list.list[self.plane_list.index], true);
+                        },
+                        _ => {}
+                    }
+                }
+            },
+            _=> {},
         }
 
         // display plane
-        let angle = 1.0 * delta_time * 3.0;
+        let angle = 1.0 * app.time.delta_time * 3.0;
         let binding = Rotation2::new(angle);
         let rotation_matrix = binding.matrix();
         self.controller_simulation = rotation_matrix * self.controller_simulation;
@@ -129,26 +126,26 @@ impl GameLogic {
                     if let Some(aleron) = plane_model.model.meshes.get_mut("left_aleron") {
 
                         let dependent = aleron.base_transform.rotation.clone() * *UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.5 * -self.controller_simulation.x);
-                        let aleron_rotation = lerp_quaternion(aleron.transform.rotation,  dependent, delta_time * 7.0);
+                        let aleron_rotation = lerp_quaternion(aleron.transform.rotation,  dependent, app.time.delta_time * 7.0);
                         let aleron_transform = Transform::new(aleron.transform.position, aleron_rotation, aleron.transform.scale);
                         aleron.change_transform(&app.queue, aleron_transform);
                     }
 
                     if let Some(aleron) = plane_model.model.meshes.get_mut("right_aleron") {
                         let dependent = aleron.base_transform.rotation.clone() * *UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.5 * self.controller_simulation.x);
-                        let aleron_rotation = lerp_quaternion(aleron.transform.rotation,  dependent, delta_time * 7.0);
+                        let aleron_rotation = lerp_quaternion(aleron.transform.rotation,  dependent, app.time.delta_time * 7.0);
                         let aleron_transform = Transform::new(aleron.transform.position, aleron_rotation, aleron.transform.scale);
                         aleron.change_transform(&app.queue, aleron_transform);
                     }
 
                     if let Some(elevator) = plane_model.model.meshes.get_mut("left_elevator") {
-                        let elevator_rotation = lerp_quaternion(elevator.transform.rotation, *UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.2 * -self.controller_simulation.y), delta_time * 7.0);
+                        let elevator_rotation = lerp_quaternion(elevator.transform.rotation, *UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.2 * -self.controller_simulation.y), app.time.delta_time * 7.0);
                         let elevator_transform = Transform::new(elevator.transform.position, elevator_rotation, elevator.transform.scale);
                         elevator.change_transform(&app.queue, elevator_transform);
                     }
 
                     if let Some(elevator) = plane_model.model.meshes.get_mut("right_elevator") {
-                        let elevator_rotation = lerp_quaternion(elevator.transform.rotation, *UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.2 * -self.controller_simulation.y), delta_time * 7.0);
+                        let elevator_rotation = lerp_quaternion(elevator.transform.rotation, *UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.2 * -self.controller_simulation.y), app.time.delta_time * 7.0);
                         let elevator_transform = Transform::new(elevator.transform.position, elevator_rotation, elevator.transform.scale);
                         elevator.change_transform(&app.queue, elevator_transform);
                     }
@@ -160,24 +157,12 @@ impl GameLogic {
                     [0.0, 0.0, 0.0].into()
                 };
 
-                plane.instance.transform.scale = lerp_vector3(plane.instance.transform.scale, scale, delta_time * 7.0);
+                plane.instance.transform.scale = lerp_vector3(plane.instance.transform.scale, scale, app.time.delta_time * 7.0);
             }
         }
 
-        self.camera_control(app, delta_time);
-        self.controller.update(&mut app_state, &mut event_pump, app, controller, delta_time);
-    }
-
-    fn get_oscillating_value(&self, speed: f32) -> f32 {
-        let elapsed_time = self.start_time.elapsed().as_secs_f32();
-        (elapsed_time * speed * PI as f32).sin()
-    }
-
-    fn delta_time(&mut self) -> Duration {
-        let current_time = Instant::now();
-        let delta_time = current_time.duration_since(self.last_frame); // this is our Time.deltatime
-        self.last_frame = current_time;
-        return delta_time
+        self.camera_control(app, app.time.delta_time);
+        self.controller.update(&mut app_state, &mut event_pump, app, controller, app.time.delta_time);
     }
 
     fn camera_control(&mut self, app: &mut App, delta_time: f32) {

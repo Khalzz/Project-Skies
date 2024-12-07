@@ -2,6 +2,7 @@ use image::{DynamicImage, GenericImageView};
 use wgpu::{Device, Extent3d, Queue, Sampler, TextureView};
 use anyhow::*;
 
+/// This code is dedicated to generation of textures and creation of rendering data for it
 pub struct Texture {
     pub texture: wgpu::Texture,
     pub view: TextureView,
@@ -11,6 +12,10 @@ pub struct Texture {
 impl Texture {
     pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float; // this is the format the depth will get into the render pipeline
     
+    pub fn new() {
+        
+    }
+
     pub fn create_texture(device: &wgpu::Device, desc: wgpu::TextureDescriptor) -> Self {
         
         let texture = device.create_texture(&desc);

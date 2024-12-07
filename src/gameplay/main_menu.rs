@@ -1,9 +1,9 @@
-use std::time::{Duration, Instant};
+use std::{collections::HashMap, time::{Duration, Instant}};
 
 use glyphon::Color;
 use nalgebra::Quaternion;
 use sdl2::controller::GameController;
-use crate::{app::{App, AppState, GameState}, primitive::rectangle::RectPos, ui::button};
+use crate::{app::{App, AppState}, rendering::ui::UiContainer};
 
 use super::controller::Controller;
 
@@ -17,8 +17,8 @@ pub struct GameLogic { // here we define the data we use on our script
 impl GameLogic {
     // this is called once
     pub fn new(app: &mut App) -> Self {
-        app.components.clear();
-        // app.components.insert("background".to_owned(), background);
+        app.ui.renderizable_elements.clear();
+        app.ui.renderizable_elements.insert("static".to_owned(), UiContainer::Tagged(HashMap::new()));
 
         Self {
             last_frame: Instant::now(),
@@ -32,10 +32,11 @@ impl GameLogic {
     pub fn update(&mut self, mut app_state: &mut AppState, mut event_pump: &mut sdl2::EventPump, app: &mut App, controller: &mut Option<GameController>) {
         let delta_time_duration = self.delta_time();
         let delta_time = delta_time_duration.as_secs_f32();
-        self.ui_control(app, delta_time, app_state);
+        // self.ui_control(app, delta_time, app_state);
         self.controller.update(&mut app_state, &mut event_pump, app, controller, delta_time);
     }
 
+    /* 
     fn ui_control(&mut self, app: &mut App, delta_time: f32, mut app_state: &mut AppState) {
         self.timer += delta_time;
 
@@ -54,77 +55,86 @@ impl GameLogic {
             }
         }
 
-        match app.components.get_mut("play") {
-            Some(play) => {
-                if self.selected == 0 {
-                    play.rectangle.color = [0.0, 1.0, 0.0, 1.0];
-                    play.text.color = Color::rgba(0, 0, 0, 255);
+        match app.ui.renderizable_elements.get_mut("static").unwrap() {
+            UiContainer::Tagged(hash_map) => {
+                match hash_map.get_mut("play") {
+                    Some(play) => {
+                        if self.selected == 0 {
+                            play.rectangle.color = [0.0, 1.0, 0.0, 1.0];
+                            play.text.color = Color::rgba(0, 0, 0, 255);
+        
+                            if self.controller.ui_select {
+                                app_state.state = GameState::Playing;
+                                app_state.reset = true;
+                            }
+                        } else {
+                            play.rectangle.color = [0.0, 0.0, 0.0, 0.0];
+                            play.text.color = Color::rgba(0, 255, 75, 255)
+                        }
+                    },
+                    None => {
+                        if self.timer >= 0.5 {
+                            let play = button::Button::new(
+                                button::ButtonConfig {
+                                    rect_pos: RectPos { top: app.config.height / 2 - 10, left: app.config.width / 2 - 70, bottom: app.config.height / 2 + 30, right: app.config.width / 2 + 70 },
+                                    fill_color: [0.0, 0.0, 0.0, 0.0],
+                                    fill_color_active: [0.0, 0.0, 0.0, 0.0],
+                                    border_color: [0.0, 1.0, 0.0, 1.0],
+                                    border_color_active: [0.0, 1.0, 0.0, 1.0],
+                                    text: "Play",
+                                    text_color: Color::rgba(0, 255, 75, 255),
+                                    text_color_active: Color::rgba(0, 255, 75, 000),
+                                    rotation: Quaternion::identity()
+                                },
+                                &mut app.ui.text.font_system,
+                            );
+                            hash_map.insert("play".to_owned(), play);
+                        } 
+                    },
+                }
 
-                    if self.controller.ui_select {
-                        app_state.state = GameState::Playing;
-                        app_state.reset = true;
-                    }
-                } else {
-                    play.rectangle.color = [0.0, 0.0, 0.0, 0.0];
-                    play.text.color = Color::rgba(0, 255, 75, 255)
+                match hash_map.get_mut("exit") {
+                    Some(exit) => {
+                        if self.selected == 1 {
+                            exit.rectangle.color = [0.0, 1.0, 0.0 , 1.0];                    
+                            exit.text.color = Color::rgba(0, 0, 0, 255);
+        
+                            if self.controller.ui_select {
+                                app_state.is_running = false;
+                            }
+                        } else {
+                            exit.rectangle.color = [0.0, 0.0, 0.0, 0.0];                    
+                            exit.text.color = Color::rgba(0, 255, 75, 255)
+                        }
+                    },
+                    None => {
+                        if self.timer >= 1.0 {
+                            let exit = button::Button::new(
+                                button::ButtonConfig {
+                                    rect_pos: RectPos { top: app.config.height / 2 + 40, left: app.config.width / 2 - 70, bottom: app.config.height / 2 + 80, right: app.config.width / 2 + 70 },
+                                    fill_color: [0.0, 0.0, 0.0, 0.0],
+                                    fill_color_active: [0.0, 0.0, 0.0, 0.0],
+                                    border_color: [0.0, 1.0, 0.0, 1.0],
+                                    border_color_active: [0.0, 1.0, 0.0, 1.0],
+                                    text: "Exit",
+                                    text_color: Color::rgba(0, 255, 75, 255),
+                                    text_color_active: Color::rgba(0, 255, 75, 000),
+                                    rotation: Quaternion::identity()
+                                },
+                                &mut app.ui.text.font_system,
+                            );
+                            hash_map.insert("exit".to_owned(), exit);
+                        }
+                    },
                 }
             },
-            None => {
-                if self.timer >= 0.5 {
-                    let play = button::Button::new(
-                        button::ButtonConfig {
-                            rect_pos: RectPos { top: app.config.height / 2 - 10, left: app.config.width / 2 - 70, bottom: app.config.height / 2 + 30, right: app.config.width / 2 + 70 },
-                            fill_color: [0.0, 0.0, 0.0, 0.0],
-                            fill_color_active: [0.0, 0.0, 0.0, 0.0],
-                            border_color: [0.0, 1.0, 0.0, 1.0],
-                            border_color_active: [0.0, 1.0, 0.0, 1.0],
-                            text: "Play",
-                            text_color: Color::rgba(0, 255, 75, 255),
-                            text_color_active: Color::rgba(0, 255, 75, 000),
-                            rotation: Quaternion::identity()
-                        },
-                        &mut app.ui.text.font_system,
-                    );
-                    app.components.insert("play".to_owned(), play);
-                } 
-            },
+            UiContainer::Untagged(vec) => todo!(),
         }
+        
 
-        match app.components.get_mut("exit") {
-            Some(exit) => {
-                if self.selected == 1 {
-                    exit.rectangle.color = [0.0, 1.0, 0.0 , 1.0];                    
-                    exit.text.color = Color::rgba(0, 0, 0, 255);
-
-                    if self.controller.ui_select {
-                        app_state.is_running = false;
-                    }
-                } else {
-                    exit.rectangle.color = [0.0, 0.0, 0.0, 0.0];                    
-                    exit.text.color = Color::rgba(0, 255, 75, 255)
-                }
-            },
-            None => {
-                if self.timer >= 1.0 {
-                    let exit = button::Button::new(
-                        button::ButtonConfig {
-                            rect_pos: RectPos { top: app.config.height / 2 + 40, left: app.config.width / 2 - 70, bottom: app.config.height / 2 + 80, right: app.config.width / 2 + 70 },
-                            fill_color: [0.0, 0.0, 0.0, 0.0],
-                            fill_color_active: [0.0, 0.0, 0.0, 0.0],
-                            border_color: [0.0, 1.0, 0.0, 1.0],
-                            border_color_active: [0.0, 1.0, 0.0, 1.0],
-                            text: "Exit",
-                            text_color: Color::rgba(0, 255, 75, 255),
-                            text_color_active: Color::rgba(0, 255, 75, 000),
-                            rotation: Quaternion::identity()
-                        },
-                        &mut app.ui.text.font_system,
-                    );
-                    app.components.insert("exit".to_owned(), exit);
-                }
-            },
-        }
+        
     }
+    */
 
     fn delta_time(&mut self) -> Duration {
         let current_time = Instant::now();

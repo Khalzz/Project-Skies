@@ -1,9 +1,9 @@
-use nalgebra::{Matrix3, Matrix4, Vector3, UnitQuaternion};
+use nalgebra::{Matrix4, Vector3, UnitQuaternion};
 use rapier3d::prelude::{ColliderHandle, RigidBodyHandle};
 use serde::Deserialize;
 use wgpu::Buffer;
 
-use crate::game_object::{GameObject, Transform};
+use crate::game_nodes::game_object::{GameObject, Transform};
 use super::model::Model;
 
 pub struct PhysicsData {

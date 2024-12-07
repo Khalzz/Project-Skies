@@ -36,7 +36,7 @@ impl AirFoil {
                     Ok(data) => {
                         data
                     },
-                    Err(e) => {
+                    _ => {
                         vec![]
                     }
                 }
