@@ -19,6 +19,10 @@ mod ui {
     pub mod label;
 }
 
+mod audio {
+    pub mod subtitles;
+}
+
 mod input {
 }
 

@@ -1,11 +1,11 @@
-use std::{collections::HashMap, f32::consts::PI, hash::Hash, time::{Duration, Instant}};
+use std::{collections::HashMap, f32::consts::PI, time::Instant};
 
 use glyphon::{cosmic_text::Align, Color, FontSystem};
 use nalgebra::{vector, Point3, Quaternion, UnitQuaternion, Vector3};
 use rand::{rngs::ThreadRng, Rng};
 use rapier3d::prelude::RigidBody;
 use sdl2::controller::GameController;
-use crate::{app::{App, AppState}, primitive::manual_vertex::ManualVertex, rendering::{camera::CameraRenderizable, instance_management::InstanceData, ui::UiContainer}, transform::Transform, ui::{ui_node::{UiNode, UiNodeContent, UiNodeParameters, Visibility}, ui_transform::UiTransform}, utils::lerps::{lerp, lerp_quaternion, lerp_vector3}};
+use crate::{app::{App, AppState}, audio::subtitles::Subtitle, rendering::{camera::CameraRenderizable, ui::UiContainer}, transform::Transform, ui::{ui_node::{UiNode, UiNodeContent, UiNodeParameters, Visibility}, ui_transform::UiTransform}, utils::lerps::{lerp, lerp_quaternion}};
 use super::{airfoil::AirFoil, controller::Controller, wing::Wing, wheel::Wheel};
 
 pub enum CameraState {
@@ -23,17 +23,8 @@ pub struct Bandit {
 
 pub struct CameraData {
     camera_state: CameraState,
-    target: Point3<f32>,
-    position: Point3<f32>,
-    mod_yaw: f32,
-    mod_pitch: f32,
-    mod_pos_x: f32,
-    mod_pos_y: f32,
-    base_position: Vector3<f32>,
     pub look_at: Option<Vector3<f32>>,
     pub next_look_at: Option<Vector3<f32>>,
-    pub mod_vector: Vector3<f32>,
-    pub mod_up: Vector3<f32>,
     pub mod_quaternion: UnitQuaternion<f32>
 }
 
@@ -70,9 +61,9 @@ pub struct GameLogic { // here we define the data we use on our script
     pub camera_data: CameraData,
     pub blinking_alerts: HashMap<String, BlinkingAlert>,
     rng: ThreadRng,
-    pub final_rotation: Quaternion<f32>,
     pub plane_systems: PlaneSystems,
-    pub gravity: Vector3<f32>
+    pub gravity: Vector3<f32>,
+    pub subtitle_data: Subtitle
 } 
 
 impl GameLogic {
@@ -127,54 +118,14 @@ impl GameLogic {
             None
         );
 
-        let subtitle_1 = UiNode::new(
-            UiTransform::new(((app.config.width as f32) / 2.0) - (app.config.width as f32 * 0.9) / 2.0 , 0.0, 30.0, app.config.width as f32 * 0.9, 0.0), 
-            Visibility::new([0.0, 0.0, 0.0, 0.0], [0.0, 255.0, 0.0, 255.0]),
-            UiNodeParameters::Text { text: "Have you found a reason to fight yet?", color: Color::rgba(255, 255, 255, 255), align: Align::Center, font_size: 15.0 }, 
-            app,
-            None
-        );
-
-        let subtitle_2 = UiNode::new(
-            UiTransform::new(((app.config.width as f32) / 2.0) - (app.config.width as f32 * 0.9) / 2.0 , 0.0, 30.0, app.config.width as f32 * 0.9, 0.0),
-            Visibility::new([100.0, 100.0, 100.0, 255.0], [0.0, 255.0, 0.0, 255.0]),
-            UiNodeParameters::Text { text: "Budy...", color: Color::rgba(255, 255, 255, 255), align: Align::Center, font_size: 15.0 }, 
-            app,
-            None
-        );
-
         let subtitle = UiNode::new(
-            UiTransform::new((app.config.width as f32 / 2.0) - (app.config.width as f32 * 0.9) / 2.0, app.config.height as f32 * 0.7, app.config.height as f32, app.config.width as f32 * 0.9, 0.0), 
+            UiTransform::new((app.config.width as f32 / 2.0) - (app.config.width as f32 * 0.9) / 2.0, app.config.height as f32 * 0.7, 100.0, app.config.width as f32 * 0.9, 0.0), 
             Visibility::new([0.0, 0.0, 0.0, 0.7], [0.0, 0.0, 0.0, 0.0]),
-            UiNodeParameters::VerticalContainerData { separation: 10.0, children: vec![subtitle_1, subtitle_2] }, 
+            UiNodeParameters::VerticalContainerData { margin: 10.0, separation: 10.0, children: vec![] }, 
             app,
             None
         );
         
-        let level_data = UiNode::new(
-            UiTransform::new(0.0, 0.0, app.config.height as f32, app.config.width as f32 * 0.9 , 0.0), 
-            Visibility::new([0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]),
-            UiNodeParameters::Text { text: "Test chamber", color: Color::rgba(255, 255, 255, 255), align: Align::Center, font_size: 20.0 }, 
-            app,
-            None
-        );
-
-        /* 
-        let throttle: Button = button::Button::new(
-            button::ButtonConfig {
-                rect_pos: RectPos { top: 10, left: app.config.width - 15, bottom: app.config.height - 10, right: app.config.width - 10 },
-                fill_color: [0.0, 1.0, 0.0, 1.0],
-                fill_color_active: [0.0, 0.0, 0.0, 0.0],
-                border_color: [0.0, 1.0, 0.0, 1.0],
-                border_color_active: [0.0, 1.0, 0.0, 1.0],
-                text: "",
-                text_color: Color::rgba(0, 255, 0, 255),
-                text_color_active: Color::rgba(0, 0, 75, 000),
-                rotation: Quaternion::identity()
-            },
-            &mut app.ui.text.font_system,
-        );
-        */
 
         app.ui.renderizable_elements.clear();
         app.ui.renderizable_elements.insert("static".to_owned(), UiContainer::Tagged(HashMap::new()));
@@ -190,22 +141,15 @@ impl GameLogic {
         app.ui.add_to_ui("static".to_owned(), "subtitles".to_owned(), subtitle);
         // app.ui.add_to_ui("static".to_owned(), "level_data".to_owned(), level_data);
 
+        let mut subtitle_data = Subtitle::new();
+
         // this might give error
         // app.ui.add_to_ui("static".to_owned(), "crosshair".to_owned(), crosshair);
 
         let camera_data = CameraData { 
             camera_state: CameraState::Normal, 
-            target: Point3::new(0.0, 0.0, 0.0), 
-            position: Point3::new(0.0, 0.0, 0.0), 
-            mod_yaw: 0.0, 
-            mod_pitch: 0.0, 
-            mod_pos_x: 0.0,
-            mod_pos_y: 0.0,
-            base_position: Vector3::new(0.0, 13.0, -35.0), 
             look_at: None,
             next_look_at: None,
-            mod_vector: Vector3::new(0.0, 0.0, 0.0),
-            mod_up: Vector3::identity(),
             mod_quaternion: UnitQuaternion::identity(),
         };
 
@@ -260,7 +204,6 @@ impl GameLogic {
         };
 
         let rng = rand::thread_rng();
-        let final_rotation = Quaternion::identity();
 
         let mut blinking_alerts: HashMap<String, BlinkingAlert> = HashMap::new();
         blinking_alerts.insert("altitude".to_owned(), BlinkingAlert { alert_state: false, time_alert: 0.0 });
@@ -274,14 +217,21 @@ impl GameLogic {
             blinking_alerts,
             plane_systems,
             rng,
-            final_rotation,
-            gravity
+            gravity,
+            subtitle_data
         }
     }
 
     // this is called every frame
     pub fn update(&mut self, mut app_state: &mut AppState, mut event_pump: &mut sdl2::EventPump, app: &mut App, controller: &mut Option<GameController>) {
-        self.controller.update(&mut app_state, &mut event_pump, app, controller, app.time.delta_time);
+        self.controller.update(&mut app_state, &mut event_pump, app, controller, app.time.delta_time); // should be first in the function
+
+        if self.controller.fix_view.just_pressed {
+            println!("se agrego un nuevo texto");
+            self.subtitle_data.add_text(&"ejemplo de mensaje".to_string(), app);
+        }
+
+        self.subtitle_data.update(app);
         self.camera_control(app, app.time.delta_time);
         self.ui_control(app, app.time.delta_time);
         self.plane_movement(app, app.time.delta_time);
@@ -506,7 +456,7 @@ impl GameLogic {
         }
         
         self.calculate_lockable(app);
-        if self.controller.change_camera.up {
+        if self.controller.change_camera.released {
             self.next_camera(&mut app.camera);
         }
     }
@@ -558,13 +508,10 @@ impl GameLogic {
     }
 
     fn ui_control(&mut self, app: &mut App, delta_time: f32) {
-        let plane: &mut &mut InstanceData = &mut app.renderizable_instances.get_mut("player").unwrap();
-        let framerate_number = app.time.framerate();
-
         if app.throttling.last_ui_update.elapsed() >= app.throttling.ui_update_interval {
             match app.ui.renderizable_elements.get_mut("static").unwrap() {
                 UiContainer::Tagged(hash_map) => {
-                    self.update_text_label(hash_map, "framerate", &format!("FPS: {}", framerate_number), &mut app.ui.text.font_system);
+                    self.update_text_label(hash_map, "framerate", &format!("FPS: {}", app.time.get_fps()), &mut app.ui.text.font_system);
                     self.update_text_label(hash_map, "altitude", &format!("ALT: {}", self.plane_systems.flight_data.altimeter), &mut app.ui.text.font_system);
                     self.update_text_label(hash_map, "g_number", &format!("G: {:.0}", self.plane_systems.flight_data.g_meter), &mut app.ui.text.font_system);
                     self.update_text_label(hash_map, "speed", &format!("SPD: {:.0}", self.plane_systems.flight_data.speedometer), &mut app.ui.text.font_system);
@@ -712,7 +659,7 @@ impl GameLogic {
 
         
         
-        if self.controller.fix_view.up && self.controller.fix_view.time_pressed < self.controller.fix_view_hold_window {
+        if self.controller.fix_view.released && self.controller.fix_view.time_pressed < self.controller.fix_view_hold_window {
             for bandit in &mut self.plane_systems.bandits {
                 if bandit.locked {
                     bandit.locked = false;

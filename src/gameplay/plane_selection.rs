@@ -7,43 +7,6 @@ use crate::{app::{App, AppState}, rendering::ui::UiContainer, transform::Transfo
 
 use super::controller::Controller;
 
-pub enum CameraState {
-    Normal,
-    Cockpit,
-    Far
-}
-
-pub struct Bandit {
-    tag: String,
-    locked: bool,
-}
-
-pub struct CameraData {
-    camera_state: CameraState,
-    target: Point3<f32>,
-    position: Point3<f32>,
-    mod_yaw: f32,
-    mod_pitch: f32,
-    mod_pos_x: f32,
-    mod_pos_y: f32,
-    base_position: Vector3<f32>,
-    pub look_at: Option<Vector3<f32>>,
-    pub next_look_at: Option<Vector3<f32>>,
-    pub mod_vector: Vector3<f32>,
-    pub mod_up: Vector3<f32>
-}
-
-pub struct BlinkingAlert {
-    alert_state: bool,
-    time_alert: f32
-}
-
-pub struct PlaneSystems {
-    bandits: Vec<Bandit>,
-    stall: bool,
-    pub altitude: f32,
-}
-
 pub struct ListOfPlanes {
     list: Vec<String>,
     index: usize
@@ -118,7 +81,6 @@ impl GameLogic {
         let binding = Rotation2::new(angle);
         let rotation_matrix = binding.matrix();
         self.controller_simulation = rotation_matrix * self.controller_simulation;
-
 
         for plane in &self.plane_list.list {
             if let Some(plane) = app.renderizable_instances.get_mut(plane) {

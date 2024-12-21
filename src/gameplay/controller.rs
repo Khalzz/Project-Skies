@@ -7,10 +7,12 @@ use sdl2::{controller::{Axis, GameController}, event::Event, keyboard::Keycode};
 
 use crate::app::{App, AppState};
 
+/// # Input
+/// This structure will be setted for key presses that are supposed to be taken as booleans.
 pub struct Input {
     pub pressed: bool,
     pub just_pressed: bool,
-    pub up: bool,
+    pub released: bool,
     pub time_pressed: f32,
 }
 
@@ -56,9 +58,9 @@ impl Controller {
             ry: 0.0,
             rs_deathzone,
             power: 0.0,
-            fix_view: Input { pressed: false, just_pressed: false, up: false, time_pressed: 0.0 },
+            fix_view: Input { pressed: false, just_pressed: false, released: false, time_pressed: 0.0 },
             fix_view_hold_window: 0.2,
-            change_camera: Input { pressed: false, just_pressed: false, up: false, time_pressed: 0.0 },
+            change_camera: Input { pressed: false, just_pressed: false, released: false, time_pressed: 0.0 },
             look_back: false,
             ui_up: false,
             ui_down: false,
@@ -73,11 +75,13 @@ impl Controller {
         if self.fix_view.pressed {
             self.fix_view.time_pressed += delta_time
         } else {
-            self.fix_view.up = false;
+            self.fix_view.released = false;
         }
 
+        self.fix_view.just_pressed = false;
+
         if !self.change_camera.pressed {
-            self.change_camera.up = false;
+            self.change_camera.released = false;
         }
 
         if self.ui_down == true {
@@ -104,35 +108,17 @@ impl Controller {
                         match button {
                             sdl2::controller::Button::Y => {
                                 self.fix_view.pressed = true;
+                                self.fix_view.just_pressed = true;
                                 self.fix_view.time_pressed = 0.0;
                             },
-                            sdl2::controller::Button::Back => {
-                                // change camera
-                            },
-                            sdl2::controller::Button::RightStick => {
-                                self.change_camera.pressed = true;
-                            },
-                            sdl2::controller::Button::LeftShoulder => {
-                                self.yaw = -1.0
-                            },
-                            sdl2::controller::Button::RightShoulder => {
-                                self.yaw = 1.0
-                            },
-                            sdl2::controller::Button::DPadUp => {
-                                self.ui_up = true;
-                            },
-                            sdl2::controller::Button::DPadDown => {
-                                self.ui_down = true;
-                            },
-                            sdl2::controller::Button::DPadLeft => {
-                                self.ui_left = true;
-                            },
-                            sdl2::controller::Button::DPadRight => {
-                                self.ui_right = true;
-                            },
-                            sdl2::controller::Button::A => {
-                                self.ui_select = true;
-                            },
+                            sdl2::controller::Button::RightStick => self.change_camera.pressed = true,
+                            sdl2::controller::Button::LeftShoulder => self.yaw = -1.0,
+                            sdl2::controller::Button::RightShoulder => self.yaw = 1.0,
+                            sdl2::controller::Button::DPadUp => self.ui_up = true,
+                            sdl2::controller::Button::DPadDown => self.ui_down = true,
+                            sdl2::controller::Button::DPadLeft => self.ui_left = true,
+                            sdl2::controller::Button::DPadRight => self.ui_right = true,
+                            sdl2::controller::Button::A => self.ui_select = true,
                             _ => {}
                         }
                     }
@@ -140,14 +126,14 @@ impl Controller {
                         match button {
                             sdl2::controller::Button::Y => {
                                 self.fix_view.pressed = false;
-                                self.fix_view.up = true;
+                                self.fix_view.released = true;
                             },
                             sdl2::controller::Button::Back => {
                                 // change camera
                             },
                             sdl2::controller::Button::RightStick => {
                                 self.change_camera.pressed = false;
-                                self.change_camera.up = true;
+                                self.change_camera.released = true;
                             },
                             sdl2::controller::Button::LeftShoulder => {
                                 self.yaw = 0.0
@@ -177,6 +163,7 @@ impl Controller {
                         // println!("Joystick {} Button {} pressed", which, button_idx);
                         if button_idx == 19 {
                             self.fix_view.pressed = true;
+                            self.fix_view.just_pressed = true;
                             self.fix_view.time_pressed = 0.0;
                         } else if button_idx == 3 {
                             self.change_camera.pressed = true;
@@ -186,10 +173,10 @@ impl Controller {
                         // println!("Joystick {} Button {} pressed", which, button_idx);
                         if button_idx == 19 {
                             self.fix_view.pressed = false;
-                            self.fix_view.up = true;
+                            self.fix_view.released = true;
                         } else if button_idx == 3 {
                             self.change_camera.pressed = false;
-                            self.change_camera.up = true;
+                            self.change_camera.released = true;
                         }
                     }
                     Event::ControllerAxisMotion { axis, .. } => {
@@ -226,7 +213,10 @@ impl Controller {
                         match keycode {
                             Some(Keycode::Escape) => app_state.is_running = false,
                             Some(Keycode::Tab) => app.show_depth_map = !app.show_depth_map,
-                            Some(Keycode::Space) => self.fix_view.pressed = true,
+                            Some(Keycode::Space) => {
+                                self.fix_view.pressed = true;
+                                self.fix_view.just_pressed = true;
+                            },
                             Some(Keycode::Down) => self.power = -1.0,
                             Some(Keycode::Up) => self.power = 1.0,
                             Some(Keycode::Q) => self.yaw = -1.0,
@@ -241,30 +231,17 @@ impl Controller {
                             },
                             Some(Keycode::S) => self.y = -1.0,
                             Some(Keycode::W) => self.y = 1.0,
-                            Some(Keycode::C) => self.change_camera.pressed = true,
-                            Some(Keycode::O) => {
-                                println!("near: {}, far: {}", app.depth_render.near_far_uniform.near, app.depth_render.near_far_uniform.far);
-                                if self.fix_view.pressed {
-                                    app.depth_render.near_far_uniform.far += 1.0;
-                                } else {
-                                    app.depth_render.near_far_uniform.near += 1.0;
-                                }
-                            },
-                            Some(Keycode::L) => {
-                                println!("near: {}, far: {}", app.depth_render.near_far_uniform.near, app.depth_render.near_far_uniform.far);
-                                if self.fix_view.pressed {
-                                    app.depth_render.near_far_uniform.far -= 1.0;
-                                } else {
-                                    app.depth_render.near_far_uniform.near -= 1.0;
-                                }
-                            },
+                            Some(Keycode::V) => self.change_camera.pressed = true,
                             _ => {},
                         }
                     },
                     Event::KeyUp { keycode, .. } => {
                         match keycode {
                             Some(Keycode::Down) => self.power = 0.0,
-                            Some(Keycode::Space) => self.fix_view.pressed = false,
+                            Some(Keycode::Space) => {
+                                self.fix_view.pressed = false;
+                                self.fix_view.released = true;
+                            },
                             Some(Keycode::Up) => self.power = 0.0,
                             Some(Keycode::Q) => self.yaw = 0.0,
                             Some(Keycode::E) => self.yaw = 0.0,
@@ -272,9 +249,9 @@ impl Controller {
                             Some(Keycode::D) => self.x = 0.0,
                             Some(Keycode::S) => self.y = 0.0,
                             Some(Keycode::W) => self.y = 0.0,
-                            Some(Keycode::C) => {
+                            Some(Keycode::V) => {
                                 self.change_camera.pressed = false;
-                                self.change_camera.up = true;
+                                self.change_camera.released = true;
                             },
                             _ => {},
                         }

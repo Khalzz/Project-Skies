@@ -87,7 +87,7 @@ impl Wing {
         let world_lift = rigidbody.rotation() * lift;
     
         // lift debug
-        render_basic_line(renderizable_lines, world_pressure_center.into(), [0.0, 0.0, 1.0],  (world_pressure_center - (world_lift.normalize() * lift_coeff)).into(), [0.0, 0.0, 1.0]);
+        render_basic_line(renderizable_lines, world_pressure_center.into(), [0.0, 0.0, 1.0],  ((world_pressure_center - ((world_lift.normalize() * 5.0) * lift_coeff))).into(), [0.0, 0.0, 1.0]);
 
         // Drag debug
         render_basic_line(renderizable_lines, world_pressure_center.into(), [1.0, 0.0, 0.0],  (world_pressure_center - world_drag).into(), [1.0, 0.0, 0.0]);

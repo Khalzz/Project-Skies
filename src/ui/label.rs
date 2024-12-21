@@ -70,11 +70,10 @@ impl Label {
     /// 
     /// ## Returns:
     /// A amount of values ordered as (text area, num_vertices, num indices)
-    pub fn ui_node_data_creation(&mut self, size: &Size, vertices: &mut Vec<VertexUi>, vertices_slice: &[VertexUi; 4], indices: &mut Vec<u16>, indices_slice: &[u16; 6], num_vertices: &mut u16, parent_rect: &Rect) -> (TextArea, u16, u32) {
+    pub fn ui_node_data_creation(&self, size: &Size, vertices: &mut Vec<VertexUi>, vertices_slice: &[VertexUi; 4], indices: &mut Vec<u16>, indices_slice: &[u16; 6], parent_rect: &Rect) -> (TextArea, u16, u32) {
         vertices.extend_from_slice(vertices_slice);
         indices.extend_from_slice(indices_slice); 
 
-        // *num_vertices += node_vertices.len() as u16;
         // *num_indices += UiNode::NUM_INDICES;
 
         // sets the new text
@@ -127,17 +126,20 @@ impl Label {
     pub fn set_text(&mut self, font_system: &mut FontSystem, text: &str, realign: bool) {
         if text != self.text {
             self.text = text.to_owned();
-            // self.buffer.set_size( font_system, (self.rect_pos.right - self.rect_pos.left) as f32, (self.rect_pos.bottom - self.rect_pos.top) as f32,);
             self.buffer.set_text(font_system, text, Attrs::new().family(Family::SansSerif), Shaping::Advanced);
-
             if realign {
-                self.buffer.lines.iter_mut().for_each(|line| {
-                    line.set_align(Some(glyphon::cosmic_text::Align::Center));
-                }); 
-
-                self.buffer.set_wrap(font_system, glyphon::Wrap::None);
-                self.buffer.shape_until_scroll(font_system);
+                self.realign(font_system)
             }
+            
         }
+    }
+
+    pub fn realign(&mut self, font_system: &mut FontSystem) {
+        self.buffer.lines.iter_mut().for_each(|line| {
+            line.set_align(Some(glyphon::cosmic_text::Align::Center));
+        }); 
+
+        self.buffer.set_wrap(font_system, glyphon::Wrap::None);
+        self.buffer.shape_until_scroll(font_system);
     }
 }

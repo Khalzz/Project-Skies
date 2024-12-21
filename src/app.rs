@@ -314,18 +314,14 @@ impl App {
             match list {
                 crate::rendering::ui::UiContainer::Tagged(hash_map) => {
                     for (_key, ui_node) in hash_map {
-                        let (textareas_to_merge, vertices_to_add, indices_to_add) = ui_node.node_content_preparation(&self.size, &mut vertices, &mut indices, &mut num_vertices);
+                        let (textareas_to_merge, vertices_to_add, indices_to_add) = ui_node.node_content_preparation(&self.size, &mut self.ui.text.font_system, &mut vertices, &mut indices, &mut num_vertices, &mut num_indices);
                         text_areas.extend(textareas_to_merge);
-                        num_vertices += vertices_to_add;
-                        num_indices += indices_to_add;
                     }
                 },
                 crate::rendering::ui::UiContainer::Untagged(vec) => {
                     for ui_node in vec {
-                        let (textareas_to_merge, vertices_to_add, indices_to_add) = ui_node.node_content_preparation(&self.size, &mut vertices, &mut indices, &mut num_vertices);
+                        let (textareas_to_merge, vertices_to_add, indices_to_add) = ui_node.node_content_preparation(&self.size, &mut self.ui.text.font_system, &mut vertices, &mut indices, &mut num_vertices, &mut num_indices);
                         text_areas.extend(textareas_to_merge);
-                        num_vertices += vertices_to_add;
-                        num_indices += indices_to_add;
                     }
                 },
             }
@@ -560,8 +556,6 @@ impl App {
 
                         accumulator += self.time.delta_time;
                         time += self.time.delta_time;
-
-                        println!("{}", time);
 
                         while accumulator >= FIXED_TIMESTEP {
                             self.physics.physics_pipeline.step(

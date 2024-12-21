@@ -21,6 +21,7 @@ impl Timing {
 
     pub fn update(&mut self) {
         self.calculate_delta_time();
+        self.calculate_framerate();
     }
 
     fn calculate_delta_time(&mut self) {
@@ -29,7 +30,7 @@ impl Timing {
         self.last_frame = current_time;
     }
 
-    pub fn framerate(&mut self) -> f32 {
+    fn calculate_framerate(&mut self) -> f32 {
         self.frame_count += 1;
 
         // Update FPS every second
@@ -39,6 +40,10 @@ impl Timing {
             self.last_fps_update = Instant::now(); // Update the last FPS update time
         }
         
+        self.fps
+    }
+
+    pub fn get_fps(&mut self) -> f32 {
         self.fps
     }
 }
