@@ -1,4 +1,5 @@
 use app::App;
+use sdl2::mixer;
 
 mod app;
 mod transform;
@@ -7,8 +8,8 @@ mod resources;
 mod game_nodes {
     pub mod game_object_2d;
     pub mod game_object;
-    pub mod scene;
     pub mod timing;
+    pub mod scene;
 }
 
 mod ui {
@@ -21,19 +22,21 @@ mod ui {
 
 mod audio {
     pub mod subtitles;
+    pub mod audio;
 }
 
 mod input {
 }
 
 mod gameplay {
-    pub mod controller;
-    pub mod play;
-    pub mod main_menu;
+    pub mod event_handling;
     pub mod plane_selection;
+    pub mod controller;
+    pub mod main_menu;
     pub mod airfoil;
-    pub mod wing;
     pub mod wheel;
+    pub mod wing;
+    pub mod play;
 }
 
 mod primitive {
@@ -41,17 +44,17 @@ mod primitive {
 }
 
 mod rendering {
-    pub mod render_line;
-    pub mod textures;
-    pub mod camera;
-    pub mod model;
-    pub mod vertex;
-    pub mod depth_renderer;
-    pub mod ui;
     pub mod instance_management;
     pub mod physics_rendering;
     pub mod rendering_utils;
+    pub mod depth_renderer;
+    pub mod render_line;
+    pub mod textures;
+    pub mod vertex;
+    pub mod camera;
+    pub mod model;
     pub mod light;
+    pub mod ui;
 }
 
 mod utils {
@@ -63,5 +66,6 @@ mod utils {
 async fn main() -> Result<(), String> {
     let app = App::new("Pankarta Software", None, None);
     app.await.update();
+    mixer::close_audio();
     Ok(())
 }

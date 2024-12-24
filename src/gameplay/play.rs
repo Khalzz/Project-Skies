@@ -1,12 +1,15 @@
-use std::{collections::HashMap, f32::consts::PI, time::Instant};
+use std::{collections::HashMap, f32::consts::PI, hash::Hash, time::{Duration, Instant}};
 
 use glyphon::{cosmic_text::Align, Color, FontSystem};
 use nalgebra::{vector, Point3, Quaternion, UnitQuaternion, Vector3};
 use rand::{rngs::ThreadRng, Rng};
 use rapier3d::prelude::RigidBody;
-use sdl2::controller::GameController;
-use crate::{app::{App, AppState}, audio::subtitles::Subtitle, rendering::{camera::CameraRenderizable, ui::UiContainer}, transform::Transform, ui::{ui_node::{UiNode, UiNodeContent, UiNodeParameters, Visibility}, ui_transform::UiTransform}, utils::lerps::{lerp, lerp_quaternion}};
-use super::{airfoil::AirFoil, controller::Controller, wing::Wing, wheel::Wheel};
+use sdl2::{controller::GameController, mixer};
+use crate::{app::{App, AppState}, audio::subtitles::Subtitle, rendering::{camera::CameraRenderizable, ui::UiContainer}, transform::Transform, ui::{ui_node::{ChildrenType, UiNode, UiNodeContent, UiNodeParameters, Visibility}, ui_transform::UiTransform}, utils::lerps::{lerp, lerp_quaternion}};
+use super::{airfoil::AirFoil, controller::Controller, event_handling::EventSystem, wheel::Wheel, wing::Wing};
+
+// Add a way of setting timing that can be agnostic to real time (or that will not be affected by the player pausing)
+
 
 pub enum CameraState {
     Normal,
@@ -60,10 +63,13 @@ pub struct GameLogic { // here we define the data we use on our script
     pub controller: Controller,
     pub camera_data: CameraData,
     pub blinking_alerts: HashMap<String, BlinkingAlert>,
-    rng: ThreadRng,
     pub plane_systems: PlaneSystems,
     pub gravity: Vector3<f32>,
-    pub subtitle_data: Subtitle
+    pub subtitle_data: Subtitle,
+    pub start_time: Instant,
+    pub event_system: Option<EventSystem>,
+    rng: ThreadRng,
+    pub game_time: f64
 } 
 
 impl GameLogic {
@@ -86,22 +92,6 @@ impl GameLogic {
             None
         );
         
-        let framerate = UiNode::new(
-            UiTransform::new(10.0, 10.0, 30.0, 100.0, 0.0), 
-            Visibility::new([0.0, 0.0, 0.0, 0.0], [0.0, 255.0, 0.0, 255.0]),
-            UiNodeParameters::Text { text: "90 fps", color: Color::rgba(0, 255, 75, 255), align: Align::Center, font_size: 20.0}, 
-            app,
-            None
-        );
-
-        let g_number = UiNode::new(
-            UiTransform::new(10.0, 50.0, 30.0, 100.0, 0.0), 
-            Visibility::new([0.0, 0.0, 0.0, 0.0], [0.0, 255.0, 0.0, 255.0]),
-            UiNodeParameters::Text { text: "G", color: Color::rgba(0, 255, 75, 255), align: Align::Center, font_size: 20.0}, 
-            app,
-            None
-        );
-        
         let altitude_alert = UiNode::new(
             UiTransform::new((app.config.width as f32 / 2.0) - (140.0 / 2.0), ((app.config.height as f32 / 2.0) - (50.0 / 2.0)) + 50.0, 50.0, 140.0, 0.0), 
             Visibility::new([0.0, 0.0, 0.0, 0.0], [255.0, 0.0, 0.0, 255.0]),
@@ -118,10 +108,46 @@ impl GameLogic {
             None
         );
 
+        let timer = UiNode::new(
+            UiTransform::new(10.0, 10.0, 30.0, 100.0, 0.0), 
+            Visibility::new([0.0, 0.0, 0.0, 0.0], [0.0, 255.0, 0.0, 255.0]),
+            UiNodeParameters::Text { text: "00:00:000", color: Color::rgba(0, 255, 75, 255), align: Align::Center, font_size: 20.0}, 
+            app,
+            None
+        );
+
+        let framerate = UiNode::new(
+            UiTransform::new(10.0, 10.0, 30.0, 100.0, 0.0), 
+            Visibility::new([0.0, 0.0, 0.0, 0.0], [0.0, 255.0, 0.0, 255.0]),
+            UiNodeParameters::Text { text: "90 fps", color: Color::rgba(0, 255, 75, 255), align: Align::Center, font_size: 20.0}, 
+            app,
+            None
+        );
+
+        let g_number = UiNode::new(
+            UiTransform::new(10.0, 50.0, 30.0, 100.0, 0.0), 
+            Visibility::new([0.0, 0.0, 0.0, 0.0], [0.0, 255.0, 0.0, 255.0]),
+            UiNodeParameters::Text { text: "G", color: Color::rgba(0, 255, 75, 255), align: Align::Center, font_size: 20.0}, 
+            app,
+            None
+        );
+
+        let mut game_info = UiNode::new(
+            UiTransform::new(10.0, 10.0, 30.0, 150.0, 0.0), 
+            Visibility::new([0.0, 0.0, 0.0, 0.7], [0.0, 0.0, 0.0, 0.0]),
+            UiNodeParameters::VerticalContainerData { margin: 10.0, separation: 10.0, children: ChildrenType::MappedChildren(HashMap::new()) }, 
+            app,
+            None
+        );
+
+        game_info.add_children("framerate".to_owned(), framerate);
+        game_info.add_children("g_number".to_owned(), g_number);
+        game_info.add_children("timer".to_owned(), timer);
+
         let subtitle = UiNode::new(
             UiTransform::new((app.config.width as f32 / 2.0) - (app.config.width as f32 * 0.9) / 2.0, app.config.height as f32 * 0.7, 100.0, app.config.width as f32 * 0.9, 0.0), 
             Visibility::new([0.0, 0.0, 0.0, 0.7], [0.0, 0.0, 0.0, 0.0]),
-            UiNodeParameters::VerticalContainerData { margin: 10.0, separation: 10.0, children: vec![] }, 
+            UiNodeParameters::VerticalContainerData { margin: 10.0, separation: 10.0, children: ChildrenType::IndexedChildren(vec![]) }, 
             app,
             None
         );
@@ -134,17 +160,12 @@ impl GameLogic {
         app.ui.add_to_ui("static".to_owned(), "altitude".to_owned(), altitude);
 
         app.ui.add_to_ui("static".to_owned(), "speed".to_owned(), speed);
-        app.ui.add_to_ui("static".to_owned(), "g_number".to_owned(), g_number);
         app.ui.add_to_ui("static".to_owned(), "compass".to_owned(), compass);
         app.ui.add_to_ui("static".to_owned(), "altitude_alert".to_owned(), altitude_alert);
-        app.ui.add_to_ui("static".to_owned(), "framerate".to_owned(), framerate);
         app.ui.add_to_ui("static".to_owned(), "subtitles".to_owned(), subtitle);
-        // app.ui.add_to_ui("static".to_owned(), "level_data".to_owned(), level_data);
+        app.ui.add_to_ui("static".to_owned(), "game_info".to_owned(),game_info);
 
-        let mut subtitle_data = Subtitle::new();
-
-        // this might give error
-        // app.ui.add_to_ui("static".to_owned(), "crosshair".to_owned(), crosshair);
+        let subtitle_data = Subtitle::new();
 
         let camera_data = CameraData { 
             camera_state: CameraState::Normal, 
@@ -211,6 +232,14 @@ impl GameLogic {
 
         let gravity = vector![0.0, -9.81, 0.0];
 
+        let event_system = match EventSystem::new(&app.scene_openned) {
+            Ok(system) => Some(system),
+            Err(error) => {
+                eprintln!("Error: {}", error);
+                None
+            },
+        };
+
         Self {
             controller: Controller::new(0.3, 0.2),
             camera_data,
@@ -218,7 +247,10 @@ impl GameLogic {
             plane_systems,
             rng,
             gravity,
-            subtitle_data
+            start_time: Instant::now(),
+            event_system,
+            subtitle_data,
+            game_time: 0.0
         }
     }
 
@@ -226,9 +258,14 @@ impl GameLogic {
     pub fn update(&mut self, mut app_state: &mut AppState, mut event_pump: &mut sdl2::EventPump, app: &mut App, controller: &mut Option<GameController>) {
         self.controller.update(&mut app_state, &mut event_pump, app, controller, app.time.delta_time); // should be first in the function
 
+        self.game_time += app.time.delta_time as f64;
+
+        if let Some(system) = &mut self.event_system {
+            system.handle_events(self.game_time, app);
+        }
+
         if self.controller.fix_view.just_pressed {
-            println!("se agrego un nuevo texto");
-            self.subtitle_data.add_text(&"ejemplo de mensaje".to_string(), app);
+            self.subtitle_data.add_text(&"SKIBIDI DAM DAM DAM YES YES".to_string(), app);
         }
 
         self.subtitle_data.update(app);
@@ -236,8 +273,6 @@ impl GameLogic {
         self.ui_control(app, app.time.delta_time);
         self.plane_movement(app, app.time.delta_time);
     }
-
-    
 
     fn plane_movement (&mut self, app: &mut App, delta_time: f32) {
         let plane = app.renderizable_instances.get_mut("player").unwrap();
@@ -383,10 +418,8 @@ impl GameLogic {
 
             let total_acceleration = acceleration + self.gravity;
 
-            // Calculate G-forces
             g_forces = total_acceleration.magnitude() / 9.81;
 
-            // Update previous velocity
             self.plane_systems.previous_velocity = Some(*current_velocity);
         }
 
@@ -480,10 +513,7 @@ impl GameLogic {
                                 let final_pos = pos + plane.transform.rotation * Vector3::new(0.0, 20.0, 0.0);
                                 app.camera.camera.position = Point3::from(final_pos);
                             },
-                            CameraState::Cockpit => {
-                                // Here we will get the actual rotation of the camera and get the angle of the actual plane
-                                // so we can define a max value for the yaw and the pitch
-                            },
+                            CameraState::Cockpit => {},
                             CameraState::Cinematic => {},
                             CameraState::Frontal => {},
                             CameraState::Free => {},
@@ -497,8 +527,8 @@ impl GameLogic {
 
     // i do this so my "ui_controller" is smaller
     fn update_text_label(&mut self, ui_tagged_elements: &mut HashMap<String, UiNode>, tag: &str, text: &str, font_system: &mut FontSystem) {
-        if let Some(framerate) = ui_tagged_elements.get_mut(tag) {
-            match &mut framerate.content {
+        if let Some(node) = ui_tagged_elements.get_mut(tag) {
+            match &mut node.content {
                 UiNodeContent::Text(label) => {
                     label.set_text(font_system, &text, true);
                 },
@@ -507,13 +537,40 @@ impl GameLogic {
         }
     }
 
+    fn format_duration(seconds: f64) -> String {
+        let duration = Duration::from_secs_f64(seconds);
+
+        let total_millis = duration.as_millis() as u64;
+        
+        let hours = total_millis / 3_600_000; // 1 hour = 3,600,000 milliseconds
+        let minutes = (total_millis % 3_600_000) / 60_000; // 1 minute = 60,000 milliseconds
+        let seconds = (total_millis % 60_000) / 1_000; // 1 second = 1,000 milliseconds
+        let milliseconds = total_millis % 1_000; // Remaining milliseconds
+    
+        // Format as hh:mm:ss:milmilmil
+        format!("{:02}:{:02}:{:02}:{:03}", hours, minutes, seconds, milliseconds)
+    }
+
     fn ui_control(&mut self, app: &mut App, delta_time: f32) {
         if app.throttling.last_ui_update.elapsed() >= app.throttling.ui_update_interval {
             match app.ui.renderizable_elements.get_mut("static").unwrap() {
                 UiContainer::Tagged(hash_map) => {
-                    self.update_text_label(hash_map, "framerate", &format!("FPS: {}", app.time.get_fps()), &mut app.ui.text.font_system);
+                    match hash_map.get_mut("game_info") {
+                        Some(info) => {
+                            match info.get_container_hashed() {
+                                Ok(map) => {
+                                    self.update_text_label(map, "framerate", &format!("FPS: {}", app.time.get_fps()), &mut app.ui.text.font_system);
+                                    self.update_text_label(map, "g_number", &format!("G: {:.0}", self.plane_systems.flight_data.g_meter), &mut app.ui.text.font_system);
+                                    self.update_text_label(map, "timer", &Self::format_duration(self.game_time), &mut app.ui.text.font_system);
+                                    // self.update_text_label(map, "framerate", &format!("FPS: {}", app.time.get_fps()), &mut app.ui.text.font_system);
+                                },
+                                Err(_) => todo!(),
+                            }
+                        },
+                        None => {},
+                    }
+
                     self.update_text_label(hash_map, "altitude", &format!("ALT: {}", self.plane_systems.flight_data.altimeter), &mut app.ui.text.font_system);
-                    self.update_text_label(hash_map, "g_number", &format!("G: {:.0}", self.plane_systems.flight_data.g_meter), &mut app.ui.text.font_system);
                     self.update_text_label(hash_map, "speed", &format!("SPD: {:.0}", self.plane_systems.flight_data.speedometer), &mut app.ui.text.font_system);
         
                     let rotation = Self::map_to_range(app.camera.camera.yaw.into(), -PI as f64, PI  as f64, 0.0, 360.0).round();

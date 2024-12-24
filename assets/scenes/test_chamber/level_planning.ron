@@ -1,0 +1,12 @@
+EventSystem (
+    event_list: {
+        10000: Event (
+            event_type: PlayAudio(
+                AudioFile(
+                    file_name: "./audio/ReasonToFight/audio.ogg"
+                )
+            ),
+            activated: false
+        )
+    }
+)

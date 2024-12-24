@@ -2,7 +2,7 @@ use std::{collections::HashMap, time::{Duration, Instant, SystemTime, UNIX_EPOCH
 
 use glyphon::{cosmic_text::Align, Color};
 
-use crate::{app::App, ui::{ui_node::{UiNode, UiNodeContent, UiNodeParameters, Visibility}, ui_transform::UiTransform}, utils::lerps::lerp};
+use crate::{app::App, ui::{ui_node::{UiNode, UiNodeContent, UiNodeParameters, Visibility}, ui_transform::UiTransform, vertical_container}, utils::lerps::lerp};
 
 const MAX_DURATION: f32 = 5.0;
 
@@ -13,20 +13,17 @@ const MAX_DURATION: f32 = 5.0;
 /// texts: A list 
 struct SubtitleLine {
     instance_time: Instant,
-    text: String,
     color: Color
 }
 
 pub struct Subtitle {
-    pub texts: Vec<SubtitleLine>,
-    pub value_list: Vec<String>
+    texts: Vec<SubtitleLine>,
 }
 
 impl Subtitle {
     pub fn new() -> Self {
         Self {
             texts: Vec::new(),
-            value_list: Vec::new(),
         }
     }
 
@@ -112,16 +109,21 @@ impl Subtitle {
                                             subtitles.visibility.background_color[3] = lerp(subtitles.visibility.background_color[3], 0.7, app.time.delta_time * 7.0);
                                             for (index, text) in &mut self.texts.iter_mut().enumerate() {
                                                 if text.instance_time.elapsed().as_secs_f32() > MAX_DURATION {
-                                                    match &mut vertical_container_data.children[index].content {
-                                                        UiNodeContent::Text(label) => {
-                                                            let new_alpha = lerp(text.color.a().into(), 0.0, app.time.delta_time) as u8;
-                                                            text.color = Color::rgba(text.color.r(), text.color.g(), text.color.b(), new_alpha);
-                                                            label.color = text.color;
+                                                    match &mut vertical_container_data.children {
+                                                        crate::ui::ui_node::ChildrenType::IndexedChildren(vec) => {
+                                                            match &mut vec[index].content {
+                                                                UiNodeContent::Text(label) => {
+                                                                    let new_alpha = lerp(text.color.a().into(), 0.0, app.time.delta_time) as u8;
+                                                                    text.color = Color::rgba(text.color.r(), text.color.g(), text.color.b(), new_alpha);
+                                                                    label.color = text.color;
+                                                                },
+                                                                _ => {},
+                                                            }
                                                         },
-                                                        UiNodeContent::VerticalContainer(vertical_container_data) => {},
+                                                        crate::ui::ui_node::ChildrenType::MappedChildren(hash_map) => todo!(),
                                                     }
                                                 }
-    
+                                                
                                                 if text.color.a() == 0 {
                                                     last_index = Some(index)
                                                 }
@@ -132,7 +134,11 @@ impl Subtitle {
                                         
                                         match last_index {
                                             Some(index) => {
-                                                vertical_container_data.children.drain(0..(index + 1));
+                                                match &mut vertical_container_data.children {
+                                                    crate::ui::ui_node::ChildrenType::IndexedChildren(vec) => {vec.drain(0..(index + 1));},
+                                                    _ => {},
+                                                }
+
                                                 self.texts.drain(0..(index + 1));
                                             },
                                             _ => {}
@@ -164,7 +170,6 @@ impl Subtitle {
 
         let new_text = SubtitleLine {
             instance_time: Instant::now(),
-            text: text.to_string(),
             color: Color::rgba(255, 255, 255, 255),
         };
 
@@ -176,7 +181,7 @@ impl Subtitle {
                             Some(subtitles) => {
                                 match &mut subtitles.content {
                                     UiNodeContent::VerticalContainer(vertical_container_data) => {
-                                        vertical_container_data.children.push(subtitle_node);
+                                        vertical_container_data.add_if_indexed(subtitle_node);
                                     },
                                     _ => {},
                                 }

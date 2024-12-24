@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::env;
 
 use rapier3d::prelude::{CCDSolver, ColliderBuilder, ColliderSet, CollisionPipeline, DefaultBroadPhase, ImpulseJointSet, IntegrationParameters, IslandManager, MultibodyJointSet, NarrowPhase, PhysicsPipeline, QueryPipeline, RigidBodyBuilder, RigidBodySet};
+use sdl2::mixer::{self, InitFlag, AUDIO_S16LSB, DEFAULT_CHANNELS};
 use wgpu::{BindGroupLayout, BindGroupLayoutDescriptor, Buffer, Device, DeviceDescriptor, Features, InstanceDescriptor, Limits, Queue, RenderPassDepthStencilAttachment, Surface, SurfaceConfiguration, TextureUsages};
 use sdl2::{video::DisplayMode, joystick::Joystick, JoystickSubsystem, GameControllerSubsystem, HapticSubsystem, video::Window, Sdl, render::Canvas, controller::GameController};
 use glyphon::{Resolution, TextArea};
@@ -12,6 +13,7 @@ use rapier3d::na::vector;
 use ron::from_str;
 use tokio::task;
 
+use crate::audio::audio::Audio;
 use crate::rendering::instance_management::{InstanceData, InstanceRaw, ModelDataInstance, PhysicsData};
 use crate::rendering::physics_rendering::RenderPhysics;
 use crate::game_nodes::game_object::{self, GameObject};
@@ -81,6 +83,8 @@ pub struct App {
     pub light: Light,
     pub physics: Physics,
     pub time: Timing,
+    pub scene_openned: Option<String>,
+    pub audio: Audio
 }
 
 pub struct Physics {
@@ -102,6 +106,7 @@ impl App {
         // base sdl2
         let context = sdl2::init().expect("SDL2 wasn't initialized");
         let video_susbsystem = context.video().expect("The Video subsystem wasn't initialized");
+        // let _audio_subsystem = context.audio().expect("The audio subsystem didnt loaded right");
 
         // so the mouse position gets setted inside the camer (the  mouse can go further than the window size)
         context.mouse().set_relative_mouse_mode(true);
@@ -285,7 +290,9 @@ impl App {
             game_models,
             light,
             physics,
-            time
+            time,
+            scene_openned: None,
+            audio: Audio::new()
         }
     }
 
@@ -548,7 +555,7 @@ impl App {
             match app_state.state {
                 GameState::Playing => {
                     if app_state.reset {
-                        self.load_level("./assets/scenes/test_chamber/data.ron".to_owned());
+                        self.load_level("./assets/scenes/test_chamber".to_owned());
                         play = play::GameLogic::new(&mut self);
                         app_state.reset = false;
                     } else {
@@ -653,7 +660,10 @@ impl App {
         }
     }
 
-    fn load_level(&mut self, level_path: String) {
+    fn load_level(&mut self, mut level_path: String) {
+
+        self.scene_openned = Some(level_path.clone());
+        level_path += "/data.ron";
 
         // i get the json data
         self.renderizable_instances = HashMap::new();

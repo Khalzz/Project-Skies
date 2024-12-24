@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+
 pub struct Timing {
     pub delta_time: f32,
     last_frame: Instant,

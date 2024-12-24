@@ -5,7 +5,7 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]
-sdl2 = {version = "*", default-features = false, features = ["ttf", "image", "raw-window-handle"]}
+sdl2 = {version = "*", default-features = false, features = ["ttf", "image", "mixer", "raw-window-handle", ]}
 wgpu = "0.18.0"
 tokio = { version = "*", features = ["full"] }
 bytemuck = { version = "*", features = [ "derive" ] }
@@ -15,12 +15,14 @@ fs_extra = "*"
 glob = "*"
 rand = "0.8"
 glyphon = "0.4"
-serde = { version = "1.0", features = ["derive"] }
+rodio = "*"
 
 # Physics
 rapier3d = { version = "*", features = [ "simd-stable", "serde-serialize" ] }
 nalgebra = "*"
 
+# External file management
+serde = { version = "1.0", features = ["derive"] }
 ron = "*"
 
 [dependencies.gltf]

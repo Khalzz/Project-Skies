@@ -1,22 +1,21 @@
 use glyphon::{FontSystem, TextArea};
+use ron::value;
 use wgpu::Color;
 
 use crate::{app::Size, rendering::vertex::VertexUi};
-
-use super::{ui_node::{UiNode, UiNodeParameters}, ui_transform::Rect};
+use super::ui_node::{ChildrenType, UiNode};
 
 /// # Vertical Container
 /// This struct will be designed for "rendering listed data" like for example, subtitles in a certain order (in this case on a vertical one)
 /// while respecting elements  like margin or separation between all of them.
-
 pub struct VerticalContainerData {
     pub margin: f32,
     pub separation: f32,
-    pub children: Vec<UiNode>
+    pub children: ChildrenType
 }
 
 impl VerticalContainerData {
-    pub fn new(margin: f32, separation: f32, children: Vec<UiNode>) -> Self {
+    pub fn new(margin: f32, separation: f32, children: ChildrenType) -> Self {
         Self {
             margin,
             separation,
@@ -30,5 +29,20 @@ impl VerticalContainerData {
         indices.extend_from_slice(indices_slice); 
 
         (vertices_slice.len() as u16, UiNode::NUM_INDICES)
+    }
+
+    pub fn add_if_mapped() {
+
+    }
+    pub fn add_if_indexed(&mut self, value_to_add: UiNode) {
+        match &mut self.children {
+            ChildrenType::IndexedChildren(vec) => {
+                vec.push(value_to_add);
+            },
+            _ => {
+                println!("You tried to add a indexed value to a value that containes a hashmap as children", )
+            },
+        }
+        
     }
 }

@@ -1,5 +1,8 @@
+use std::collections::{HashMap, HashSet};
+
 use glyphon::{cosmic_text::Align, Color, FontSystem, TextArea};
 use nalgebra::{base, vector};
+use rapier3d::parry::utils::hashmap;
 use crate::{app::{App, Size}, rendering::vertex::VertexUi};
 use super::{label::{self, Label}, ui_transform::{Rect, UiTransform}, vertical_container::{self, VerticalContainerData}};
 
@@ -10,6 +13,13 @@ pub enum Alignment {
 
     VerticalAlignment(f32)
     
+}
+
+// We do this so the container node type can save vectors and hashmap values
+pub enum ChildrenType {
+    IndexedChildren(Vec<UiNode>),
+    MappedChildren(HashMap<String, UiNode>)
+
 }
 
 pub enum UiNodeContent {
@@ -28,7 +38,7 @@ pub enum UiNodeParameters<'a> {
     VerticalContainerData {
         margin: f32, // separation between container and content
         separation: f32, // separation between elements in the content
-        children: Vec<UiNode>
+        children: ChildrenType
     }
 }
 
@@ -113,8 +123,8 @@ impl UiNode {
 
     pub fn node_content_preparation(&mut self, size: &Size, font_system: &mut FontSystem, vertices: &mut Vec<VertexUi>, indices: &mut Vec<u16>, num_vertices: &mut u16, num_indices: &mut u32) -> (Vec<TextArea>, u16, u32) {
         let mut text_areas: Vec<TextArea> = Vec::new();
-        let mut vertices_to_add = 0;
-        let mut indices_to_add = 0;
+        let vertices_to_add = 0;
+        let indices_to_add = 0;
     
         let vertices_slice = self.vertices(size);
         let indice_slice = self.indices(*num_vertices);
@@ -138,31 +148,46 @@ impl UiNode {
                 *num_vertices += container_vertices;
                 *num_indices += container_indices;
 
-                
-                for child in &mut vertical_container.children {
-                    // Reset child's transform based on parent's properties
-                    child.transform.width = ((self.transform.rect.right - vertical_container.margin as u32) - (self.transform.rect.left + vertical_container.margin as u32)) as f32;
-                    child.transform.x = self.transform.x + vertical_container.margin; // Align with parent's x
-                    child.transform.y = base_position; // Set y position based on parent's layout
-                    base_position += child.transform.height + vertical_container.separation; // Update base position for next child
-
-                    self.transform.rect.bottom = (child.transform.y + child.transform.height) as u32 + vertical_container.separation as u32;
-
-                    // Apply transformations specific to this child
-                    child.transform.apply_transformation();
-
-                    let (child_text_areas, child_vertices, child_indices) = child.node_content_preparation(size, font_system, vertices, indices, num_vertices, num_indices);
-                    text_areas.extend(child_text_areas);
-                    *num_vertices += child_vertices;
-                    *num_indices += child_indices;
+                match &mut vertical_container.children {
+                    ChildrenType::IndexedChildren(vec) => {
+                        for child in vec {
+                            let (child_text_areas, child_vertices, child_indices) = Self::handle_children(&mut self.transform, child, vertical_container.margin, vertical_container.separation, &mut base_position, size, font_system, vertices, indices, num_vertices, num_indices);
+                            text_areas.extend(child_text_areas);
+                            *num_vertices += child_vertices;
+                            *num_indices += child_indices;
+                        }
+                    },
+                    ChildrenType::MappedChildren(hash_map) => {
+                        for (_id, child) in hash_map {
+                            let (child_text_areas, child_vertices, child_indices) = Self::handle_children(&mut self.transform, child, vertical_container.margin, vertical_container.separation, &mut base_position, size, font_system, vertices, indices, num_vertices, num_indices);
+                            text_areas.extend(child_text_areas);
+                            *num_vertices += child_vertices;
+                            *num_indices += child_indices;
+                        }
+                    },
                 }
-                
-                
             },
         }
     
         (text_areas, vertices_to_add, indices_to_add)
     }
+
+    fn handle_children<'a>(transform: &mut UiTransform, child: &'a mut UiNode, margin: f32, separation: f32, base_position: &mut f32, size: &Size, font_system: &mut FontSystem, vertices: &mut Vec<VertexUi>, indices: &mut Vec<u16>, num_vertices: &mut u16, num_indices: &mut u32) -> (Vec<TextArea<'a>>, u16, u32) {
+        // Reset child's transform based on parent's properties
+        child.transform.width = ((transform.rect.right - margin as u32) - (transform.rect.left + margin as u32)) as f32;
+        child.transform.x = transform.x + margin; // Align with parent's x
+        child.transform.y = *base_position; // Set y position based on parent's layout
+        *base_position += child.transform.height + separation; // Update base position for next child
+
+        transform.rect.bottom = (child.transform.y + child.transform.height) as u32 + separation as u32;
+
+        // Apply transformations specific to this child
+        child.transform.apply_transformation();
+
+        child.node_content_preparation(size, font_system, vertices, indices, num_vertices, num_indices)
+        
+    }
+
     /// # Ui node render data getter
     /// 
     /// This function will mainly get as a parameter information about the renderizable element, mainly a list of vertex and indices
@@ -215,5 +240,33 @@ impl UiNode {
                 border_color: self.visibility.border_color, 
             },
         ]
+    }
+
+    pub fn add_children(&mut self, id: String, ui_node: UiNode) {
+        match &mut self.content {
+            UiNodeContent::VerticalContainer(vertical_container_data) => {
+                match &mut vertical_container_data.children {
+                    ChildrenType::IndexedChildren(vec) => {
+                        vec.push(ui_node);
+                    },
+                    ChildrenType::MappedChildren(hash_map) => {
+                        hash_map.insert(id, ui_node);
+                    },
+                }
+            },
+            _ => {},
+        }
+    }
+
+    pub fn get_container_hashed(&mut self) -> Result<&mut HashMap<String, UiNode>, String> {
+        match &mut self.content {
+            UiNodeContent::Text(label) => Err("This UiNode is not a container".to_owned()),
+            UiNodeContent::VerticalContainer(vertical_container_data) => {
+                match &mut vertical_container_data.children {
+                    ChildrenType::IndexedChildren(vec) => Err("This UiNode is not a map".to_owned()),
+                    ChildrenType::MappedChildren(hash_map) => Ok(hash_map),
+                }
+            },
+        }
     }
 }
