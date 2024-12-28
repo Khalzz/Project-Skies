@@ -5,6 +5,11 @@ pub fn lerp(start: f32, end: f32, t: f32) -> f32 {
     start + (end - start) * t
 }
 
+pub fn lerp_u32(start: u32, end: u32, t: f32,) -> i32 {
+    // Calculate the interpolated value
+    (start as f32 * (1.0 - t) + end as f32 * t).round() as i32
+}
+
 pub fn lerp_point3(start: Point3<f32>, end: Point3<f32>, t: f32) -> Point3<f32> {
     Point3::new(
         start.x + (end.x - start.x) * t,

@@ -120,7 +120,7 @@ impl Label {
 
     // this function is dedicated to center vertically where we display the text in the rect
     fn vertical_positioning_in_rect(&self, rect: &Rect) -> f32 {
-        (rect.bottom - (rect.bottom - rect.top) / 2) as f32 - (self.buffer.metrics().line_height / 2.0)
+        (rect.bottom - (rect.bottom - rect.top) / 2.0) - (self.buffer.metrics().line_height / 2.0)
     }
 
     pub fn set_text(&mut self, font_system: &mut FontSystem, text: &str, realign: bool) {

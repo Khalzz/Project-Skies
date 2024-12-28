@@ -1,9 +1,12 @@
 use std::{collections::HashMap, io::{BufReader, Cursor}, path::Path};
 use gltf::{image,  Gltf};
-use nalgebra::{Quaternion, Vector3};
-use wgpu::util::DeviceExt;
+use nalgebra::{vector, Quaternion, Unit, Vector3};
+use rapier3d::prelude::{ColliderBuilder, RigidBodyBuilder};
+use ron::from_str;
+use tokio::task;
+use wgpu::{util::DeviceExt, Buffer, Device};
 
-use crate::{rendering::{model::{self, Mesh, Model, ModelVertex}, textures::Texture}, transform::Transform};
+use crate::{app::App, game_nodes::{game_object::{self, GameObject}, scene::Scene}, rendering::{instance_management::{InstanceData, InstanceRaw, ModelDataInstance, PhysicsData}, model::{self, Mesh, Model, ModelVertex}, textures::Texture}, transform::Transform};
 
 pub async fn load_string(file_name: &str) -> anyhow::Result<String> {
     let path = std::path::Path::new(env!("OUT_DIR")).join("res").join(file_name);
@@ -133,14 +136,14 @@ pub async fn _load_model_glb(file_name: &str, device: &wgpu::Device, queue: &wgp
         };
     }
 
-    let mut meshes = HashMap::new();
+    let mut mesh_lists = HashMap::new();
     for scene in gltf.scenes() {
         for node in scene.nodes() {
-            traverse_node(node, &buffer_data, device, queue, transform_bind_group_layout, &mut meshes, file_name, None)?;
+            traverse_node(node, &buffer_data, device, queue, transform_bind_group_layout, &mut mesh_lists, file_name, None)?;
         }
     }
 
-    Ok(model::Model { meshes, materials })
+    Ok(model::Model { mesh_lists, materials })
 }
 
 pub async fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgpu::Queue, transform_bind_group_layout: &wgpu::BindGroupLayout) -> anyhow::Result<Model> {
@@ -265,21 +268,21 @@ pub async fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgp
         };
     }
 
-    let mut meshes = HashMap::new();
+    let mut mesh_lists = HashMap::new();
 
     for scene in gltf.scenes() {
         for node in scene.nodes() {
-            traverse_node(node, &buffer_data, device, queue, transform_bind_group_layout, &mut meshes, file_name, None)?;
+            traverse_node(node, &buffer_data, device, queue, transform_bind_group_layout, &mut mesh_lists, file_name, None)?;
         }
     }
 
     Ok(model::Model {
-        meshes,
+        mesh_lists,
         materials,
     })
 }
 
-fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::Device, queue: &wgpu::Queue, transform_bind_group_layout: &wgpu::BindGroupLayout, meshes: &mut HashMap<String, Mesh>, file_name: &str, parent_transform: Option<([f32; 3], [f32; 4], [f32; 3])>) -> anyhow::Result<()> {
+fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::Device, queue: &wgpu::Queue, transform_bind_group_layout: &wgpu::BindGroupLayout, mesh_lists: &mut HashMap<String, HashMap<String, Mesh>>, file_name: &str, parent_transform: Option<([f32; 3], [f32; 4], [f32; 3])>) -> anyhow::Result<()> {
         let mesh = node.mesh().expect("Got mesh");
         let primitives = mesh.primitives();
         primitives.for_each(|primitive| {
@@ -362,12 +365,7 @@ fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::D
                 ],
             });
 
-            if primitive.material().alpha_mode() == gltf::material::AlphaMode::Blend || primitive.material().alpha_mode() == gltf::material::AlphaMode::Mask {
-                println!("The node {} has transparency", node.name().unwrap());
-            }
-            
-            meshes.insert(
-                node.name().unwrap().to_owned(), model::Mesh {
+            let mesh = model::Mesh {
                 name: file_name.to_string(),
                 vertex_buffer,
                 index_buffer,
@@ -379,12 +377,180 @@ fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::D
                 base_transform: transform,
                 parent_transform: parent_values,
                 alpha_mode: primitive.material().alpha_mode(),
-            });
+            };
 
+            if primitive.material().alpha_mode() == gltf::material::AlphaMode::Blend || primitive.material().alpha_mode() == gltf::material::AlphaMode::Mask {
+                add_or_init_mesh_list(mesh_lists, &"transparent".to_string(), node.name().unwrap().to_owned(), mesh);
+            } else {
+                add_or_init_mesh_list(mesh_lists, &"opaque".to_string(), node.name().unwrap().to_owned(), mesh);
+            }
+            
         });
     for child in node.children() {
-        traverse_node(child, buffer_data, device, queue, transform_bind_group_layout, meshes, file_name, Some(node.transform().decomposed()))?;
+        traverse_node(child, buffer_data, device, queue, transform_bind_group_layout, mesh_lists, file_name, Some(node.transform().decomposed()))?;
     }
 
     Ok(())
+}
+
+/// # Add or init mesh list
+/// This function is used to create a mesh_list, here we define a list and if it exists we add data, else we create it and add data later
+fn add_or_init_mesh_list(mesh_lists: &mut HashMap<String, HashMap<String, Mesh>>, list_name: &String, key: String, mesh_to_add: Mesh) {
+    match mesh_lists.get_mut(list_name) {
+        Some(inner_mesh_list) => {
+            inner_mesh_list.insert(key, mesh_to_add);
+        },
+        None => {
+            mesh_lists.insert(list_name.to_string(), HashMap::new());
+            add_or_init_mesh_list(mesh_lists, list_name, key, mesh_to_add);
+        },
+    }
+}
+
+pub fn load_level(app: &mut App, mut level_path: String) {
+
+    app.scene_openned = Some(level_path.clone());
+    level_path += "/data.ron";
+
+    // i get the json data
+    app.renderizable_instances = HashMap::new();
+
+    for (_key, model) in &mut app.game_models {
+        model.instance_count = 0;
+    }
+
+    let instances_data_to_load = load_instances(level_path);
+    match instances_data_to_load {
+        Some(instances) => {
+            // models to load
+            let mut models: Vec<String> = vec![];
+
+            for data in &instances {
+                if !models.contains(&data.model.to_string()) {
+                    models.push(data.model.to_string())
+                }
+            }
+
+            // we get all data id and game_objects
+            for model_name in &models {
+                let mut ids: Vec<String> = vec![];
+                let mut model_instances:Vec<&GameObject> = vec![];
+
+                for game_object in &instances {
+                    if &game_object.model == model_name {
+                        ids.push(game_object.id.clone());
+                        model_instances.push(game_object);
+                    }
+                }
+
+                for (i, instance_data) in model_instances.iter().enumerate() {
+                    match app.game_models.get_mut(model_name) {
+                        Some(model_data) => {
+                            model_data.instance_count += 1;
+                            model_data.instance_buffer = create_instance_buffer(&model_instances, &app.device);
+                        },
+                        None => {
+                            let model = task::block_in_place( || {
+                                tokio::runtime::Runtime::new()
+                                    .unwrap()
+                                    .block_on(load_model_gltf(&model_name, &app.device, &app.queue, &app.transform_bind_group_layout))
+                            });
+
+                            match model {
+                                Ok(correct_model) => {
+                                    app.game_models.insert(
+                                        model_name.to_string(), 
+                                        ModelDataInstance {
+                                            model: correct_model,
+                                            instance_count: 1,
+                                            instance_buffer: create_instance_buffer(&model_instances, &app.device)
+                                        }
+                                    );
+                                },
+                                Err(e) => eprintln!("The element was not loaded as an instance: {}", e),
+                            }
+                        },
+                    }
+                    
+                    // Physics
+                    let mut physics_data: Option<PhysicsData> = None;
+
+                    if let Some(physics_obj_data) = &instance_data.metadata.physics {
+                        let mut rigid_body = if physics_obj_data.rigidbody.is_static {
+                            RigidBodyBuilder::fixed().additional_mass(physics_obj_data.rigidbody.mass).translation(vector![instance_data.transform.position.x, instance_data.transform.position.y, instance_data.transform.position.z]).build()
+                        } else {
+                            // i had to do this
+                            let principal_inertia = nalgebra::Vector3::new(44531.0, 256608.0, 1333.0);
+
+                            RigidBodyBuilder::dynamic()
+                            .additional_mass_properties(rapier3d::prelude::MassProperties::new(physics_obj_data.rigidbody.center_of_mass.into(), physics_obj_data.rigidbody.mass, principal_inertia))
+                            .translation(instance_data.transform.position)
+                            .build()
+                        };
+
+                        rigid_body.set_linvel(physics_obj_data.rigidbody.initial_velocity, true);
+                        let rigidbody_handle = app.physics.rigidbody_set.insert(rigid_body);
+
+                        // collisions
+                        let collider_handle = match &physics_obj_data.collider {
+                            Some(collider_data) => {
+                                let collider = match collider_data {
+                                    game_object::ColliderType::Cuboid { half_extents } => {
+                                        ColliderBuilder::cuboid(half_extents.0, half_extents.1, half_extents.2).build()
+                                    },
+                                    game_object::ColliderType::HalfSpace { normal } => {
+                                        ColliderBuilder::halfspace(Unit::new_normalize(*normal)).build()
+                                    },
+                                    _ => todo!(),
+                                };
+
+                                Some(app.physics.collider_set.insert_with_parent(collider, rigidbody_handle, &mut app.physics.rigidbody_set))
+                            },
+                            None => {
+                                None
+                            },
+                        };
+
+                        physics_data = Some(PhysicsData { rigidbody_handle, collider_handle });
+                    };
+
+                    // println!("loaded data: {}", ids[i]);
+                    app.renderizable_instances.insert(ids[i].clone(), InstanceData { physics_data: physics_data, renderizable_transform: instance_data.transform.clone(), instance: (**instance_data).clone(), model_ref: model_name.clone() });
+                }
+            }
+        },
+        None => eprintln!("The instance data was not correctly loaded"),
+    }
+}
+
+pub fn create_instance_buffer(instances: &Vec<&GameObject>, device: &Device) -> Buffer {
+    let raw_instances: Vec<InstanceRaw> = instances.iter()
+    .map(|instance| instance.transform.to_raw())
+    .collect();
+
+    device.create_buffer_init(
+        &wgpu::util::BufferInitDescriptor {
+            label: Some("Instance Buffer"),
+            contents: bytemuck::cast_slice(&raw_instances),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        }
+    )
+}
+
+fn load_instances(path: String) -> Option<Vec<GameObject>> {
+    match std::fs::read_to_string(path) {
+        Ok(file_contents) => {
+            match from_str::<Scene>(&file_contents) {
+                Ok(level) => {
+                    return Some(level.children);
+                },
+                Err(e) => {
+                    // Handle the error if deserialization fails
+                    eprintln!("Error deserializing RON: {}", e);
+                }
+            }
+        },
+        _ => {}
+    }
+    return None
 }

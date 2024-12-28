@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use glyphon::{FontSystem, SwashCache, TextAtlas, TextRenderer};
+use glyphon::{FontSystem, SwashCache, TextArea, TextAtlas, TextRenderer};
 use wgpu::{Buffer, Device, Queue, RenderPipeline, SurfaceConfiguration};
 
 use crate::{rendering::vertex::VertexUi, ui::ui_node::UiNode};
@@ -17,7 +17,12 @@ pub struct TextRendering {
 }
 pub struct UiRendering {
     pub vertex_buffer: Buffer,
-    pub index_buffer: Buffer
+    pub index_buffer: Buffer,
+    pub vertices: Vec<VertexUi>,
+    pub indices: Vec<u16>,
+    pub num_vertices: u16,
+    pub num_indices: u32,
+    
 }
 
 // this code will make a direct reference to the UI rendering
@@ -37,6 +42,7 @@ pub struct Ui {
     pub ui_pipeline: RenderPipeline,
     pub ui_rendering: UiRendering,
     pub text: TextRendering,
+    pub has_changed: bool,
 }
 
 impl Ui {
@@ -119,7 +125,11 @@ impl Ui {
                 size: 5000,
                 usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
-            })
+            }),
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            num_vertices: 0,
+            num_indices: 0,
         };
 
         Self {
@@ -133,6 +143,7 @@ impl Ui {
             },
             ui_rendering,
             renderizable_elements: HashMap::new(),
+            has_changed: true
         }
     }
 

@@ -71,8 +71,10 @@ pub struct Mesh {
     pub alpha_mode: AlphaMode
 }
 
+/// # Model
+/// A 3D model is defined by meshes, the "mesh_list" is for definition of different mesh types, for example separation of opaque and transparent ones.
 pub struct Model {
-    pub meshes: HashMap<String, Mesh>,
+    pub mesh_lists: HashMap<String, HashMap<String, Mesh>>,
     pub materials: Vec<Material>
 }
 
@@ -122,21 +124,13 @@ pub trait DrawModel<'a> {
     fn draw_model(&mut self, model: &'a Model, camera_bind_group: &'a wgpu::BindGroup, light_bind_group: &'a wgpu::BindGroup);
 
     // Draw multiple instances of the entire model
-    fn draw_model_instanced(
+    fn draw_model_instanced_from_list(
         &mut self,
         model: &'a Model,
         instances: Range<u32>,
         camera_bind_group: &'a wgpu::BindGroup,
-        light_bind_group: &'a wgpu::BindGroup
-    );
-
-    // New function to draw only transparent objects
-    fn draw_transparent_model_instanced(
-        &mut self,
-        model: &'a Model,
-        instances: Range<u32>,
-        camera_bind_group: &'a wgpu::BindGroup,
-        light_bind_group: &'a wgpu::BindGroup
+        light_bind_group: &'a wgpu::BindGroup,
+        list_name: &String
     );
 }
 
@@ -159,26 +153,16 @@ where
     }
 
     fn draw_model(&mut self, model: &'b Model, camera_bind_group: &'b wgpu::BindGroup, light_bind_group: &'a wgpu::BindGroup) {
-        self.draw_model_instanced(model, 0..1, camera_bind_group, &light_bind_group);
+        self.draw_model_instanced_from_list(model, 0..1, camera_bind_group, &light_bind_group, &"opaque".to_owned());
     }
 
-    fn draw_model_instanced(&mut self, model: &'b Model, instances: Range<u32>, camera_bind_group: &'b wgpu::BindGroup, light_bind_group: &'a wgpu::BindGroup) {
-        let _ = &model.meshes.iter()
-        .filter(|(_key, mesh)| mesh.alpha_mode != gltf::material::AlphaMode::Blend && mesh.alpha_mode != gltf::material::AlphaMode::Mask)
-        .for_each(|(_key, mesh)| {
-            let material = &model.materials[mesh.material];
-            self.draw_mesh_instanced(mesh, material, instances.clone(), camera_bind_group, light_bind_group);
-        });
-    }
-    
-    fn draw_transparent_model_instanced( &mut self, model: &'b Model, instances: Range<u32>, camera_bind_group: &'b wgpu::BindGroup, light_bind_group: &'a wgpu::BindGroup) {
-        let _ = &model.meshes.iter()
-        .for_each(|(_key, mesh)| {
-            if mesh.alpha_mode == gltf::material::AlphaMode::Blend || mesh.alpha_mode == gltf::material::AlphaMode::Mask {
+    fn draw_model_instanced_from_list(&mut self, model: &'b Model, instances: Range<u32>, camera_bind_group: &'b wgpu::BindGroup, light_bind_group: &'a wgpu::BindGroup, list_name: &String) {
+        if let Some(meshes) = model.mesh_lists.get(list_name) {
+            for (_key, mesh) in meshes {
                 let material = &model.materials[mesh.material];
                 self.draw_mesh_instanced(mesh, material, instances.clone(), camera_bind_group, light_bind_group);
-            } 
-        });
+            }
+        }
     }
 }
 
@@ -248,6 +232,7 @@ where
     ) {
         self.draw_light_model_instanced(model, 0..1, camera_bind_group, light_bind_group);
     }
+    
     fn draw_light_model_instanced(
         &mut self,
         model: &'b Model,
@@ -255,8 +240,10 @@ where
         camera_bind_group: &'b wgpu::BindGroup,
         light_bind_group: &'b wgpu::BindGroup,
     ) {
-        for mesh in &model.meshes {
-            self.draw_light_mesh_instanced(mesh.1, instances.clone(), camera_bind_group, light_bind_group);
+        for (_id, mesh_lists) in &model.mesh_lists {
+            for mesh in mesh_lists {
+                self.draw_light_mesh_instanced(mesh.1, instances.clone(), camera_bind_group, light_bind_group);
+            }
         }
     }
 }

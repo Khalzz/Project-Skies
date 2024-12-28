@@ -23,11 +23,10 @@ impl GameLogic {
     pub fn new(app: &mut App) -> Self {
 
         let plane_name = UiNode::new(
-            UiTransform::new(0.0, 0.0, 50.0, 100.0, 0.0), 
+            UiTransform::new(0.0, 0.0, 50.0, 100.0, 0.0, false), 
             Visibility::new([0.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.29, 1.0]),
             UiNodeParameters::Text { text: "Plane Name", color: Color::rgba(0, 255, 75, 255), align: Align::Center, font_size: 20.0 }, 
             app,
-            None
         );
 
         app.ui.renderizable_elements.clear();
@@ -55,8 +54,10 @@ impl GameLogic {
     pub fn update(&mut self, mut app_state: &mut AppState, mut event_pump: &mut sdl2::EventPump, app: &mut App, controller: &mut Option<GameController>) {
         if let Some(plane) = app.renderizable_instances.get_mut(&self.plane_list.list[self.plane_list.index]) {
             if let Some(plane_model) = app.game_models.get_mut(&plane.instance.model) {
-                if let Some(afterburner) = plane_model.model.meshes.get_mut("Afterburner") {
-                    afterburner.change_transform(&app.queue, Transform::new(afterburner.transform.position, afterburner.transform.rotation, Vector3::new(0.0, 0.0, 0.0)));
+                if let Some(meshes) = plane_model.model.mesh_lists.get_mut("transparent") {
+                    if let Some(afterburner) = meshes.get_mut("Afterburner") {
+                        afterburner.change_transform(&app.queue, Transform::new(afterburner.transform.position, afterburner.transform.rotation, Vector3::new(0.0, 0.0, 0.0)));
+                    }
                 }
             }
         }
@@ -85,31 +86,33 @@ impl GameLogic {
         for plane in &self.plane_list.list {
             if let Some(plane) = app.renderizable_instances.get_mut(plane) {
                 if let Some(plane_model) = app.game_models.get_mut(&plane.model_ref) {
-                    if let Some(aleron) = plane_model.model.meshes.get_mut("left_aleron") {
+                    if let Some(meshes) = plane_model.model.mesh_lists.get_mut("opaque") {
+                        if let Some(aleron) = meshes.get_mut("left_aleron") {
 
-                        let dependent = aleron.base_transform.rotation.clone() * *UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.5 * -self.controller_simulation.x);
-                        let aleron_rotation = lerp_quaternion(aleron.transform.rotation,  dependent, app.time.delta_time * 7.0);
-                        let aleron_transform = Transform::new(aleron.transform.position, aleron_rotation, aleron.transform.scale);
-                        aleron.change_transform(&app.queue, aleron_transform);
-                    }
-
-                    if let Some(aleron) = plane_model.model.meshes.get_mut("right_aleron") {
-                        let dependent = aleron.base_transform.rotation.clone() * *UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.5 * self.controller_simulation.x);
-                        let aleron_rotation = lerp_quaternion(aleron.transform.rotation,  dependent, app.time.delta_time * 7.0);
-                        let aleron_transform = Transform::new(aleron.transform.position, aleron_rotation, aleron.transform.scale);
-                        aleron.change_transform(&app.queue, aleron_transform);
-                    }
-
-                    if let Some(elevator) = plane_model.model.meshes.get_mut("left_elevator") {
-                        let elevator_rotation = lerp_quaternion(elevator.transform.rotation, *UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.2 * -self.controller_simulation.y), app.time.delta_time * 7.0);
-                        let elevator_transform = Transform::new(elevator.transform.position, elevator_rotation, elevator.transform.scale);
-                        elevator.change_transform(&app.queue, elevator_transform);
-                    }
-
-                    if let Some(elevator) = plane_model.model.meshes.get_mut("right_elevator") {
-                        let elevator_rotation = lerp_quaternion(elevator.transform.rotation, *UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.2 * -self.controller_simulation.y), app.time.delta_time * 7.0);
-                        let elevator_transform = Transform::new(elevator.transform.position, elevator_rotation, elevator.transform.scale);
-                        elevator.change_transform(&app.queue, elevator_transform);
+                            let dependent = aleron.base_transform.rotation.clone() * *UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.5 * -self.controller_simulation.x);
+                            let aleron_rotation = lerp_quaternion(aleron.transform.rotation,  dependent, app.time.delta_time * 7.0);
+                            let aleron_transform = Transform::new(aleron.transform.position, aleron_rotation, aleron.transform.scale);
+                            aleron.change_transform(&app.queue, aleron_transform);
+                        }
+    
+                        if let Some(aleron) = meshes.get_mut("right_aleron") {
+                            let dependent = aleron.base_transform.rotation.clone() * *UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.5 * self.controller_simulation.x);
+                            let aleron_rotation = lerp_quaternion(aleron.transform.rotation,  dependent, app.time.delta_time * 7.0);
+                            let aleron_transform = Transform::new(aleron.transform.position, aleron_rotation, aleron.transform.scale);
+                            aleron.change_transform(&app.queue, aleron_transform);
+                        }
+    
+                        if let Some(elevator) = meshes.get_mut("left_elevator") {
+                            let elevator_rotation = lerp_quaternion(elevator.transform.rotation, *UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.2 * -self.controller_simulation.y), app.time.delta_time * 7.0);
+                            let elevator_transform = Transform::new(elevator.transform.position, elevator_rotation, elevator.transform.scale);
+                            elevator.change_transform(&app.queue, elevator_transform);
+                        }
+    
+                        if let Some(elevator) = meshes.get_mut("right_elevator") {
+                            let elevator_rotation = lerp_quaternion(elevator.transform.rotation, *UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.2 * -self.controller_simulation.y), app.time.delta_time * 7.0);
+                            let elevator_transform = Transform::new(elevator.transform.position, elevator_rotation, elevator.transform.scale);
+                            elevator.change_transform(&app.queue, elevator_transform);
+                        }
                     }
                 }
 

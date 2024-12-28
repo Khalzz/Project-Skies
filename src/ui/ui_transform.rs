@@ -9,10 +9,10 @@
 
 #[derive(Clone, Debug)]
 pub struct Rect {
-    pub top: u32,
-    pub left: u32,
-    pub bottom: u32,
-    pub right: u32,
+    pub top: f32,
+    pub left: f32,
+    pub bottom: f32,
+    pub right: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -22,17 +22,18 @@ pub struct UiTransform {
     pub y: f32,
     pub height: f32,
     pub width: f32,
-    pub rotation: f32
+    pub rotation: f32,
+    pub smooth_change: bool
 }
 
 impl UiTransform {
-    pub fn new(x: f32, y: f32, height: f32, width: f32, rotation: f32) -> Self {
+    pub fn new(x: f32, y: f32, height: f32, width: f32, rotation: f32, smooth_change: bool) -> Self {
 
         let rect = Rect {
-            top: y as u32,
-            left: x as u32,
-            bottom: (y + height) as u32,
-            right: (x + width) as u32,
+            top: y as f32,
+            left: x as f32,
+            bottom: (y + height) as f32,
+            right: (x + width) as f32,
         };
 
         Self {
@@ -42,15 +43,16 @@ impl UiTransform {
             height,
             width,
             rotation,
+            smooth_change
         }
     }
 
     pub fn apply_transformation(&mut self) {
         self.rect = Rect {
-            top: self.y as u32,
-            left: self.x as u32,
-            bottom: (self.y + self.height) as u32,
-            right: (self.x + self.width) as u32,
+            top: self.y as f32,
+            left: self.x as f32,
+            bottom: (self.y + self.height) as f32,
+            right: (self.x + self.width) as f32,
         };
     }
 }

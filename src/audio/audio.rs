@@ -1,5 +1,6 @@
 use std::{fs::File, io::BufReader, time::Duration};
 
+use fs_extra::file;
 use rodio::{source::SineWave, Decoder, OutputStream, OutputStreamHandle, Sink, Source};
 use sdl2::mixer::{self, InitFlag, Sdl2MixerContext, AUDIO_S16LSB, DEFAULT_CHANNELS};
 
@@ -21,13 +22,18 @@ impl Audio {
             stream,
             stream_handle,
             sink
+            
         }
     }
 
-    pub fn play_audio(&mut self, mut file: String) {
-        // file += "/audio.ogg";
+    pub fn update(game_time: f64) {
+        
+    }
 
-        let file = File::open(file);
+    pub fn play_audio(&mut self, mut file_string: String) {
+        file_string += "/audio.ogg";
+
+        let file = File::open(file_string);
 
         match file {
             Ok(result_file) => {
@@ -35,15 +41,14 @@ impl Audio {
 
                 match Decoder::new(buffer) {
                     Ok(source) => {
-                        println!("playing");
                         self.sink.append(source);
                         self.sink.play();
                     },
-                    Err(err) => eprintln!("Error: {}", err),
+                    Err(err) => eprintln!("Error decoding the buffer: {}", err),
                 }
 
             },
-            Err(err) => eprintln!("Error: {}", err),
+            Err(err) => eprintln!("Error Opening the file: {}", err),
         }
         
     }

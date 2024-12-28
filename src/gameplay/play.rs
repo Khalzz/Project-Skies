@@ -77,67 +77,59 @@ impl GameLogic {
     pub fn new(app: &mut App) -> Self {
         // UI ELEMENTS AND LIST
         let altitude = UiNode::new(
-            UiTransform::new(((app.config.width as f32 / 2.0) - (150.0 / 2.0)) - 400.0, (app.config.height as f32 / 2.0) - (30.0 / 2.0), 30.0, 150.0, 0.0), 
+            UiTransform::new(((app.config.width as f32 / 2.0) - (150.0 / 2.0)) - 400.0, (app.config.height as f32 / 2.0) - (30.0 / 2.0), 30.0, 150.0, 0.0, false), 
             Visibility::new([0.0, 0.0, 0.0, 0.0], [0.0, 255.0, 0.0, 255.0]),
             UiNodeParameters::Text { text: "ALT", color: Color::rgba(0, 255, 75, 255), align: Align::Center, font_size: 20.0}, 
             app,
-            None
         );
 
         let speed = UiNode::new(
-            UiTransform::new(((app.config.width as f32 / 2.0) - (150.0 / 2.0)) + 400.0, (app.config.height as f32 / 2.0) - (30.0 / 2.0), 30.0, 150.0, 0.0), 
+            UiTransform::new(((app.config.width as f32 / 2.0) - (150.0 / 2.0)) + 400.0, (app.config.height as f32 / 2.0) - (30.0 / 2.0), 30.0, 150.0, 0.0, false), 
             Visibility::new([0.0, 0.0, 0.0, 0.0], [0.0, 255.0, 0.0, 255.0]),
             UiNodeParameters::Text { text: "SPD", color: Color::rgba(0, 255, 75, 255), align: Align::Center, font_size: 20.0}, 
             app,
-            None
         );
         
         let altitude_alert = UiNode::new(
-            UiTransform::new((app.config.width as f32 / 2.0) - (140.0 / 2.0), ((app.config.height as f32 / 2.0) - (50.0 / 2.0)) + 50.0, 50.0, 140.0, 0.0), 
+            UiTransform::new((app.config.width as f32 / 2.0) - (140.0 / 2.0), ((app.config.height as f32 / 2.0) - (50.0 / 2.0)) + 50.0, 50.0, 140.0, 0.0, false), 
             Visibility::new([0.0, 0.0, 0.0, 0.0], [255.0, 0.0, 0.0, 255.0]),
             UiNodeParameters::Text { text: "ALT", color: Color::rgba(0, 255, 75, 255), align: Align::Center, font_size: 20.0 }, 
             app,
-            None
         );
 
         let compass = UiNode::new(
-            UiTransform::new((app.config.width as f32 / 2.0) - (100.0 / 2.0), 300.0, 50.0, 100.0, 0.0), 
+            UiTransform::new((app.config.width as f32 / 2.0) - (100.0 / 2.0), 300.0, 50.0, 100.0, 0.0, false), 
             Visibility::new([0.0, 0.0, 0.0, 0.0], [0.0, 255.0, 0.0, 255.0]),
             UiNodeParameters::Text { text: "90°", color: Color::rgba(0, 255, 75, 255), align: Align::Center, font_size: 20.0 }, 
             app,
-            None
         );
 
         let timer = UiNode::new(
-            UiTransform::new(10.0, 10.0, 30.0, 100.0, 0.0), 
+            UiTransform::new(10.0, 10.0, 30.0, 100.0, 0.0, false), 
             Visibility::new([0.0, 0.0, 0.0, 0.0], [0.0, 255.0, 0.0, 255.0]),
             UiNodeParameters::Text { text: "00:00:000", color: Color::rgba(0, 255, 75, 255), align: Align::Center, font_size: 20.0}, 
             app,
-            None
         );
 
         let framerate = UiNode::new(
-            UiTransform::new(10.0, 10.0, 30.0, 100.0, 0.0), 
+            UiTransform::new(10.0, 10.0, 30.0, 100.0, 0.0, false), 
             Visibility::new([0.0, 0.0, 0.0, 0.0], [0.0, 255.0, 0.0, 255.0]),
             UiNodeParameters::Text { text: "90 fps", color: Color::rgba(0, 255, 75, 255), align: Align::Center, font_size: 20.0}, 
             app,
-            None
         );
 
         let g_number = UiNode::new(
-            UiTransform::new(10.0, 50.0, 30.0, 100.0, 0.0), 
+            UiTransform::new(10.0, 50.0, 30.0, 100.0, 0.0, false), 
             Visibility::new([0.0, 0.0, 0.0, 0.0], [0.0, 255.0, 0.0, 255.0]),
             UiNodeParameters::Text { text: "G", color: Color::rgba(0, 255, 75, 255), align: Align::Center, font_size: 20.0}, 
             app,
-            None
         );
 
         let mut game_info = UiNode::new(
-            UiTransform::new(10.0, 10.0, 30.0, 150.0, 0.0), 
+            UiTransform::new(10.0, 10.0, 0.0, 150.0, 0.0, false), 
             Visibility::new([0.0, 0.0, 0.0, 0.7], [0.0, 0.0, 0.0, 0.0]),
             UiNodeParameters::VerticalContainerData { margin: 10.0, separation: 10.0, children: ChildrenType::MappedChildren(HashMap::new()) }, 
             app,
-            None
         );
 
         game_info.add_children("framerate".to_owned(), framerate);
@@ -145,11 +137,10 @@ impl GameLogic {
         game_info.add_children("timer".to_owned(), timer);
 
         let subtitle = UiNode::new(
-            UiTransform::new((app.config.width as f32 / 2.0) - (app.config.width as f32 * 0.9) / 2.0, app.config.height as f32 * 0.7, 100.0, app.config.width as f32 * 0.9, 0.0), 
+            UiTransform::new((app.config.width as f32 / 2.0) - (app.config.width as f32 * 0.9) / 2.0, app.config.height as f32 * 0.7, 0.0, app.config.width as f32 * 0.9, 0.0, true), 
             Visibility::new([0.0, 0.0, 0.0, 0.7], [0.0, 0.0, 0.0, 0.0]),
             UiNodeParameters::VerticalContainerData { margin: 10.0, separation: 10.0, children: ChildrenType::IndexedChildren(vec![]) }, 
             app,
-            None
         );
         
 
@@ -261,7 +252,7 @@ impl GameLogic {
         self.game_time += app.time.delta_time as f64;
 
         if let Some(system) = &mut self.event_system {
-            system.handle_events(self.game_time, app);
+            system.handle_events(self.game_time, app, &mut self.subtitle_data);
         }
 
         if self.controller.fix_view.just_pressed {
@@ -279,133 +270,139 @@ impl GameLogic {
         let plane_model = app.game_models.get_mut(&plane.model_ref).unwrap();
 
         // elevators
-        if let Some(elevator) = plane_model.model.meshes.get_mut("left_elevator") {
-            let final_rotation = UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.15 * -self.controller.y);
-            let elevator_rotation = lerp_quaternion(elevator.transform.rotation,  *final_rotation, app.time.delta_time * 7.0);
-            let elevator_transform = Transform::new(elevator.transform.position, elevator_rotation, elevator.transform.scale);
-            elevator.change_transform(&app.queue, elevator_transform);
-        }
-
-        if let Some(elevator) = plane_model.model.meshes.get_mut("right_elevator") {
-            let final_rotation = UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.15 * -self.controller.y);
-            let elevator_rotation = lerp_quaternion(elevator.transform.rotation,  *final_rotation, app.time.delta_time * 7.0);
-            let elevator_transform = Transform::new(elevator.transform.position, elevator_rotation, elevator.transform.scale);
-            elevator.change_transform(&app.queue, elevator_transform);
-        }
-
-        // wings
-        /* 
-        let l_wing = app.game_models.get_mut(&plane.model_ref).unwrap().model.meshes.get_mut("left_wing").unwrap();
-        let l_wing_rotation = lerp_quaternion(l_wing.instance.transform.rotation,Quaternion::from_angle_y(Rad(angle)), delta_time);
-        let l_wing_transform = Transform::new(l_wing.instance.transform.position, l_wing_rotation, l_wing.instance.transform.scale);
-        l_wing.change_transform(&app.queue, l_wing_transform);
-
-        let r_wing = app.game_models.get_mut(&plane.model_ref).unwrap().model.meshes.get_mut("right_wing").unwrap();
-        let r_wing_rotation = lerp_quaternion(r_wing.instance.transform.rotation,Quaternion::from_angle_y(Rad(-angle)), delta_time);
-        let r_wing_transform = Transform::new(r_wing.instance.transform.position, r_wing_rotation, r_wing.instance.transform.scale);
-        r_wing.change_transform(&app.queue, r_wing_transform);
-        */
-
-        if let Some(aleron) = plane_model.model.meshes.get_mut("left_aleron") {
-            match self.plane_systems.base_rotations.left_aleron {
-                Some(base_rotation) => {
-                    let dependent = UnitQuaternion::from_quaternion(base_rotation.clone()) * UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.5 * -self.controller.x);
-                    let aleron_rotation = lerp_quaternion(aleron.transform.rotation,  *dependent, app.time.delta_time * 7.0);
-                    let aleron_transform = Transform::new(aleron.transform.position, aleron_rotation, aleron.transform.scale);
-                    aleron.change_transform(&app.queue, aleron_transform);
-                },
-                None => {
-                    self.plane_systems.base_rotations.left_aleron = Some(aleron.transform.rotation);
-                },
+        if let Some(meshes) = plane_model.model.mesh_lists.get_mut("opaque") {
+            if let Some(elevator) = meshes.get_mut("left_elevator") {
+                let final_rotation = UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.15 * -self.controller.y);
+                let elevator_rotation = lerp_quaternion(elevator.transform.rotation,  *final_rotation, app.time.delta_time * 7.0);
+                let elevator_transform = Transform::new(elevator.transform.position, elevator_rotation, elevator.transform.scale);
+                elevator.change_transform(&app.queue, elevator_transform);
             }
-        }
-
-        if let Some(aleron) = plane_model.model.meshes.get_mut("right_aleron") {
-            match self.plane_systems.base_rotations.right_aleron {
-                Some(base_rotation) => {
-                    let dependent = UnitQuaternion::from_quaternion(base_rotation.clone()) * UnitQuaternion::from_axis_angle(&Vector3::x_axis(), 0.5 * self.controller.x);
-                    let aleron_rotation = lerp_quaternion(aleron.transform.rotation,  *dependent, app.time.delta_time * 7.0);
-                    let aleron_transform = Transform::new(aleron.transform.position, aleron_rotation, aleron.transform.scale);
-                    aleron.change_transform(&app.queue, aleron_transform);
-                },
-                None => {
-                    // this is not correctly resetting once the plane is reseted
-                    self.plane_systems.base_rotations.right_aleron = Some(aleron.transform.rotation);
-                },
+    
+            if let Some(elevator) = meshes.get_mut("right_elevator") {
+                let final_rotation = UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.15 * -self.controller.y);
+                let elevator_rotation = lerp_quaternion(elevator.transform.rotation,  *final_rotation, app.time.delta_time * 7.0);
+                let elevator_transform = Transform::new(elevator.transform.position, elevator_rotation, elevator.transform.scale);
+                elevator.change_transform(&app.queue, elevator_transform);
             }
-        }
-
-        // rudders
-        // only rudder or left rudder if it haves 2
-        if let Some(rudder) = plane_model.model.meshes.get_mut("rudder_0") {
-            let rudder_rotation = lerp_quaternion(rudder.transform.rotation, *UnitQuaternion::from_axis_angle(&Vector3::x_axis(),-28.4493 * PI / 180.0) * *UnitQuaternion::from_axis_angle(&Vector3::y_axis(),0.5 * self.controller.yaw), delta_time * 7.0);
-            let rudder_transform = Transform::new(rudder.transform.position, rudder_rotation, rudder.transform.scale);
-            rudder.change_transform(&app.queue, rudder_transform);
-        }
-
-        // right rudder if it haves 2
-        if let Some(rudder) = plane_model.model.meshes.get_mut("rudder_1") {
-            let rudder_rotation = lerp_quaternion(rudder.transform.rotation, *UnitQuaternion::from_axis_angle(&Vector3::x_axis(),-28.4493 * PI / 180.0) * *UnitQuaternion::from_axis_angle(&Vector3::y_axis(),0.5 * self.controller.yaw), delta_time * 7.0);
-            let rudder_transform = Transform::new(rudder.transform.position, rudder_rotation, rudder.transform.scale);
-            rudder.change_transform(&app.queue, rudder_transform);
-        }
-
-        if let Some(afterburner) = plane_model.model.meshes.get_mut("Afterburner") {
-            if self.controller.power > 0.0 {
-                self.plane_systems.afterburner_value =  lerp(self.plane_systems.afterburner_value, self.controller.power + self.rng.gen_range(-0.5..0.5), app.time.delta_time * 20.0);
-            } else {
-                self.plane_systems.afterburner_value = lerp(self.plane_systems.afterburner_value, 0.0, delta_time * 2.0)
-            }
-
-            afterburner.change_transform(&app.queue, Transform::new(afterburner.transform.position, afterburner.transform.rotation, Vector3::new(1.0, 1.0, self.plane_systems.afterburner_value)));
-        }
-
-        match &plane.physics_data {
-            Some(physics_data) => {
-                if let Some(rigidbody) = app.physics.rigidbody_set.get_mut(physics_data.rigidbody_handle) {
-                    self.plane_systems.flight_data.g_meter = self.calculate_g_forces(rigidbody, app.time.delta_time);
-                    self.plane_systems.flight_data.speedometer = rigidbody.linvel().norm() * 3.6; // in kmh, if i want it as knots change the 3.6 to 1.94384
-
-                    rigidbody.reset_torques(true);
-                    rigidbody.reset_forces(true);
-
-                    // Thrust                    
-                    let max_thrust = 60000.0; // newtons of force generated by engine
-                    let power_value_world = rigidbody.rotation() * nalgebra::Vector3::new(0.0, 0.0, max_thrust * self.controller.power);
-
-                    // Apply the thrust force to the rigidbody.
-                    rigidbody.add_force(power_value_world, true);
-                    // Thrust
-
-                    self.plane_systems.wings[0].control_input = self.controller.x;
-                    self.plane_systems.wings[1].control_input = -self.controller.x;
-                    self.plane_systems.wings[2].control_input = self.controller.y;
-                    self.plane_systems.wings[3].control_input = self.controller.yaw;
-                    
-                    for wing in &mut self.plane_systems.wings {
-                        wing.physics_force(rigidbody, &mut app.physics.render_physics.renderizable_lines);
-                    }
+    
+            // wings
+            /* 
+            let l_wing = app.game_models.get_mut(&plane.model_ref).unwrap().model.meshes.get_mut("left_wing").unwrap();
+            let l_wing_rotation = lerp_quaternion(l_wing.instance.transform.rotation,Quaternion::from_angle_y(Rad(angle)), delta_time);
+            let l_wing_transform = Transform::new(l_wing.instance.transform.position, l_wing_rotation, l_wing.instance.transform.scale);
+            l_wing.change_transform(&app.queue, l_wing_transform);
+    
+            let r_wing = app.game_models.get_mut(&plane.model_ref).unwrap().model.meshes.get_mut("right_wing").unwrap();
+            let r_wing_rotation = lerp_quaternion(r_wing.instance.transform.rotation,Quaternion::from_angle_y(Rad(-angle)), delta_time);
+            let r_wing_transform = Transform::new(r_wing.instance.transform.position, r_wing_rotation, r_wing.instance.transform.scale);
+            r_wing.change_transform(&app.queue, r_wing_transform);
+            */
+    
+            if let Some(aleron) = meshes.get_mut("left_aleron") {
+                match self.plane_systems.base_rotations.left_aleron {
+                    Some(base_rotation) => {
+                        let dependent = UnitQuaternion::from_quaternion(base_rotation.clone()) * UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.5 * -self.controller.x);
+                        let aleron_rotation = lerp_quaternion(aleron.transform.rotation,  *dependent, app.time.delta_time * 7.0);
+                        let aleron_transform = Transform::new(aleron.transform.position, aleron_rotation, aleron.transform.scale);
+                        aleron.change_transform(&app.queue, aleron_transform);
+                    },
+                    None => {
+                        self.plane_systems.base_rotations.left_aleron = Some(aleron.transform.rotation);
+                    },
                 }
+            }
+    
+            if let Some(aleron) = meshes.get_mut("right_aleron") {
+                match self.plane_systems.base_rotations.right_aleron {
+                    Some(base_rotation) => {
+                        let dependent = UnitQuaternion::from_quaternion(base_rotation.clone()) * UnitQuaternion::from_axis_angle(&Vector3::x_axis(), 0.5 * self.controller.x);
+                        let aleron_rotation = lerp_quaternion(aleron.transform.rotation,  *dependent, app.time.delta_time * 7.0);
+                        let aleron_transform = Transform::new(aleron.transform.position, aleron_rotation, aleron.transform.scale);
+                        aleron.change_transform(&app.queue, aleron_transform);
+                    },
+                    None => {
+                        // this is not correctly resetting once the plane is reseted
+                        self.plane_systems.base_rotations.right_aleron = Some(aleron.transform.rotation);
+                    },
+                }
+            }
+    
+            // rudders
+            // only rudder or left rudder if it haves 2
+            if let Some(rudder) = meshes.get_mut("rudder_0") {
+                let rudder_rotation = lerp_quaternion(rudder.transform.rotation, *UnitQuaternion::from_axis_angle(&Vector3::x_axis(),-28.4493 * PI / 180.0) * *UnitQuaternion::from_axis_angle(&Vector3::y_axis(),0.5 * self.controller.yaw), delta_time * 7.0);
+                let rudder_transform = Transform::new(rudder.transform.position, rudder_rotation, rudder.transform.scale);
+                rudder.change_transform(&app.queue, rudder_transform);
+            }
+    
+            // right rudder if it haves 2
+            if let Some(rudder) = meshes.get_mut("rudder_1") {
+                let rudder_rotation = lerp_quaternion(rudder.transform.rotation, *UnitQuaternion::from_axis_angle(&Vector3::x_axis(),-28.4493 * PI / 180.0) * *UnitQuaternion::from_axis_angle(&Vector3::y_axis(),0.5 * self.controller.yaw), delta_time * 7.0);
+                let rudder_transform = Transform::new(rudder.transform.position, rudder_rotation, rudder.transform.scale);
+                rudder.change_transform(&app.queue, rudder_transform);
+            }
+    
+            
 
-                for (_i, wheel) in &mut self.plane_systems.wheels.iter_mut().enumerate() {
-                    if let Some((suspension_force, suspension_origin, wheel_position)) = wheel.update_wheel(&physics_data, &mut app.physics.render_physics.renderizable_lines, &app.physics.collider_set, &mut app.physics.rigidbody_set, &app.physics.query_pipeline) {
-                        if let Some(rigidbody) = app.physics.rigidbody_set.get_mut(physics_data.rigidbody_handle) {
-                            
-                            if let Some(wheel_mesh) = &mut plane_model.model.meshes.get_mut(&wheel.mesh_name) {
-                                let final_pos =  rigidbody.rotation().inverse() * (wheel_position - rigidbody.translation());
+            match &plane.physics_data {
+                Some(physics_data) => {
+                    if let Some(rigidbody) = app.physics.rigidbody_set.get_mut(physics_data.rigidbody_handle) {
+                        self.plane_systems.flight_data.g_meter = self.calculate_g_forces(rigidbody, app.time.delta_time);
+                        self.plane_systems.flight_data.speedometer = rigidbody.linvel().norm() * 3.6; // in kmh, if i want it as knots change the 3.6 to 1.94384
 
-                                wheel_mesh.transform.position = Vector3::new(final_pos.x / plane.instance.transform.scale.x, final_pos.y / plane.instance.transform.scale.y, final_pos.z / plane.instance.transform.scale.z);
-                                wheel_mesh.update_transform(&app.queue);
-                            }
+                        rigidbody.reset_torques(true);
+                        rigidbody.reset_forces(true);
 
-                            rigidbody.add_force_at_point(suspension_force, suspension_origin.into(), true);
+                        // Thrust                    
+                        let max_thrust = 60000.0; // newtons of force generated by engine
+                        let power_value_world = rigidbody.rotation() * nalgebra::Vector3::new(0.0, 0.0, max_thrust * self.controller.power);
+
+                        // Apply the thrust force to the rigidbody.
+                        rigidbody.add_force(power_value_world, true);
+                        // Thrust
+
+                        self.plane_systems.wings[0].control_input = self.controller.x;
+                        self.plane_systems.wings[1].control_input = -self.controller.x;
+                        self.plane_systems.wings[2].control_input = self.controller.y;
+                        self.plane_systems.wings[3].control_input = self.controller.yaw;
+                        
+                        for wing in &mut self.plane_systems.wings {
+                            wing.physics_force(rigidbody, &mut app.physics.render_physics.renderizable_lines);
                         }
                     }
-                }
-            },
-            None => {
 
-            },
+                    for (_i, wheel) in &mut self.plane_systems.wheels.iter_mut().enumerate() {
+                        if let Some((suspension_force, suspension_origin, wheel_position)) = wheel.update_wheel(&physics_data, &mut app.physics.render_physics.renderizable_lines, &app.physics.collider_set, &mut app.physics.rigidbody_set, &app.physics.query_pipeline) {
+                            if let Some(rigidbody) = app.physics.rigidbody_set.get_mut(physics_data.rigidbody_handle) {
+                                
+                                if let Some(wheel_mesh) = &mut meshes.get_mut(&wheel.mesh_name) {
+                                    let final_pos =  rigidbody.rotation().inverse() * (wheel_position - rigidbody.translation());
+
+                                    wheel_mesh.transform.position = Vector3::new(final_pos.x / plane.instance.transform.scale.x, final_pos.y / plane.instance.transform.scale.y, final_pos.z / plane.instance.transform.scale.z);
+                                    wheel_mesh.update_transform(&app.queue);
+                                }
+
+                                rigidbody.add_force_at_point(suspension_force, suspension_origin.into(), true);
+                            }
+                        }
+                    }
+                },
+                None => {
+
+                },
+            }
+        }
+        
+        if let Some(meshes) = plane_model.model.mesh_lists.get_mut("transparent") {
+            if let Some(afterburner) = meshes.get_mut("Afterburner") {
+                if self.controller.power > 0.0 {
+                    self.plane_systems.afterburner_value =  lerp(self.plane_systems.afterburner_value, self.controller.power + self.rng.gen_range(-0.5..0.5), app.time.delta_time * 20.0);
+                } else {
+                    self.plane_systems.afterburner_value = lerp(self.plane_systems.afterburner_value, 0.0, delta_time * 2.0)
+                }
+    
+                afterburner.change_transform(&app.queue, Transform::new(afterburner.transform.position, afterburner.transform.rotation, Vector3::new(1.0, 1.0, self.plane_systems.afterburner_value)));
+            } 
         }
     }
 
