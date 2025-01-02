@@ -1,6 +1,6 @@
-use std::f32::consts::PI;
-
 use rapier3d::prelude::RigidBody;
+use std::f32::consts::PI;
+use nalgebra::vector;
 
 use crate::{primitive::manual_vertex::ManualVertex, rendering::render_line::render_basic_line};
 
@@ -35,7 +35,23 @@ impl Wing {
         }
     }
 
-    // fix the fact that im setting all based on the orientation of the plane instead of the wing orientation
+    /// # Simplified Physics Force
+    /// This function will apply a force on a especific point of the plane 
+    pub fn _physics_force(&mut self, rigidbody: &mut RigidBody, renderizable_lines: &mut Vec<[ManualVertex; 2]>) {    
+        // To make this movement first try setting a force point on each aero body based on controller
+        
+        // Show the position of each aero foil.
+
+        // Define a force based on the direction is applied and input
+            // rudder will apply a force on (rudder position), with a base direction of vector.x, with the input of yaw
+            // elevator will apply a force on (elevator position), with a base direction of vector.y, with the input of y
+            // aleron will apply a force on (aleron 1 or 2 position), with a base direction of vector.y, with the input of x
+        let world_pressure_center = rigidbody.rotation() * self.pressure_center + rigidbody.translation();
+
+        render_basic_line(renderizable_lines, world_pressure_center, [0.0, 1.0, 1.0], world_pressure_center + ((rigidbody.rotation() * self.normal) * self.control_input), [0.0, 1.0, 1.0]);
+        // rigidbody.add_force_at_point(world_pressure_center + ((rigidbody.rotation() * self.normal * 100.0) * self.control_input), world_pressure_center.into(), true);
+    }
+
     pub fn physics_force(&mut self, rigidbody: &mut RigidBody, renderizable_lines: &mut Vec<[ManualVertex; 2]>) {    
         // Transform the local pressure center into world space
         let world_pressure_center = rigidbody.rotation() * self.pressure_center + rigidbody.translation();
@@ -93,7 +109,7 @@ impl Wing {
         render_basic_line(renderizable_lines, world_pressure_center.into(), [1.0, 0.0, 0.0],  (world_pressure_center - world_drag).into(), [1.0, 0.0, 0.0]);
 
         // Wing Direction debug
-        render_basic_line(renderizable_lines, world_pressure_center.into(), [1.0, 1.0, 1.0], (world_pressure_center + (rigidbody.rotation() * self.normal)).into(), [1.0, 1.0, 1.0]);
+        render_basic_line(renderizable_lines, world_pressure_center.into(), [1.0, 1.0, 1.0], (world_pressure_center + (world_lift + world_drag)).into(), [1.0, 1.0, 1.0]);
 
     
         // Apply forces at the rotated pressure center position in world coordinates

@@ -480,7 +480,8 @@ pub fn load_level(app: &mut App, mut level_path: String) {
                             RigidBodyBuilder::fixed().additional_mass(physics_obj_data.rigidbody.mass).translation(vector![instance_data.transform.position.x, instance_data.transform.position.y, instance_data.transform.position.z]).build()
                         } else {
                             // i had to do this
-                            let principal_inertia = nalgebra::Vector3::new(44531.0, 256608.0, 1333.0);
+                            // let principal_inertia = nalgebra::Vector3::new(44531.0, 256608.0, 1333.0);
+                            let principal_inertia = nalgebra::Vector3::new(44531.0, 0.0, 1333.0);
 
                             RigidBodyBuilder::dynamic()
                             .additional_mass_properties(rapier3d::prelude::MassProperties::new(physics_obj_data.rigidbody.center_of_mass.into(), physics_obj_data.rigidbody.mass, principal_inertia))

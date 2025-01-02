@@ -40,7 +40,7 @@
                         is_static: false, 
                         mass: 1000.0,
                         center_of_mass: (0.0, 0.0, 7.0),
-                        initial_velocity: (0.0, 0.0, 0.0),
+                        initial_velocity: (0.0, 0.0,  0.0),
                     ),
                     collider: Some( Cuboid (
                         half_extents: (7.0, 1.0, 14.0)

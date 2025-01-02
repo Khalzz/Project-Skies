@@ -139,9 +139,6 @@ impl App {
             ..Default::default() // remember that this set every other parameter as their default values
         }).await.unwrap();
 
-        // println!("{}", adapter.get_info().name);
-        // println!("{}", adapter.get_info().backend.to_str());
-
         let (device, queue) = adapter.request_device(
             &DeviceDescriptor { 
                 label: None, 
@@ -326,13 +323,13 @@ impl App {
                 match list {
                     crate::rendering::ui::UiContainer::Tagged(hash_map) => {
                         for (_key, ui_node) in hash_map {
-                            let (textareas_to_merge, vertices_to_add, indices_to_add) = ui_node.node_content_preparation(&self.size, &mut self.ui.ui_rendering, &mut self.ui.text.font_system, self.time.delta_time);
+                            let (textareas_to_merge, _vertices_to_add, _indices_to_add) = ui_node.node_content_preparation(&self.size, &mut self.ui.ui_rendering, &mut self.ui.text.font_system, self.time.delta_time);
                             text_areas.extend(textareas_to_merge);
                         }
                     },
                     crate::rendering::ui::UiContainer::Untagged(vec) => {
                         for ui_node in vec {
-                            let (textareas_to_merge, vertices_to_add, indices_to_add) = ui_node.node_content_preparation(&self.size, &mut self.ui.ui_rendering, &mut self.ui.text.font_system, self.time.delta_time);
+                            let (textareas_to_merge, _vertices_to_add, _indices_to_add) = ui_node.node_content_preparation(&self.size, &mut self.ui.ui_rendering, &mut self.ui.text.font_system, self.time.delta_time);
                             text_areas.extend(textareas_to_merge);
                         }
                     },
@@ -454,7 +451,7 @@ impl App {
             render_pass.set_bind_group(0, &self.physics.render_physics.bind_group, &[]);
             render_pass.set_bind_group(1, &self.camera.bind_group, &[]);
     
-            if self.show_depth_map {
+            if !self.show_depth_map {
                 // Prepare vertex and index buffers specifically for physics rendering
                 let vertices: Vec<ManualVertex> = self.physics.render_physics.renderizable_lines.iter()
                 .flat_map(|line| line.to_vec())

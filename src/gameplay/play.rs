@@ -193,8 +193,8 @@ impl GameLogic {
         let wings = vec![
             Wing::new(vector![8.5, 0.0, 1.0], 6.96, 2.50, 0.0, naca_2412.clone(), vector![0.0, 1.0, 0.0], 0.5), // left wing
             Wing::new(vector![-8.5, 0.0, 1.0], 6.96, 2.50, 0.0, naca_2412.clone(), vector![0.0, 1.0, 0.0], 0.5), // right wing
-            Wing::new(vector![0.0, 0.0, -9.0], 6.54, 2.70, 0.0, naca_0012.clone(), vector![0.0, 1.0, 0.0], 1.0), // elevator wing
-            Wing::new(vector![0.0, 1.0, -9.0], 6.96, 2.50, 0.0, naca_0012.clone(), vector![1.0, 0.0, 0.0], 0.15) // rudder wing
+            Wing::new(vector![0.0, 0.0, -6.0], 6.54, 2.70, 0.0, naca_0012.clone(), vector![0.0, 1.0, 0.0], 1.0), // elevator wing
+            Wing::new(vector![0.0, 5.0, -7.0], 6.96, 2.50, 0.0, naca_0012.clone(), vector![1.0, 0.0, 0.0], 0.15) // rudder wing
         ];
 
         let wheels = vec![
