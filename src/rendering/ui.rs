@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use glyphon::{FontSystem, SwashCache, TextArea, TextAtlas, TextRenderer};
+use glyphon::{Cache, FontSystem, SwashCache, TextAtlas, TextRenderer};
 use wgpu::{Buffer, Device, Queue, RenderPipeline, SurfaceConfiguration};
 
 use crate::{rendering::vertex::VertexUi, ui::ui_node::UiNode};
@@ -46,13 +46,13 @@ pub struct Ui {
 }
 
 impl Ui {
-    pub fn new(device: &Device, queue: &Queue, config: &SurfaceConfiguration) -> Self {
+    pub fn new(device: &Device, queue: &Queue, config: &SurfaceConfiguration, cache: &Cache) -> Self {
         let mut font_system = FontSystem::new();
         let font = include_bytes!("../../assets/fonts/Inter-Thin.ttf");
         font_system.db_mut().load_font_data(font.to_vec());
 
         let text_cache = SwashCache::new();
-        let mut text_atlas = TextAtlas::new(&device, queue, config.format);
+        let mut text_atlas = TextAtlas::new(&device, queue, cache, config.format);
         let text_renderer: TextRenderer = TextRenderer::new(
             &mut text_atlas,
             &device,
@@ -76,12 +76,13 @@ impl Ui {
             layout: Some(&ui_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &text_shader,
-                entry_point: "vertex",
+                entry_point: Some("vertex"),
                 buffers: &[VertexUi::desc()],
+                compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &text_shader,
-                entry_point: "fragment",
+                entry_point: Some("fragment"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::Bgra8UnormSrgb,
                     blend: Some(wgpu::BlendState {
@@ -98,6 +99,7 @@ impl Ui {
                     }),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
+                compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -111,6 +113,7 @@ impl Ui {
             multisample: wgpu::MultisampleState::default(),
             depth_stencil: None,
             multiview: None,
+            cache: None, // BE CAREFUL BOE, THIS MIGHT GENERATE WEIRD STUFF :o
         });
 
         let ui_rendering = UiRendering {

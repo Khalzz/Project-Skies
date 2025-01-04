@@ -1,5 +1,4 @@
 use app::App;
-use sdl2::mixer;
 
 mod app;
 mod transform;
@@ -64,8 +63,9 @@ mod utils {
 // this tokio trait means that main WILL AND CAN be asyncronous (without tokio this is not achievable)
 #[tokio::main]
 async fn main() -> Result<(), String> {
-    let app = App::new("Pankarta Software", None, None);
-    app.await.update();
-    mixer::close_audio();
+    match App::new("Pankarta Software", None, None).await {
+        Ok(app) => app.update(),
+        Err(err) => eprintln!("Something went wrong in the definition of the app: {}", err), 
+    }
     Ok(())
 }

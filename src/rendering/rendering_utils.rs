@@ -8,12 +8,13 @@ pub fn create_render_pipeline(device: &wgpu::Device, layout: &wgpu::PipelineLayo
         layout: Some(layout),
         vertex: wgpu::VertexState {
             module: &shader,
-            entry_point: "vs_main",
+            entry_point: Some("vs_main"),
             buffers: vertex_layouts,
+            compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
             module: &shader,
-            entry_point: "fs_main",
+            entry_point: Some("fs_main"),
             targets: &[Some(wgpu::ColorTargetState {
                     format: color_format,
                     blend: Some(wgpu::BlendState {
@@ -30,6 +31,7 @@ pub fn create_render_pipeline(device: &wgpu::Device, layout: &wgpu::PipelineLayo
                     }),
                     write_mask: wgpu::ColorWrites::ALL,
             })],
+            compilation_options: Default::default(),
         }),
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
@@ -56,6 +58,7 @@ pub fn create_render_pipeline(device: &wgpu::Device, layout: &wgpu::PipelineLayo
             alpha_to_coverage_enabled: false,
         },
         multiview: None,
+        cache: None,
     })
 }
 
@@ -67,17 +70,20 @@ pub fn create_line_render_pipeline(device: &wgpu::Device, layout: &wgpu::Pipelin
         layout: Some(layout),
         vertex: wgpu::VertexState {
             module: &shader,
-            entry_point: "vs_main",
+            entry_point: Some("vs_main"),
             buffers: vertex_layouts,
+            compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
             module: &shader,
-            entry_point: "fs_main",
+            entry_point: Some("fs_main"),
             targets: &[Some(wgpu::ColorTargetState {
                 format: color_format,
                 blend: Some(wgpu::BlendState::REPLACE),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
+            compilation_options: Default::default(),
+
         }),
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::LineList,
@@ -96,5 +102,6 @@ pub fn create_line_render_pipeline(device: &wgpu::Device, layout: &wgpu::Pipelin
             alpha_to_coverage_enabled: false,
         },
         multiview: None,
+        cache: None,
     })
 }

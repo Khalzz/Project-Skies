@@ -3,12 +3,12 @@ use std::collections::HashMap;
 use std::env;
 
 use rapier3d::prelude::{CCDSolver, ColliderBuilder, ColliderSet, CollisionPipeline, DefaultBroadPhase, ImpulseJointSet, IntegrationParameters, IslandManager, MultibodyJointSet, NarrowPhase, PhysicsPipeline, QueryPipeline, RigidBodyBuilder, RigidBodySet};
-use sdl2::mixer::{self, InitFlag, AUDIO_S16LSB, DEFAULT_CHANNELS};
 use wgpu::{BindGroupLayout, BindGroupLayoutDescriptor, Buffer, Device, DeviceDescriptor, Features, InstanceDescriptor, Limits, Queue, RenderPassDepthStencilAttachment, Surface, SurfaceConfiguration, TextureUsages};
 use sdl2::{video::DisplayMode, joystick::Joystick, JoystickSubsystem, GameControllerSubsystem, HapticSubsystem, video::Window, Sdl, render::Canvas, controller::GameController};
-use glyphon::{Resolution, TextArea};
+use glyphon::{Cache, Resolution, TextArea, Viewport};
 use nalgebra:: {Unit, Vector3};
 use wgpu::util::DeviceExt;
+
 use rapier3d::na::vector;
 use ron::from_str;
 use tokio::task;
@@ -58,12 +58,14 @@ pub struct Throttling {
     pub controller_update_interval: Duration,
 }
 
-pub struct App {
+pub struct App<'a> {
+    pub cache: Cache,
+    pub viewport: Viewport,
     pub context: Sdl,
     pub size: Size,
     pub canvas: Canvas<Window>,
     pub current_display: DisplayMode,
-    pub surface: Surface,
+    pub surface: Surface<'a>,
     pub queue: Queue,
     pub device: Device,
     pub config: SurfaceConfiguration,
@@ -102,8 +104,8 @@ pub struct Physics {
     pub render_physics: RenderPhysics,
 }
 
-impl App {
-    pub async fn new(title: &str, ext_width: Option<u32>, ext_height: Option<u32>) -> App{
+impl App<'_> {
+    pub async fn new(title: &str, ext_width: Option<u32>, ext_height: Option<u32>) -> Result<App, String> {
         // base sdl2
         let context = sdl2::init().expect("SDL2 wasn't initialized");
         let video_susbsystem = context.video().expect("The Video subsystem wasn't initialized");
@@ -132,7 +134,12 @@ impl App {
         let window: Window = video_susbsystem.window(title, width, height as u32).vulkan().fullscreen().build().expect("The window wasn't created");
         
         let instance = wgpu::Instance::new(InstanceDescriptor::default());
-        let surface = unsafe { instance.create_surface(&window).unwrap() };
+        let surface = unsafe {
+            match instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::from_window(&window).unwrap()) {
+                Ok(s) => s,
+                Err(e) => return Err(e.to_string()),
+            }
+        };
 
         let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
@@ -141,11 +148,12 @@ impl App {
 
         let (device, queue) = adapter.request_device(
             &DeviceDescriptor { 
-                label: None, 
-                features: Features::empty(), 
-                limits: Limits::default() }
-            , None).await.unwrap();
-        
+                label: None,
+                required_features: Features::empty(),
+                required_limits: Limits::default(),
+                memory_hints: wgpu::MemoryHints::Performance, 
+            }, None).await.unwrap();
+
         let mut canvas = window.into_canvas().accelerated().build().expect("the canvas wasn't builded");
 
         canvas.set_blend_mode(sdl2::render::BlendMode::Blend);
@@ -162,10 +170,23 @@ impl App {
             present_mode: wgpu::PresentMode::AutoNoVsync,
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
+            desired_maximum_frame_latency: 144,
         };
 
         surface.configure(&device, &config);
         // Surface settings
+
+        // G L Y P H O N
+        let cache = Cache::new(&device);
+        let mut viewport = Viewport::new(&device, &cache);
+
+        viewport.update(
+            &queue,
+            Resolution {
+                width: config.width,
+                height: config.height,
+            },
+        );
 
         // depth
         let depth_texture = Texture::create_depth_texture(&device, &config, "depth_texture");
@@ -211,7 +232,7 @@ impl App {
         });
 
         // rendering elements
-        let ui = Ui::new(&device, &queue, &config);
+        let ui = Ui::new(&device, &queue, &config, &cache);
         let camera = CameraRenderizable::new(&device, &config);
         let light = Light::new(&device, &config, &camera);
 
@@ -264,7 +285,9 @@ impl App {
 
         let time = Timing::new();
 
-        App {
+        Ok(App {
+            cache,
+            viewport,
             current_display,
             context,
             size: Size {width, height},
@@ -291,7 +314,7 @@ impl App {
             time,
             scene_openned: None,
             audio: Audio::new()
-        }
+        })
     }
 
     pub fn resize(&mut self) {
@@ -303,6 +326,15 @@ impl App {
         self.camera.projection.resize(self.size.width, self.size.height);
 
         self.depth_texture = Texture::create_depth_texture(&self.device, &self.config, "depth_texture");
+
+        self.viewport.update(
+            &self.queue,
+            Resolution {
+                width: self.config.width,
+                height: self.config.height,
+            },
+        );
+
     }
 
     // Pass to a especific element the values of "render pass" to the self structure, so they are made once and then used here
@@ -339,7 +371,8 @@ impl App {
             self.queue.write_buffer(&self.ui.ui_rendering.vertex_buffer, 0, bytemuck::cast_slice(self.ui.ui_rendering.vertices.as_slice()));
             self.queue.write_buffer(&self.ui.ui_rendering.index_buffer, 0, bytemuck::cast_slice(&self.ui.ui_rendering.indices));
             
-            self.ui.text.text_renderer.prepare(&self.device, &self.queue, &mut self.ui.text.font_system, &mut self.ui.text.text_atlas, Resolution {width: self.size.width, height: self.size.height}, text_areas, &mut self.ui.text.text_cache).unwrap();
+
+            self.ui.text.text_renderer.prepare(&self.device, &self.queue, &mut self.ui.text.font_system, &mut self.ui.text.text_atlas, &self.viewport, text_areas, &mut self.ui.text.text_cache).unwrap();
             // self.ui.has_changed = false
         }
         
@@ -497,7 +530,7 @@ impl App {
             render_pass.set_index_buffer(self.ui.ui_rendering.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
             render_pass.draw_indexed(0..self.ui.ui_rendering.num_indices, 0, 0..1);
 
-            self.ui.text.text_renderer.render(&self.ui.text.text_atlas, &mut render_pass).unwrap();
+            self.ui.text.text_renderer.render(&self.ui.text.text_atlas, &self.viewport, &mut render_pass).unwrap();
         }
 
         /* 

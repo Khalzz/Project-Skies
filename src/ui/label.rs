@@ -41,21 +41,20 @@ impl Label {
         // adjust the line height
         let mut buffer = Buffer::new(font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
 
-        if text != "" {
-            // set the size and text of the lable
-            buffer.set_size( font_system, ((container_transform.x + container_transform.width) - container_transform.x) as f32, ((container_transform.y + container_transform.height) - container_transform.y) as f32,);
-            buffer.set_text(font_system, text, Attrs::new().family(BASE_FONT), Shaping::Advanced);
+        // set the size and text of the lable
+        buffer.set_size( font_system, Some(((container_transform.x + container_transform.width) - container_transform.x) as f32), Some(((container_transform.y + container_transform.height) - container_transform.y) as f32));
+        buffer.set_text(font_system, text, Attrs::new().family(BASE_FONT), Shaping::Advanced);
 
-            // alignment for each line
-            buffer.lines.iter_mut().for_each(|line| {
-                line.set_align(Some(align));
-            });
+        // alignment for each line
+        buffer.lines.iter_mut().for_each(|line| {
+            line.set_align(Some(align));
+        });
 
-            // how the text cuts if it exceed the size of the container
-            buffer.set_wrap(font_system, glyphon::Wrap::None);
+        // how the text cuts if it exceed the size of the container
+        buffer.set_wrap(font_system, glyphon::Wrap::None);
 
-            buffer.shape_until_scroll(font_system);
-        }
+        buffer.shape_until_scroll(font_system, true);
+        
 
         Self {
             buffer,
@@ -97,15 +96,22 @@ impl Label {
             scale: 1.0,
             bounds: self.bounds(&parent_rect),
             default_color: self.color,
+            custom_glyphs: &[],
         };
 
         return text_area
     }
 
     pub fn get_text_width(&self) -> TextWidth {
+        
+        let width_buffer = match self.buffer.size().0 {
+            Some(value) => value,
+            None => 0.0,
+        };
+
         TextWidth {
             width: self.buffer.layout_runs().fold(0.0, |width, run| run.line_w.max(width)),
-            buffer_width: self.buffer.size().0,
+            buffer_width: width_buffer,
         }
     }
 
@@ -140,6 +146,6 @@ impl Label {
         }); 
 
         self.buffer.set_wrap(font_system, glyphon::Wrap::None);
-        self.buffer.shape_until_scroll(font_system);
+        self.buffer.shape_until_scroll(font_system, true);
     }
 }

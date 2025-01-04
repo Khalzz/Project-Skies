@@ -116,7 +116,7 @@ impl UiNode {
             UiNodeContent::Text(label) => {
                 label.text_area(&self.transform.rect);
                 // label.realign(font_system);
-                label.buffer.set_size(font_system, (self.transform.rect.right - self.transform.rect.left) as f32, (self.transform.rect.bottom - self.transform.rect.top) as f32,);
+                label.buffer.set_size(font_system, Some((self.transform.rect.right - self.transform.rect.left) as f32), Some((self.transform.rect.bottom - self.transform.rect.top) as f32));
         
                 let (text_area, added_vertices, added_indices) = label.ui_node_data_creation(size, &mut ui.vertices, &vertices_slice, &mut ui.indices, &indice_slice, &self.transform.rect);
                 text_areas.push(text_area);

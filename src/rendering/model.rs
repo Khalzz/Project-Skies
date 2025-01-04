@@ -148,7 +148,7 @@ where
         self.set_bind_group(0, &material.bind_group, &[]);
         self.set_bind_group(1, camera_bind_group, &[]);
         self.set_bind_group(2, &mesh.transform_bind_group, &[]);
-        self.set_bind_group(3, &light_bind_group, &[]);
+        self.set_bind_group(3, light_bind_group, &[]);
         self.draw_indexed(0..mesh.num_elements, 0, instances);
     }
 

@@ -2,7 +2,6 @@ use std::{fs::File, io::BufReader, time::Duration};
 
 use fs_extra::file;
 use rodio::{source::SineWave, Decoder, OutputStream, OutputStreamHandle, Sink, Source};
-use sdl2::mixer::{self, InitFlag, Sdl2MixerContext, AUDIO_S16LSB, DEFAULT_CHANNELS};
 
 // To add: a way to load all audio once the game starts
 

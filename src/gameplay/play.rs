@@ -4,7 +4,7 @@ use glyphon::{cosmic_text::Align, Color, FontSystem};
 use nalgebra::{vector, Point3, Quaternion, UnitQuaternion, Vector3};
 use rand::{rngs::ThreadRng, Rng};
 use rapier3d::prelude::RigidBody;
-use sdl2::{controller::GameController, mixer};
+use sdl2::{controller::GameController};
 use crate::{app::{App, AppState}, audio::subtitles::Subtitle, rendering::{camera::CameraRenderizable, ui::UiContainer}, transform::Transform, ui::{ui_node::{ChildrenType, UiNode, UiNodeContent, UiNodeParameters, Visibility}, ui_transform::UiTransform}, utils::lerps::{lerp, lerp_quaternion}};
 use super::{airfoil::AirFoil, controller::Controller, event_handling::EventSystem, wheel::Wheel, wing::Wing};
 
