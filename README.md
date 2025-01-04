@@ -261,13 +261,13 @@ This sampling will be done by an algorithm similar to this one:
 /// - CD Drag Coefficient.
 /// - CL Lift Coefficient.
 pub fn sample(&self, alpha: f32) -> (f32, f32) {
-		// Get the scaled index and clamp it within bounds
-		let scaled_index = self.alpha_to_index(alpha);
-		let clamped_index = scaled_index.clamp(0, self.data.len() - 1);
-		
-		// Access and return Cl and Cd values from data
-		let data_point = &self.data[clamped_index];
-		(data_point.y, data_point.z)
+	// Get the scaled index and clamp it within bounds
+	let scaled_index = self.alpha_to_index(alpha);
+	let clamped_index = scaled_index.clamp(0, self.data.len() - 1);
+	
+	// Access and return Cl and Cd values from data
+	let data_point = &self.data[clamped_index];
+	(data_point.y, data_point.z)
 }
 
 /// # Alpha to index
@@ -282,18 +282,18 @@ pub fn sample(&self, alpha: f32) -> (f32, f32) {
 /// ## Returns
 /// - Scaled Index: Index of the airfoil data that contains his respective CD and CL
 fn alpha_to_index(&self, alpha: f32) -> usize {
-		// we get the range between the maximum alpha on the data and the minimum
-		let range: f32 = self.max_alpha - self.min_alpha;
-		
-		// when the max_alpha and the min_alpha has the same numerical value
-		if range == 0.0 {
-		    return 0;
-		}
-		
-		// scale the data to get an index for the values in the airfoil data
-		let normalized_alpha = (alpha - self.min_alpha) / range;
-		let scaled_index = (normalized_alpha * (self.data.len() as f32 - 1.0)).round();
-		scaled_index as usize
+	// we get the range between the maximum alpha on the data and the minimum
+	let range: f32 = self.max_alpha - self.min_alpha;
+	
+	// when the max_alpha and the min_alpha has the same numerical value
+	if range == 0.0 {
+	    return 0;
+	}
+	
+	// scale the data to get an index for the values in the airfoil data
+	let normalized_alpha = (alpha - self.min_alpha) / range;
+	let scaled_index = (normalized_alpha * (self.data.len() as f32 - 1.0)).round();
+	scaled_index as usize
 }
 ```
 
