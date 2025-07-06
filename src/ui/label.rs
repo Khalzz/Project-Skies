@@ -43,7 +43,7 @@ impl Label {
 
         // set the size and text of the lable
         buffer.set_size( font_system, Some(((container_transform.x + container_transform.width) - container_transform.x) as f32), Some(((container_transform.y + container_transform.height) - container_transform.y) as f32));
-        buffer.set_text(font_system, text, Attrs::new().family(BASE_FONT), Shaping::Advanced);
+        buffer.set_text(font_system, text, &Attrs::new().family(BASE_FONT), Shaping::Advanced);
 
         // alignment for each line
         buffer.lines.iter_mut().for_each(|line| {
@@ -132,7 +132,7 @@ impl Label {
     pub fn set_text(&mut self, font_system: &mut FontSystem, text: &str, realign: bool) {
         if text != self.text {
             self.text = text.to_owned();
-            self.buffer.set_text(font_system, text, Attrs::new().family(Family::SansSerif), Shaping::Advanced);
+            self.buffer.set_text(font_system, text, &Attrs::new().family(Family::SansSerif), Shaping::Advanced);
             if realign {
                 self.realign(font_system)
             }

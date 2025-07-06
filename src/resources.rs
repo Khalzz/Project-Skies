@@ -6,7 +6,7 @@ use ron::from_str;
 use tokio::task;
 use wgpu::{util::DeviceExt, Buffer, Device};
 
-use crate::{app::App, game_nodes::{game_object::{self, GameObject}, scene::Scene}, rendering::{instance_management::{InstanceData, InstanceRaw, ModelDataInstance, PhysicsData}, model::{self, Mesh, Model, ModelVertex}, textures::Texture}, transform::Transform};
+use crate::{app::App, game_nodes::{game_object::{self, GameObject}, scene::Scene}, rendering::{instance_management::{InstanceData, InstanceRaw, ModelDataInstance}, model::{self, Mesh, Model, ModelVertex}, textures::Texture}, transform::Transform};
 
 pub async fn load_string(file_name: &str) -> anyhow::Result<String> {
     let path = std::path::Path::new(env!("OUT_DIR")).join("res").join(file_name);
@@ -443,11 +443,15 @@ pub fn load_level(app: &mut App, mut level_path: String) {
                     }
                 }
 
+                // Create instance buffer once per model
+                let instance_buffer = create_instance_buffer(&model_instances, &app.device);
+
                 for (i, instance_data) in model_instances.iter().enumerate() {
                     match app.game_models.get_mut(model_name) {
                         Some(model_data) => {
                             model_data.instance_count += 1;
-                            model_data.instance_buffer = create_instance_buffer(&model_instances, &app.device);
+                            // Update the instance buffer with the new one created above
+                            model_data.instance_buffer = instance_buffer.clone();
                         },
                         None => {
                             let model = task::block_in_place( || {
@@ -463,7 +467,7 @@ pub fn load_level(app: &mut App, mut level_path: String) {
                                         ModelDataInstance {
                                             model: correct_model,
                                             instance_count: 1,
-                                            instance_buffer: create_instance_buffer(&model_instances, &app.device)
+                                            instance_buffer: instance_buffer.clone()
                                         }
                                     );
                                 },
@@ -471,52 +475,9 @@ pub fn load_level(app: &mut App, mut level_path: String) {
                             }
                         },
                     }
-                    
-                    // Physics
-                    let mut physics_data: Option<PhysicsData> = None;
-
-                    if let Some(physics_obj_data) = &instance_data.metadata.physics {
-                        let mut rigid_body = if physics_obj_data.rigidbody.is_static {
-                            RigidBodyBuilder::fixed().additional_mass(physics_obj_data.rigidbody.mass).translation(vector![instance_data.transform.position.x, instance_data.transform.position.y, instance_data.transform.position.z]).build()
-                        } else {
-                            // i had to do this
-                            // let principal_inertia = nalgebra::Vector3::new(44531.0, 256608.0, 1333.0);
-                            let principal_inertia = nalgebra::Vector3::new(44531.0, 0.0, 1333.0);
-
-                            RigidBodyBuilder::dynamic()
-                            .additional_mass_properties(rapier3d::prelude::MassProperties::new(physics_obj_data.rigidbody.center_of_mass.into(), physics_obj_data.rigidbody.mass, principal_inertia))
-                            .translation(instance_data.transform.position)
-                            .build()
-                        };
-
-                        rigid_body.set_linvel(physics_obj_data.rigidbody.initial_velocity, true);
-                        let rigidbody_handle = app.physics.rigidbody_set.insert(rigid_body);
-
-                        // collisions
-                        let collider_handle = match &physics_obj_data.collider {
-                            Some(collider_data) => {
-                                let collider = match collider_data {
-                                    game_object::ColliderType::Cuboid { half_extents } => {
-                                        ColliderBuilder::cuboid(half_extents.0, half_extents.1, half_extents.2).build()
-                                    },
-                                    game_object::ColliderType::HalfSpace { normal } => {
-                                        ColliderBuilder::halfspace(Unit::new_normalize(*normal)).build()
-                                    },
-                                    _ => todo!(),
-                                };
-
-                                Some(app.physics.collider_set.insert_with_parent(collider, rigidbody_handle, &mut app.physics.rigidbody_set))
-                            },
-                            None => {
-                                None
-                            },
-                        };
-
-                        physics_data = Some(PhysicsData { rigidbody_handle, collider_handle });
-                    };
 
                     // println!("loaded data: {}", ids[i]);
-                    app.renderizable_instances.insert(ids[i].clone(), InstanceData { physics_data: physics_data, renderizable_transform: instance_data.transform.clone(), instance: (**instance_data).clone(), model_ref: model_name.clone() });
+                    app.renderizable_instances.insert(ids[i].clone(), InstanceData { renderizable_transform: instance_data.transform.clone(), instance: (**instance_data).clone(), model_ref: model_name.clone() });
                 }
             }
         },
@@ -538,7 +499,7 @@ pub fn create_instance_buffer(instances: &Vec<&GameObject>, device: &Device) -> 
     )
 }
 
-fn load_instances(path: String) -> Option<Vec<GameObject>> {
+pub fn load_instances(path: String) -> Option<Vec<GameObject>> {
     match std::fs::read_to_string(path) {
         Ok(file_contents) => {
             match from_str::<Scene>(&file_contents) {

@@ -1,8 +1,22 @@
 use app::App;
+use winit::{dpi::PhysicalSize, event::{Event, WindowEvent}, event_loop::{ControlFlow, EventLoop}};
 
 mod app;
 mod transform;
 mod resources;
+
+mod input {
+    pub mod pressable;
+    pub mod input;
+    pub mod mouse;
+    pub mod utils;
+}
+
+mod physics {
+    pub mod physics_resources;
+    pub mod physics_handler;
+    pub mod physics;
+}
 
 mod game_nodes {
     pub mod game_object_2d;
@@ -24,9 +38,6 @@ mod audio {
     pub mod audio;
 }
 
-mod input {
-}
-
 mod gameplay {
     pub mod event_handling;
     pub mod plane_selection;
@@ -36,6 +47,10 @@ mod gameplay {
     pub mod wheel;
     pub mod wing;
     pub mod play;
+    pub mod plane {
+        pub mod plane;
+        pub mod physics_logic;
+    }
 }
 
 mod primitive {
@@ -59,6 +74,7 @@ mod rendering {
 mod utils {
     pub mod lerps;
 }
+
 
 // this tokio trait means that main WILL AND CAN be asyncronous (without tokio this is not achievable)
 #[tokio::main]

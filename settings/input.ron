@@ -1,0 +1,61 @@
+(
+    keys: [
+        (
+            label: "pitch_up",
+            keys: ["w"]
+        ),
+        (
+            label: "roll_left",
+            keys: ["a"]
+        ),
+        (
+            label: "pitch_down",
+            keys: ["s"]
+        ),
+        (
+            label: "roll_right",
+            keys: ["d"]
+        ),
+        (
+            label: "rudder_left",
+            keys: ["q"]
+        ),
+        (
+            label: "rudder_right",
+            keys: ["e"]
+        ),
+        (
+            label: "throttle_up",
+            keys: ["Up"]
+        ),
+        (
+            label: "throttle_down",
+            keys: ["Down"]
+        ),
+        (
+            label: "change_camera",
+            keys: ["v"]
+        ),
+        (
+            label: "fix_view",
+            keys: ["space"]
+        ),
+        (
+            label: "test",
+            keys: ["t"]
+        ),
+        (
+            label: "up_wheel",
+            keys: ["Right"]
+        ),
+        (
+            label: "down_wheel",
+            keys: ["Left"]
+        ),
+
+    ],
+    mouse: (
+        x_sensitivity: 0.5,
+        y_sensitivity: 0.5,
+    ),
+)

@@ -6,6 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]
 sdl2 = {version = "*", default-features = false, features = ["raw-window-handle" ]}
+winit = "0.30.11"
 wgpu = "*"
 tokio = { version = "*", features = ["full"] }
 bytemuck = { version = "*", features = [ "derive" ] }
