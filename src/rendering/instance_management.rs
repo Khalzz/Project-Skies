@@ -1,19 +1,12 @@
 use nalgebra::{Matrix4, Vector3, UnitQuaternion};
-use rapier3d::prelude::{ColliderHandle, RigidBodyHandle};
 use serde::Deserialize;
 use wgpu::Buffer;
 
 use crate::game_nodes::game_object::{GameObject, Transform};
 use super::model::Model;
 
-pub struct PhysicsData {
-    pub rigidbody_handle: RigidBodyHandle,
-    pub collider_handle: Option<ColliderHandle>
-}
-
 // When moving player we move instance; when moving world object we move renderizable_transform
 pub struct InstanceData {
-    pub physics_data: Option<PhysicsData>,
     pub renderizable_transform: Transform,
     pub instance: GameObject,
     pub model_ref: String,

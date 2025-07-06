@@ -2,7 +2,7 @@ use rapier3d::prelude::RigidBody;
 use std::f32::consts::PI;
 use nalgebra::vector;
 
-use crate::{primitive::manual_vertex::ManualVertex, rendering::render_line::render_basic_line};
+use crate::{physics::physics::DebugPhysicsMessageType, primitive::manual_vertex::ManualVertex};
 
 use super::airfoil::AirFoil;
 
@@ -16,11 +16,12 @@ pub struct Wing {
     pub normal: nalgebra::Vector3<f32>,
     pub flap_ratio: f32,
     pub efficiency_factor: f32,
-    pub control_input: f32
+    pub control_input: f32,
+    pub is_roll_axis: bool
 }
 
 impl Wing {
-    pub fn new(pressure_center: nalgebra::Vector3<f32>, wing_span: f32, wing_area: f32, chord: f32, air_foil: AirFoil, normal: nalgebra::Vector3<f32>, flap_ratio: f32) -> Self {
+    pub fn new(pressure_center: nalgebra::Vector3<f32>, wing_span: f32, wing_area: f32, chord: f32, air_foil: AirFoil, normal: nalgebra::Vector3<f32>, flap_ratio: f32, is_roll_axis: bool) -> Self {
         Self { 
             wing_area, 
             wing_span, 
@@ -31,29 +32,12 @@ impl Wing {
             pressure_center,
             aspect_ratio: wing_span.powi(2) / wing_area,
             efficiency_factor: 1.0,
-            control_input: 0.0
+            control_input: 0.0,
+            is_roll_axis
         }
     }
 
-    /// # Simplified Physics Force
-    /// This function will apply a force on a especific point of the plane 
-    pub fn _physics_force(&mut self, rigidbody: &mut RigidBody, renderizable_lines: &mut Vec<[ManualVertex; 2]>) {    
-        // To make this movement first try setting a force point on each aero body based on controller
-        
-        // Show the position of each aero foil.
-
-        // Define a force based on the direction is applied and input
-            // rudder will apply a force on (rudder position), with a base direction of vector.x, with the input of yaw
-            // elevator will apply a force on (elevator position), with a base direction of vector.y, with the input of y
-            // aleron will apply a force on (aleron 1 or 2 position), with a base direction of vector.y, with the input of x
-        let world_pressure_center = rigidbody.rotation() * self.pressure_center + rigidbody.translation();
-
-        render_basic_line(renderizable_lines, world_pressure_center, [0.0, 1.0, 1.0], world_pressure_center + ((rigidbody.rotation() * self.normal) * self.control_input), [0.0, 1.0, 1.0]);
-        // rigidbody.add_force_at_point(world_pressure_center + ((rigidbody.rotation() * self.normal * 100.0) * self.control_input), world_pressure_center.into(), true);
-    }
-
-    pub fn physics_force(&mut self, rigidbody: &mut RigidBody, renderizable_lines: &mut Vec<[ManualVertex; 2]>) {    
-        // Transform the local pressure center into world space
+    pub fn physics_force(&mut self, rigidbody: &mut RigidBody, renderizable_lines: &mut Vec<DebugPhysicsMessageType>) {    
         let world_pressure_center = rigidbody.rotation() * self.pressure_center + rigidbody.translation();
     
         // Calculate local velocity in the wing's local space, adjusting for rotation
@@ -102,23 +86,19 @@ impl Wing {
         let world_drag = rigidbody.rotation() * drag;
         let world_lift = rigidbody.rotation() * lift;
     
-        // lift debug
-        render_basic_line(renderizable_lines, world_pressure_center.into(), [0.0, 0.0, 1.0],  ((world_pressure_center - ((world_lift.normalize() * 5.0) * lift_coeff))).into(), [0.0, 0.0, 1.0]);
-
-        // Drag debug
-        render_basic_line(renderizable_lines, world_pressure_center.into(), [1.0, 0.0, 0.0],  (world_pressure_center - world_drag).into(), [1.0, 0.0, 0.0]);
-
-        // Wing Direction debug
-        render_basic_line(renderizable_lines, world_pressure_center.into(), [1.0, 1.0, 1.0], (world_pressure_center + (world_lift + world_drag)).into(), [1.0, 1.0, 1.0]);
-
-    
         // Apply forces at the rotated pressure center position in world coordinates
         rigidbody.add_force_at_point(world_lift + world_drag, world_pressure_center.into(), true);
-        
-        
-        let angular_velocity = rigidbody.angvel();
-        let angular_damping_factor = 0.99;
-        rigidbody.set_angvel(angular_velocity * angular_damping_factor, true);
-        
+
+        let origin = ManualVertex {
+            position: world_pressure_center.into(),
+            color: [0.0, 1.0, 0.0]
+        };
+        let end = ManualVertex {
+            position: (world_pressure_center + ((world_lift + world_drag))).into(),
+            color: [0.0, 1.0, 0.0]
+        };
+        renderizable_lines.push(DebugPhysicsMessageType::RenderizableLines([origin, end]));
+        /* 
+        */
     }
 }

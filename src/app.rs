@@ -1,45 +1,39 @@
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
 use std::env;
+use std::thread;
+use std::sync::mpsc::{channel, Sender, Receiver};
 
-use rapier3d::prelude::{CCDSolver, ColliderBuilder, ColliderSet, CollisionPipeline, DefaultBroadPhase, ImpulseJointSet, IntegrationParameters, IslandManager, MultibodyJointSet, NarrowPhase, PhysicsPipeline, QueryPipeline, RigidBodyBuilder, RigidBodySet};
-use wgpu::{BindGroupLayout, BindGroupLayoutDescriptor, Buffer, Device, DeviceDescriptor, Features, InstanceDescriptor, Limits, Queue, RenderPassDepthStencilAttachment, Surface, SurfaceConfiguration, TextureUsages};
+use wgpu::{BindGroupLayout, BindGroupLayoutDescriptor, Device, DeviceDescriptor, Features, InstanceDescriptor, Limits, Queue, RenderPassDepthStencilAttachment, Surface, SurfaceConfiguration, TextureUsages};
 use sdl2::{video::DisplayMode, joystick::Joystick, JoystickSubsystem, GameControllerSubsystem, HapticSubsystem, video::Window, Sdl, render::Canvas, controller::GameController};
 use glyphon::{Cache, Resolution, TextArea, Viewport};
-use nalgebra:: {Unit, Vector3};
-use wgpu::util::DeviceExt;
-
-use rapier3d::na::vector;
-use ron::from_str;
-use tokio::task;
 
 use crate::audio::audio::Audio;
-use crate::rendering::instance_management::{InstanceData, InstanceRaw, ModelDataInstance, PhysicsData};
-use crate::rendering::physics_rendering::RenderPhysics;
-use crate::game_nodes::game_object::{self, GameObject};
-use crate::rendering::model::{self, DrawModel, Vertex};
+use crate::physics::physics::{physics_handling, DebugPhysicsMessageType};
+use crate::physics::physics_handler::{RenderMessage, PhysicsCommand};
 use crate::primitive::manual_vertex::ManualVertex;
+use crate::rendering::instance_management::{InstanceData, InstanceRaw, ModelDataInstance};
+use crate::rendering::physics_rendering::RenderPhysics;
 use crate::rendering::depth_renderer::DepthRender;
 use crate::rendering::camera::CameraRenderizable;
 use crate::rendering::textures::Texture;
-use crate::rendering::vertex::VertexUi;
 use crate::game_nodes::timing::Timing;
 use crate::rendering::rendering_utils;
-use crate::game_nodes::scene::Scene;
 use crate::rendering::light::Light;
 use crate::rendering::ui::Ui;
-
+use crate::rendering::model::{self, DrawModel, Vertex};
 use crate::gameplay::{main_menu, plane_selection, play};
-use crate::ui::ui_node::{UiNode, UiNodeContent};
-use crate::resources::{self, load_level};
-use crate::utils::lerps::lerp_vector3;
+use crate::resources::load_level;
+use crate::input::input::InputSubsystem;
 
+#[derive(Clone)]
 pub enum GameState {
     Playing,
     MainMenu,
     SelectingPlane
 }
 
+#[derive(Clone)]
 pub struct AppState {
     pub is_running: bool,
     pub state: GameState,
@@ -84,23 +78,9 @@ pub struct App<'a> {
     pub transform_bind_group_layout: BindGroupLayout,
     pub game_models: HashMap<String, ModelDataInstance>,
     pub light: Light,
-    pub physics: Physics,
     pub time: Timing,
     pub scene_openned: Option<String>,
-    pub audio: Audio
-}
-
-pub struct Physics {
-    pub physics_pipeline: PhysicsPipeline,
-    pub colission_pipeline: CollisionPipeline,
-    pub query_pipeline: QueryPipeline,
-    pub gravity: Vector3<f32>,
-    
-    // This values will save the rigidbodies and colliders
-    pub rigidbody_set: RigidBodySet, 
-    pub collider_set: ColliderSet,
-
-    // for rendering forces
+    pub audio: Audio,
     pub render_physics: RenderPhysics,
 }
 
@@ -131,9 +111,10 @@ impl App<'_> {
 
         env::set_var("SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS", "0");
 
-        let window: Window = video_susbsystem.window(title, width, height as u32).vulkan().fullscreen().build().expect("The window wasn't created");
+        // Create window in windowed mode first to avoid device loss
+        let mut window: Window = video_susbsystem.window(title, width, height as u32).build().expect("The window wasn't created");
         
-        let instance = wgpu::Instance::new(InstanceDescriptor::default());
+        let instance = wgpu::Instance::new(&InstanceDescriptor::default());
         let surface = unsafe {
             match instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::from_window(&window).unwrap()) {
                 Ok(s) => s,
@@ -151,12 +132,10 @@ impl App<'_> {
                 label: None,
                 required_features: Features::empty(),
                 required_limits: Limits::default(),
-                memory_hints: wgpu::MemoryHints::Performance, 
-            }, None).await.unwrap();
-
-        let mut canvas = window.into_canvas().accelerated().build().expect("the canvas wasn't builded");
-
-        canvas.set_blend_mode(sdl2::render::BlendMode::Blend);
+                memory_hints: wgpu::MemoryHints::Performance,
+                trace: wgpu::Trace::Off, 
+            },
+        ).await.unwrap();
 
         // Surface settings
         let surface_caps = surface.get_capabilities(&adapter);
@@ -170,11 +149,17 @@ impl App<'_> {
             present_mode: wgpu::PresentMode::AutoNoVsync,
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
-            desired_maximum_frame_latency: 144,
+            desired_maximum_frame_latency: 1,
         };
 
         surface.configure(&device, &config);
-        // Surface settings
+        
+        // Now switch to fullscreen after WGPU is configured
+        window.set_fullscreen(sdl2::video::FullscreenType::Desktop).expect("Failed to set fullscreen");
+        
+        let mut canvas = window.into_canvas().accelerated().build().expect("the canvas wasn't builded");
+
+        canvas.set_blend_mode(sdl2::render::BlendMode::Blend);
 
         // G L Y P H O N
         let cache = Cache::new(&device);
@@ -273,17 +258,10 @@ impl App<'_> {
         let render_physics = RenderPhysics::new(&device, &config, &camera);
 
         // Physics data
-        let physics = Physics {
-            physics_pipeline: PhysicsPipeline::new(),
-            colission_pipeline: CollisionPipeline::new(),
-            query_pipeline: QueryPipeline::new(),
-            gravity: Vector3::new(0.0, -9.81, 0.0),
-            rigidbody_set: RigidBodySet::new(),
-            collider_set: ColliderSet::new(),
-            render_physics,
-        };
 
         let time = Timing::new();
+
+        
 
         Ok(App {
             cache,
@@ -310,10 +288,10 @@ impl App<'_> {
             transform_bind_group_layout,
             game_models,
             light,
-            physics,
             time,
             scene_openned: None,
-            audio: Audio::new()
+            audio: Audio::new(),
+            render_physics,
         })
     }
 
@@ -334,14 +312,15 @@ impl App<'_> {
                 height: self.config.height,
             },
         );
-
     }
 
     // Pass to a especific element the values of "render pass" to the self structure, so they are made once and then used here
     // Find a way to make that i can "set when the ui elements change"
     // find a way to optimize the non transparent object rendering
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
-        // UI
+        let start_time = Instant::now();
+        
+        // UI - Only process if actually changed
         if self.ui.has_changed {
             let mut text_areas: Vec<TextArea> = Vec::new();
 
@@ -368,25 +347,30 @@ impl App<'_> {
                 }
             }
             
-            self.queue.write_buffer(&self.ui.ui_rendering.vertex_buffer, 0, bytemuck::cast_slice(self.ui.ui_rendering.vertices.as_slice()));
-            self.queue.write_buffer(&self.ui.ui_rendering.index_buffer, 0, bytemuck::cast_slice(&self.ui.ui_rendering.indices));
-            
+            // Only update buffers if we have data
+            if !self.ui.ui_rendering.vertices.is_empty() {
+                self.queue.write_buffer(&self.ui.ui_rendering.vertex_buffer, 0, bytemuck::cast_slice(self.ui.ui_rendering.vertices.as_slice()));
+            }
+            if !self.ui.ui_rendering.indices.is_empty() {
+                self.queue.write_buffer(&self.ui.ui_rendering.index_buffer, 0, bytemuck::cast_slice(&self.ui.ui_rendering.indices));
+            }
 
-            self.ui.text.text_renderer.prepare(&self.device, &self.queue, &mut self.ui.text.font_system, &mut self.ui.text.text_atlas, &self.viewport, text_areas, &mut self.ui.text.text_cache).unwrap();
-            // self.ui.has_changed = false
+            // Only prepare text if we have text areas
+            if !text_areas.is_empty() {
+                self.ui.text.text_renderer.prepare(&self.device, &self.queue, &mut self.ui.text.font_system, &mut self.ui.text.text_atlas, &self.viewport, text_areas, &mut self.ui.text.text_cache).unwrap();
+            }
+            self.ui.has_changed = false;
         }
         
-        // UI
-
         // WGPU
         let output = self.surface.get_current_texture()?;
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default()); // this let us to control how render code interacts with textures
+        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
         
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render Encoder"),
         });
         
-        // Opaque
+        // Opaque pass
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor { 
                 label: Some("Render Pass"), 
@@ -394,7 +378,7 @@ impl App<'_> {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { // nuestro render pass limpia la pantalla y setea un color de fondo
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
                             r: 0.1,
                             g: 0.2,
                             b: 0.3,
@@ -406,7 +390,7 @@ impl App<'_> {
                 depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
                     view: &self.depth_render.texture.view,
                     depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0), // limpiamos nuestro "depth stencil para este estado"
+                        load: wgpu::LoadOp::Clear(1.0),
                         store: wgpu::StoreOp::Store,
                     }),
                     stencil_ops: None,
@@ -415,21 +399,26 @@ impl App<'_> {
                 timestamp_writes: None,
             });
 
-
             render_pass.set_pipeline(&self.render_pipeline);
 
+            // Group models by type to reduce state changes
+            let mut model_groups: HashMap<String, Vec<(&String, &InstanceData)>> = HashMap::new();
             for (key, renderizable) in &self.renderizable_instances {
-                if let Some(model_data) = self.game_models.get(&renderizable.model_ref)  {
-                    if key != "sun" {
-                        render_pass.set_vertex_buffer(1, model_data.instance_buffer.slice(..));
-                        render_pass.draw_model_instanced_from_list(&model_data.model, 0..model_data.instance_count as u32, &self.camera.bind_group, &self.light.rendering_data.bind_group, &"opaque".to_string()); // usamos la funcion que renderiza los objetos opacos
-                    }
+                if key != "sun" {
+                    model_groups.entry(renderizable.model_ref.clone()).or_insert_with(Vec::new).push((key, renderizable));
+                }
+            }
+
+            // Render each model type once with all its instances
+            for (model_ref, _instances) in model_groups {
+                if let Some(model_data) = self.game_models.get(&model_ref) {
+                    render_pass.set_vertex_buffer(1, model_data.instance_buffer.slice(..));
+                    render_pass.draw_model_instanced_from_list(&model_data.model, 0..model_data.instance_count as u32, &self.camera.bind_group, &self.light.rendering_data.bind_group, &"opaque".to_string());
                 }
             }
         }
 
-        // transparency render pass
-
+        // Transparency pass
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor { 
                 label: Some("Render Pass"), 
@@ -437,14 +426,14 @@ impl App<'_> {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load, // se carga el color anteriormente seteado
+                        load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
                 })],
                 depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
                     view: &self.depth_render.texture.view,
                     depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Load, // cargamos la informacion de profundidad anteriormente definida
+                        load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     }),
                     stencil_ops: None,
@@ -455,66 +444,77 @@ impl App<'_> {
             
             render_pass.set_pipeline(&self.render_pipeline);
             
+            // Group models by type to reduce state changes
+            let mut model_groups: HashMap<String, Vec<(&String, &InstanceData)>> = HashMap::new();
             for (_key, renderizable) in &self.renderizable_instances {
-                if let Some(model_data) = self.game_models.get(&renderizable.model_ref)  {
+                model_groups.entry(renderizable.model_ref.clone()).or_insert_with(Vec::new).push((_key, renderizable));
+            }
+
+            // Render each model type once with all its instances
+            for (model_ref, _instances) in model_groups {
+                if let Some(model_data) = self.game_models.get(&model_ref) {
                     render_pass.set_vertex_buffer(1, model_data.instance_buffer.slice(..));
-                    render_pass.draw_model_instanced_from_list(&model_data.model, 0..model_data.instance_count as u32, &self.camera.bind_group, &self.light.rendering_data.bind_group, &"transparent".to_string()); // usamos la funcion que renderiza los objetos opacos
+                    render_pass.draw_model_instanced_from_list(&model_data.model, 0..model_data.instance_count as u32, &self.camera.bind_group, &self.light.rendering_data.bind_group, &"transparent".to_string());
                 }
             }
         }
         
-        // Ui Pass
-        {
+        // UI Pass - Only render if UI has content
+        if self.ui.ui_rendering.num_indices > 0 {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("UI Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load, // Load to preserve 3D rendering results
+                        load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
                 })],
-                depth_stencil_attachment: None, // No depth-stencil for UI
+                depth_stencil_attachment: None,
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
 
-            render_pass.set_pipeline(&self.physics.render_physics.render_pipeline);
-            render_pass.set_bind_group(0, &self.physics.render_physics.bind_group, &[]);
+            render_pass.set_pipeline(&self.render_physics.render_pipeline);
+            render_pass.set_bind_group(0, &self.render_physics.bind_group, &[]);
             render_pass.set_bind_group(1, &self.camera.bind_group, &[]);
     
             if !self.show_depth_map {
                 // Prepare vertex and index buffers specifically for physics rendering
-                let vertices: Vec<ManualVertex> = self.physics.render_physics.renderizable_lines.iter()
+                let vertices: Vec<ManualVertex> = self.render_physics.renderizable_lines.iter()
                 .flat_map(|line| line.to_vec())
                 .collect();
-
                 if !vertices.is_empty() {
-                    self.physics.render_physics.vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    self.render_physics.vertex_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some("Updated ManualVertex Buffer"),
-                        contents: bytemuck::cast_slice(&vertices),
+                        size: (vertices.len() * std::mem::size_of::<ManualVertex>()) as u64,
                         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: true,
                     });
+                    self.render_physics.vertex_buffer.slice(..).get_mapped_range_mut().copy_from_slice(bytemuck::cast_slice(&vertices));
+                    self.render_physics.vertex_buffer.unmap();
 
                     // Update index buffer for all lines
                     let mut indices = Vec::new();
-                    for i in 0..self.physics.render_physics.renderizable_lines.len() {
+                    for i in 0..self.render_physics.renderizable_lines.len() {
                         let base_index = (i * 2) as u16; // Each line has two vertices
                         indices.push(base_index);
                         indices.push(base_index + 1);
                     }
-
                     if !indices.is_empty() {
-                        self.physics.render_physics.index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        self.render_physics.index_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                             label: Some("Index Buffer"),
-                            contents: bytemuck::cast_slice(&indices),
-                            usage: wgpu::BufferUsages::INDEX,
+                            size: (indices.len() * std::mem::size_of::<u16>()) as u64,
+                            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                            mapped_at_creation: true,
                         });
+                        self.render_physics.index_buffer.slice(..).get_mapped_range_mut().copy_from_slice(bytemuck::cast_slice(&indices));
+                        self.render_physics.index_buffer.unmap();
 
                         // Set vertex and index buffers once before drawing
-                        render_pass.set_vertex_buffer(0, self.physics.render_physics.vertex_buffer.slice(..));
-                        render_pass.set_index_buffer(self.physics.render_physics.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                        render_pass.set_vertex_buffer(0, self.render_physics.vertex_buffer.slice(..));
+                        render_pass.set_index_buffer(self.render_physics.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
 
                         // Draw all lines
                         render_pass.draw_indexed(0..(indices.len() as u32), 0, 0..1);
@@ -522,27 +522,24 @@ impl App<'_> {
                 }
                 
             }
-            // Clear the line vertices after drawing
-            self.physics.render_physics.renderizable_lines.clear();
 
             render_pass.set_pipeline(&self.ui.ui_pipeline);
             render_pass.set_vertex_buffer(0, self.ui.ui_rendering.vertex_buffer.slice(..));
             render_pass.set_index_buffer(self.ui.ui_rendering.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
             render_pass.draw_indexed(0..self.ui.ui_rendering.num_indices, 0, 0..1);
 
+            // Render text (text renderer handles empty content gracefully)
             self.ui.text.text_renderer.render(&self.ui.text.text_atlas, &self.viewport, &mut render_pass).unwrap();
         }
 
-        /* 
-        if self.show_depth_map {
-            self.depth_render.render(&view, &mut encoder);
-        }
-        */
-
-        // we have the render pass inside the {} so we can do the submit to the queue, we can also drop the render pass if you prefeer
+        // Submit and present
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
-        self.ui.text.text_atlas.trim();
+        
+        // Only trim atlas occasionally to reduce overhead
+        if start_time.elapsed().as_millis() % 100 == 0 {
+            self.ui.text.text_atlas.trim();
+        }
 
         Ok(())
     }
@@ -560,24 +557,21 @@ impl App<'_> {
         let mut controller = Self::open_first_available_controller(&self.controller_subsystem);
         let _joystick = Self::open_first_avalible_joystick(&self.joystick_subsystem);
         
-        // Phyisics timealization
-        const FIXED_TIMESTEP: f32 = 1.0 / 60.0; // Fixed timestep for 60 FPS
-        let mut accumulator = 0.0;
+        // physics handling
+        let physics_data_channel = physics_handling(&self.device, &self.config, &self.camera, "./assets/scenes/test_chamber".to_owned(), app_state.state.clone());
 
-        let integration_parameters = IntegrationParameters { dt: FIXED_TIMESTEP, ..Default::default() };
-        let mut island_manager = IslandManager::new();
-        let mut broad_phase = DefaultBroadPhase::new();
-        let mut narrow_phase = NarrowPhase::new();
-        let mut impulse_joint_set = ImpulseJointSet::new();
-        let mut multibody_joint_set = MultibodyJointSet::new();
-        let mut ccd_solver = CCDSolver::new();
-        let physics_hooks = ();
-        let event_handler = ();
+        let mut input_subsystem = InputSubsystem::new(include_str!("../settings/input.ron"));
+
+        let mut debug_physics: Vec<DebugPhysicsMessageType> = Vec::new();
 
         loop {
+            // Relevant subsystems update
             self.time.update();
-            
+            input_subsystem.update(&mut event_pump, self.time.delta_time, false);
+
             if !app_state.is_running {
+                // Send shutdown command to physics thread
+                let _ = physics_data_channel.request_data_tx.send(PhysicsCommand::Shutdown);
                 break
             }
 
@@ -588,63 +582,65 @@ impl App<'_> {
                         play = play::GameLogic::new(&mut self);
                         app_state.reset = false;
                     } else {
-                        accumulator += self.time.delta_time;
 
-                        while accumulator >= FIXED_TIMESTEP {
-                            self.physics.physics_pipeline.step(
-                                &play.gravity,
-                                &integration_parameters,
-                                &mut island_manager,
-                                &mut broad_phase,
-                                &mut narrow_phase,
-                                &mut self.physics.rigidbody_set,
-                                &mut self.physics.collider_set,
-                                &mut impulse_joint_set,
-                                &mut multibody_joint_set,
-                                &mut ccd_solver,
-                                Some(&mut self.physics.query_pipeline),
-                                &physics_hooks,
-                                &event_handler,
-                            );  
+                        
+                        // Request physics data from physics thread
+                        if let Err(e) = physics_data_channel.request_data_tx.send(PhysicsCommand::RequestData) {
+                            eprintln!("Failed to send physics command: {}", e);
+                        }
+                        
+                        // Update input subsystem first
 
-                            if let Some(instance) = self.renderizable_instances.get_mut("player") {
-                                match &instance.physics_data {
-                                    Some(physics_data) => {
-                                        if let Some(rigidbody) = self.physics.rigidbody_set.get_mut(physics_data.rigidbody_handle) {
-                                            play.plane_systems.flight_data.g_meter = play.calculate_g_forces(rigidbody, self.time.delta_time);
-                                        }
-                                    },
-                                    None => {}
-                                }
+                        // Recibimos los datos del otro thread
+                        let physics_data = match physics_data_channel.physics_data_rx.try_recv() {
+                            Ok(data) => data,
+                            Err(_) => HashMap::new(),
+                        };
+
+                        // Check for debug physics messages every frame
+                        match physics_data_channel.debug_physics_rx.try_recv() {
+                            Ok(data) => debug_physics = data,
+                            Err(_) => {},
+                        };
+
+                        // Clear previous debug lines and add new ones
+                        self.render_physics.renderizable_lines.clear();
+                        
+                        for message in &debug_physics {
+                            match message {
+                                DebugPhysicsMessageType::RenderizableLines(lines) => {
+                                    self.render_physics.renderizable_lines.push(lines.clone());
+                                },
+                                DebugPhysicsMessageType::RenderizablePoint(point) => {
+                                },
                             }
-
-                            accumulator -= FIXED_TIMESTEP
                         }
 
-                        play.update( &mut app_state, &mut event_pump, &mut self, &mut controller);
+                        // Apply physics data to transforms first with smoothing
+                        for (_key, renderizable) in &mut self.renderizable_instances {
+                            if let Some(physics_data) = physics_data.get(&_key.to_string()) {
+                                renderizable.instance.transform.position = physics_data.translation;
+                                renderizable.instance.transform.rotation = nalgebra::Unit::new_normalize(physics_data.rotation);
+                            }
+                        }
+
+                        play.update(&mut self, &input_subsystem, &physics_data_channel.plane_control_tx, &physics_data);
+
+                        // Update instance buffers efficiently - group by model type
+                        let mut model_instances: HashMap<String, Vec<InstanceRaw>> = HashMap::new();
                         
-                        for (model_key, model) in &self.game_models {
-                            let mut offset_index = 0;
-                        
-                            for (_key, renderizable) in &mut self.renderizable_instances {
-                                if renderizable.model_ref == *model_key {
-                                    match &renderizable.physics_data {
-                                        Some(physics_info) => {
-                                            if let Some(rigid_body) = self.physics.rigidbody_set.get(physics_info.rigidbody_handle) {
-                                                // Update position and rotation
-                                                // println!("key: {}, position: {}",_key,  renderizable.instance.transform.position);
-                                                renderizable.instance.transform.position = *rigid_body.translation();
-                                                renderizable.instance.transform.rotation = *rigid_body.rotation();
-                        
-                                                // Calculate unique offset based on instance count
-                                                let offset = (offset_index * std::mem::size_of::<InstanceRaw>()) as u64;
-                                                self.queue.write_buffer(&model.instance_buffer, offset, bytemuck::cast_slice(&[renderizable.instance.transform.to_raw()]));
-                        
-                                                offset_index += 1; // Increment for next unique instance
-                                            }
-                                        },
-                                        None => {},
-                                    }
+                        for (_key, renderizable) in &self.renderizable_instances {
+                            model_instances
+                                .entry(renderizable.model_ref.clone())
+                                .or_insert_with(Vec::new)
+                                .push(renderizable.instance.transform.to_raw());
+                        }
+
+                        // Write all instances for each model type at once
+                        for (model_ref, instances) in model_instances {
+                            if let Some(model) = self.game_models.get(&model_ref) {
+                                if !instances.is_empty() {
+                                    self.queue.write_buffer(&model.instance_buffer, 0, bytemuck::cast_slice(&instances));
                                 }
                             }
                         }
@@ -659,6 +655,7 @@ impl App<'_> {
                                 None => {},
                             }
                         }
+
                         self.queue.write_buffer(&self.light.rendering_data.buffer, 0, bytemuck::cast_slice(&[self.light.uniform]));
                         // lighting update
 
@@ -675,6 +672,10 @@ impl App<'_> {
                 Ok(_) => {},
                 Err(wgpu::SurfaceError::Outdated) => { 
                     self.resize()
+                }
+                Err(wgpu::SurfaceError::Lost) => {
+                    eprintln!("Device lost! You need to recreate the device and all resources.");
+                    break;
                 }
                 Err(e) => eprintln!("Error: {}", e),
             }

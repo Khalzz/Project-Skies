@@ -259,7 +259,7 @@ impl Controller {
                     Event::MouseMotion { xrel, yrel, .. } => {
                         self.mouse.x += xrel;
 
-                        let value = (self.mouse.y + yrel).clamp(-80, 80);
+                        let value = (self.mouse.y + yrel).clamp(-88, 88);
                         self.mouse.y = value;
                     }
                     Event::Quit { .. } => {
