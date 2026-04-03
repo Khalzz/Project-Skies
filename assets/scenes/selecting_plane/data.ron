@@ -41,9 +41,9 @@
                         mass: 9000.0, 
                         initial_velocity: (0.0, 0.0, 0.0),
                     ),
-                    collider: Some( Cuboid (
+                    colliders: [ Cuboid (
                             half_extents: (1.0, 1.0, 1.0)
-                    ))     
+                    )]     
                 )),
             ),
         ),
@@ -63,9 +63,9 @@
                         mass: 9000.0, 
                         initial_velocity: (0.0, 0.0, 0.0)
                     ),
-                    collider: Some( Cuboid (
+                    colliders: [ Cuboid (
                             half_extents: (1.0, 1.0, 1.0)
-                    ))
+                    )]
                 )),
                 camera_data: Some((
                     cockpit_camera: (x: 0.0, y: 2.3, z: 14.3),
@@ -90,9 +90,9 @@
                         mass: 0.0, 
                         initial_velocity: (0.0, 0.0, 0.0),
                     ),
-                    collider: Some( HalfSpace (
+                    colliders: [ HalfSpace (
                             normal: (0.0, 1.0, 0.0)
-                    ))
+                    )]
                 ))
             ),
         )

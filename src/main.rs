@@ -50,7 +50,15 @@ mod gameplay {
     pub mod plane {
         pub mod plane;
         pub mod physics_logic;
+        pub mod flight_system;
+        pub mod utils;
     }
+}
+
+mod tooling {
+    pub mod tooling_manager;
+    pub mod base_frame;
+    pub mod debug_console;
 }
 
 mod primitive {
@@ -75,13 +83,18 @@ mod utils {
     pub mod lerps;
 }
 
-
 // this tokio trait means that main WILL AND CAN be asyncronous (without tokio this is not achievable)
 #[tokio::main]
 async fn main() -> Result<(), String> {
-    match App::new("Pankarta Software", None, None).await {
-        Ok(app) => app.update(),
-        Err(err) => eprintln!("Something went wrong in the definition of the app: {}", err), 
+    let result = tooling::tooling_manager::tooling_handling();
+
+    if result.should_play {
+        // Game Tooling
+        match App::new("Pankarta Software", None, None).await {
+            Ok(app) => app.update(),
+            Err(err) => eprintln!("Something went wrong in the definition of the app: {}", err), 
+        }
     }
+
     Ok(())
 }

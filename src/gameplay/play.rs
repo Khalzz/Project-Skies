@@ -9,6 +9,8 @@ use crate::{app::{App, AppState}, audio::subtitles::Subtitle, input::{input::Inp
 use super::{airfoil::AirFoil, event_handling::EventSystem, plane::plane::Plane, wheel::Wheel, wing::Wing};
 use std::sync::mpsc::Sender;
 use crate::gameplay::plane::plane::PlaneControls;
+use crate::tooling::debug_console;
+use crate::debug_text;
 
 // Add a way of setting timing that can be agnostic to real time (or that will not be affected by the player pausing)
 pub enum CameraState {
@@ -162,6 +164,15 @@ impl GameLogic {
         app.ui.add_to_ui("static".to_owned(), "subtitles".to_owned(), subtitle);
         app.ui.add_to_ui("static".to_owned(), "game_info".to_owned(),game_info);
 
+        // Debug Console - positioned on right side of screen
+        let debug_console = UiNode::new(
+            UiTransform::new(app.config.width as f32 - 320.0, 10.0, 0.0, 310.0, 0.0, false), 
+            Visibility::new([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]), // starts invisible
+            UiNodeParameters::VerticalContainerData { margin: 10.0, separation: 5.0, children: ChildrenType::IndexedChildren(vec![]) }, 
+            app,
+        );
+        app.ui.add_to_ui("static".to_owned(), "debug_console".to_owned(), debug_console);
+
         let subtitle_data = Subtitle::new();
 
         let camera_data = CameraData { 
@@ -239,6 +250,13 @@ impl GameLogic {
             self.subtitle_data.add_text(&"SKIBIDI DAM DAM DAM YES YES".to_string(), app);
         }
 
+        // Debug console output (press F2 to show/hide)
+        debug_text!("FPS: {}", app.time.get_fps());
+        debug_text!("Altitude: {:.1}", self.plane_systems.flight_data.altimeter);
+        debug_text!("Speed: {:.1}", self.plane_systems.flight_data.speedometer);
+        debug_text!("G-Force: {:.2}", self.plane_systems.flight_data.g_meter);
+        debug_text!("Throttle: {:.0}%", self.plane.controls.throttle * 100.0);
+
         self.plane.update(app.time.delta_time, input_subsystem);
         plane_control_tx.send(self.plane.controls.clone());
 
@@ -246,6 +264,7 @@ impl GameLogic {
         self.subtitle_data.update(app);
         self.camera_control(app, app.time.delta_time, input_subsystem);
         self.ui_control(app, app.time.delta_time);
+        self.update_debug_console(app);
     }
 
     fn plane_movement (&mut self, app: &mut App, delta_time: f32, physics_data: &HashMap<String, RenderMessage>) {
@@ -276,14 +295,14 @@ impl GameLogic {
             }
 
             if let Some(elevator) = meshes.get_mut("left_elevator") {
-                let final_rotation = UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.15 * -self.plane.controls.elevator);
+                let final_rotation = UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.15 * self.plane.controls.elevator);
                 let elevator_rotation = lerp_quaternion(elevator.transform.rotation,  *final_rotation, app.time.delta_time * 7.0);
                 let elevator_transform = Transform::new(elevator.transform.position, elevator_rotation, elevator.transform.scale);
                 elevator.change_transform(&app.queue, elevator_transform);
             }
     
             if let Some(elevator) = meshes.get_mut("right_elevator") {
-                let final_rotation = UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.15 * -self.plane.controls.elevator);
+                let final_rotation = UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.15 * self.plane.controls.elevator);
                 let elevator_rotation = lerp_quaternion(elevator.transform.rotation,  *final_rotation, app.time.delta_time * 7.0);
                 let elevator_transform = Transform::new(elevator.transform.position, elevator_rotation, elevator.transform.scale);
                 elevator.change_transform(&app.queue, elevator_transform);
@@ -365,7 +384,7 @@ impl GameLogic {
             // Calculate target camera position and look-at point
             let (target_position, target_look_at, target_up) = match self.camera_data.camera_state {
                 CameraState::Normal => {
-                    let target_pos = player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 7.0, -28.0));
+                    let target_pos = player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 0.6, -3.0));
                     let look_at = player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 0.0, 100.0));
                     (target_pos, look_at, player.instance.transform.rotation * *Vector3::y_axis())
                 },
@@ -374,7 +393,7 @@ impl GameLogic {
                     let target_pos = if let Some(cameras) = &player.instance.metadata.cameras {
                         player.instance.transform.position + (player.instance.transform.rotation * cameras.cockpit_camera)
                     } else {
-                        player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 1.8, 13.5))
+                        player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 0.2, 1.3))
                     };
                     let look_at = player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 0.0, 100.0));
                     (target_pos, look_at, player.instance.transform.rotation * *Vector3::y_axis())
@@ -384,7 +403,7 @@ impl GameLogic {
                     let target_pos = if let Some(cameras) = &player.instance.metadata.cameras {
                         player.instance.transform.position + (player.instance.transform.rotation * cameras.cinematic_camera)
                     } else {
-                        player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(-10.0, 3.0, -5.0))
+                        player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(-1.0, 3.0, -1.0))
                     };
                     let look_at = player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(30.0, 0.0, 100.0));
                     (target_pos, look_at, player.instance.transform.rotation * *Vector3::y_axis())
@@ -394,7 +413,7 @@ impl GameLogic {
                     let target_pos = if let Some(cameras) = &player.instance.metadata.cameras {
                         player.instance.transform.position + (player.instance.transform.rotation * cameras.frontal_camera)
                     } else {
-                        player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 6.0, 30.0))
+                        player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 2.0, 3.0))
                     };
                     let look_at = player.instance.transform.position;
                     (target_pos, look_at, player.instance.transform.rotation * *Vector3::y_axis())
@@ -412,7 +431,7 @@ impl GameLogic {
                     // Combine rotations
                     self.camera_data.mod_quaternion = rotation_y * rotation_x;
 
-                    let target_pos = (self.camera_data.mod_quaternion * Vector3::new(0.0, 0.0, -50.0)) + player.instance.transform.position;
+                    let target_pos = (self.camera_data.mod_quaternion * Vector3::new(0.0, 0.0, -5.0)) + player.instance.transform.position;
                     let look_at = player.instance.transform.position;
                     (target_pos, look_at, *Vector3::y_axis())
                 },
@@ -560,6 +579,62 @@ impl GameLogic {
             CameraState::Frontal => self.camera_data.camera_state = CameraState::Normal,
             CameraState::Free => self.camera_data.camera_state = CameraState::Cockpit,
 
+        }
+    }
+
+    /// Updates the debug console UI with messages from the debug_console module.
+    /// Messages are cleared each frame, so you need to call debug_text!() every frame you want to display something.
+    fn update_debug_console(&mut self, app: &mut App) {
+        let is_visible = debug_console::is_console_visible();
+        let messages = debug_console::drain_messages();
+        let delta_time = app.time.delta_time;
+
+        // First, create all the label nodes we need (while app is not borrowed elsewhere)
+        let label_nodes: Vec<UiNode> = if is_visible {
+            messages.iter().map(|message| {
+                UiNode::new(
+                    UiTransform::new(0.0, 0.0, 18.0, 290.0, 0.0, false),
+                    Visibility::new([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]),
+                    UiNodeParameters::Text {
+                        text: message,
+                        color: Color::rgba(0, 255, 100, 255),
+                        align: Align::Left,
+                        font_size: 14.0,
+                    },
+                    app,
+                )
+            }).collect()
+        } else {
+            Vec::new()
+        };
+
+        // Now get the UI container and update it
+        let Some(UiContainer::Tagged(hash_map)) = app.ui.renderizable_elements.get_mut("static") else {
+            return;
+        };
+
+        let Some(console_node) = hash_map.get_mut("debug_console") else {
+            return;
+        };
+
+        // Update visibility
+        let target_alpha = if is_visible { 0.85 } else { 0.0 };
+        console_node.visibility.background_color[3] = lerp(
+            console_node.visibility.background_color[3],
+            target_alpha,
+            delta_time * 10.0,
+        );
+
+        let UiNodeContent::VerticalContainer(container) = &mut console_node.content else {
+            return;
+        };
+
+        // Clear previous frame's messages and add new ones
+        if let ChildrenType::IndexedChildren(vec) = &mut container.children {
+            vec.clear();
+            for label in label_nodes {
+                vec.push(label);
+            }
         }
     }
 }

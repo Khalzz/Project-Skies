@@ -52,6 +52,14 @@
             label: "down_wheel",
             keys: ["Left"]
         ),
+        (
+            label: "toggle_debug",
+            keys: ["F2"]
+        ),
+        (
+            label: "toggle_console",
+            keys: ["F3"]
+        ),
 
     ],
     mouse: (

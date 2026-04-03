@@ -589,6 +589,18 @@ impl App<'_> {
                             eprintln!("Failed to send physics command: {}", e);
                         }
                         
+                        // Toggle debug rendering with F2 (also shows console)
+                        if input_subsystem.is_just_pressed("toggle_debug") {
+                            if let Err(e) = physics_data_channel.request_data_tx.send(PhysicsCommand::ToggleDebug) {
+                                eprintln!("Failed to send toggle debug command: {}", e);
+                            }
+                        }
+                        
+                        // Toggle console independently with F3
+                        if input_subsystem.is_just_pressed("toggle_console") {
+                            crate::tooling::debug_console::toggle_console();
+                        }
+                        
                         // Update input subsystem first
 
                         // Recibimos los datos del otro thread

@@ -26,13 +26,14 @@ pub struct RenderMessage {
 
 #[derive(Debug)]
 pub enum PhysicsCommand {
-    RequestData,  // Main thread requests physics data
-    Shutdown,     // Main thread signals shutdown
+    RequestData,      // Main thread requests physics data
+    Shutdown,         // Main thread signals shutdown
+    ToggleDebug,      // Toggle debug rendering
 }
 
 pub struct PhysicsData {
     pub rigidbody_handle: RigidBodyHandle,
-    pub collider_handle: Option<ColliderHandle>,
+    pub collider_handles: Vec<ColliderHandle>,
     pub metadata: HashMap<String, MetadataType>
 }
 
@@ -46,7 +47,11 @@ pub struct Physics {
     pub rigidbody_set: RigidBodySet, 
     pub collider_set: ColliderSet,
 
-    pub physics_elements: HashMap<String, Option<PhysicsData>>
+    pub physics_elements: HashMap<String, Option<PhysicsData>>,
+    
+    // Delta time tracking
+    pub delta_time: f32,
+    pub last_physics_time: Instant,
 }
 
 impl Physics {
@@ -60,6 +65,8 @@ impl Physics {
             rigidbody_set: RigidBodySet::new(),
             collider_set: ColliderSet::new(),
             physics_elements: HashMap::new(),
+            delta_time: 0.0,
+            last_physics_time: Instant::now(),
         };
 
         physics
@@ -104,7 +111,7 @@ impl Physics {
                 Some(physics_data) => {
                     match physics_data {
                         Some(physics_data) => {
-                            plane_physics_logic.update(&plane_controls, &self.collider_set, &mut self.rigidbody_set, &self.query_pipeline, physics_data, &debug_physics_tx);
+                            plane_physics_logic.update(&plane_controls, &self.collider_set, &mut self.rigidbody_set, &self.query_pipeline, physics_data, &debug_physics_tx, self.delta_time);
                         },
                         None => {
                             println!("Player not found");
@@ -118,6 +125,14 @@ impl Physics {
 
             // Step the physics pipeline with fixed timestep
             while accumulator >= FIXED_TIMESTEP {
+                // Calculate delta time for this physics step
+                let current_time = Instant::now();
+                self.delta_time = current_time.duration_since(self.last_physics_time).as_secs_f32();
+                self.last_physics_time = current_time;
+                
+                // Clamp delta time to prevent spiral of death
+                let clamped_delta_time = self.delta_time.min(FIXED_TIMESTEP * 2.0);
+                
                 self.physics_pipeline.step(
                     &self.gravity,
                     &integration_parameters,
@@ -144,6 +159,9 @@ impl Physics {
                 Ok(PhysicsCommand::Shutdown) => {
                     println!("Physics thread received shutdown command");
                     break;
+                },
+                Ok(PhysicsCommand::ToggleDebug) => {
+                    plane_physics_logic.toggle_debug_rendering();
                 },
                 Err(_) => {
                     // No message available, continuing with physics
@@ -176,5 +194,16 @@ impl Physics {
                 should_send_data = false; // Reset flag after sending
             }
         }
+    }
+    
+    // Getter method to access delta time from other parts of the code
+    pub fn get_delta_time(&self) -> f32 {
+        self.delta_time
+    }
+    
+    // Method to reset delta time (useful for debugging or when physics is paused)
+    pub fn reset_delta_time(&mut self) {
+        self.delta_time = 0.0;
+        self.last_physics_time = Instant::now();
     }
 }

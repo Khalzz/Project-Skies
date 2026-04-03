@@ -56,7 +56,7 @@ pub fn load_physics_from_level(mut level_path: String, collider_set: &mut Collid
                         let mut rigid_body = if physics_obj_data.rigidbody.is_static {
                             RigidBodyBuilder::fixed().additional_mass(physics_obj_data.rigidbody.mass).translation(vector![instance_data.transform.position.x, instance_data.transform.position.y, instance_data.transform.position.z]).build()
                         } else {
-                            let principal_inertia = nalgebra::Vector3::new(10000.0, 10000.0, 100000.0);
+                            let principal_inertia = nalgebra::Vector3::new(1.0, 1.0, 1.0);
 
                             RigidBodyBuilder::dynamic()
                             .additional_mass_properties(rapier3d::prelude::MassProperties::new(physics_obj_data.rigidbody.center_of_mass.into(), physics_obj_data.rigidbody.mass, principal_inertia))
@@ -67,27 +67,26 @@ pub fn load_physics_from_level(mut level_path: String, collider_set: &mut Collid
                         rigid_body.set_linvel(physics_obj_data.rigidbody.initial_velocity, true);
                         let rigidbody_handle = rigidbody_set.insert(rigid_body);
 
-                        // collisions
-                        let collider_handle = match &physics_obj_data.collider {
-                            Some(collider_data) => {
-                                let collider = match collider_data {
-                                    game_object::ColliderType::Cuboid { half_extents } => {
-                                        ColliderBuilder::cuboid(half_extents.0, half_extents.1, half_extents.2).build()
-                                    },
-                                    game_object::ColliderType::HalfSpace { normal } => {
-                                        ColliderBuilder::halfspace(Unit::new_normalize(*normal)).build()
-                                    },
-                                    _ => todo!(),
-                                };
+                        // Create colliders
+                        let mut collider_handles: Vec<ColliderHandle> = Vec::new();
 
-                                Some(collider_set.insert_with_parent(collider, rigidbody_handle, rigidbody_set))
-                            },
-                            None => {
-                                None
-                            },
-                        };
+                        for collider_data in &physics_obj_data.colliders {
+                            let collider = match collider_data {
+                                game_object::ColliderType::Cuboid { half_extents, position } => {
+                                    ColliderBuilder::cuboid(half_extents.0, half_extents.1, half_extents.2)
+                                        .translation(vector![position.0, position.1, position.2])
+                                        .build()
+                                },
+                                game_object::ColliderType::HalfSpace { normal } => {
+                                    ColliderBuilder::halfspace(Unit::new_normalize(*normal)).build()
+                                },
+                                _ => continue,
+                            };
+                            let handle = collider_set.insert_with_parent(collider, rigidbody_handle, rigidbody_set);
+                            collider_handles.push(handle);
+                        }
 
-                        physics_data = Some(PhysicsData { rigidbody_handle, collider_handle, metadata: HashMap::new() });
+                        physics_data = Some(PhysicsData { rigidbody_handle, collider_handles, metadata: HashMap::new() });
                     };
 
                     // println!("loaded data: {}", ids[i]);

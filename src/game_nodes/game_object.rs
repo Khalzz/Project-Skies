@@ -22,7 +22,7 @@ pub struct Lighting {
 
 #[derive(Debug, Deserialize, Clone)]
 pub enum ColliderType {
-    Cuboid { half_extents: (f32, f32, f32) },
+    Cuboid { half_extents: (f32, f32, f32), #[serde(default)] position: (f32, f32, f32) },
     Ball { radius: f32 },
     Cylinder { half_height: f32, radius: f32 },
     HeightField { heights: Vec<Vec<f32>>, scale_x: f32, scale_y: f32 },
@@ -40,7 +40,8 @@ pub struct RigidBodyData {
 #[derive(Debug, Deserialize, Clone)]
 pub struct Physics {
     pub rigidbody: RigidBodyData,
-    pub collider: Option<ColliderType>,
+    #[serde(default)]
+    pub colliders: Vec<ColliderType>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
