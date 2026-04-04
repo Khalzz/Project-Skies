@@ -108,26 +108,50 @@ impl UiNode {
         let mut text_areas: Vec<TextArea> = Vec::new();
         let vertices_to_add = 0;
         let indices_to_add = 0;
+
+        let transform = &mut self.transform;
+        let visibility = &self.visibility;
+        let content = &mut self.content;
     
-        let vertices_slice = self.vertices(size);
-        let indice_slice = self.indices(ui.num_vertices);
-    
-        match &mut self.content {
+        match content {
             UiNodeContent::Text(label) => {
-                label.text_area(&self.transform.rect);
-                // label.realign(font_system);
-                label.buffer.set_size(font_system, Some((self.transform.rect.right - self.transform.rect.left) as f32), Some((self.transform.rect.bottom - self.transform.rect.top) as f32));
+                let vertices_slice = Self::compute_vertices(transform, visibility, size);
+                let indice_slice = Self::compute_indices(ui.num_vertices);
+                label.text_area(&transform.rect);
+                label.buffer.set_size(font_system, Some((transform.rect.right - transform.rect.left) as f32), Some((transform.rect.bottom - transform.rect.top) as f32));
         
-                let (text_area, added_vertices, added_indices) = label.ui_node_data_creation(size, &mut ui.vertices, &vertices_slice, &mut ui.indices, &indice_slice, &self.transform.rect);
+                let (text_area, added_vertices, added_indices) = label.ui_node_data_creation(size, &mut ui.vertices, &vertices_slice, &mut ui.indices, &indice_slice, &transform.rect);
                 text_areas.push(text_area);
                 ui.num_vertices += added_vertices;
                 ui.num_indices += added_indices;
             },
             UiNodeContent::VerticalContainer(vertical_container) => {
-                let mut base_position = self.transform.y + vertical_container.margin;
-                let mut end_bottom = self.transform.rect.bottom;
+                let mut base_position = transform.y + vertical_container.margin;
+                let mut end_bottom = transform.rect.bottom;
+                let auto_width = transform.width == 0.0;
+                let auto_height = transform.height == 0.0;
     
-                // Render the base container itself
+                if auto_width {
+                    let mut max_child_width: f32 = 0.0;
+                    match &vertical_container.children {
+                        ChildrenType::IndexedChildren(vec) => {
+                            for child in vec.iter() {
+                                max_child_width = max_child_width.max(child.transform.width);
+                            }
+                        },
+                        ChildrenType::MappedChildren(hash_map) => {
+                            for (_id, child) in hash_map.iter() {
+                                max_child_width = max_child_width.max(child.transform.width);
+                            }
+                        },
+                    }
+                    let total_width = max_child_width + vertical_container.margin * 2.0;
+                    transform.width = total_width;
+                    transform.rect.right = transform.rect.left + total_width;
+                }
+
+                let vertices_slice = Self::compute_vertices(transform, visibility, size);
+                let indice_slice = Self::compute_indices(ui.num_vertices);
                 let (container_vertices, container_indices) = vertical_container.ui_node_data_creation(size, &mut ui.vertices, &vertices_slice, &mut ui.indices, &indice_slice);
                 ui.num_vertices += container_vertices;
                 ui.num_indices += container_indices;
@@ -135,7 +159,7 @@ impl UiNode {
                 match &mut vertical_container.children {
                     ChildrenType::IndexedChildren(vec) => {
                         for child in vec {
-                            let (child_text_areas, child_vertices, child_indices) = Self::handle_children(&mut self.transform, &mut end_bottom, child, vertical_container.margin, vertical_container.separation, &mut base_position, size, ui, delta_time, font_system);
+                            let (child_text_areas, child_vertices, child_indices) = Self::handle_children(transform, &mut end_bottom, child, vertical_container.margin, vertical_container.separation, &mut base_position, size, ui, delta_time, font_system);
                             text_areas.extend(child_text_areas);
                             ui.num_vertices += child_vertices;
                             ui.num_indices += child_indices;
@@ -143,7 +167,7 @@ impl UiNode {
                     },
                     ChildrenType::MappedChildren(hash_map) => {
                         for (_id, child) in hash_map {
-                            let (child_text_areas, child_vertices, child_indices) = Self::handle_children(&mut self.transform, &mut end_bottom, child, vertical_container.margin, vertical_container.separation, &mut base_position, size, ui, delta_time, font_system);
+                            let (child_text_areas, child_vertices, child_indices) = Self::handle_children(transform, &mut end_bottom, child, vertical_container.margin, vertical_container.separation, &mut base_position, size, ui, delta_time, font_system);
                             text_areas.extend(child_text_areas);
                             ui.num_vertices += child_vertices;
                             ui.num_indices += child_indices;
@@ -151,11 +175,14 @@ impl UiNode {
                     },
                 }
                 
-                self.transform.rect.bottom = if self.transform.smooth_change {
-                    lerp(self.transform.rect.bottom, end_bottom, delta_time * 20.0)
+                transform.rect.bottom = if transform.smooth_change {
+                    lerp(transform.rect.bottom, end_bottom + vertical_container.margin, delta_time * 20.0)
                 } else {
-                    end_bottom
+                    end_bottom + vertical_container.margin
                 };
+                if auto_height {
+                    transform.height = transform.rect.bottom - transform.rect.top;
+                }
 
             },
         }
@@ -185,6 +212,36 @@ impl UiNode {
     /// A amount of values ordered as (text area, num_vertices, num indices)
     pub fn indices(&self, base: u16) -> [u16; 6] {
         [base, 1 + base, 2 + base, base, 2 + base, 3 + base]
+    }
+
+    fn compute_indices(base: u16) -> [u16; 6] {
+        [base, 1 + base, 2 + base, base, 2 + base, 3 + base]
+    }
+
+    fn compute_vertices(transform: &UiTransform, visibility: &Visibility, screen_size: &Size) -> [VertexUi; 4] {
+        let top = 1.0 - (transform.rect.top as f32 / (screen_size.height as f32 / 2.0));
+        let left = (transform.rect.left as f32 / (screen_size.width as f32 / 2.0)) - 1.0;
+        let bottom = 1.0 - (transform.rect.bottom as f32 / (screen_size.height as f32 / 2.0));
+        let right = (transform.rect.right as f32 / (screen_size.width as f32 / 2.0)) - 1.0;
+
+        let rect = [
+            transform.rect.top as f32,
+            transform.rect.left as f32,
+            transform.rect.bottom as f32,
+            transform.rect.right as f32,
+        ];
+
+        let left_top = vector![left, top, 0.0];
+        let left_bottom = vector![left, bottom, 0.0];
+        let right_top = vector![right, top, 0.0];
+        let right_bottom = vector![right, bottom, 0.0];
+
+        [
+            VertexUi { position: left_top.into(), color: visibility.background_color, rect, border_color: visibility.border_color },
+            VertexUi { position: left_bottom.into(), color: visibility.background_color, rect, border_color: visibility.border_color },
+            VertexUi { position: right_bottom.into(), color: visibility.background_color, rect, border_color: visibility.border_color },
+            VertexUi { position: right_top.into(), color: visibility.background_color, rect, border_color: visibility.border_color },
+        ]
     }
 
     pub fn vertices(&mut self, screen_size: &Size) -> [VertexUi; 4] {

@@ -5,7 +5,7 @@ use nalgebra::{vector, Point3, Quaternion, UnitQuaternion, Vector3};
 use rand::{rngs::ThreadRng, Rng};
 use rapier3d::prelude::RigidBody;
 use sdl2::{controller::GameController};
-use crate::{app::{App, AppState}, audio::subtitles::Subtitle, input::{input::InputSubsystem, utils::to_axis}, physics::physics_handler::{MetadataType, PhysicsData, RenderMessage}, rendering::{camera::CameraRenderizable, ui::UiContainer}, transform::Transform, ui::{ui_node::{ChildrenType, UiNode, UiNodeContent, UiNodeParameters, Visibility}, ui_transform::UiTransform}, utils::lerps::{lerp, lerp_quaternion}};
+use crate::{app::{App, AppState}, audio::subtitles::Subtitle, input::{input::InputSubsystem, utils::to_axis}, physics::physics_handler::{MetadataType, PhysicsData, RenderMessage}, primitive::manual_vertex::ManualVertex, rendering::{camera::CameraRenderizable, ui::UiContainer}, transform::Transform, ui::{ui_node::{ChildrenType, UiNode, UiNodeContent, UiNodeParameters, Visibility}, ui_transform::UiTransform}, utils::lerps::{lerp, lerp_quaternion}};
 use super::{airfoil::AirFoil, event_handling::EventSystem, plane::plane::Plane, wheel::Wheel, wing::Wing};
 use std::sync::mpsc::Sender;
 use crate::gameplay::plane::plane::PlaneControls;
@@ -76,6 +76,7 @@ impl GameLogic {
     // this is called once
     pub fn new(app: &mut App) -> Self {
         // UI ELEMENTS AND LIST
+        /* 
         let altitude = UiNode::new(
             UiTransform::new(((app.config.width as f32 / 2.0) - (150.0 / 2.0)) - 400.0, (app.config.height as f32 / 2.0) - (30.0 / 2.0), 30.0, 150.0, 0.0, false), 
             Visibility::new([0.0, 0.0, 0.0, 0.0], [0.0, 255.0, 0.0, 255.0]),
@@ -139,6 +140,9 @@ impl GameLogic {
             app,
         );
 
+        */
+
+        /* 
         game_info.add_children("framerate".to_owned(), framerate);
         game_info.add_children("g_number".to_owned(), g_number);
         game_info.add_children("timer".to_owned(), timer);
@@ -163,15 +167,7 @@ impl GameLogic {
         app.ui.add_to_ui("static".to_owned(), "altitude_alert".to_owned(), altitude_alert);
         app.ui.add_to_ui("static".to_owned(), "subtitles".to_owned(), subtitle);
         app.ui.add_to_ui("static".to_owned(), "game_info".to_owned(),game_info);
-
-        // Debug Console - positioned on right side of screen
-        let debug_console = UiNode::new(
-            UiTransform::new(app.config.width as f32 - 320.0, 10.0, 0.0, 310.0, 0.0, false), 
-            Visibility::new([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]), // starts invisible
-            UiNodeParameters::VerticalContainerData { margin: 10.0, separation: 5.0, children: ChildrenType::IndexedChildren(vec![]) }, 
-            app,
-        );
-        app.ui.add_to_ui("static".to_owned(), "debug_console".to_owned(), debug_console);
+        */
 
         let subtitle_data = Subtitle::new();
 
@@ -209,7 +205,7 @@ impl GameLogic {
             base_rotations: BaseRotations { left_aleron: None, right_aleron: None },
             flap_ratio: 0.0,
             previous_velocity: None,
-            flight_data: FlightData { altimeter: 0.0, speedometer: 0.0, g_meter: 0.0 }
+            flight_data: FlightData { altimeter: 0.0, speedometer: 0.0, g_meter: 1.0 }
         };
 
         let rng = rand::thread_rng();
@@ -251,12 +247,6 @@ impl GameLogic {
         }
 
         // Debug console output (press F2 to show/hide)
-        debug_text!("FPS: {}", app.time.get_fps());
-        debug_text!("Altitude: {:.1}", self.plane_systems.flight_data.altimeter);
-        debug_text!("Speed: {:.1}", self.plane_systems.flight_data.speedometer);
-        debug_text!("G-Force: {:.2}", self.plane_systems.flight_data.g_meter);
-        debug_text!("Throttle: {:.0}%", self.plane.controls.throttle * 100.0);
-
         self.plane.update(app.time.delta_time, input_subsystem);
         plane_control_tx.send(self.plane.controls.clone());
 
@@ -272,6 +262,28 @@ impl GameLogic {
         let physics_data_renderizable = physics_data.get("player");
         let plane_model = app.game_models.get_mut(&plane.model_ref).unwrap();
 
+        if let Some(data) = physics_data_renderizable {
+            self.plane_systems.flight_data.speedometer = data.linvel.magnitude();
+
+            // G-meter: project felt acceleration onto the plane's local up axis
+            match &self.plane_systems.previous_velocity {
+                Some(prev_vel) if *prev_vel != data.linvel => {
+                    let acceleration = (data.linvel - prev_vel) / delta_time;
+                    // Felt acceleration = total acceleration minus gravity (pilot doesn't feel gravity)
+                    let felt_acceleration = acceleration - self.gravity;
+                    // Project onto the plane's local up axis for the G reading
+                    let plane_up = UnitQuaternion::from_quaternion(data.rotation) * Vector3::y_axis();
+                    let target_g = felt_acceleration.dot(&plane_up) / 9.81;
+                    self.plane_systems.flight_data.g_meter = lerp(self.plane_systems.flight_data.g_meter, target_g, delta_time * 10.0);
+                    self.plane_systems.previous_velocity = Some(data.linvel);
+                }
+                None => {
+                    self.plane_systems.previous_velocity = Some(data.linvel);
+                }
+                _ => {}
+            }
+        }
+
         // elevators
         if let Some(meshes) = plane_model.model.mesh_lists.get_mut("opaque") {
             match physics_data_renderizable {
@@ -285,6 +297,14 @@ impl GameLogic {
                                         wheel_mesh.transform.position = Vector3::new(final_pos.x / plane.instance.transform.scale.x, final_pos.y / plane.instance.transform.scale.y, final_pos.z / plane.instance.transform.scale.z);
                                         wheel_mesh.update_transform(&app.queue);
                                     }
+
+                                    // Render suspension debug line using visual transform
+                                    let vis_origin = plane.instance.transform.position + plane.instance.transform.rotation * (plane.instance.transform.rotation.inverse() * (wheel.suspension_origin - plane.instance.transform.position));
+                                    let vis_wheel = plane.instance.transform.position + plane.instance.transform.rotation * (plane.instance.transform.rotation.inverse() * (wheel.wheel_position - plane.instance.transform.position));
+                                    app.render_physics.renderizable_lines.push([
+                                        ManualVertex { position: [vis_origin.x, vis_origin.y, vis_origin.z], color: [0.0, 1.0, 0.0] },
+                                        ManualVertex { position: [vis_wheel.x, vis_wheel.y, vis_wheel.z], color: [0.0, 1.0, 0.0] },
+                                    ]);
                                 }
                             }
                             _ => {}
@@ -376,6 +396,80 @@ impl GameLogic {
 
                 afterburner.change_transform(&app.queue, Transform::new(afterburner.transform.position, afterburner.transform.rotation, Vector3::new(1.0, 1.0, self.plane_systems.afterburner_value)));
             } 
+        }
+
+        // Render collider debug wireframes using the model's visual transform
+        if let Some(physics_data_renderizable) = physics_data_renderizable {
+            if let Some(MetadataType::Colliders(colliders)) = physics_data_renderizable.metadata.get("colliders") {
+                let plane = app.renderizable_instances.get("player").unwrap();
+                let pos = &plane.instance.transform.position;
+                let rot = &plane.instance.transform.rotation;
+                let color = [0.0, 1.0, 1.0];
+                for col in colliders {
+                    let he = &col.half_extents;
+                    let off = &col.local_offset;
+                    let corners_local = [
+                        Vector3::new(-he.x, -he.y, -he.z),
+                        Vector3::new( he.x, -he.y, -he.z),
+                        Vector3::new( he.x,  he.y, -he.z),
+                        Vector3::new(-he.x,  he.y, -he.z),
+                        Vector3::new(-he.x, -he.y,  he.z),
+                        Vector3::new( he.x, -he.y,  he.z),
+                        Vector3::new( he.x,  he.y,  he.z),
+                        Vector3::new(-he.x,  he.y,  he.z),
+                    ];
+                    let cw: Vec<Vector3<f32>> = corners_local.iter()
+                        .map(|c| pos + rot * (off + c))
+                        .collect();
+                    let edges = [
+                        (0,1),(1,2),(2,3),(3,0),
+                        (4,5),(5,6),(6,7),(7,4),
+                        (0,4),(1,5),(2,6),(3,7),
+                    ];
+                    for (a, b) in edges {
+                        app.render_physics.renderizable_lines.push([
+                            ManualVertex { position: [cw[a].x, cw[a].y, cw[a].z], color },
+                            ManualVertex { position: [cw[b].x, cw[b].y, cw[b].z], color },
+                        ]);
+                    }
+                }
+            }
+
+            // Render wing debug lines (axes + lift force) using visual transform
+            if let Some(MetadataType::Wings(wings)) = physics_data_renderizable.metadata.get("wings") {
+                let plane = app.renderizable_instances.get("player").unwrap();
+                let pos = &plane.instance.transform.position;
+                let rot = &plane.instance.transform.rotation;
+                let axis_len = 0.2;
+
+                for w in wings {
+                    let wpc = pos + rot * w.pressure_center;
+                    // X axis (red)
+                    let x_end = wpc + rot * Vector3::new(axis_len, 0.0, 0.0);
+                    app.render_physics.renderizable_lines.push([
+                        ManualVertex { position: [wpc.x, wpc.y, wpc.z], color: [1.0, 0.0, 0.0] },
+                        ManualVertex { position: [x_end.x, x_end.y, x_end.z], color: [1.0, 0.0, 0.0] },
+                    ]);
+                    // Y axis (green)
+                    let y_end = wpc + rot * Vector3::new(0.0, axis_len, 0.0);
+                    app.render_physics.renderizable_lines.push([
+                        ManualVertex { position: [wpc.x, wpc.y, wpc.z], color: [0.0, 1.0, 0.0] },
+                        ManualVertex { position: [y_end.x, y_end.y, y_end.z], color: [0.0, 1.0, 0.0] },
+                    ]);
+                    // Z axis (blue)
+                    let z_end = wpc + rot * Vector3::new(0.0, 0.0, axis_len);
+                    app.render_physics.renderizable_lines.push([
+                        ManualVertex { position: [wpc.x, wpc.y, wpc.z], color: [0.0, 0.0, 1.0] },
+                        ManualVertex { position: [z_end.x, z_end.y, z_end.z], color: [0.0, 0.0, 1.0] },
+                    ]);
+                    // Lift force (yellow/orange)
+                    let lift_end = wpc + w.last_lift_force * 0.01;
+                    app.render_physics.renderizable_lines.push([
+                        ManualVertex { position: [wpc.x, wpc.y, wpc.z], color: [1.0, 0.8, 0.0] },
+                        ManualVertex { position: [lift_end.x, lift_end.y, lift_end.z], color: [1.0, 0.5, 0.0] },
+                    ]);
+                }
+            }
         }
     }
 
@@ -476,16 +570,16 @@ impl GameLogic {
         if app.throttling.last_ui_update.elapsed() >= app.throttling.ui_update_interval {
             match app.ui.renderizable_elements.get_mut("static").unwrap() {
                 UiContainer::Tagged(hash_map) => {
-                    match hash_map.get_mut("game_info") {
+                    match hash_map.get_mut("data_box") {
                         Some(info) => {
                             match info.get_container_hashed() {
                                 Ok(map) => {
                                     self.update_text_label(map, "framerate", &format!("FPS: {}", app.time.get_fps()), &mut app.ui.text.font_system);
-                                    self.update_text_label(map, "g_number", &format!("G: {:.0}", self.plane_systems.flight_data.g_meter), &mut app.ui.text.font_system);
+                                    self.update_text_label(map, "g", &format!("G: {:.0}", self.plane_systems.flight_data.g_meter), &mut app.ui.text.font_system);
                                     self.update_text_label(map, "timer", &Self::format_duration(self.game_time), &mut app.ui.text.font_system);
-                                    self.update_text_label(map, "throttle_value", &format!("Power: {}%", (self.plane.controls.throttle * 100.0).round()), &mut app.ui.text.font_system);
+                                    self.update_text_label(map, "power", &format!("Power: {}%", (self.plane.controls.throttle * 100.0).round()), &mut app.ui.text.font_system);
                                 },
-                                Err(_) => todo!(),
+                                Err(_) => {},
                             }
                         },
                         None => {},

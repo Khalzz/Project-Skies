@@ -7,6 +7,7 @@ use crate::physics::physics_handler::PhysicsData;
 #[derive(Debug, Clone)]
 pub struct WheelData {
     pub wheel_position: Vector3<f32>,
+    pub suspension_origin: Vector3<f32>,
 }
 
 pub struct Wheel {

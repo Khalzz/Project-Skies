@@ -60,6 +60,10 @@
             label: "toggle_console",
             keys: ["F3"]
         ),
+        (
+            label: "toggle_pause",
+            keys: ["F12"]
+        ),
 
     ],
     mouse: (

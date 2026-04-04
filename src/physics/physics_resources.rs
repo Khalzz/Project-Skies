@@ -56,11 +56,12 @@ pub fn load_physics_from_level(mut level_path: String, collider_set: &mut Collid
                         let mut rigid_body = if physics_obj_data.rigidbody.is_static {
                             RigidBodyBuilder::fixed().additional_mass(physics_obj_data.rigidbody.mass).translation(vector![instance_data.transform.position.x, instance_data.transform.position.y, instance_data.transform.position.z]).build()
                         } else {
-                            let principal_inertia = nalgebra::Vector3::new(1.0, 1.0, 1.0);
+                            let principal_inertia = nalgebra::Vector3::new(1000.0, 1000.0, 1000.0);
 
                             RigidBodyBuilder::dynamic()
                             .additional_mass_properties(rapier3d::prelude::MassProperties::new(physics_obj_data.rigidbody.center_of_mass.into(), physics_obj_data.rigidbody.mass, principal_inertia))
                             .translation(instance_data.transform.position)
+                            .angular_damping(2.0)
                             .build()
                         };
 

@@ -7,6 +7,7 @@ use crate::{physics::physics::DebugPhysicsMessageType, primitive::manual_vertex:
 use super::airfoil::AirFoil;
 
 pub struct Wing {
+    pub label: String,
     pub pressure_center: nalgebra::Vector3<f32>,
     pub wing_area: f32,
     pub wing_span: f32,
@@ -17,88 +18,149 @@ pub struct Wing {
     pub flap_ratio: f32,
     pub efficiency_factor: f32,
     pub control_input: f32,
-    pub is_roll_axis: bool
+    pub is_roll_axis: bool,
+    pub last_lift_force: nalgebra::Vector3<f32>,
+    pub stable: bool,
 }
 
 impl Wing {
-    pub fn new(pressure_center: nalgebra::Vector3<f32>, wing_span: f32, wing_area: f32, chord: f32, air_foil: AirFoil, normal: nalgebra::Vector3<f32>, flap_ratio: f32, is_roll_axis: bool) -> Self {
-        Self { 
-            wing_area, 
-            wing_span, 
+    pub fn new(label: String, pressure_center: nalgebra::Vector3<f32>, wing_span: f32, wing_area: f32, chord: f32, air_foil: AirFoil, normal: nalgebra::Vector3<f32>, flap_ratio: f32, is_roll_axis: bool, stable: bool) -> Self {
+        Self {
+            label,
+            wing_area,
+            wing_span,
             chord,
-            air_foil, 
-            normal, 
+            air_foil,
+            normal,
             flap_ratio,
             pressure_center,
             aspect_ratio: wing_span.powi(2) / wing_area,
             efficiency_factor: 1.0,
-            control_input: 0.0,
-            is_roll_axis
+            control_input: 0.05,
+            is_roll_axis,
+            last_lift_force: nalgebra::Vector3::zeros(),
+            stable,
         }
     }
 
-    pub fn physics_force(&mut self, rigidbody: &mut RigidBody, renderizable_lines: &mut Vec<DebugPhysicsMessageType>) {    
+    pub fn physics_force(&mut self, rigidbody: &mut RigidBody) {
+    let world_pressure_center = rigidbody.rotation() * self.pressure_center
+        + rigidbody.translation();
+
+    let angular_contribution = rigidbody.angvel()
+        .cross(&(rigidbody.rotation() * self.pressure_center));
+    let world_velocity = rigidbody.linvel() + angular_contribution;
+    let local_velocity = rigidbody.rotation().inverse() * world_velocity;
+
+    if local_velocity.magnitude() < 0.01 {
+        return;
+    }
+
+    let forward_speed = local_velocity.z;
+    let vertical_speed = local_velocity.y;
+
+    let max_deflection = if self.is_roll_axis { 25.0 } else { 25.0 };
+    let air_density = 1.225f32;
+    let speed_sq = local_velocity.magnitude_squared();
+    let dynamic_pressure = 0.5 * air_density * speed_sq;
+
+    let velocity_dir_world = (rigidbody.rotation() * local_velocity).normalize();
+    let span_axis_world = rigidbody.rotation() * self.normal;
+    let lift_dir = span_axis_world.cross(&velocity_dir_world).normalize();
+    let velocity_dir_local = local_velocity.normalize();
+
+    let total_force = if self.stable {
+        let sideslip_speed = local_velocity.x; // lateral velocity in local space
+    
+        let yaw_damping = 50000.0; // tune this
+        let control_authority = dynamic_pressure * self.wing_area * (max_deflection as f32).to_radians();
+        
+        // Damping resists sideslip, control_input steers into it
+        let side_force_magnitude = (-sideslip_speed * yaw_damping) + (self.control_input * control_authority);
+        
+        let side_axis_world = rigidbody.rotation() * nalgebra::Vector3::x();
+        let side_force = side_axis_world * side_force_magnitude;
+        
+        self.last_lift_force = side_force;
+        side_force
+    } else {
+        let aoa_deg = vertical_speed.atan2(forward_speed).to_degrees()
+            + self.control_input * (max_deflection as f32);
+
+        let (lift_coefficient, drag_coefficient) = self.air_foil.sample(aoa_deg);
+
+        let lift_force = lift_dir * (dynamic_pressure * self.wing_area * lift_coefficient) * 2.0;
+        let drag_force = rigidbody.rotation() * (-velocity_dir_local * dynamic_pressure * self.wing_area * drag_coefficient);
+
+        self.last_lift_force = lift_force;
+        lift_force + drag_force
+    };
+
+    // Parasitic drag: opposes forward airspeed only (local Z), not gravity
+    let parasitic_cd = 0.02;
+    let forward_drag = -local_velocity.z.signum() * local_velocity.z * local_velocity.z * 0.5 * air_density * self.wing_area * parasitic_cd;
+    let parasitic_drag_local = nalgebra::Vector3::new(0.0, 0.0, forward_drag);
+    let parasitic_drag = rigidbody.rotation() * parasitic_drag_local;
+    let total_force = total_force + parasitic_drag;
+
+    let max_force = 5_000_000.0;
+    let mag = total_force.magnitude();
+    let clamped = if mag > max_force { total_force * (max_force / mag) } else { total_force };
+
+    rigidbody.add_force_at_point(clamped.into(), world_pressure_center.into(), true);
+}
+
+    pub fn render(&self, rigidbody: &RigidBody, renderizable_lines: &mut Vec<DebugPhysicsMessageType>) {
         let world_pressure_center = rigidbody.rotation() * self.pressure_center + rigidbody.translation();
-    
-        // Calculate local velocity in the wing's local space, adjusting for rotation
-        let inverse_transform_direction = rigidbody.rotation().inverse() * rigidbody.linvel();
-        let local_velocity = inverse_transform_direction + rigidbody.angvel();
-        // let local_velocity = inverse_transform_direction + rigidbody.angvel().cross(&world_pressure_center);
+        let axis_length = 0.2;
 
-        // let local_velocity = Self::get_point_velocity(&rigidbody, &self.pressure_center);
+        // X axis (red)
+        let x_dir = rigidbody.rotation() * vector![axis_length, 0.0, 0.0];
+        let x_origin = ManualVertex {
+            position: world_pressure_center.into(),
+            color: [1.0, 0.0, 0.0]
+        };
+        let x_end = ManualVertex {
+            position: (world_pressure_center + x_dir).into(),
+            color: [1.0, 0.0, 0.0]
+        };
+        renderizable_lines.push(DebugPhysicsMessageType::RenderizableLines([x_origin, x_end]));
 
-        let speed = local_velocity.magnitude();
-        if speed <= 1.0 {
-            return;
-        }
-    
-        // Calculate drag and lift directions in the world space
-        let drag_direction = -local_velocity.normalize();
-        let lift_direction = drag_direction.cross(&self.normal).cross(&drag_direction).normalize();
-    
-        // Calculate the angle of attack, ensuring it is based on the plane's orientation
-        let angle_of_attack = (drag_direction.dot(&self.normal).asin().to_degrees()).clamp(self.air_foil.min_alpha, self.air_foil.max_alpha);
-    
-
-        // Sample the lift and drag coefficients based on the angle of attack
-        let (mut lift_coeff, mut drag_coeff) = self.air_foil.sample(angle_of_attack);
-    
-        // Apply flap effects if any
-        if self.flap_ratio > 0.0 {
-            let cl_max = 1.1039;
-            let deflection_ratio = self.control_input;
-            let delta_lift_coeff = self.flap_ratio.sqrt() * cl_max * deflection_ratio;
-            lift_coeff += delta_lift_coeff;
-        }
-
-        // Calculate induced drag based on lift and wing characteristics
-        let induced_drag_coeff = lift_coeff.powi(2) / (PI * self.aspect_ratio * self.efficiency_factor);
-        drag_coeff += induced_drag_coeff;
-    
-        let air_density = 1.255;
-        let dynamic_pressure = 0.5 * speed.powi(2) * air_density * self.wing_area;
-    
-        // Calculate lift and drag forces in local space
-        let lift = lift_direction * lift_coeff * dynamic_pressure;
-        let drag = drag_direction * drag_coeff * dynamic_pressure;
-    
-        // Rotate lift and drag forces into world space
-        let world_drag = rigidbody.rotation() * drag;
-        let world_lift = rigidbody.rotation() * lift;
-    
-        // Apply forces at the rotated pressure center position in world coordinates
-        rigidbody.add_force_at_point(world_lift + world_drag, world_pressure_center.into(), true);
-
-        let origin = ManualVertex {
+        // Y axis (green)
+        let y_dir = rigidbody.rotation() * vector![0.0, axis_length, 0.0];
+        let y_origin = ManualVertex {
             position: world_pressure_center.into(),
             color: [0.0, 1.0, 0.0]
         };
-        let end = ManualVertex {
-            position: (world_pressure_center + ((world_lift + world_drag))).into(),
+        let y_end = ManualVertex {
+            position: (world_pressure_center + y_dir).into(),
             color: [0.0, 1.0, 0.0]
         };
-        renderizable_lines.push(DebugPhysicsMessageType::RenderizableLines([origin, end]));
-        /* 
-        */
+        renderizable_lines.push(DebugPhysicsMessageType::RenderizableLines([y_origin, y_end]));
+
+        // Z axis (blue)
+        let z_dir = rigidbody.rotation() * vector![0.0, 0.0, axis_length];
+        let z_origin = ManualVertex {
+            position: world_pressure_center.into(),
+            color: [0.0, 0.0, 1.0]
+        };
+        let z_end = ManualVertex {
+            position: (world_pressure_center + z_dir).into(),
+            color: [0.0, 0.0, 1.0]
+        };
+        renderizable_lines.push(DebugPhysicsMessageType::RenderizableLines([z_origin, z_end]));
+
+        // Lift force visualization (yellow/orange) - scaled down for visibility
+        let lift_scale = 0.01; // Scale factor to make the line visible
+        let lift_dir = (self.last_lift_force * lift_scale);
+        let lift_origin = ManualVertex {
+            position: world_pressure_center.into(),
+            color: [1.0, 0.8, 0.0]
+        };
+        let lift_end = ManualVertex {
+            position: (world_pressure_center + lift_dir).into(),
+            color: [1.0, 0.5, 0.0]
+        };
+        renderizable_lines.push(DebugPhysicsMessageType::RenderizableLines([lift_origin, lift_end]));
     }
 }

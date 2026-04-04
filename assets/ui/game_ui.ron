@@ -1,0 +1,101 @@
+(
+    id: "test chamber",
+    children: {
+        "data_box": (
+            transform: (position: (10.0, 10.0), size: Some((width: 200.0, height: 200.0))),
+            child: VerticalContainer((
+                margin: Some(20.0),
+                separation: Some(5.0),
+                background_color: Some((0.0, 0.0, 0.0, 0.5)),
+                children: Some({
+                    "timer": (
+                        transform: (
+                            position: (0.0, 0.0),
+                            size: Some((height: 35.0, width: 125.0))
+                        ), 
+                        child: Label((
+                            text: "00:00:00:00",
+                            font_size: 10.0,
+                            color: (0.0, 1.0, 0.0, 1.0),
+                            border_color: Some((0.0, 1.0, 0.0, 1.0)),
+                            border_thickness: Some(2.0),
+                            alignment: Some("Center"),
+                        ))
+                    ),
+                    "framerate": (
+                        transform: (
+                            position: (0.0, 0.0),
+                            size: Some((height: 35.0, width: 125.0))
+                        ), 
+                        child: Label((
+                            text: "100fps",
+                            font_size: 10.0,
+                            color: (0.0, 1.0, 0.0, 1.0),
+                            border_color: Some((0.0, 1.0, 0.0, 1.0)),
+                            border_thickness: Some(2.0),
+                            alignment: Some("Center"),
+                        )),
+                    ),
+                    "g": (
+                        transform: (
+                            position: (0.0, 0.0),
+                            size: Some((height: 35.0, width: 125.0))
+                        ), 
+                        child: Label((
+                            text: "1g",
+                            font_size: 10.0,
+                            color: (0.0, 1.0, 0.0, 1.0),
+                            border_color: Some((0.0, 1.0, 0.0, 1.0)),
+                            border_thickness: Some(2.0),
+                            alignment: Some("Center"),
+                        )),
+                    ),
+                    "power": (
+                        transform: (
+                            position: (0.0, 0.0),
+                            size: Some((height: 35.0, width: 250.0))
+                        ), 
+                        child: Label((
+                            text: "0%",
+                            font_size: 10.0,
+                            color: (0.0, 1.0, 0.0, 1.0),
+                            border_color: Some((0.0, 1.0, 0.0, 1.0)),
+                            border_thickness: Some(2.0),
+                            alignment: Some("Center"),
+                        )),
+                    )
+                }),
+            )),
+        ),
+        "compass": (
+            transform: (
+                position: (0.0, 10.0),
+                size: Some((height: 35.0, width: 100.0)),
+                anchor: Some("center_x"),
+            ), 
+            child: Label((
+                text: "90°",
+                font_size: 10.0,
+                color: (0.0, 1.0, 0.0, 1.0),
+                border_color: Some((0.0, 1.0, 0.0, 1.0)),
+                border_thickness: Some(2.0),
+                alignment: Some("Center"),
+            ))
+        ),
+        "speed": (
+            transform: (
+                position: (0.0, 50.0),
+                size: Some((height: 35.0, width: 100.0)),
+                anchor: Some("center_x"),
+            ), 
+            child: Label((
+                text: "90°",
+                font_size: 10.0,
+                color: (0.0, 1.0, 0.0, 1.0),
+                border_color: Some((0.0, 1.0, 0.0, 1.0)),
+                border_thickness: Some(2.0),
+                alignment: Some("Center"),
+            ))
+        ),
+    }
+)
