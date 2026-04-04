@@ -24,27 +24,38 @@
             id: "player",
             model: "F16/f16.gltf",
             transform: (
-                position: (0.0, 100.0, 0.0),
+                position: (0.0, 0.5, 0.0),
                 rotation: (0.0, 0.0, 0.0),
-                scale: (14.0, 14.0, 14.0),
+                scale: (1.0, 1.0, 1.0),
             ),
             children: [],
             metadata: (
                 cameras: Some((
-                    cockpit_camera: (0.0, 1.8, 13.5),
-                    cinematic_camera: (-10.0, 3.0, -5.0),
-                    frontal_camera: (0.0, 6.0, 30.0),
+                    cockpit_camera: (0.0, 1.8, 1.5),
+                    cinematic_camera: (-1.0, 2.0, -1.0),
+                    frontal_camera: (0.0, 1.0, 3.0),
                 )),
                 physics: Some((
                     rigidbody: ( 
                         is_static: false, 
                         mass: 1000.0,
-                        center_of_mass: (0.0, 0.0, 7.0),
-                        initial_velocity: (0.0, 0.0,  500.0),
+                        center_of_mass: (0.0, 0.0, 0.5),
+                        initial_velocity: (0.0, 0.0, 0.1),
                     ),
-                    collider: Some( Cuboid (
-                        half_extents: (7.0, 1.0, 14.0)
-                    ))     
+                    colliders: [
+                        Cuboid (
+                            half_extents: (0.1, 0.1, 0.7),
+                            position: (0.0, 0.0, 0.2)
+                        ),
+                        Cuboid (
+                            half_extents: (0.3, 0.01, 0.2),
+                            position: (0.4, 0.03, 0.2)
+                        ),
+                        Cuboid (
+                            half_extents: (0.3, 0.01, 0.2),
+                            position: (-0.4, 0.03, 0.2)
+                        ),
+                    ]     
                 )),
             ),
         ),
@@ -52,9 +63,9 @@
             id: "fellow_aviator",
             model: "F14/f14.gltf",
             transform: (
-                position: (1000.0, 100.0, 0.0),
+                position: (10.0, 10.0, 0.0),
                 rotation: (0.0, 0.0, 0.0),
-                scale: (19.0, 19.0, 19.0),
+                scale: (1.9, 1.9, 1.9),
             ),
             children: [],
             metadata: (
@@ -65,9 +76,9 @@
                         center_of_mass: (0.0, 0.0, 0.0),
                         initial_velocity: (0.0, 0.0, 0.0)
                     ),
-                    collider: Some( Cuboid (
+                    colliders: [ Cuboid (
                             half_extents: (1.0, 1.0, 1.0)
-                    ))     
+                    )]     
                 )),
                 camera: Some((
                     cockpit_camera: (0.0, 2.3, 14.3),
@@ -93,9 +104,9 @@
                         center_of_mass: (0.0, 0.0, 0.0),
                         initial_velocity: (0.0, 0.0, 0.0),
                     ),
-                    collider: Some( HalfSpace (
+                    colliders: [ HalfSpace (
                             normal: (0.0, 1.0, 0.0)
-                    ))  
+                    )]  
                 ))
             ),
         )

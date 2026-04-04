@@ -60,7 +60,7 @@ impl Subtitle {
         };
 
         let Some(subtitles) = hash_map.get_mut("subtitles") else {
-            println!("subtitles not found on there");
+            // println!("subtitles not found on there");
             return;
         };
 
@@ -142,7 +142,7 @@ impl Subtitle {
                 vertical_container_data.add_if_indexed(subtitle_node);
             }
         } else {
-            println!("subtitles not found on there");
+            // println!("subtitles not found on there");
         }
 
         self.texts.push(new_text);

@@ -26,6 +26,11 @@ nalgebra = "*"
 serde = { version = "1.0", features = ["derive"] }
 ron = "*"
 
+# Tooling
+egui = "*"
+eframe = "*"
+egui_plot = "*"
+
 [dependencies.gltf]
 version = "1.4"
 features = ["extras", "names", "utils"]

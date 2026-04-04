@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 
 use glyphon::{Cache, FontSystem, SwashCache, TextAtlas, TextRenderer};
+use ron::from_str;
 use wgpu::{Buffer, Device, Queue, RenderPipeline, SurfaceConfiguration};
 
-use crate::{rendering::vertex::VertexUi, ui::ui_node::UiNode};
-
-// fix this so its more presentable and add here every reference to ui_components
+use crate::{rendering::{ui, vertex::VertexUi}, ui::{label::Label, ui_node::{self, ChildrenType, Visibility}, ui_structure::{self, UiStructure}}};
+use crate::ui::ui_transform::UiTransform;
+use crate::ui::ui_node::{UiNode, UiNodeContent};
+use crate::ui::vertical_container::VerticalContainerData;
 
 
 pub struct TextRendering {
@@ -136,7 +138,6 @@ impl Ui {
         };
 
         Self {
-            
             ui_pipeline,
             text: TextRendering {
                 text_renderer,
@@ -148,6 +149,121 @@ impl Ui {
             renderizable_elements: HashMap::new(),
             has_changed: true
         }
+    }
+
+    fn convert_component(&mut self, component: &ui_structure::UiComponent, screen_width: f32, screen_height: f32) -> UiNode {
+        let width = component.transform.size.as_ref().map(|s| s.width).unwrap_or(0.0);
+        let height = component.transform.size.as_ref().map(|s| s.height).unwrap_or(0.0);
+        let auto_size = component.transform.size.is_none();
+
+        let mut x = component.transform.position.x;
+        let y = component.transform.position.y;
+
+        if let Some(anchor) = &component.transform.anchor {
+            match anchor.as_str() {
+                "center_x" => x = (screen_width / 2.0) - (width / 2.0) + component.transform.position.x,
+                _ => {}
+            }
+        }
+
+        let transform = UiTransform::new(
+            x,
+            y,
+            height,
+            width,
+            0.0,
+            auto_size,
+        );
+        let mut visibility = Visibility::new([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]);
+
+        let content = match &component.child {
+            ui_structure::UiNode::Label(label_data) => {
+                let color = glyphon::Color::rgba(
+                    (label_data.color[0] * 255.0) as u8,
+                    (label_data.color[1] * 255.0) as u8,
+                    (label_data.color[2] * 255.0) as u8,
+                    (label_data.color[3] * 255.0) as u8,
+                );
+                let align = match label_data.alignment.as_deref() {
+                    Some("Center") => glyphon::cosmic_text::Align::Center,
+                    Some("Right") => glyphon::cosmic_text::Align::Right,
+                    _ => glyphon::cosmic_text::Align::Left,
+                };
+                let bg = label_data.background_color.unwrap_or([0.0, 0.0, 0.0, 0.0]);
+                let border = label_data.border_color.unwrap_or([0.0, 0.0, 0.0, 0.0]);
+                visibility = Visibility::new(bg, border);
+                UiNodeContent::Text(Label::new(
+                    &mut self.text.font_system,
+                    &label_data.text,
+                    transform.clone(),
+                    color,
+                    align,
+                    label_data.font_size,
+                ))
+            }
+            ui_structure::UiNode::VerticalContainer(container_data) => {
+                let bg = container_data.background_color.unwrap_or([0.0, 0.0, 0.0, 0.0]);
+                let border = container_data.border_color.unwrap_or([0.0, 0.0, 0.0, 0.0]);
+                visibility = Visibility::new(bg, border);
+                let margin = container_data.margin.unwrap_or(0.0);
+                let separation = container_data.separation.unwrap_or(0.0);
+
+                let children = if let Some(ron_children) = &container_data.children {
+                    let mut map = HashMap::new();
+                    for (child_id, child_component) in ron_children {
+                        map.insert(child_id.clone(), self.convert_component(child_component, screen_width, screen_height));
+                    }
+                    ChildrenType::MappedChildren(map)
+                } else {
+                    ChildrenType::MappedChildren(HashMap::new())
+                };
+
+                UiNodeContent::VerticalContainer(VerticalContainerData::new(margin, separation, children))
+            }
+        };
+
+        UiNode { transform, visibility, content }
+    }
+
+    pub fn load_ui(&mut self, path: &str, collection: &str, screen_width: u32, screen_height: u32) {
+        let ui_structure = self.open_ui(path);
+        let sw = screen_width as f32;
+        let sh = screen_height as f32;
+
+        match ui_structure {
+            Some(ui_structure) => {
+                if !self.renderizable_elements.contains_key(collection) {
+                    self.renderizable_elements.insert(collection.to_owned(), UiContainer::Tagged(HashMap::new()));
+                }
+
+                for (id, component) in &ui_structure.children {
+                    let node = self.convert_component(component, sw, sh);
+                    self.add_to_ui(collection.to_owned(), id.clone(), node);
+                }
+            },
+            None => {
+                println!("Failed to load UI from path: {}", path);
+            }
+        }
+    }
+
+    pub fn open_ui(&mut self, path: &str) -> Option<UiStructure> {
+        match std::fs::read_to_string(path) {
+            Ok(file_contents) => {
+                match from_str::<UiStructure>(&file_contents) {
+                    Ok(ui) => {
+                        // Here we start loading elements based on this to the hashmap components
+                        return Some(ui)
+                    },
+                    Err(e) => {
+                        // Handle the error if deserialization fails
+                        eprintln!("Error deserializing RON: {}", e);
+                    }
+                }
+            },
+            _ => {}
+        }
+        return None
     }
 
     pub fn add_to_ui(&mut self, collection: String, id: String, element_to_add: UiNode) {

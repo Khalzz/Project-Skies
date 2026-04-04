@@ -580,6 +580,7 @@ impl App<'_> {
                     if app_state.reset {
                         load_level(&mut self, "./assets/scenes/test_chamber".to_owned());
                         play = play::GameLogic::new(&mut self);
+                        self.ui.load_ui("./assets/ui/game_ui.ron", "static", self.config.width, self.config.height);
                         app_state.reset = false;
                     } else {
 
@@ -587,6 +588,25 @@ impl App<'_> {
                         // Request physics data from physics thread
                         if let Err(e) = physics_data_channel.request_data_tx.send(PhysicsCommand::RequestData) {
                             eprintln!("Failed to send physics command: {}", e);
+                        }
+                        
+                        // Toggle debug rendering with F2 (also shows console)
+                        if input_subsystem.is_just_pressed("toggle_debug") {
+                            if let Err(e) = physics_data_channel.request_data_tx.send(PhysicsCommand::ToggleDebug) {
+                                eprintln!("Failed to send toggle debug command: {}", e);
+                            }
+                        }
+                        
+                        // Toggle console independently with F3
+                        if input_subsystem.is_just_pressed("toggle_console") {
+                            crate::tooling::debug_console::toggle_console();
+                        }
+                        
+                        // Toggle physics pause with F12
+                        if input_subsystem.is_just_pressed("toggle_pause") {
+                            if let Err(e) = physics_data_channel.request_data_tx.send(PhysicsCommand::TogglePause) {
+                                eprintln!("Failed to send toggle pause command: {}", e);
+                            }
                         }
                         
                         // Update input subsystem first
@@ -597,11 +617,15 @@ impl App<'_> {
                             Err(_) => HashMap::new(),
                         };
 
-                        // Check for debug physics messages every frame
-                        match physics_data_channel.debug_physics_rx.try_recv() {
-                            Ok(data) => debug_physics = data,
-                            Err(_) => {},
-                        };
+                        // Drain all queued debug physics messages, keep only the latest
+                        let mut got_new = false;
+                        while let Ok(data) = physics_data_channel.debug_physics_rx.try_recv() {
+                            debug_physics = data;
+                            got_new = true;
+                        }
+                        if !got_new {
+                            debug_physics.clear();
+                        }
 
                         // Clear previous debug lines and add new ones
                         self.render_physics.renderizable_lines.clear();
@@ -697,7 +721,7 @@ impl App<'_> {
     fn open_first_avalible_joystick(joystick_subsystem: &JoystickSubsystem) -> Option<Joystick> {
         for index in 0..joystick_subsystem.num_joysticks().unwrap() {
             let joy = joystick_subsystem.open(index).unwrap();
-            print!("{}: {}", index, joy.name());
+            println!("{}: {}", index, joy.name());
             return Some(joy)
         }
         None

@@ -7,6 +7,7 @@ use crate::physics::physics_handler::PhysicsData;
 #[derive(Debug, Clone)]
 pub struct WheelData {
     pub wheel_position: Vector3<f32>,
+    pub suspension_origin: Vector3<f32>,
 }
 
 pub struct Wheel {
@@ -40,7 +41,10 @@ impl Wheel {
             let ray = Ray::new(suspension_origin.into(), ray_direction.into_inner());
             
             let mut filter = QueryFilter::default();
-            filter.exclude_collider = physics_data.collider_handle;
+            // Exclude all colliders belonging to this physics object
+            if let Some(first_collider) = physics_data.collider_handles.first() {
+                filter.exclude_collider = Some(*first_collider);
+            }
 
             // Perform raycast
             if let Some((_handle, time_of_impact)) = query_pipeline.cast_ray(

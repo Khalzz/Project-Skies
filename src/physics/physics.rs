@@ -2,6 +2,7 @@ use wgpu::{Device, SurfaceConfiguration};
 use std::thread;
 use std::sync::mpsc::{channel, Sender, Receiver};
 use std::collections::HashMap;
+use std::panic;
 use nalgebra::Point3;
 
 use crate::rendering::physics_rendering::RenderPhysics;
@@ -37,6 +38,20 @@ pub fn physics_handling(device: &Device, config: &SurfaceConfiguration, camera: 
     let render_physics = RenderPhysics::new(&device, &config, &camera);
 
     thread::spawn(move || {
+        // Set a custom panic hook to print detailed error info
+        panic::set_hook(Box::new(|panic_info| {
+            eprintln!("=== PHYSICS THREAD PANIC ===");
+            if let Some(location) = panic_info.location() {
+                eprintln!("Panic at {}:{}:{}", location.file(), location.line(), location.column());
+            }
+            if let Some(message) = panic_info.payload().downcast_ref::<&str>() {
+                eprintln!("Message: {}", message);
+            } else if let Some(message) = panic_info.payload().downcast_ref::<String>() {
+                eprintln!("Message: {}", message);
+            }
+            eprintln!("============================");
+        }));
+
         match state {
             GameState::Playing => {
                 let mut physics = Physics::new();

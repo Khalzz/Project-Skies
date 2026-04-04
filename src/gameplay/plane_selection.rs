@@ -22,22 +22,8 @@ impl GameLogic {
     // this is called once
     pub fn new(app: &mut App) -> Self {
 
-        let plane_name = UiNode::new(
-            UiTransform::new(0.0, 0.0, 50.0, 100.0, 0.0, false), 
-            Visibility::new([0.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.29, 1.0]),
-            UiNodeParameters::Text { text: "Plane Name", color: Color::rgba(0, 255, 75, 255), align: Align::Center, font_size: 20.0 }, 
-            app,
-        );
-
         app.ui.renderizable_elements.clear();
         app.ui.renderizable_elements.insert("static".to_owned(), UiContainer::Tagged(HashMap::new()));
-
-        match app.ui.renderizable_elements.get_mut("static").unwrap() {
-            UiContainer::Tagged(hash_map) => {
-                hash_map.insert("plane_name".to_owned(), plane_name);
-            },
-            _ => {},
-        }
 
         app.camera.camera.position = [0.0, 7.0, 50.0].into();
 

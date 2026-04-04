@@ -51,13 +51,25 @@ impl AirFoil {
 
     // Sample function to get Cl and Cd based on alpha
     pub fn sample(&self, alpha: f32) -> (f32, f32) {
-        // Get the scaled index and clamp it within bounds
-        let scaled_index = self.alpha_to_index(alpha);
-        let clamped_index = scaled_index.clamp(0, self.data.len() - 1);
-    
-        // Access and return Cl and Cd values from data
-        let data_point = &self.data[clamped_index];
-        (data_point.y, data_point.z)
+        let len = self.data.len();
+        
+        // Get raw float index
+        let float_index = self.alpha_to_float_index(alpha); // see below
+        
+        // Clamp to valid range
+        let float_index = float_index.clamp(0.0, (len - 1) as f32);
+        
+        let lower = float_index.floor() as usize;
+        let upper = (lower + 1).min(len - 1);
+        let t = float_index.fract(); // interpolation factor 0..1
+        
+        let a = &self.data[lower];
+        let b = &self.data[upper];
+        
+        let cl = a.y + (b.y - a.y) * t;
+        let cd = a.z + (b.z - a.z) * t;
+        
+        (cl, cd)
     }
 
     fn alpha_to_index(&self, alpha: f32) -> usize {
@@ -72,5 +84,15 @@ impl AirFoil {
         let normalized_alpha = (alpha - self.min_alpha) / range;
         let scaled_index = (normalized_alpha * (self.data.len() as f32 - 1.0)).round();
         scaled_index as usize
+    }
+
+    fn alpha_to_float_index(&self, alpha: f32) -> f32 {
+        let range = self.max_alpha - self.min_alpha;
+        if range == 0.0 {
+            return 0.0;
+        }
+        let normalized_alpha = (alpha - self.min_alpha) / range;
+        normalized_alpha * (self.data.len() as f32 - 1.0)
+        // no .round() — keep the fractional part for interpolation
     }
 }

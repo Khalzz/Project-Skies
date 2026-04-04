@@ -94,10 +94,9 @@ impl InputSubsystem {
                                         if !pressable.is_pressed() {
                                             pressable.set_just_pressed(true);
                                         }
-        
+
                                         pressable.set_pressed(true, delta_time);
-        
-        
+
                                         if debug {
                                             println!("Key {} pressed", key);
                                         }
@@ -126,7 +125,6 @@ impl InputSubsystem {
                                     println!("Key {} can't have a null identifier", key);
                                 }
                             }
-                            
                         }
                     }
                 }
@@ -137,7 +135,7 @@ impl InputSubsystem {
                     // For camera control
                     self.mouse.set_x(self.mouse.get_x() + xrel);
                     self.mouse.set_y((self.mouse.get_y() + yrel).clamp(-170, 170));
-                    
+
                     // For buttons
                     self.mouse.set_raw_x(x);
                     self.mouse.set_raw_y(y);

@@ -33,6 +33,8 @@ pub struct EventSystem {
 
 impl EventSystem {
     pub fn new(file_path: &Option<String>) -> Result<EventSystem, String> {
+        println!("{}", file_path.to_owned().unwrap_or("None".to_string()));
+
         match file_path {
             Some(path) => {
                 match std::fs::read_to_string(path.to_owned() + "/level_planning.ron") {

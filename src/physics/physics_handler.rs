@@ -12,27 +12,44 @@ use serde::{Deserialize, Serialize};
 use crate::physics::physics::DebugPhysicsMessageType;
 
 #[derive(Debug, Clone)]
+pub struct ColliderDebugData {
+    pub half_extents: Vector3<f32>,
+    pub local_offset: Vector3<f32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WingDebugData {
+    pub pressure_center: Vector3<f32>,
+    pub last_lift_force: Vector3<f32>,
+}
+
+#[derive(Debug, Clone)]
 pub enum MetadataType {
     Translation(Vector3<f32>),
     Rotation(Quaternion<f32>),
     Wheels(HashMap<String, WheelData>),
+    Colliders(Vec<ColliderDebugData>),
+    Wings(Vec<WingDebugData>),
 }
 
 pub struct RenderMessage {
     pub translation: Vector3<f32>,
     pub rotation: Quaternion<f32>,
+    pub linvel: Vector3<f32>,
     pub metadata: HashMap<String, MetadataType>
 }
 
 #[derive(Debug)]
 pub enum PhysicsCommand {
-    RequestData,  // Main thread requests physics data
-    Shutdown,     // Main thread signals shutdown
+    RequestData,      // Main thread requests physics data
+    Shutdown,         // Main thread signals shutdown
+    ToggleDebug,      // Toggle debug rendering
+    TogglePause,      // Toggle physics pause
 }
 
 pub struct PhysicsData {
     pub rigidbody_handle: RigidBodyHandle,
-    pub collider_handle: Option<ColliderHandle>,
+    pub collider_handles: Vec<ColliderHandle>,
     pub metadata: HashMap<String, MetadataType>
 }
 
@@ -46,7 +63,11 @@ pub struct Physics {
     pub rigidbody_set: RigidBodySet, 
     pub collider_set: ColliderSet,
 
-    pub physics_elements: HashMap<String, Option<PhysicsData>>
+    pub physics_elements: HashMap<String, Option<PhysicsData>>,
+    
+    // Delta time tracking
+    pub delta_time: f32,
+    pub last_physics_time: Instant,
 }
 
 impl Physics {
@@ -60,6 +81,8 @@ impl Physics {
             rigidbody_set: RigidBodySet::new(),
             collider_set: ColliderSet::new(),
             physics_elements: HashMap::new(),
+            delta_time: 0.0,
+            last_physics_time: Instant::now(),
         };
 
         physics
@@ -83,6 +106,7 @@ impl Physics {
 
         let mut plane_physics_logic = PlanePhysicsLogic::new();
         let mut plane_controls: PlaneControls = PlaneControls::new();
+        let mut paused = true;
 
         loop {
             match plane_control_rx.try_recv() {
@@ -99,25 +123,35 @@ impl Physics {
             accumulator += elapsed;
             last_update = now;
 
-            // Apply forces before physics step
-            match self.physics_elements.get_mut("player") {
-                Some(physics_data) => {
-                    match physics_data {
-                        Some(physics_data) => {
-                            plane_physics_logic.update(&plane_controls, &self.collider_set, &mut self.rigidbody_set, &self.query_pipeline, physics_data, &debug_physics_tx);
-                        },
-                        None => {
-                            println!("Player not found");
+            // Apply forces before physics step (only if not paused)
+            if !paused {
+                match self.physics_elements.get_mut("player") {
+                    Some(physics_data) => {
+                        match physics_data {
+                            Some(physics_data) => {
+                                plane_physics_logic.update(&plane_controls, &self.collider_set, &mut self.rigidbody_set, &self.query_pipeline, physics_data, &debug_physics_tx, self.delta_time);
+                            },
+                            None => {
+                                println!("Player not found");
+                            }
                         }
+                    },
+                    None => {
+                        println!("Player not found");
                     }
-                },
-                None => {
-                    println!("Player not found");
                 }
             }
 
-            // Step the physics pipeline with fixed timestep
-            while accumulator >= FIXED_TIMESTEP {
+            // Step the physics pipeline with fixed timestep (only if not paused)
+            while accumulator >= FIXED_TIMESTEP && !paused {
+                // Calculate delta time for this physics step
+                let current_time = Instant::now();
+                self.delta_time = current_time.duration_since(self.last_physics_time).as_secs_f32();
+                self.last_physics_time = current_time;
+                
+                // Clamp delta time to prevent spiral of death
+                let clamped_delta_time = self.delta_time.min(FIXED_TIMESTEP * 2.0);
+                
                 self.physics_pipeline.step(
                     &self.gravity,
                     &integration_parameters,
@@ -145,6 +179,13 @@ impl Physics {
                     println!("Physics thread received shutdown command");
                     break;
                 },
+                Ok(PhysicsCommand::ToggleDebug) => {
+                    plane_physics_logic.toggle_debug_rendering();
+                },
+                Ok(PhysicsCommand::TogglePause) => {
+                    paused = !paused;
+                    println!("Physics {}", if paused { "PAUSED" } else { "RESUMED" });
+                },
                 Err(_) => {
                     // No message available, continuing with physics
                 }
@@ -157,8 +198,9 @@ impl Physics {
                     match physics_data {
                         Some(physics_data) => {
                             let metadata = physics_data.metadata.clone();
+                            let rb = self.rigidbody_set.get(physics_data.rigidbody_handle).unwrap();
 
-                            new_render_messages.insert(key.clone(), RenderMessage { translation: *self.rigidbody_set.get(physics_data.rigidbody_handle).unwrap().translation(), rotation: self.rigidbody_set.get(physics_data.rigidbody_handle).unwrap().rotation().into_inner(), metadata: metadata });
+                            new_render_messages.insert(key.clone(), RenderMessage { translation: *rb.translation(), rotation: rb.rotation().into_inner(), linvel: *rb.linvel(), metadata: metadata });
                         },
                         None => {},
                     }
@@ -176,5 +218,16 @@ impl Physics {
                 should_send_data = false; // Reset flag after sending
             }
         }
+    }
+    
+    // Getter method to access delta time from other parts of the code
+    pub fn get_delta_time(&self) -> f32 {
+        self.delta_time
+    }
+    
+    // Method to reset delta time (useful for debugging or when physics is paused)
+    pub fn reset_delta_time(&mut self) {
+        self.delta_time = 0.0;
+        self.last_physics_time = Instant::now();
     }
 }

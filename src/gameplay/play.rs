@@ -5,10 +5,12 @@ use nalgebra::{vector, Point3, Quaternion, UnitQuaternion, Vector3};
 use rand::{rngs::ThreadRng, Rng};
 use rapier3d::prelude::RigidBody;
 use sdl2::{controller::GameController};
-use crate::{app::{App, AppState}, audio::subtitles::Subtitle, input::{input::InputSubsystem, utils::to_axis}, physics::physics_handler::{MetadataType, PhysicsData, RenderMessage}, rendering::{camera::CameraRenderizable, ui::UiContainer}, transform::Transform, ui::{ui_node::{ChildrenType, UiNode, UiNodeContent, UiNodeParameters, Visibility}, ui_transform::UiTransform}, utils::lerps::{lerp, lerp_quaternion}};
+use crate::{app::{App, AppState}, audio::subtitles::Subtitle, input::{input::InputSubsystem, utils::to_axis}, physics::physics_handler::{MetadataType, PhysicsData, RenderMessage}, primitive::manual_vertex::ManualVertex, rendering::{camera::CameraRenderizable, ui::UiContainer}, transform::Transform, ui::{ui_node::{ChildrenType, UiNode, UiNodeContent, UiNodeParameters, Visibility}, ui_transform::UiTransform}, utils::lerps::{lerp, lerp_quaternion}};
 use super::{airfoil::AirFoil, event_handling::EventSystem, plane::plane::Plane, wheel::Wheel, wing::Wing};
 use std::sync::mpsc::Sender;
 use crate::gameplay::plane::plane::PlaneControls;
+use crate::tooling::debug_console;
+use crate::debug_text;
 
 // Add a way of setting timing that can be agnostic to real time (or that will not be affected by the player pausing)
 pub enum CameraState {
@@ -74,6 +76,7 @@ impl GameLogic {
     // this is called once
     pub fn new(app: &mut App) -> Self {
         // UI ELEMENTS AND LIST
+        /* 
         let altitude = UiNode::new(
             UiTransform::new(((app.config.width as f32 / 2.0) - (150.0 / 2.0)) - 400.0, (app.config.height as f32 / 2.0) - (30.0 / 2.0), 30.0, 150.0, 0.0, false), 
             Visibility::new([0.0, 0.0, 0.0, 0.0], [0.0, 255.0, 0.0, 255.0]),
@@ -137,6 +140,9 @@ impl GameLogic {
             app,
         );
 
+        */
+
+        /* 
         game_info.add_children("framerate".to_owned(), framerate);
         game_info.add_children("g_number".to_owned(), g_number);
         game_info.add_children("timer".to_owned(), timer);
@@ -161,6 +167,7 @@ impl GameLogic {
         app.ui.add_to_ui("static".to_owned(), "altitude_alert".to_owned(), altitude_alert);
         app.ui.add_to_ui("static".to_owned(), "subtitles".to_owned(), subtitle);
         app.ui.add_to_ui("static".to_owned(), "game_info".to_owned(),game_info);
+        */
 
         let subtitle_data = Subtitle::new();
 
@@ -198,7 +205,7 @@ impl GameLogic {
             base_rotations: BaseRotations { left_aleron: None, right_aleron: None },
             flap_ratio: 0.0,
             previous_velocity: None,
-            flight_data: FlightData { altimeter: 0.0, speedometer: 0.0, g_meter: 0.0 }
+            flight_data: FlightData { altimeter: 0.0, speedometer: 0.0, g_meter: 1.0 }
         };
 
         let rng = rand::thread_rng();
@@ -239,6 +246,7 @@ impl GameLogic {
             self.subtitle_data.add_text(&"SKIBIDI DAM DAM DAM YES YES".to_string(), app);
         }
 
+        // Debug console output (press F2 to show/hide)
         self.plane.update(app.time.delta_time, input_subsystem);
         plane_control_tx.send(self.plane.controls.clone());
 
@@ -246,12 +254,35 @@ impl GameLogic {
         self.subtitle_data.update(app);
         self.camera_control(app, app.time.delta_time, input_subsystem);
         self.ui_control(app, app.time.delta_time);
+        self.update_debug_console(app);
     }
 
     fn plane_movement (&mut self, app: &mut App, delta_time: f32, physics_data: &HashMap<String, RenderMessage>) {
         let plane = app.renderizable_instances.get_mut("player").unwrap();
         let physics_data_renderizable = physics_data.get("player");
         let plane_model = app.game_models.get_mut(&plane.model_ref).unwrap();
+
+        if let Some(data) = physics_data_renderizable {
+            self.plane_systems.flight_data.speedometer = data.linvel.magnitude();
+
+            // G-meter: project felt acceleration onto the plane's local up axis
+            match &self.plane_systems.previous_velocity {
+                Some(prev_vel) if *prev_vel != data.linvel => {
+                    let acceleration = (data.linvel - prev_vel) / delta_time;
+                    // Felt acceleration = total acceleration minus gravity (pilot doesn't feel gravity)
+                    let felt_acceleration = acceleration - self.gravity;
+                    // Project onto the plane's local up axis for the G reading
+                    let plane_up = UnitQuaternion::from_quaternion(data.rotation) * Vector3::y_axis();
+                    let target_g = felt_acceleration.dot(&plane_up) / 9.81;
+                    self.plane_systems.flight_data.g_meter = lerp(self.plane_systems.flight_data.g_meter, target_g, delta_time * 10.0);
+                    self.plane_systems.previous_velocity = Some(data.linvel);
+                }
+                None => {
+                    self.plane_systems.previous_velocity = Some(data.linvel);
+                }
+                _ => {}
+            }
+        }
 
         // elevators
         if let Some(meshes) = plane_model.model.mesh_lists.get_mut("opaque") {
@@ -266,6 +297,14 @@ impl GameLogic {
                                         wheel_mesh.transform.position = Vector3::new(final_pos.x / plane.instance.transform.scale.x, final_pos.y / plane.instance.transform.scale.y, final_pos.z / plane.instance.transform.scale.z);
                                         wheel_mesh.update_transform(&app.queue);
                                     }
+
+                                    // Render suspension debug line using visual transform
+                                    let vis_origin = plane.instance.transform.position + plane.instance.transform.rotation * (plane.instance.transform.rotation.inverse() * (wheel.suspension_origin - plane.instance.transform.position));
+                                    let vis_wheel = plane.instance.transform.position + plane.instance.transform.rotation * (plane.instance.transform.rotation.inverse() * (wheel.wheel_position - plane.instance.transform.position));
+                                    app.render_physics.renderizable_lines.push([
+                                        ManualVertex { position: [vis_origin.x, vis_origin.y, vis_origin.z], color: [0.0, 1.0, 0.0] },
+                                        ManualVertex { position: [vis_wheel.x, vis_wheel.y, vis_wheel.z], color: [0.0, 1.0, 0.0] },
+                                    ]);
                                 }
                             }
                             _ => {}
@@ -276,14 +315,14 @@ impl GameLogic {
             }
 
             if let Some(elevator) = meshes.get_mut("left_elevator") {
-                let final_rotation = UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.15 * -self.plane.controls.elevator);
+                let final_rotation = UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.15 * self.plane.controls.elevator);
                 let elevator_rotation = lerp_quaternion(elevator.transform.rotation,  *final_rotation, app.time.delta_time * 7.0);
                 let elevator_transform = Transform::new(elevator.transform.position, elevator_rotation, elevator.transform.scale);
                 elevator.change_transform(&app.queue, elevator_transform);
             }
     
             if let Some(elevator) = meshes.get_mut("right_elevator") {
-                let final_rotation = UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.15 * -self.plane.controls.elevator);
+                let final_rotation = UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.15 * self.plane.controls.elevator);
                 let elevator_rotation = lerp_quaternion(elevator.transform.rotation,  *final_rotation, app.time.delta_time * 7.0);
                 let elevator_transform = Transform::new(elevator.transform.position, elevator_rotation, elevator.transform.scale);
                 elevator.change_transform(&app.queue, elevator_transform);
@@ -358,6 +397,80 @@ impl GameLogic {
                 afterburner.change_transform(&app.queue, Transform::new(afterburner.transform.position, afterburner.transform.rotation, Vector3::new(1.0, 1.0, self.plane_systems.afterburner_value)));
             } 
         }
+
+        // Render collider debug wireframes using the model's visual transform
+        if let Some(physics_data_renderizable) = physics_data_renderizable {
+            if let Some(MetadataType::Colliders(colliders)) = physics_data_renderizable.metadata.get("colliders") {
+                let plane = app.renderizable_instances.get("player").unwrap();
+                let pos = &plane.instance.transform.position;
+                let rot = &plane.instance.transform.rotation;
+                let color = [0.0, 1.0, 1.0];
+                for col in colliders {
+                    let he = &col.half_extents;
+                    let off = &col.local_offset;
+                    let corners_local = [
+                        Vector3::new(-he.x, -he.y, -he.z),
+                        Vector3::new( he.x, -he.y, -he.z),
+                        Vector3::new( he.x,  he.y, -he.z),
+                        Vector3::new(-he.x,  he.y, -he.z),
+                        Vector3::new(-he.x, -he.y,  he.z),
+                        Vector3::new( he.x, -he.y,  he.z),
+                        Vector3::new( he.x,  he.y,  he.z),
+                        Vector3::new(-he.x,  he.y,  he.z),
+                    ];
+                    let cw: Vec<Vector3<f32>> = corners_local.iter()
+                        .map(|c| pos + rot * (off + c))
+                        .collect();
+                    let edges = [
+                        (0,1),(1,2),(2,3),(3,0),
+                        (4,5),(5,6),(6,7),(7,4),
+                        (0,4),(1,5),(2,6),(3,7),
+                    ];
+                    for (a, b) in edges {
+                        app.render_physics.renderizable_lines.push([
+                            ManualVertex { position: [cw[a].x, cw[a].y, cw[a].z], color },
+                            ManualVertex { position: [cw[b].x, cw[b].y, cw[b].z], color },
+                        ]);
+                    }
+                }
+            }
+
+            // Render wing debug lines (axes + lift force) using visual transform
+            if let Some(MetadataType::Wings(wings)) = physics_data_renderizable.metadata.get("wings") {
+                let plane = app.renderizable_instances.get("player").unwrap();
+                let pos = &plane.instance.transform.position;
+                let rot = &plane.instance.transform.rotation;
+                let axis_len = 0.2;
+
+                for w in wings {
+                    let wpc = pos + rot * w.pressure_center;
+                    // X axis (red)
+                    let x_end = wpc + rot * Vector3::new(axis_len, 0.0, 0.0);
+                    app.render_physics.renderizable_lines.push([
+                        ManualVertex { position: [wpc.x, wpc.y, wpc.z], color: [1.0, 0.0, 0.0] },
+                        ManualVertex { position: [x_end.x, x_end.y, x_end.z], color: [1.0, 0.0, 0.0] },
+                    ]);
+                    // Y axis (green)
+                    let y_end = wpc + rot * Vector3::new(0.0, axis_len, 0.0);
+                    app.render_physics.renderizable_lines.push([
+                        ManualVertex { position: [wpc.x, wpc.y, wpc.z], color: [0.0, 1.0, 0.0] },
+                        ManualVertex { position: [y_end.x, y_end.y, y_end.z], color: [0.0, 1.0, 0.0] },
+                    ]);
+                    // Z axis (blue)
+                    let z_end = wpc + rot * Vector3::new(0.0, 0.0, axis_len);
+                    app.render_physics.renderizable_lines.push([
+                        ManualVertex { position: [wpc.x, wpc.y, wpc.z], color: [0.0, 0.0, 1.0] },
+                        ManualVertex { position: [z_end.x, z_end.y, z_end.z], color: [0.0, 0.0, 1.0] },
+                    ]);
+                    // Lift force (yellow/orange)
+                    let lift_end = wpc + w.last_lift_force * 0.01;
+                    app.render_physics.renderizable_lines.push([
+                        ManualVertex { position: [wpc.x, wpc.y, wpc.z], color: [1.0, 0.8, 0.0] },
+                        ManualVertex { position: [lift_end.x, lift_end.y, lift_end.z], color: [1.0, 0.5, 0.0] },
+                    ]);
+                }
+            }
+        }
     }
 
     fn camera_control(&mut self, app: &mut App, delta_time: f32, input_subsystem: &InputSubsystem) {
@@ -365,7 +478,7 @@ impl GameLogic {
             // Calculate target camera position and look-at point
             let (target_position, target_look_at, target_up) = match self.camera_data.camera_state {
                 CameraState::Normal => {
-                    let target_pos = player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 7.0, -28.0));
+                    let target_pos = player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 0.6, -3.0));
                     let look_at = player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 0.0, 100.0));
                     (target_pos, look_at, player.instance.transform.rotation * *Vector3::y_axis())
                 },
@@ -374,7 +487,7 @@ impl GameLogic {
                     let target_pos = if let Some(cameras) = &player.instance.metadata.cameras {
                         player.instance.transform.position + (player.instance.transform.rotation * cameras.cockpit_camera)
                     } else {
-                        player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 1.8, 13.5))
+                        player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 0.2, 1.3))
                     };
                     let look_at = player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 0.0, 100.0));
                     (target_pos, look_at, player.instance.transform.rotation * *Vector3::y_axis())
@@ -384,7 +497,7 @@ impl GameLogic {
                     let target_pos = if let Some(cameras) = &player.instance.metadata.cameras {
                         player.instance.transform.position + (player.instance.transform.rotation * cameras.cinematic_camera)
                     } else {
-                        player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(-10.0, 3.0, -5.0))
+                        player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(-1.0, 3.0, -1.0))
                     };
                     let look_at = player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(30.0, 0.0, 100.0));
                     (target_pos, look_at, player.instance.transform.rotation * *Vector3::y_axis())
@@ -394,7 +507,7 @@ impl GameLogic {
                     let target_pos = if let Some(cameras) = &player.instance.metadata.cameras {
                         player.instance.transform.position + (player.instance.transform.rotation * cameras.frontal_camera)
                     } else {
-                        player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 6.0, 30.0))
+                        player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 2.0, 3.0))
                     };
                     let look_at = player.instance.transform.position;
                     (target_pos, look_at, player.instance.transform.rotation * *Vector3::y_axis())
@@ -412,7 +525,7 @@ impl GameLogic {
                     // Combine rotations
                     self.camera_data.mod_quaternion = rotation_y * rotation_x;
 
-                    let target_pos = (self.camera_data.mod_quaternion * Vector3::new(0.0, 0.0, -50.0)) + player.instance.transform.position;
+                    let target_pos = (self.camera_data.mod_quaternion * Vector3::new(0.0, 0.0, -5.0)) + player.instance.transform.position;
                     let look_at = player.instance.transform.position;
                     (target_pos, look_at, *Vector3::y_axis())
                 },
@@ -457,16 +570,16 @@ impl GameLogic {
         if app.throttling.last_ui_update.elapsed() >= app.throttling.ui_update_interval {
             match app.ui.renderizable_elements.get_mut("static").unwrap() {
                 UiContainer::Tagged(hash_map) => {
-                    match hash_map.get_mut("game_info") {
+                    match hash_map.get_mut("data_box") {
                         Some(info) => {
                             match info.get_container_hashed() {
                                 Ok(map) => {
                                     self.update_text_label(map, "framerate", &format!("FPS: {}", app.time.get_fps()), &mut app.ui.text.font_system);
-                                    self.update_text_label(map, "g_number", &format!("G: {:.0}", self.plane_systems.flight_data.g_meter), &mut app.ui.text.font_system);
+                                    self.update_text_label(map, "g", &format!("G: {:.0}", self.plane_systems.flight_data.g_meter), &mut app.ui.text.font_system);
                                     self.update_text_label(map, "timer", &Self::format_duration(self.game_time), &mut app.ui.text.font_system);
-                                    self.update_text_label(map, "throttle_value", &format!("Power: {}%", (self.plane.controls.throttle * 100.0).round()), &mut app.ui.text.font_system);
+                                    self.update_text_label(map, "power", &format!("Power: {}%", (self.plane.controls.throttle * 100.0).round()), &mut app.ui.text.font_system);
                                 },
-                                Err(_) => todo!(),
+                                Err(_) => {},
                             }
                         },
                         None => {},
@@ -560,6 +673,62 @@ impl GameLogic {
             CameraState::Frontal => self.camera_data.camera_state = CameraState::Normal,
             CameraState::Free => self.camera_data.camera_state = CameraState::Cockpit,
 
+        }
+    }
+
+    /// Updates the debug console UI with messages from the debug_console module.
+    /// Messages are cleared each frame, so you need to call debug_text!() every frame you want to display something.
+    fn update_debug_console(&mut self, app: &mut App) {
+        let is_visible = debug_console::is_console_visible();
+        let messages = debug_console::drain_messages();
+        let delta_time = app.time.delta_time;
+
+        // First, create all the label nodes we need (while app is not borrowed elsewhere)
+        let label_nodes: Vec<UiNode> = if is_visible {
+            messages.iter().map(|message| {
+                UiNode::new(
+                    UiTransform::new(0.0, 0.0, 18.0, 290.0, 0.0, false),
+                    Visibility::new([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]),
+                    UiNodeParameters::Text {
+                        text: message,
+                        color: Color::rgba(0, 255, 100, 255),
+                        align: Align::Left,
+                        font_size: 14.0,
+                    },
+                    app,
+                )
+            }).collect()
+        } else {
+            Vec::new()
+        };
+
+        // Now get the UI container and update it
+        let Some(UiContainer::Tagged(hash_map)) = app.ui.renderizable_elements.get_mut("static") else {
+            return;
+        };
+
+        let Some(console_node) = hash_map.get_mut("debug_console") else {
+            return;
+        };
+
+        // Update visibility
+        let target_alpha = if is_visible { 0.85 } else { 0.0 };
+        console_node.visibility.background_color[3] = lerp(
+            console_node.visibility.background_color[3],
+            target_alpha,
+            delta_time * 10.0,
+        );
+
+        let UiNodeContent::VerticalContainer(container) = &mut console_node.content else {
+            return;
+        };
+
+        // Clear previous frame's messages and add new ones
+        if let ChildrenType::IndexedChildren(vec) = &mut container.children {
+            vec.clear();
+            for label in label_nodes {
+                vec.push(label);
+            }
         }
     }
 }
