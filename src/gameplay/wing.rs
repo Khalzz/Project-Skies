@@ -100,7 +100,7 @@ impl Wing {
         let parasitic_drag = rigidbody.rotation() * parasitic_drag_local;
         let total_force = total_force + parasitic_drag;
 
-        let max_force = 5_000_000.0;
+        let max_force = 500_000.0;
         let mag = total_force.magnitude();
         let clamped = if mag > max_force { total_force * (max_force / mag) } else { total_force };
 

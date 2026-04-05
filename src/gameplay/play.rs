@@ -757,6 +757,36 @@ impl GameLogic {
         
                     self.update_text_label(hash_map, "compass", &format!("{}", text_compass).to_string(), &mut app.ui.text.font_system);
 
+                    // Update velocity vector marker position
+                    if let Some(velocity) = &self.plane_systems.previous_velocity {
+                        if velocity.magnitude() > 0.1 {
+                            if let Some(player) = app.renderizable_instances.get("player") {
+                                let pos = player.instance.transform.position;
+                                let vel_point = Point3::from(pos + velocity.normalize() * 100.0);
+                                if let Some(screen_pos) = app.camera.world_to_screen(vel_point, app.config.width, app.config.height) {
+                                    if let Some(marker) = hash_map.get_mut("velocity_marker") {
+                                        marker.transform.x = screen_pos.x as f32 - marker.transform.width / 2.0;
+                                        marker.transform.y = screen_pos.y as f32 - marker.transform.height / 2.0;
+                                        marker.transform.rect.left = marker.transform.x;
+                                        marker.transform.rect.top = marker.transform.y;
+                                        marker.transform.rect.right = marker.transform.x + marker.transform.width;
+                                        marker.transform.rect.bottom = marker.transform.y + marker.transform.height;
+                                        if let UiNodeContent::Text(label) = &mut marker.content {
+                                            label.color = Color::rgba(0, 255, 75, 255);
+                                        }
+                                    }
+                                } else {
+                                    // Off screen — hide marker
+                                    if let Some(marker) = hash_map.get_mut("velocity_marker") {
+                                        if let UiNodeContent::Text(label) = &mut marker.content {
+                                            label.color = Color::rgba(0, 255, 75, 0);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     
                     if let Some(altitude_alert) = hash_map.get_mut("altitude_alert") {
                         self.blinking_alert("altitude".to_owned(), altitude_alert, self.plane_systems.flight_data.altimeter < 1000.0, delta_time);

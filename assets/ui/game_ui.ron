@@ -111,5 +111,17 @@
                 alignment: Some("Center"),
             )),
         ),
+        "velocity_marker": (
+            transform: (
+                position: (0.0, 0.0),
+                size: Some((width: 20.0, height: 20.0)),
+            ),
+            child: Label((
+                text: "◇",
+                font_size: 14.0,
+                color: (0.0, 1.0, 0.3, 1.0),
+                alignment: Some("Center"),
+            )),
+        ),
     }
 )
