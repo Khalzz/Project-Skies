@@ -54,7 +54,7 @@
         ),
         (
             label: "toggle_debug",
-            keys: ["F2"]
+            keys: ["F1"]
         ),
         (
             label: "toggle_console",

@@ -3,6 +3,7 @@
 
 use nalgebra::{Vector3, Matrix3, Matrix4, UnitQuaternion};
 use serde::{Deserialize, Deserializer};
+use std::collections::HashMap;
 
 use crate::rendering::instance_management::InstanceRaw;
 
@@ -44,22 +45,16 @@ pub struct Physics {
     pub colliders: Vec<ColliderType>,
 }
 
-fn default_cockpit_fov() -> f32 { 70.0 }
-fn default_cinematic_fov() -> f32 { 60.0 }
-fn default_frontal_fov() -> f32 { 60.0 }
+fn default_camera_fov() -> f32 { 60.0 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct Cameras {
-    pub cockpit_camera: Vector3<f32>,
-    #[serde(default = "default_cockpit_fov")]
-    pub cockpit_fov: f32,
-    pub cinematic_camera: Vector3<f32>,
-    #[serde(default = "default_cinematic_fov")]
-    pub cinematic_fov: f32,
-    pub frontal_camera: Vector3<f32>,
-    #[serde(default = "default_frontal_fov")]
-    pub frontal_fov: f32,
+pub struct Camera {
+    pub position: Vector3<f32>,
+    #[serde(default = "default_camera_fov")]
+    pub fov: f32,
 }
+
+pub type Cameras = HashMap<String, Camera>;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct MetaData {

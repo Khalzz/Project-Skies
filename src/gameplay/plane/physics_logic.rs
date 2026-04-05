@@ -6,7 +6,7 @@ use crate::gameplay::wing::{Wing};
 use crate::gameplay::airfoil::AirFoil;
 use crate::gameplay::wheel::{Wheel, WheelData};
 use crate::physics::physics::DebugPhysicsMessageType;
-use crate::physics::physics_handler::{ColliderDebugData, MetadataType, PhysicsData, WingDebugData};
+use crate::physics::physics_handler::{ColliderDebugData, MetadataType, PhysicsData, SuspensionDebugData, WingDebugData};
 use crate::primitive::manual_vertex::ManualVertex;
 use rapier3d::prelude::{ColliderSet, QueryPipeline, RigidBodySet, RigidBody};
 use nalgebra::vector;
@@ -63,7 +63,7 @@ impl PlanePhysicsLogic {
             renderizable_wheels: HashMap::new(),
             renderizable_lines: Vec::new(),
             flight_system: FlightSystem::new(),
-            debug_rendering_enabled: true,
+            debug_rendering_enabled: false,
         }
     }
     
@@ -151,6 +151,7 @@ impl PlanePhysicsLogic {
     /// Configure roll damping for different aircraft types
     pub fn update(&mut self, plane_controls: &PlaneControls, collider_set: &ColliderSet, rigidbody_set: &mut RigidBodySet, query_pipeline: &QueryPipeline, physics_data: &mut PhysicsData, debug_physics_tx: &Sender<Vec<DebugPhysicsMessageType>>, delta_time: f32) {
         self.renderizable_lines.clear();
+        physics_data.metadata.clear();
 
         // Send collider shapes as metadata so the main thread can render them in sync with the model
         if self.debug_rendering_enabled {
@@ -197,24 +198,35 @@ impl PlanePhysicsLogic {
         }
 
         self.renderizable_wheels.clear();
+        let mut suspension_debug_data: Vec<SuspensionDebugData> = Vec::new();
         
         for (index, wheel) in self.wheels.iter_mut().enumerate() {
             if let Some((suspension_force, suspension_origin, wheel_position)) = wheel.update_wheel(&physics_data, &collider_set, rigidbody_set, &query_pipeline) {
-                self.renderizable_wheels.insert(wheel.mesh_name.clone(), WheelData { wheel_position, suspension_origin });
-                
                 if let Some(rigidbody) = rigidbody_set.get_mut(physics_data.rigidbody_handle) {
                     rigidbody.add_force_at_point(suspension_force, suspension_origin.into(), true);
+                }
+                if let Some(rigidbody) = rigidbody_set.get(physics_data.rigidbody_handle) {
+                    let rb_pos = rigidbody.translation();
+                    let rb_rot = rigidbody.rotation();
+                    let local_position = rb_rot.inverse() * (wheel_position - rb_pos);
+                    let local_origin = rb_rot.inverse() * (suspension_origin - rb_pos);
+                    self.renderizable_wheels.insert(wheel.mesh_name.clone(), WheelData { local_position });
+                    suspension_debug_data.push(SuspensionDebugData {
+                        local_origin,
+                        local_wheel: local_position,
+                    });
                 }
             }
         }
 
-        // Send wing debug data via metadata for main-thread rendering
+        // Send wing and suspension debug data via metadata for main-thread rendering
         if self.debug_rendering_enabled {
             let wing_debug: Vec<WingDebugData> = self.wings.iter().map(|w| WingDebugData {
                 pressure_center: w.pressure_center,
                 last_lift_force: w.last_lift_force,
             }).collect();
             physics_data.metadata.insert("wings".to_string(), MetadataType::Wings(wing_debug));
+            physics_data.metadata.insert("suspensions".to_string(), MetadataType::Suspensions(suspension_debug_data));
         }
 
         physics_data.metadata.insert("wheels".to_string(), MetadataType::Wheels(self.renderizable_wheels.clone()));        

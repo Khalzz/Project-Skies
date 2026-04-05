@@ -5,7 +5,7 @@ use nalgebra::{vector, Point3, Quaternion, UnitQuaternion, Vector3};
 use rand::{rngs::ThreadRng, Rng};
 use rapier3d::prelude::RigidBody;
 use sdl2::{controller::GameController};
-use crate::{app::{App, AppState}, audio::subtitles::Subtitle, input::{input::InputSubsystem, utils::to_axis}, physics::physics_handler::{MetadataType, PhysicsData, RenderMessage}, primitive::manual_vertex::ManualVertex, rendering::{camera::CameraRenderizable, ui::UiContainer}, transform::Transform, ui::{ui_node::{ChildrenType, UiNode, UiNodeContent, UiNodeParameters, Visibility}, ui_transform::UiTransform}, utils::lerps::{lerp, lerp_quaternion}};
+use crate::{app::{App, AppState}, audio::subtitles::Subtitle, input::{input::InputSubsystem, utils::to_axis}, physics::physics_handler::{MetadataType, PhysicsData, RenderMessage}, primitive::manual_vertex::ManualVertex, rendering::{camera::CameraRenderizable, ui::UiContainer}, transform::Transform, ui::{ui_node::{ChildrenType, UiNode, UiNodeContent, Visibility}, ui_transform::UiTransform}, utils::lerps::{lerp, lerp_quaternion}};
 use super::{airfoil::AirFoil, event_handling::EventSystem, plane::plane::Plane, wheel::Wheel, wing::Wing};
 use std::sync::mpsc::Sender;
 use crate::gameplay::plane::plane::PlaneControls;
@@ -269,7 +269,7 @@ impl GameLogic {
         self.game_time += app.time.delta_time as f64;
 
         if input_subsystem.is_just_pressed("test") {
-            self.subtitle_data.add_text(&"SKIBIDI DAM DAM DAM YES YES".to_string(), app);
+            self.subtitle_data.add_text("SKIBIDI DAM DAM DAM YES YES", 3000, app);
         }
 
         // Debug console output (press F2 to show/hide)
@@ -277,6 +277,9 @@ impl GameLogic {
         plane_control_tx.send(self.plane.controls.clone());
 
         self.plane_movement(app, app.time.delta_time, physics_data);
+        if let Some(event_system) = &mut self.event_system {
+            event_system.handle_events(self.game_time, app, &mut self.subtitle_data);
+        }
         self.subtitle_data.update(app);
         self.camera_control(app, app.time.delta_time, input_subsystem);
         self.ui_control(app, app.time.delta_time);
@@ -319,18 +322,10 @@ impl GameLogic {
                             MetadataType::Wheels(wheels) => {
                                 for (index, wheel) in wheels.iter() {
                                     if let Some(wheel_mesh) = &mut meshes.get_mut(index.as_str()) {
-                                        let final_pos =  plane.instance.transform.rotation.inverse() * (wheel.wheel_position - plane.instance.transform.position);
-                                        wheel_mesh.transform.position = Vector3::new(final_pos.x / plane.instance.transform.scale.x, final_pos.y / plane.instance.transform.scale.y, final_pos.z / plane.instance.transform.scale.z);
+                                        let local_pos = &wheel.local_position;
+                                        wheel_mesh.transform.position = Vector3::new(local_pos.x / plane.instance.transform.scale.x, local_pos.y / plane.instance.transform.scale.y, local_pos.z / plane.instance.transform.scale.z);
                                         wheel_mesh.update_transform(&app.queue);
                                     }
-
-                                    // Render suspension debug line using visual transform
-                                    let vis_origin = plane.instance.transform.position + plane.instance.transform.rotation * (plane.instance.transform.rotation.inverse() * (wheel.suspension_origin - plane.instance.transform.position));
-                                    let vis_wheel = plane.instance.transform.position + plane.instance.transform.rotation * (plane.instance.transform.rotation.inverse() * (wheel.wheel_position - plane.instance.transform.position));
-                                    app.render_physics.renderizable_lines.push([
-                                        ManualVertex { position: [vis_origin.x, vis_origin.y, vis_origin.z], color: [0.0, 1.0, 0.0] },
-                                        ManualVertex { position: [vis_wheel.x, vis_wheel.y, vis_wheel.z], color: [0.0, 1.0, 0.0] },
-                                    ]);
                                 }
                             }
                             _ => {}
@@ -425,75 +420,93 @@ impl GameLogic {
         }
 
         // Render collider debug wireframes using the model's visual transform
-        if let Some(physics_data_renderizable) = physics_data_renderizable {
-            if let Some(MetadataType::Colliders(colliders)) = physics_data_renderizable.metadata.get("colliders") {
-                let plane = app.renderizable_instances.get("player").unwrap();
-                let pos = &plane.instance.transform.position;
-                let rot = &plane.instance.transform.rotation;
-                let color = [0.0, 1.0, 1.0];
-                for col in colliders {
-                    let he = &col.half_extents;
-                    let off = &col.local_offset;
-                    let corners_local = [
-                        Vector3::new(-he.x, -he.y, -he.z),
-                        Vector3::new( he.x, -he.y, -he.z),
-                        Vector3::new( he.x,  he.y, -he.z),
-                        Vector3::new(-he.x,  he.y, -he.z),
-                        Vector3::new(-he.x, -he.y,  he.z),
-                        Vector3::new( he.x, -he.y,  he.z),
-                        Vector3::new( he.x,  he.y,  he.z),
-                        Vector3::new(-he.x,  he.y,  he.z),
-                    ];
-                    let cw: Vec<Vector3<f32>> = corners_local.iter()
-                        .map(|c| pos + rot * (off + c))
-                        .collect();
-                    let edges = [
-                        (0,1),(1,2),(2,3),(3,0),
-                        (4,5),(5,6),(6,7),(7,4),
-                        (0,4),(1,5),(2,6),(3,7),
-                    ];
-                    for (a, b) in edges {
+        if app.render_physics.visible {
+            if let Some(physics_data_renderizable) = physics_data_renderizable {
+                if let Some(MetadataType::Colliders(colliders)) = physics_data_renderizable.metadata.get("colliders") {
+                    let plane = app.renderizable_instances.get("player").unwrap();
+                    let pos = &plane.instance.transform.position;
+                    let rot = &plane.instance.transform.rotation;
+                    let color = [0.0, 1.0, 1.0];
+                    for col in colliders {
+                        let he = &col.half_extents;
+                        let off = &col.local_offset;
+                        let corners_local = [
+                            Vector3::new(-he.x, -he.y, -he.z),
+                            Vector3::new( he.x, -he.y, -he.z),
+                            Vector3::new( he.x,  he.y, -he.z),
+                            Vector3::new(-he.x,  he.y, -he.z),
+                            Vector3::new(-he.x, -he.y,  he.z),
+                            Vector3::new( he.x, -he.y,  he.z),
+                            Vector3::new( he.x,  he.y,  he.z),
+                            Vector3::new(-he.x,  he.y,  he.z),
+                        ];
+                        let cw: Vec<Vector3<f32>> = corners_local.iter()
+                            .map(|c| pos + rot * (off + c))
+                            .collect();
+                        let edges = [
+                            (0,1),(1,2),(2,3),(3,0),
+                            (4,5),(5,6),(6,7),(7,4),
+                            (0,4),(1,5),(2,6),(3,7),
+                        ];
+                        for (a, b) in edges {
+                            app.render_physics.renderizable_lines.push([
+                                ManualVertex { position: [cw[a].x, cw[a].y, cw[a].z], color },
+                                ManualVertex { position: [cw[b].x, cw[b].y, cw[b].z], color },
+                            ]);
+                        }
+                    }
+                }
+
+                // Render wing debug lines (axes + lift force) using visual transform
+                if let Some(MetadataType::Wings(wings)) = physics_data_renderizable.metadata.get("wings") {
+                    let plane = app.renderizable_instances.get("player").unwrap();
+                    let pos = &plane.instance.transform.position;
+                    let rot = &plane.instance.transform.rotation;
+                    let axis_len = 0.2;
+
+                    for w in wings {
+                        let wpc = pos + rot * w.pressure_center;
+                        // X axis (red)
+                        let x_end = wpc + rot * Vector3::new(axis_len, 0.0, 0.0);
                         app.render_physics.renderizable_lines.push([
-                            ManualVertex { position: [cw[a].x, cw[a].y, cw[a].z], color },
-                            ManualVertex { position: [cw[b].x, cw[b].y, cw[b].z], color },
+                            ManualVertex { position: [wpc.x, wpc.y, wpc.z], color: [1.0, 0.0, 0.0] },
+                            ManualVertex { position: [x_end.x, x_end.y, x_end.z], color: [1.0, 0.0, 0.0] },
+                        ]);
+                        // Y axis (green)
+                        let y_end = wpc + rot * Vector3::new(0.0, axis_len, 0.0);
+                        app.render_physics.renderizable_lines.push([
+                            ManualVertex { position: [wpc.x, wpc.y, wpc.z], color: [0.0, 1.0, 0.0] },
+                            ManualVertex { position: [y_end.x, y_end.y, y_end.z], color: [0.0, 1.0, 0.0] },
+                        ]);
+                        // Z axis (blue)
+                        let z_end = wpc + rot * Vector3::new(0.0, 0.0, axis_len);
+                        app.render_physics.renderizable_lines.push([
+                            ManualVertex { position: [wpc.x, wpc.y, wpc.z], color: [0.0, 0.0, 1.0] },
+                            ManualVertex { position: [z_end.x, z_end.y, z_end.z], color: [0.0, 0.0, 1.0] },
+                        ]);
+                        // Lift force (yellow/orange)
+                        let lift_end = wpc + w.last_lift_force * 0.01;
+                        app.render_physics.renderizable_lines.push([
+                            ManualVertex { position: [wpc.x, wpc.y, wpc.z], color: [1.0, 0.8, 0.0] },
+                            ManualVertex { position: [lift_end.x, lift_end.y, lift_end.z], color: [1.0, 0.5, 0.0] },
                         ]);
                     }
                 }
-            }
 
-            // Render wing debug lines (axes + lift force) using visual transform
-            if let Some(MetadataType::Wings(wings)) = physics_data_renderizable.metadata.get("wings") {
-                let plane = app.renderizable_instances.get("player").unwrap();
-                let pos = &plane.instance.transform.position;
-                let rot = &plane.instance.transform.rotation;
-                let axis_len = 0.2;
+                // Render suspension debug lines using visual transform
+                if let Some(MetadataType::Suspensions(suspensions)) = physics_data_renderizable.metadata.get("suspensions") {
+                    let plane = app.renderizable_instances.get("player").unwrap();
+                    let pos = &plane.instance.transform.position;
+                    let rot = &plane.instance.transform.rotation;
 
-                for w in wings {
-                    let wpc = pos + rot * w.pressure_center;
-                    // X axis (red)
-                    let x_end = wpc + rot * Vector3::new(axis_len, 0.0, 0.0);
-                    app.render_physics.renderizable_lines.push([
-                        ManualVertex { position: [wpc.x, wpc.y, wpc.z], color: [1.0, 0.0, 0.0] },
-                        ManualVertex { position: [x_end.x, x_end.y, x_end.z], color: [1.0, 0.0, 0.0] },
-                    ]);
-                    // Y axis (green)
-                    let y_end = wpc + rot * Vector3::new(0.0, axis_len, 0.0);
-                    app.render_physics.renderizable_lines.push([
-                        ManualVertex { position: [wpc.x, wpc.y, wpc.z], color: [0.0, 1.0, 0.0] },
-                        ManualVertex { position: [y_end.x, y_end.y, y_end.z], color: [0.0, 1.0, 0.0] },
-                    ]);
-                    // Z axis (blue)
-                    let z_end = wpc + rot * Vector3::new(0.0, 0.0, axis_len);
-                    app.render_physics.renderizable_lines.push([
-                        ManualVertex { position: [wpc.x, wpc.y, wpc.z], color: [0.0, 0.0, 1.0] },
-                        ManualVertex { position: [z_end.x, z_end.y, z_end.z], color: [0.0, 0.0, 1.0] },
-                    ]);
-                    // Lift force (yellow/orange)
-                    let lift_end = wpc + w.last_lift_force * 0.01;
-                    app.render_physics.renderizable_lines.push([
-                        ManualVertex { position: [wpc.x, wpc.y, wpc.z], color: [1.0, 0.8, 0.0] },
-                        ManualVertex { position: [lift_end.x, lift_end.y, lift_end.z], color: [1.0, 0.5, 0.0] },
-                    ]);
+                    for s in suspensions {
+                        let vis_origin = pos + rot * s.local_origin;
+                        let vis_wheel = pos + rot * s.local_wheel;
+                        app.render_physics.renderizable_lines.push([
+                            ManualVertex { position: [vis_origin.x, vis_origin.y, vis_origin.z], color: [0.0, 1.0, 0.0] },
+                            ManualVertex { position: [vis_wheel.x, vis_wheel.y, vis_wheel.z], color: [0.0, 1.0, 0.0] },
+                        ]);
+                    }
                 }
             }
         }
@@ -511,7 +524,11 @@ impl GameLogic {
                 },
                 CameraState::Cockpit => {
                     let (base_pos, default_fov) = if let Some(cameras) = &player.instance.metadata.cameras {
-                        (player.instance.transform.rotation * cameras.cockpit_camera, cameras.cockpit_fov)
+                        if let Some(cam) = cameras.get("cockpit") {
+                            (player.instance.transform.rotation * cam.position, cam.fov)
+                        } else {
+                            (player.instance.transform.rotation * Vector3::new(0.0, 0.2, 1.3), 70.0)
+                        }
                     } else {
                         (player.instance.transform.rotation * Vector3::new(0.0, 0.2, 1.3), 70.0)
                     };
@@ -520,7 +537,7 @@ impl GameLogic {
                     // Mouse wheel adjusts target FOV
                     let scroll = input_subsystem.mouse.get_scroll_y();
                     if scroll != 0.0 {
-                        self.camera_data.cockpit_target_fov = (self.camera_data.cockpit_target_fov - scroll * 5.0).clamp(20.0, 90.0);
+                        self.camera_data.cockpit_target_fov = (self.camera_data.cockpit_target_fov - scroll * 5.0).clamp(20.0, 120.0);
                     }
                     // Lerp current FOV toward target
                     self.camera_data.cockpit_current_fov = lerp(self.camera_data.cockpit_current_fov, self.camera_data.cockpit_target_fov, delta_time * 8.0);
@@ -563,7 +580,11 @@ impl GameLogic {
                 },
                 CameraState::Cinematic => {
                     let (target_pos, fov) = if let Some(cameras) = &player.instance.metadata.cameras {
-                        (player.instance.transform.position + (player.instance.transform.rotation * cameras.cinematic_camera), cameras.cinematic_fov)
+                        if let Some(cam) = cameras.get("cinematic") {
+                            (player.instance.transform.position + (player.instance.transform.rotation * cam.position), cam.fov)
+                        } else {
+                            (player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(-1.0, 3.0, -1.0)), 60.0)
+                        }
                     } else {
                         (player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(-1.0, 3.0, -1.0)), 60.0)
                     };
@@ -573,7 +594,11 @@ impl GameLogic {
                 },
                 CameraState::Frontal => {
                     let (target_pos, fov) = if let Some(cameras) = &player.instance.metadata.cameras {
-                        (player.instance.transform.position + (player.instance.transform.rotation * cameras.frontal_camera), cameras.frontal_fov)
+                        if let Some(cam) = cameras.get("frontal") {
+                            (player.instance.transform.position + (player.instance.transform.rotation * cam.position), cam.fov)
+                        } else {
+                            (player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 2.0, 3.0)), 60.0)
+                        }
                     } else {
                         (player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 2.0, 3.0)), 60.0)
                     };
@@ -587,7 +612,7 @@ impl GameLogic {
                     // Mouse wheel adjusts target FOV
                     let scroll = input_subsystem.mouse.get_scroll_y();
                     if scroll != 0.0 {
-                        self.camera_data.free_target_fov = (self.camera_data.free_target_fov - scroll * 5.0).clamp(20.0, 90.0);
+                        self.camera_data.free_target_fov = (self.camera_data.free_target_fov - scroll * 5.0).clamp(20.0, 120.0);
                     }
                     self.camera_data.free_current_fov = lerp(self.camera_data.free_current_fov, self.camera_data.free_target_fov, delta_time * 8.0);
                     app.camera.projection.fovy = self.camera_data.free_current_fov;
@@ -813,16 +838,15 @@ impl GameLogic {
         // First, create all the label nodes we need (while app is not borrowed elsewhere)
         let label_nodes: Vec<UiNode> = if is_visible {
             messages.iter().map(|message| {
-                UiNode::new(
-                    UiTransform::new(0.0, 0.0, 18.0, 290.0, 0.0, false),
-                    Visibility::new([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]),
-                    UiNodeParameters::Text {
-                        text: message,
-                        color: Color::rgba(0, 255, 100, 255),
-                        align: Align::Left,
-                        font_size: 14.0,
-                    },
-                    app,
+                UiNode::label(
+                    &mut app.ui.text.font_system,
+                    message,
+                    0.0, 0.0, 290.0, 18.0,
+                    14.0,
+                    Color::rgba(0, 255, 100, 255),
+                    Align::Left,
+                    [0.0, 0.0, 0.0, 0.0],
+                    [0.0, 0.0, 0.0, 0.0],
                 )
             }).collect()
         } else {

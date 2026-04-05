@@ -24,12 +24,19 @@ pub struct WingDebugData {
 }
 
 #[derive(Debug, Clone)]
+pub struct SuspensionDebugData {
+    pub local_origin: Vector3<f32>,
+    pub local_wheel: Vector3<f32>,
+}
+
+#[derive(Debug, Clone)]
 pub enum MetadataType {
     Translation(Vector3<f32>),
     Rotation(Quaternion<f32>),
     Wheels(HashMap<String, WheelData>),
     Colliders(Vec<ColliderDebugData>),
     Wings(Vec<WingDebugData>),
+    Suspensions(Vec<SuspensionDebugData>),
 }
 
 pub struct RenderMessage {
@@ -106,7 +113,8 @@ impl Physics {
 
         let mut plane_physics_logic = PlanePhysicsLogic::new();
         let mut plane_controls: PlaneControls = PlaneControls::new();
-        let mut paused = true;
+        let mut paused = false;
+        let mut shutdown = false;
 
         loop {
             match plane_control_rx.try_recv() {
@@ -171,24 +179,36 @@ impl Physics {
                 accumulator -= FIXED_TIMESTEP;
             }
 
-            match rx.try_recv() {
-                Ok(PhysicsCommand::RequestData) => {
-                    should_send_data = true;
-                },
-                Ok(PhysicsCommand::Shutdown) => {
-                    println!("Physics thread received shutdown command");
-                    break;
-                },
-                Ok(PhysicsCommand::ToggleDebug) => {
-                    plane_physics_logic.toggle_debug_rendering();
-                },
-                Ok(PhysicsCommand::TogglePause) => {
-                    paused = !paused;
-                    println!("Physics {}", if paused { "PAUSED" } else { "RESUMED" });
-                },
-                Err(_) => {
-                    // No message available, continuing with physics
+            loop {
+                match rx.try_recv() {
+                    Ok(PhysicsCommand::RequestData) => {
+                        should_send_data = true;
+                    },
+                    Ok(PhysicsCommand::Shutdown) => {
+                        println!("Physics thread received shutdown command");
+                        shutdown = true;
+                        break;
+                    },
+                    Ok(PhysicsCommand::ToggleDebug) => {
+                        plane_physics_logic.toggle_debug_rendering();
+                    },
+                    Ok(PhysicsCommand::TogglePause) => {
+                        paused = !paused;
+                        if !paused {
+                            accumulator = 0.0;
+                            last_update = Instant::now();
+                            self.last_physics_time = Instant::now();
+                        }
+                        println!("Physics {}", if paused { "PAUSED" } else { "RESUMED" });
+                    },
+                    Err(_) => {
+                        break;
+                    }
                 }
+            }
+
+            if shutdown {
+                break;
             }
 
             if should_send_data {

@@ -84,9 +84,9 @@ impl EventSystem {
                 Ok(ron_result_string) => {
                     match ron::from_str::<SubtitleData>(&ron_result_string) {
                         Ok(subtitles) => {
-                            for (time, subtitle) in subtitles.subtitles {
+                            for (time, entry) in subtitles.subtitles {
                                 if !audio_file.played.contains(&(time as u64)) && duration > time.into() {
-                                    subtitle_system.add_text(&subtitle, app);
+                                    subtitle_system.add_text(&entry.text, entry.duration, app);
                                     audio_file.played.push(time as u64);
                                 }
                             }
