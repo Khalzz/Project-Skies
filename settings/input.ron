@@ -54,7 +54,7 @@
         ),
         (
             label: "toggle_debug",
-            keys: ["F2"]
+            keys: ["F1"]
         ),
         (
             label: "toggle_console",
@@ -63,6 +63,10 @@
         (
             label: "toggle_pause",
             keys: ["F12"]
+        ),
+        (
+            label: "toggle_camera_debug",
+            keys: ["F4"]
         ),
 
     ],

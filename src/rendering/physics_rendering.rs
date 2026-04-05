@@ -5,6 +5,7 @@ use super::{camera::{Camera, CameraRenderizable}, rendering_utils, textures::Tex
 
 pub struct RenderPhysics {
     pub renderizable_lines: Vec<[ManualVertex; 2]>,
+    pub visible: bool,
     pub vertex_buffer: Buffer,
     pub index_buffer: Buffer,
     pub bind_group_layout: BindGroupLayout,
@@ -77,7 +78,8 @@ impl RenderPhysics {
         Self {
             vertex_buffer,
             index_buffer,
-            renderizable_lines: vec![], 
+            renderizable_lines: vec![],
+            visible: false,
             bind_group_layout,
             bind_group,
             render_pipeline,

@@ -97,5 +97,19 @@
                 alignment: Some("Center"),
             ))
         ),
+        "subtitles": (
+            transform: (
+                position: (0.0, -150.0),
+                size: Some((width: 800.0, height: 35.0)),
+                anchor: Some("center_x, bottom"),
+            ),
+            child: Label((
+                text: "",
+                font_size: 15.0,
+                color: (1.0, 1.0, 1.0, 0.0),
+                background_color: Some((0.0, 0.0, 0.0, 0.0)),
+                alignment: Some("Center"),
+            )),
+        ),
     }
 )

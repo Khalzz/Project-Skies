@@ -6,6 +6,8 @@ use rapier3d::parry::utils::hashmap;
 use crate::{app::{App, Size}, rendering::{ui::{Ui, UiRendering}, vertex::VertexUi}, utils::lerps::{lerp, lerp_u32}};
 use super::{label::{self, Label}, ui_transform::{Rect, UiTransform}, vertical_container::{self, VerticalContainerData}};
 
+use crate::ui::ui_structure;
+
 pub enum Alignment {
     Start,
     Center,
@@ -314,5 +316,112 @@ impl UiNode {
                 }
             },
         }
+    }
+
+    /// Create a label node from minimal parameters. Transform, visibility, and content
+    /// are all derived automatically — no manual UiTransform/Visibility construction needed.
+    pub fn label(
+        font_system: &mut FontSystem,
+        text: &str,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        font_size: f32,
+        color: Color,
+        align: Align,
+        background_color: [f32; 4],
+        border_color: [f32; 4],
+    ) -> Self {
+        let transform = UiTransform::new(x, y, height, width, 0.0, false);
+        let visibility = Visibility::new(background_color, border_color);
+        let content = UiNodeContent::Text(Label::new(font_system, text, transform.clone(), color, align, font_size));
+        Self { transform, visibility, content }
+    }
+
+    /// Create a UiNode directly from a ron UiComponent definition.
+    /// This is the single entry point for building UI from .ron data.
+    pub fn from_component(
+        component: &ui_structure::UiComponent,
+        font_system: &mut FontSystem,
+        screen_width: f32,
+        screen_height: f32,
+    ) -> Self {
+        let width = component.transform.size.as_ref().map(|s| s.width).unwrap_or(0.0);
+        let height = component.transform.size.as_ref().map(|s| s.height).unwrap_or(0.0);
+        let auto_size = component.transform.size.is_none();
+
+        let mut x = component.transform.position.x;
+        let mut y = component.transform.position.y;
+
+        if let Some(anchor) = &component.transform.anchor {
+            for part in anchor.split(',').map(|s| s.trim()) {
+                match part {
+                    "center_x" => x = (screen_width / 2.0) - (width / 2.0) + component.transform.position.x,
+                    "center_y" => y = (screen_height / 2.0) - (height / 2.0) + component.transform.position.y,
+                    "center" => {
+                        x = (screen_width / 2.0) - (width / 2.0) + component.transform.position.x;
+                        y = (screen_height / 2.0) - (height / 2.0) + component.transform.position.y;
+                    }
+                    "bottom" => y = screen_height - height + component.transform.position.y,
+                    "right" => x = screen_width - width + component.transform.position.x,
+                    _ => {}
+                }
+            }
+        }
+
+        let transform = UiTransform::new(x, y, height, width, 0.0, auto_size);
+        let mut visibility = Visibility::new([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]);
+
+        let content = match &component.child {
+            ui_structure::UiNode::Label(label_data) => {
+                let color = Color::rgba(
+                    (label_data.color[0] * 255.0) as u8,
+                    (label_data.color[1] * 255.0) as u8,
+                    (label_data.color[2] * 255.0) as u8,
+                    (label_data.color[3] * 255.0) as u8,
+                );
+                let align = match label_data.alignment.as_deref() {
+                    Some("Center") => Align::Center,
+                    Some("Right") => Align::Right,
+                    _ => Align::Left,
+                };
+                let bg = label_data.background_color.unwrap_or([0.0, 0.0, 0.0, 0.0]);
+                let border = label_data.border_color.unwrap_or([0.0, 0.0, 0.0, 0.0]);
+                visibility = Visibility::new(bg, border);
+                UiNodeContent::Text(Label::new(
+                    font_system,
+                    &label_data.text,
+                    transform.clone(),
+                    color,
+                    align,
+                    label_data.font_size,
+                ))
+            }
+            ui_structure::UiNode::VerticalContainer(container_data) => {
+                let bg = container_data.background_color.unwrap_or([0.0, 0.0, 0.0, 0.0]);
+                let border = container_data.border_color.unwrap_or([0.0, 0.0, 0.0, 0.0]);
+                visibility = Visibility::new(bg, border);
+                let margin = container_data.margin.unwrap_or(0.0);
+                let separation = container_data.separation.unwrap_or(0.0);
+
+                let children = if let Some(ron_children) = &container_data.children {
+                    let mut map = HashMap::new();
+                    for (child_id, child_component) in ron_children {
+                        map.insert(
+                            child_id.clone(),
+                            UiNode::from_component(child_component, font_system, screen_width, screen_height),
+                        );
+                    }
+                    ChildrenType::MappedChildren(map)
+                } else {
+                    ChildrenType::IndexedChildren(vec![])
+                };
+
+                UiNodeContent::VerticalContainer(VerticalContainerData::new(margin, separation, children))
+            }
+        };
+
+        Self { transform, visibility, content }
     }
 }

@@ -480,7 +480,7 @@ impl App<'_> {
             render_pass.set_bind_group(0, &self.render_physics.bind_group, &[]);
             render_pass.set_bind_group(1, &self.camera.bind_group, &[]);
     
-            if !self.show_depth_map {
+            if !self.show_depth_map && self.render_physics.visible {
                 // Prepare vertex and index buffers specifically for physics rendering
                 let vertices: Vec<ManualVertex> = self.render_physics.renderizable_lines.iter()
                 .flat_map(|line| line.to_vec())
@@ -592,6 +592,7 @@ impl App<'_> {
                         
                         // Toggle debug rendering with F2 (also shows console)
                         if input_subsystem.is_just_pressed("toggle_debug") {
+                            self.render_physics.visible = !self.render_physics.visible;
                             if let Err(e) = physics_data_channel.request_data_tx.send(PhysicsCommand::ToggleDebug) {
                                 eprintln!("Failed to send toggle debug command: {}", e);
                             }

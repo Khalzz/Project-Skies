@@ -11,6 +11,7 @@ pub struct Mouse {
     y_sensitivity: f32,
     raw_x: i32,
     raw_y: i32,
+    scroll_y: f32,
 }
 
 /// Mouse
@@ -30,6 +31,7 @@ impl Mouse {
             y_sensitivity,
             raw_x: 0,
             raw_y: 0,
+            scroll_y: 0.0,
         }
     }
 
@@ -92,4 +94,15 @@ impl Mouse {
         self.raw_y = y;
     }
 
+    pub fn get_scroll_y(&self) -> f32 {
+        self.scroll_y
+    }
+
+    pub fn add_scroll_y(&mut self, delta: f32) {
+        self.scroll_y += delta;
+    }
+
+    pub fn reset_scroll_y(&mut self) {
+        self.scroll_y = 0.0;
+    }
 }

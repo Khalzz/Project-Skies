@@ -3,7 +3,7 @@ use std::{collections::HashMap, f64::consts::PI, time::{Duration, Instant}};
 use sdl2::controller::GameController;
 use glyphon::{cosmic_text::Align, Color};
 
-use crate::{app::{App, AppState}, rendering::ui::UiContainer, transform::Transform, ui::{button, ui_node::{UiNode, UiNodeContent, UiNodeParameters, Visibility}, ui_transform::UiTransform}, utils::lerps::{lerp_quaternion, lerp_vector3}};
+use crate::{app::{App, AppState}, rendering::ui::UiContainer, transform::Transform, ui::{button, ui_node::{UiNode, UiNodeContent, Visibility}, ui_transform::UiTransform}, utils::lerps::{lerp_quaternion, lerp_vector3}};
 
 use super::controller::Controller;
 
