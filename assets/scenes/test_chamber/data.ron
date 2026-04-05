@@ -31,13 +31,16 @@
             children: [],
             metadata: (
                 cameras: Some((
-                    cockpit_camera: (0.0, 1.8, 1.5),
+                    cockpit_camera: (0.0, 0.125, 0.95),
+                    cockpit_fov: 70.0,
                     cinematic_camera: (-1.0, 2.0, -1.0),
+                    cinematic_fov: 60.0,
                     frontal_camera: (0.0, 1.0, 3.0),
+                    frontal_fov: 60.0,
                 )),
                 physics: Some((
                     rigidbody: ( 
-                        is_static: false, 
+                        is_static: false,
                         mass: 1000.0,
                         center_of_mass: (0.0, 0.0, 0.5),
                         initial_velocity: (0.0, 0.0, 0.1),

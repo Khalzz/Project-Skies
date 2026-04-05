@@ -64,6 +64,10 @@
             label: "toggle_pause",
             keys: ["F12"]
         ),
+        (
+            label: "toggle_camera_debug",
+            keys: ["F4"]
+        ),
 
     ],
     mouse: (

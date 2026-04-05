@@ -140,6 +140,9 @@ impl InputSubsystem {
                     self.mouse.set_raw_x(x);
                     self.mouse.set_raw_y(y);
                 }
+                Event::MouseWheel { y, .. } => {
+                    self.mouse.add_scroll_y(y as f32);
+                }
                 Event::Quit { .. } => {
                     std::process::exit(0);
                 }
@@ -200,5 +203,6 @@ impl InputSubsystem {
     pub fn reset_mouse_relative_movement(&mut self) {
         self.mouse.reset_rel_x();
         self.mouse.reset_rel_y();
+        self.mouse.reset_scroll_y();
     }
 }

@@ -31,6 +31,19 @@ pub struct CameraData {
     pub look_at: Option<Vector3<f32>>,
     pub next_look_at: Option<Vector3<f32>>,
     pub mod_quaternion: UnitQuaternion<f32>,
+    pub debug_offset: Vector3<f32>,
+    pub debug_mode_active: bool,
+    pub cockpit_current_rotation: UnitQuaternion<f32>,
+    pub cockpit_target_fov: f32,
+    pub cockpit_current_fov: f32,
+    pub cockpit_yaw: f32,
+    pub cockpit_pitch: f32,
+    pub cockpit_current_head_shift: f32,
+    pub free_yaw: f32,
+    pub free_pitch: f32,
+    pub free_current_rotation: UnitQuaternion<f32>,
+    pub free_target_fov: f32,
+    pub free_current_fov: f32,
 }
 
 pub struct BlinkingAlert {
@@ -176,6 +189,19 @@ impl GameLogic {
             look_at: None,
             next_look_at: None,
             mod_quaternion: UnitQuaternion::identity(),
+            debug_offset: Vector3::new(0.0, 0.6, -3.0),
+            debug_mode_active: false,
+            cockpit_current_rotation: UnitQuaternion::identity(),
+            cockpit_target_fov: 70.0,
+            cockpit_current_fov: 70.0,
+            cockpit_yaw: 0.0,
+            cockpit_pitch: 0.0,
+            cockpit_current_head_shift: 0.0,
+            free_yaw: 0.0,
+            free_pitch: 0.0,
+            free_current_rotation: UnitQuaternion::identity(),
+            free_target_fov: 60.0,
+            free_current_fov: 60.0,
         };
 
         let fellow = Bandit {
@@ -478,67 +504,169 @@ impl GameLogic {
             // Calculate target camera position and look-at point
             let (target_position, target_look_at, target_up) = match self.camera_data.camera_state {
                 CameraState::Normal => {
+                    app.camera.projection.znear = 0.1;
                     let target_pos = player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 0.6, -3.0));
                     let look_at = player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 0.0, 100.0));
                     (target_pos, look_at, player.instance.transform.rotation * *Vector3::y_axis())
                 },
                 CameraState::Cockpit => {
-                    app.camera.projection.fovy = 70.0;
-                    let target_pos = if let Some(cameras) = &player.instance.metadata.cameras {
-                        player.instance.transform.position + (player.instance.transform.rotation * cameras.cockpit_camera)
+                    let (base_pos, default_fov) = if let Some(cameras) = &player.instance.metadata.cameras {
+                        (player.instance.transform.rotation * cameras.cockpit_camera, cameras.cockpit_fov)
                     } else {
-                        player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 0.2, 1.3))
+                        (player.instance.transform.rotation * Vector3::new(0.0, 0.2, 1.3), 70.0)
                     };
-                    let look_at = player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 0.0, 100.0));
+                    app.camera.projection.znear = 0.01;
+
+                    // Mouse wheel adjusts target FOV
+                    let scroll = input_subsystem.mouse.get_scroll_y();
+                    if scroll != 0.0 {
+                        self.camera_data.cockpit_target_fov = (self.camera_data.cockpit_target_fov - scroll * 5.0).clamp(20.0, 90.0);
+                    }
+                    // Lerp current FOV toward target
+                    self.camera_data.cockpit_current_fov = lerp(self.camera_data.cockpit_current_fov, self.camera_data.cockpit_target_fov, delta_time * 8.0);
+                    app.camera.projection.fovy = self.camera_data.cockpit_current_fov;
+
+                    let max_yaw: f32 = 170.0;
+                    let max_pitch: f32 = 70.0;
+                    let sens = input_subsystem.mouse.get_sensitivity();
+
+                    // Update yaw/pitch from relative mouse, clamp immediately so no over-accumulation
+                    self.camera_data.cockpit_yaw = (self.camera_data.cockpit_yaw - input_subsystem.mouse.get_rel_x() as f32 * sens.0).clamp(-max_yaw, max_yaw);
+                    self.camera_data.cockpit_pitch = (self.camera_data.cockpit_pitch + input_subsystem.mouse.get_rel_y() as f32 * sens.1).clamp(-max_pitch, max_pitch);
+
+                    let yaw = self.camera_data.cockpit_yaw;
+                    let pitch = self.camera_data.cockpit_pitch;
+
+                    // Target head shift (cubic easing near the limit)
+                    let t = (yaw / max_yaw).clamp(-1.0, 1.0);
+                    let target_head_shift = 0.03 * t * t * t.signum();
+                    self.camera_data.cockpit_current_head_shift = lerp(self.camera_data.cockpit_current_head_shift, target_head_shift, delta_time * 8.0);
+                    let head_offset = player.instance.transform.rotation * Vector3::new(self.camera_data.cockpit_current_head_shift, 0.0, 0.0);
+
+                    let target_pos = player.instance.transform.position + base_pos + head_offset;
+
+                    // Target rotation from mouse
+                    let rotation_y = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), yaw.to_radians());
+                    let rotation_x = UnitQuaternion::from_axis_angle(&Vector3::x_axis(), pitch.to_radians());
+                    let target_rotation = rotation_y * rotation_x;
+
+                    // Lerp the rotation for smooth feel
+                    self.camera_data.cockpit_current_rotation = UnitQuaternion::new_normalize(lerp_quaternion(
+                        self.camera_data.cockpit_current_rotation.into_inner(),
+                        target_rotation.into_inner(),
+                        delta_time * 12.0,
+                    ));
+
+                    let look_dir = player.instance.transform.rotation * self.camera_data.cockpit_current_rotation * Vector3::new(0.0, 0.0, 100.0);
+                    let look_at = target_pos + look_dir;
                     (target_pos, look_at, player.instance.transform.rotation * *Vector3::y_axis())
                 },
                 CameraState::Cinematic => {
-                    app.camera.projection.fovy = 60.0;
-                    let target_pos = if let Some(cameras) = &player.instance.metadata.cameras {
-                        player.instance.transform.position + (player.instance.transform.rotation * cameras.cinematic_camera)
+                    let (target_pos, fov) = if let Some(cameras) = &player.instance.metadata.cameras {
+                        (player.instance.transform.position + (player.instance.transform.rotation * cameras.cinematic_camera), cameras.cinematic_fov)
                     } else {
-                        player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(-1.0, 3.0, -1.0))
+                        (player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(-1.0, 3.0, -1.0)), 60.0)
                     };
+                    app.camera.projection.fovy = fov;
                     let look_at = player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(30.0, 0.0, 100.0));
                     (target_pos, look_at, player.instance.transform.rotation * *Vector3::y_axis())
                 },
                 CameraState::Frontal => {
-                    app.camera.projection.fovy = 60.0;
-                    let target_pos = if let Some(cameras) = &player.instance.metadata.cameras {
-                        player.instance.transform.position + (player.instance.transform.rotation * cameras.frontal_camera)
+                    let (target_pos, fov) = if let Some(cameras) = &player.instance.metadata.cameras {
+                        (player.instance.transform.position + (player.instance.transform.rotation * cameras.frontal_camera), cameras.frontal_fov)
                     } else {
-                        player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 2.0, 3.0))
+                        (player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 2.0, 3.0)), 60.0)
                     };
+                    app.camera.projection.fovy = fov;
                     let look_at = player.instance.transform.position;
                     (target_pos, look_at, player.instance.transform.rotation * *Vector3::y_axis())
                 },
                 CameraState::Free => {
-                    app.camera.projection.fovy = 60.0;
-                    
-                    app.camera.camera.yaw = -input_subsystem.mouse.get_x() as f32 * input_subsystem.mouse.get_sensitivity().0;
-                    app.camera.camera.pitch = input_subsystem.mouse.get_y() as f32 * input_subsystem.mouse.get_sensitivity().1;
+                    app.camera.projection.znear = 0.1;
 
-                    // Clamp pitch to avoid flipping over
-                    let rotation_y = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), app.camera.camera.yaw.to_radians());
-                    let rotation_x = UnitQuaternion::from_axis_angle(&Vector3::x_axis(), app.camera.camera.pitch.to_radians());
+                    // Mouse wheel adjusts target FOV
+                    let scroll = input_subsystem.mouse.get_scroll_y();
+                    if scroll != 0.0 {
+                        self.camera_data.free_target_fov = (self.camera_data.free_target_fov - scroll * 5.0).clamp(20.0, 90.0);
+                    }
+                    self.camera_data.free_current_fov = lerp(self.camera_data.free_current_fov, self.camera_data.free_target_fov, delta_time * 8.0);
+                    app.camera.projection.fovy = self.camera_data.free_current_fov;
 
-                    // Combine rotations
-                    self.camera_data.mod_quaternion = rotation_y * rotation_x;
+                    let sens = input_subsystem.mouse.get_sensitivity();
+                    self.camera_data.free_yaw = self.camera_data.free_yaw - input_subsystem.mouse.get_rel_x() as f32 * sens.0;
+                    self.camera_data.free_pitch = (self.camera_data.free_pitch + input_subsystem.mouse.get_rel_y() as f32 * sens.1).clamp(-89.0, 89.0);
 
-                    let target_pos = (self.camera_data.mod_quaternion * Vector3::new(0.0, 0.0, -5.0)) + player.instance.transform.position;
+                    let rotation_y = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), self.camera_data.free_yaw.to_radians());
+                    let rotation_x = UnitQuaternion::from_axis_angle(&Vector3::x_axis(), self.camera_data.free_pitch.to_radians());
+                    let target_rotation = rotation_y * rotation_x;
+
+                    self.camera_data.free_current_rotation = UnitQuaternion::new_normalize(lerp_quaternion(
+                        self.camera_data.free_current_rotation.into_inner(),
+                        target_rotation.into_inner(),
+                        delta_time * 12.0,
+                    ));
+
+                    let target_pos = player.instance.transform.position + (self.camera_data.free_current_rotation * Vector3::new(0.0, 0.0, -5.0));
                     let look_at = player.instance.transform.position;
                     (target_pos, look_at, *Vector3::y_axis())
                 },
             };
 
+            // Debug mode overlay: move camera offset with arrow keys / W / S
+            let final_position = if self.camera_data.debug_mode_active {
+                let speed = 2.0 * delta_time;
+                let mut changed = false;
+
+                if input_subsystem.is_pressed("throttle_up") {
+                    self.camera_data.debug_offset.z += speed;
+                    changed = true;
+                }
+                if input_subsystem.is_pressed("throttle_down") {
+                    self.camera_data.debug_offset.z -= speed;
+                    changed = true;
+                }
+                if input_subsystem.is_pressed("up_wheel") {
+                    self.camera_data.debug_offset.x += speed;
+                    changed = true;
+                }
+                if input_subsystem.is_pressed("down_wheel") {
+                    self.camera_data.debug_offset.x -= speed;
+                    changed = true;
+                }
+                if input_subsystem.is_pressed("pitch_up") {
+                    self.camera_data.debug_offset.y += speed;
+                    changed = true;
+                }
+                if input_subsystem.is_pressed("pitch_down") {
+                    self.camera_data.debug_offset.y -= speed;
+                    changed = true;
+                }
+
+                if changed {
+                    println!("Camera offset: Vector3::new({:.3}, {:.3}, {:.3})",
+                        self.camera_data.debug_offset.x,
+                        self.camera_data.debug_offset.y,
+                        self.camera_data.debug_offset.z);
+                }
+
+                // Apply debug offset relative to the plane
+                player.instance.transform.position + (player.instance.transform.rotation * self.camera_data.debug_offset)
+            } else {
+                target_position
+            };
+
             // Apply camera position directly (no interpolation to match object movement)
-            app.camera.camera.position = target_position.into();
+            app.camera.camera.position = final_position.into();
             app.camera.camera.look_at(target_look_at.into());
             app.camera.camera.up = target_up;
         }
         // self.calculate_lockable(app);
         if input_subsystem.is_just_pressed("change_camera") {
             self.next_camera(&mut app.camera);
+        }
+        if input_subsystem.is_just_pressed("toggle_camera_debug") {
+            self.camera_data.debug_mode_active = !self.camera_data.debug_mode_active;
+            println!("Camera debug mode: {}", if self.camera_data.debug_mode_active { "ON" } else { "OFF" });
         }
     }
 
@@ -672,7 +800,6 @@ impl GameLogic {
             CameraState::Cinematic => self.camera_data.camera_state = CameraState::Frontal,
             CameraState::Frontal => self.camera_data.camera_state = CameraState::Normal,
             CameraState::Free => self.camera_data.camera_state = CameraState::Cockpit,
-
         }
     }
 
