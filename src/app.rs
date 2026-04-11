@@ -330,21 +330,9 @@ impl App<'_> {
             self.ui.ui_rendering.indices.clear();
             self.ui.ui_rendering.num_indices = 0;
 
-            for (_key, list) in &mut self.ui.renderizable_elements {
-                match list {
-                    crate::rendering::ui::UiContainer::Tagged(hash_map) => {
-                        for (_key, ui_node) in hash_map {
-                            let (textareas_to_merge, _vertices_to_add, _indices_to_add) = ui_node.node_content_preparation(&self.size, &mut self.ui.ui_rendering, &mut self.ui.text.font_system, self.time.delta_time);
-                            text_areas.extend(textareas_to_merge);
-                        }
-                    },
-                    crate::rendering::ui::UiContainer::Untagged(vec) => {
-                        for ui_node in vec {
-                            let (textareas_to_merge, _vertices_to_add, _indices_to_add) = ui_node.node_content_preparation(&self.size, &mut self.ui.ui_rendering, &mut self.ui.text.font_system, self.time.delta_time);
-                            text_areas.extend(textareas_to_merge);
-                        }
-                    },
-                }
+            for (_key, ui_node) in &mut self.ui.renderizable_elements {
+                let (textareas_to_merge, _vertices_to_add, _indices_to_add) = ui_node.node_content_preparation(&self.size, &mut self.ui.ui_rendering, &mut self.ui.text.font_system, self.time.delta_time);
+                text_areas.extend(textareas_to_merge);
             }
             
             // Only update buffers if we have data
@@ -580,7 +568,7 @@ impl App<'_> {
                     if app_state.reset {
                         load_level(&mut self, "./assets/scenes/test_chamber".to_owned());
                         play = play::GameLogic::new(&mut self);
-                        self.ui.load_ui("./assets/ui/game_ui.ron", "static", self.config.width, self.config.height);
+                        self.ui.load_ui("./assets/ui/game_ui.ron", self.config.width, self.config.height);
                         app_state.reset = false;
                     } else {
 

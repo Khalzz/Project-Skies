@@ -3,7 +3,7 @@ use std::{collections::HashMap, time::{Duration, Instant}};
 use glyphon::Color;
 use nalgebra::Quaternion;
 use sdl2::controller::GameController;
-use crate::{app::{App, AppState}, rendering::ui::UiContainer};
+use crate::{app::{App, AppState}};
 
 use super::controller::Controller;
 
@@ -18,7 +18,6 @@ impl GameLogic {
     // this is called once
     pub fn new(app: &mut App) -> Self {
         app.ui.renderizable_elements.clear();
-        app.ui.renderizable_elements.insert("static".to_owned(), UiContainer::Tagged(HashMap::new()));
 
         Self {
             last_frame: Instant::now(),

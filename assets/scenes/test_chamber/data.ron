@@ -47,7 +47,7 @@
                 physics: Some((
                     rigidbody: ( 
                         is_static: false,
-                        mass: 1000.0,
+                        mass: 8900,
                         center_of_mass: (0.0, 0.0, 0.5),
                         initial_velocity: (0.0, 0.0, 0.1),
                     ),

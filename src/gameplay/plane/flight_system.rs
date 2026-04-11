@@ -35,7 +35,7 @@ impl FlightSystem {
     }
 
     pub fn update_thrust(&mut self, rigidbody: &mut RigidBody, deltaTime: f32, throttle: f32) {
-        let thrust_local = nalgebra::Vector3::new(0.0, 0.0, 50000.0) * throttle;
+        let thrust_local = nalgebra::Vector3::new(0.0, 0.0, 129000.0) * throttle;
         let thrust_world = rigidbody.rotation() * thrust_local;
         rigidbody.add_force(thrust_world, true);
     }

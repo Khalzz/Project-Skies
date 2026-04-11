@@ -5,7 +5,7 @@ use nalgebra::{vector, Point3, Quaternion, UnitQuaternion, Vector3};
 use rand::{rngs::ThreadRng, Rng};
 use rapier3d::prelude::RigidBody;
 use sdl2::{controller::GameController};
-use crate::{app::{App, AppState}, audio::subtitles::Subtitle, input::{input::InputSubsystem, utils::to_axis}, physics::physics_handler::{MetadataType, PhysicsData, RenderMessage}, primitive::manual_vertex::ManualVertex, rendering::{camera::CameraRenderizable, ui::UiContainer}, transform::Transform, ui::{ui_node::{ChildrenType, UiNode, UiNodeContent, Visibility}, ui_transform::UiTransform}, utils::lerps::{lerp, lerp_quaternion}};
+use crate::{app::{App, AppState}, audio::subtitles::Subtitle, input::{input::InputSubsystem, utils::to_axis}, physics::physics_handler::{MetadataType, PhysicsData, RenderMessage}, primitive::manual_vertex::ManualVertex, rendering::{camera::CameraRenderizable, ui::Ui}, transform::Transform, ui::{ui_node::{UiNode, UiNodeContent, Visibility}, ui_transform::UiTransform}, utils::lerps::{lerp, lerp_quaternion}};
 use super::{airfoil::AirFoil, event_handling::EventSystem, plane::plane::Plane, wheel::Wheel, wing::Wing};
 use std::sync::mpsc::Sender;
 use crate::gameplay::plane::plane::PlaneControls;
@@ -283,7 +283,6 @@ impl GameLogic {
         self.subtitle_data.update(app);
         self.camera_control(app, app.time.delta_time, input_subsystem);
         self.ui_control(app, app.time.delta_time);
-        self.update_debug_console(app);
     }
 
     fn plane_movement (&mut self, app: &mut App, delta_time: f32, physics_data: &HashMap<String, RenderMessage>) {
@@ -292,7 +291,7 @@ impl GameLogic {
         let plane_model = app.game_models.get_mut(&plane.model_ref).unwrap();
 
         if let Some(data) = physics_data_renderizable {
-            self.plane_systems.flight_data.speedometer = data.linvel.magnitude();
+            self.plane_systems.flight_data.speedometer = data.linvel.magnitude() * 1.94384;
 
             // G-meter: project felt acceleration onto the plane's local up axis
             match &self.plane_systems.previous_velocity {
@@ -721,83 +720,85 @@ impl GameLogic {
 
     fn ui_control(&mut self, app: &mut App, delta_time: f32) {
         if app.throttling.last_ui_update.elapsed() >= app.throttling.ui_update_interval {
-            match app.ui.renderizable_elements.get_mut("static").unwrap() {
-                UiContainer::Tagged(hash_map) => {
-                    match hash_map.get_mut("data_box") {
-                        Some(info) => {
-                            match info.get_container_hashed() {
-                                Ok(map) => {
-                                    self.update_text_label(map, "framerate", &format!("FPS: {}", app.time.get_fps()), &mut app.ui.text.font_system);
-                                    self.update_text_label(map, "g", &format!("G: {:.0}", self.plane_systems.flight_data.g_meter), &mut app.ui.text.font_system);
-                                    self.update_text_label(map, "timer", &Self::format_duration(self.game_time), &mut app.ui.text.font_system);
-                                    self.update_text_label(map, "power", &format!("Power: {}%", (self.plane.controls.throttle * 100.0).round()), &mut app.ui.text.font_system);
-                                },
-                                Err(_) => {},
+            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "data_box/framerate").and_then(|n| n.as_label_mut()) {
+                label.set_text(&mut app.ui.text.font_system, &format!("FPS: {}", app.time.get_fps()), true);
+            }
+
+            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "data_box/g").and_then(|n| n.as_label_mut()) {
+                label.set_text(&mut app.ui.text.font_system, &format!("G: {:.0}", self.plane_systems.flight_data.g_meter), true);
+            }
+
+            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "data_box/timer").and_then(|n| n.as_label_mut()) {
+                label.set_text(&mut app.ui.text.font_system, &Self::format_duration(self.game_time), true);
+            }
+
+            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "data_box/power").and_then(|n| n.as_label_mut()) {
+                label.set_text(&mut app.ui.text.font_system, &format!("Power: {}%", (self.plane.controls.throttle * 100.0).round()), true);
+            }
+
+            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "altitude").and_then(|n| n.as_label_mut()) {
+                label.set_text(&mut app.ui.text.font_system, &format!("ALT: {}", self.plane_systems.flight_data.altimeter), true);
+            }
+
+            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "speed").and_then(|n| n.as_label_mut()) {
+                label.set_text(&mut app.ui.text.font_system, &format!("SPD: {:.0}", self.plane_systems.flight_data.speedometer), true);
+            }
+
+            let rotation = Self::map_to_range(app.camera.camera.yaw.into(), -PI as f64, PI  as f64, 0.0, 360.0).round();
+            
+            let text_compass = if rotation >= 355.0 || rotation <= 5.0 {
+                "N".to_owned()
+            } else if rotation >= 175.0 && rotation <= 185.0{
+                "S".to_owned()
+            } else if rotation >= 85.0 && rotation <= 95.0 {
+                "E".to_owned()
+            } else if rotation >= 265.0 && rotation <= 275.0 {
+                "O".to_owned()
+            } else {
+                rotation.round().to_string() + "°"
+            };
+
+            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "compass").and_then(|n| n.as_label_mut()) {
+                label.set_text(&mut app.ui.text.font_system, &text_compass, true);
+            }
+
+            // Update velocity vector marker position
+            if let Some(velocity) = &self.plane_systems.previous_velocity {
+                if velocity.magnitude() > 0.1 {
+                    if let Some(player) = app.renderizable_instances.get("player") {
+                        let pos = player.instance.transform.position;
+                        let vel_point = Point3::from(pos + velocity.normalize() * 100.0);
+                        if let Some(screen_pos) = app.camera.world_to_screen(vel_point, app.config.width, app.config.height) {
+                            if let Some(marker) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "velocity_marker") {
+                                marker.transform.x = screen_pos.x as f32 - marker.transform.width / 2.0;
+                                marker.transform.y = screen_pos.y as f32 - marker.transform.height / 2.0;
+                                marker.transform.rect.left = marker.transform.x;
+                                marker.transform.rect.top = marker.transform.y;
+                                marker.transform.rect.right = marker.transform.x + marker.transform.width;
+                                marker.transform.rect.bottom = marker.transform.y + marker.transform.height;
+                                if let UiNodeContent::Text(label) = &mut marker.content {
+                                    label.color = Color::rgba(0, 255, 75, 255);
+                                }
                             }
-                        },
-                        None => {},
-                    }
-
-                    self.update_text_label(hash_map, "altitude", &format!("ALT: {}", self.plane_systems.flight_data.altimeter), &mut app.ui.text.font_system);
-                    self.update_text_label(hash_map, "speed", &format!("SPD: {:.0}", self.plane_systems.flight_data.speedometer), &mut app.ui.text.font_system);
-        
-                    let rotation = Self::map_to_range(app.camera.camera.yaw.into(), -PI as f64, PI  as f64, 0.0, 360.0).round();
-                    
-                    let text_compass = if rotation >= 355.0 || rotation <= 5.0 {
-                        "N".to_owned()
-                    } else if rotation >= 175.0 && rotation <= 185.0{
-                        "S".to_owned()
-                    } else if rotation >= 85.0 && rotation <= 95.0 {
-                        "E".to_owned()
-                    } else if rotation >= 265.0 && rotation <= 275.0 {
-                        "O".to_owned()
-                    } else {
-                        rotation.round().to_string() + "°"
-                    };
-        
-                    self.update_text_label(hash_map, "compass", &format!("{}", text_compass).to_string(), &mut app.ui.text.font_system);
-
-                    // Update velocity vector marker position
-                    if let Some(velocity) = &self.plane_systems.previous_velocity {
-                        if velocity.magnitude() > 0.1 {
-                            if let Some(player) = app.renderizable_instances.get("player") {
-                                let pos = player.instance.transform.position;
-                                let vel_point = Point3::from(pos + velocity.normalize() * 100.0);
-                                if let Some(screen_pos) = app.camera.world_to_screen(vel_point, app.config.width, app.config.height) {
-                                    if let Some(marker) = hash_map.get_mut("velocity_marker") {
-                                        marker.transform.x = screen_pos.x as f32 - marker.transform.width / 2.0;
-                                        marker.transform.y = screen_pos.y as f32 - marker.transform.height / 2.0;
-                                        marker.transform.rect.left = marker.transform.x;
-                                        marker.transform.rect.top = marker.transform.y;
-                                        marker.transform.rect.right = marker.transform.x + marker.transform.width;
-                                        marker.transform.rect.bottom = marker.transform.y + marker.transform.height;
-                                        if let UiNodeContent::Text(label) = &mut marker.content {
-                                            label.color = Color::rgba(0, 255, 75, 255);
-                                        }
-                                    }
-                                } else {
-                                    // Off screen — hide marker
-                                    if let Some(marker) = hash_map.get_mut("velocity_marker") {
-                                        if let UiNodeContent::Text(label) = &mut marker.content {
-                                            label.color = Color::rgba(0, 255, 75, 0);
-                                        }
-                                    }
+                        } else {
+                            // Off screen — hide marker
+                            if let Some(marker) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "velocity_marker") {
+                                if let UiNodeContent::Text(label) = &mut marker.content {
+                                    label.color = Color::rgba(0, 255, 75, 0);
                                 }
                             }
                         }
                     }
+                }
+            }
 
-                    
-                    if let Some(altitude_alert) = hash_map.get_mut("altitude_alert") {
-                        self.blinking_alert("altitude".to_owned(), altitude_alert, self.plane_systems.flight_data.altimeter < 1000.0, delta_time);
-                    }
-        
-                    if let Some(stall_alert) = hash_map.get_mut("stall_alert") {
-                        self.blinking_alert("stall".to_owned(), stall_alert, self.plane_systems.stall, delta_time);
-                    }
-                },
-                _ => {},
-            };
+            if let Some(altitude_alert) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "altitude_alert") {
+                self.blinking_alert("altitude".to_owned(), altitude_alert, self.plane_systems.flight_data.altimeter < 1000.0, delta_time);
+            }
+
+            if let Some(stall_alert) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "stall_alert") {
+                self.blinking_alert("stall".to_owned(), stall_alert, self.plane_systems.stall, delta_time);
+            }
 
             app.ui.has_changed = true; // Mark UI as changed so it gets processed
             app.throttling.last_ui_update = Instant::now();
@@ -855,61 +856,6 @@ impl GameLogic {
             CameraState::Cinematic => self.camera_data.camera_state = CameraState::Frontal,
             CameraState::Frontal => self.camera_data.camera_state = CameraState::Normal,
             CameraState::Free => self.camera_data.camera_state = CameraState::Cockpit,
-        }
-    }
-
-    /// Updates the debug console UI with messages from the debug_console module.
-    /// Messages are cleared each frame, so you need to call debug_text!() every frame you want to display something.
-    fn update_debug_console(&mut self, app: &mut App) {
-        let is_visible = debug_console::is_console_visible();
-        let messages = debug_console::drain_messages();
-        let delta_time = app.time.delta_time;
-
-        // First, create all the label nodes we need (while app is not borrowed elsewhere)
-        let label_nodes: Vec<UiNode> = if is_visible {
-            messages.iter().map(|message| {
-                UiNode::label(
-                    &mut app.ui.text.font_system,
-                    message,
-                    0.0, 0.0, 290.0, 18.0,
-                    14.0,
-                    Color::rgba(0, 255, 100, 255),
-                    Align::Left,
-                    [0.0, 0.0, 0.0, 0.0],
-                    [0.0, 0.0, 0.0, 0.0],
-                )
-            }).collect()
-        } else {
-            Vec::new()
-        };
-
-        // Now get the UI container and update it
-        let Some(UiContainer::Tagged(hash_map)) = app.ui.renderizable_elements.get_mut("static") else {
-            return;
-        };
-
-        let Some(console_node) = hash_map.get_mut("debug_console") else {
-            return;
-        };
-
-        // Update visibility
-        let target_alpha = if is_visible { 0.85 } else { 0.0 };
-        console_node.visibility.background_color[3] = lerp(
-            console_node.visibility.background_color[3],
-            target_alpha,
-            delta_time * 10.0,
-        );
-
-        let UiNodeContent::VerticalContainer(container) = &mut console_node.content else {
-            return;
-        };
-
-        // Clear previous frame's messages and add new ones
-        if let ChildrenType::IndexedChildren(vec) = &mut container.children {
-            vec.clear();
-            for label in label_nodes {
-                vec.push(label);
-            }
         }
     }
 }

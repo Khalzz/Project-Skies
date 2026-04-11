@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use crate::{
     app::App,
-    rendering::ui::UiContainer,
+    rendering::ui::Ui,
     ui::ui_node::UiNodeContent,
 };
 
@@ -39,9 +39,7 @@ impl Subtitle {
             _ => false,
         };
 
-        let Some(UiContainer::Tagged(hash_map)) = app.ui.renderizable_elements.get_mut("static")
-        else { return };
-        let Some(node) = hash_map.get_mut("subtitles") else { return };
+        let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "subtitles") else { return };
         let UiNodeContent::Text(label) = &mut node.content else { return };
 
         if visible {
@@ -57,9 +55,7 @@ impl Subtitle {
         self.duration = duration_ms as f32 / 1000.0;
         let screen_width = app.config.width as f32;
 
-        let Some(UiContainer::Tagged(hash_map)) = app.ui.renderizable_elements.get_mut("static")
-        else { return };
-        let Some(node) = hash_map.get_mut("subtitles") else { return };
+        let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "subtitles") else { return };
         let UiNodeContent::Text(label) = &mut node.content else { return };
 
         label.set_text(&mut app.ui.text.font_system, text, true);

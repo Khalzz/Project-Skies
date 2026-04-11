@@ -3,7 +3,7 @@ use std::{collections::HashMap, f64::consts::PI, time::{Duration, Instant}};
 use sdl2::controller::GameController;
 use glyphon::{cosmic_text::Align, Color};
 
-use crate::{app::{App, AppState}, rendering::ui::UiContainer, transform::Transform, ui::{button, ui_node::{UiNode, UiNodeContent, Visibility}, ui_transform::UiTransform}, utils::lerps::{lerp_quaternion, lerp_vector3}};
+use crate::{app::{App, AppState}, transform::Transform, ui::{button, ui_node::{UiNode, UiNodeContent, Visibility}}, utils::lerps::{lerp_quaternion, lerp_vector3}};
 
 use super::controller::Controller;
 
@@ -23,7 +23,6 @@ impl GameLogic {
     pub fn new(app: &mut App) -> Self {
 
         app.ui.renderizable_elements.clear();
-        app.ui.renderizable_elements.insert("static".to_owned(), UiContainer::Tagged(HashMap::new()));
 
         app.camera.camera.position = [0.0, 7.0, 50.0].into();
 
@@ -49,19 +48,6 @@ impl GameLogic {
         }
 
         // ui plane name
-        match app.ui.renderizable_elements.get_mut("static").unwrap() {
-            UiContainer::Tagged(hash_map) => {
-                if let Some(plane_name) = hash_map.get_mut("plane_name") {
-                    match &mut plane_name.content {
-                        UiNodeContent::Text(label) => {
-                            label.set_text(&mut app.ui.text.font_system, &self.plane_list.list[self.plane_list.index], true);
-                        },
-                        _ => {}
-                    }
-                }
-            },
-            _=> {},
-        }
 
         // display plane
         let angle = 1.0 * app.time.delta_time * 3.0;

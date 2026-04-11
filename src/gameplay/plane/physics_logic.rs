@@ -1,31 +1,15 @@
 use std::collections::HashMap;
 use std::sync::mpsc::Sender;
 
-use crate::gameplay::plane::plane::{Plane, PlaneControls};
+use crate::gameplay::plane::plane::{PlaneControls};
 use crate::gameplay::wing::{Wing};
 use crate::gameplay::airfoil::AirFoil;
 use crate::gameplay::wheel::{Wheel, WheelData};
 use crate::physics::physics::DebugPhysicsMessageType;
 use crate::physics::physics_handler::{ColliderDebugData, MetadataType, PhysicsData, SuspensionDebugData, WingDebugData};
-use crate::primitive::manual_vertex::ManualVertex;
-use rapier3d::prelude::{ColliderSet, QueryPipeline, RigidBodySet, RigidBody};
+use rapier3d::prelude::{ColliderSet, QueryPipeline, RigidBodySet};
 use nalgebra::vector;
-use nalgebra::Vector3;
 use crate::gameplay::plane::flight_system::FlightSystem;
-
-/// Safely add torque to rigidbody, skipping if NaN/Inf
-
-
-/// Check if rigidbody state is valid (no NaN/Inf in position or velocity)
-fn is_rigidbody_valid(rigidbody: &RigidBody) -> bool {
-    let pos = rigidbody.translation();
-    let vel = rigidbody.linvel();
-    let angvel = rigidbody.angvel();
-    
-    pos.x.is_finite() && pos.y.is_finite() && pos.z.is_finite() &&
-    vel.x.is_finite() && vel.y.is_finite() && vel.z.is_finite() &&
-    angvel.x.is_finite() && angvel.y.is_finite() && angvel.z.is_finite()
-}
 
 pub struct PlanePhysicsLogic {
     pub wheels: Vec<Wheel>,
@@ -39,9 +23,9 @@ pub struct PlanePhysicsLogic {
 impl PlanePhysicsLogic {
     pub fn new() -> Self {
         let wheels = vec![
-            Wheel::new("wheel-f".to_string(), vector![0.0, 0.0, 0.7], 0.6, 15000.0, 1000.0),
-            Wheel::new("wheel-lb".to_string(), vector![-0.1, 0.0, 0.0], 0.3, 10000.0, 1000.0),
-            Wheel::new("wheel-rb".to_string(), vector![0.1, 0.0, 0.0], 0.3, 10000.0, 1000.0)
+            Wheel::new("wheel-f".to_string(), vector![0.0, 0.0, 0.7], 0.4, 300000.0, 50000.0),
+            Wheel::new("wheel-lb".to_string(), vector![-0.1, 0.0, 0.0], 0.3, 100000.0, 20000.0),
+            Wheel::new("wheel-rb".to_string(), vector![0.1, 0.0, 0.0], 0.3, 100000.0, 20000.0)
         ];
 
         // load airfoil:
@@ -50,11 +34,11 @@ impl PlanePhysicsLogic {
 
         // i have to also add left and right ailerons
         let wings = vec![
-            Wing::new("Left wing".to_string(), vector![0.4, 0.0, 0.1], 2.50, 0.0, naca_2412.clone(), vector![1.0,0.0, 0.0], true, false, -3.0), // left wing (-3° incidence for lift)
-            Wing::new("Right wing".to_string(), vector![-0.4, 0.0, 0.1], 2.50, 0.0, naca_2412.clone(), vector![1.0, 0.0, 0.0], true, false, -3.0), // right wing (-3° incidence for lift)
-            Wing::new("Right elevator wing".to_string(), vector![0.3, 0.0, -0.5], 2.70, 0.0, naca_0012.clone(), vector![1.0, 0.0, 0.0], false, false, 0.0), // right elevator wing
-            Wing::new("Left elevator wing".to_string(), vector![-0.3, 0.0, -0.5], 2.70, 0.0, naca_0012.clone(), vector![1.0, 0.0, 0.0], false, false, 0.0), // left elevator wing
-            Wing::new("Rudder wing".to_string(), vector![0.0, 0.3, -0.5], 1.0, 0.0, naca_0012.clone(), vector![0.0, 1.0, 0.0], false, true, 0.0) // rudder wing
+            Wing::new("Left wing".to_string(), vector![0.4, 0.0, 0.1], 16.5, 0.0, naca_2412.clone(), vector![1.0,0.0, 0.0], true, false, 4.0, 500_000.0), // left wing (+4° incidence, includes LEX area)
+            Wing::new("Right wing".to_string(), vector![-0.4, 0.0, 0.1], 16.5, 0.0, naca_2412.clone(), vector![1.0, 0.0, 0.0], true, false, 4.0, 500_000.0), // right wing (+4° incidence, includes LEX area)
+            Wing::new("Right elevator wing".to_string(), vector![0.3, 0.0, -0.5], 2.70, 0.0, naca_0012.clone(), vector![1.0, 0.0, 0.0], false, false, 0.0, 120_000.0), // right elevator wing
+            Wing::new("Left elevator wing".to_string(), vector![-0.3, 0.0, -0.5], 2.70, 0.0, naca_0012.clone(), vector![1.0, 0.0, 0.0], false, false, 0.0, 120_000.0), // left elevator wing
+            Wing::new("Rudder wing".to_string(), vector![0.0, 0.3, -0.8], 1.70, 0.0, naca_0012.clone(), vector![0.0, 1.0, 0.0], false, true, 0.0, 200_000.0) // rudder wing
         ];
 
         Self {
@@ -71,81 +55,6 @@ impl PlanePhysicsLogic {
     pub fn toggle_debug_rendering(&mut self) {
         self.debug_rendering_enabled = !self.debug_rendering_enabled;
         println!("Debug rendering: {}", if self.debug_rendering_enabled { "ENABLED" } else { "DISABLED" });
-    }
-
-    /// Renders debug lines for all cuboid colliders (wireframe boxes)
-    fn render_collider_debug(&mut self, collider_set: &ColliderSet, rigidbody_set: &RigidBodySet, physics_data: &PhysicsData) {
-        let rigidbody = match rigidbody_set.get(physics_data.rigidbody_handle) {
-            Some(rb) => rb,
-            None => return,
-        };
-        let rb_translation = rigidbody.translation();
-        let rb_rotation = rigidbody.rotation();
-
-        // Iterate over all collider handles
-        for collider_handle in &physics_data.collider_handles {
-            if let Some(collider) = collider_set.get(*collider_handle) {
-                // Collider position is LOCAL to the rigidbody
-                let col_local = collider.position_wrt_parent().unwrap_or(collider.position());
-                let col_offset = col_local.translation.vector;
-                let col_rotation = col_local.rotation;
-                    
-                // Try to get cuboid shape
-                if let Some(cuboid) = collider.shape().as_cuboid() {
-                    let half_extents = cuboid.half_extents;
-                    
-                    // Define the 8 corners of the cuboid in local space
-                    let corners_local = [
-                        Vector3::new(-half_extents.x, -half_extents.y, -half_extents.z),
-                        Vector3::new( half_extents.x, -half_extents.y, -half_extents.z),
-                        Vector3::new( half_extents.x,  half_extents.y, -half_extents.z),
-                        Vector3::new(-half_extents.x,  half_extents.y, -half_extents.z),
-                        Vector3::new(-half_extents.x, -half_extents.y,  half_extents.z),
-                        Vector3::new( half_extents.x, -half_extents.y,  half_extents.z),
-                        Vector3::new( half_extents.x,  half_extents.y,  half_extents.z),
-                        Vector3::new(-half_extents.x,  half_extents.y,  half_extents.z),
-                    ];
-                    
-                    // Transform: collider local -> rigidbody local -> world
-                    let corners_world: Vec<Vector3<f32>> = corners_local.iter()
-                        .map(|c| {
-                            let in_rb_space = col_offset + col_rotation * c;
-                            rb_translation + rb_rotation * in_rb_space
-                        })
-                        .collect();
-                    
-                    // Collider color (cyan/teal for visibility)
-                    let color = [0.0, 1.0, 1.0];
-                    
-                    // Draw the 12 edges of the cuboid
-                    // Bottom face edges
-                    self.add_debug_line(corners_world[0], corners_world[1], color);
-                    self.add_debug_line(corners_world[1], corners_world[2], color);
-                    self.add_debug_line(corners_world[2], corners_world[3], color);
-                    self.add_debug_line(corners_world[3], corners_world[0], color);
-                    
-                    // Top face edges
-                    self.add_debug_line(corners_world[4], corners_world[5], color);
-                    self.add_debug_line(corners_world[5], corners_world[6], color);
-                    self.add_debug_line(corners_world[6], corners_world[7], color);
-                    self.add_debug_line(corners_world[7], corners_world[4], color);
-                    
-                    // Vertical edges connecting top and bottom
-                    self.add_debug_line(corners_world[0], corners_world[4], color);
-                    self.add_debug_line(corners_world[1], corners_world[5], color);
-                    self.add_debug_line(corners_world[2], corners_world[6], color);
-                    self.add_debug_line(corners_world[3], corners_world[7], color);
-                }
-            }
-        }
-    }
-    
-    /// Helper function to add a debug line between two points
-    fn add_debug_line(&mut self, start: Vector3<f32>, end: Vector3<f32>, color: [f32; 3]) {
-        self.renderizable_lines.push(DebugPhysicsMessageType::RenderizableLines([
-            ManualVertex { position: [start.x, start.y, start.z], color },
-            ManualVertex { position: [end.x, end.y, end.z], color }
-        ]));
     }
 
     /// Configure roll damping for different aircraft types
@@ -185,16 +94,29 @@ impl PlanePhysicsLogic {
 
             for wing in &mut self.wings {
                 wing.control_input = match wing.label.as_str() {
-                    "Left wing"           => -plane_controls.aileron,   // ailerons roll opposite
-                    "Right wing"          => plane_controls.aileron,
-                    "Left elevator wing"  => plane_controls.elevator,
-                    "Right elevator wing" => plane_controls.elevator,
-                    "Rudder wing"         =>  plane_controls.rudder,
+                    "Left wing"           => (-plane_controls.aileron + plane_controls.trim_roll).clamp(-1.0, 1.0),
+                    "Right wing"          => (plane_controls.aileron + plane_controls.trim_roll).clamp(-1.0, 1.0),
+                    "Left elevator wing"  => (plane_controls.elevator + plane_controls.trim_pitch).clamp(-1.0, 1.0),
+                    "Right elevator wing" => (plane_controls.elevator + plane_controls.trim_pitch).clamp(-1.0, 1.0),
+                    "Rudder wing"         => (plane_controls.rudder + plane_controls.trim_yaw).clamp(-1.0, 1.0),
                     _ => 0.0,
                 };
 
                 wing.physics_force(rigidbody);
             }
+
+            // Fuselage side force: the fuselage acts as a flat plate during sideslip,
+            // generating a lateral force at the CoM that redirects the velocity vector
+            // to align with the aircraft heading. Without this, the rudder only rotates
+            // the nose but the plane keeps sliding in the original direction.
+            let local_vel = rigidbody.rotation().inverse() * rigidbody.linvel();
+            let sideslip_speed = local_vel.x;
+            let air_density = 1.225f32;
+            let fuselage_side_area = 20.0; // m² - approximate F-16 fuselage side profile
+            let fuselage_cd = 1.2;         // bluff body drag coefficient
+            let fuselage_side_force_mag = -0.5 * air_density * sideslip_speed * sideslip_speed.abs() * fuselage_side_area * fuselage_cd;
+            let fuselage_side_force = rigidbody.rotation() * nalgebra::Vector3::new(fuselage_side_force_mag, 0.0, 0.0);
+            rigidbody.add_force(fuselage_side_force, true);
         }
 
         self.renderizable_wheels.clear();
@@ -231,16 +153,4 @@ impl PlanePhysicsLogic {
 
         physics_data.metadata.insert("wheels".to_string(), MetadataType::Wheels(self.renderizable_wheels.clone()));        
     }
-
-    /* 
-    public void SetControlInput(Vector3 input) {
-        if (Dead) return;
-        controlInput = Vector3.ClampMagnitude(input, 1);
-    }
-    */
-}
-
-/// Element-wise multiplication for Vector3
-fn vector3_scale(a: Vector3<f32>, b: Vector3<f32>) -> Vector3<f32> {
-    Vector3::new(a.x * b.x, a.y * b.y, a.z * b.z)
 }
