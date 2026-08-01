@@ -1,0 +1,59 @@
+(
+    id: "pause_menu",
+    children: {
+        "menu": (
+            transform: (
+                position: (x: 0.0, y: 0.0),
+                self_anchor: Some((horizontal: Center, vertical: Center)),
+                direction: Some(Vertical),
+                child_anchor: Some((horizontal: Center, vertical: Center)),
+            ),
+            content: Container((
+                margin: Some(20.0),
+                gap: Some(5.0),
+                background_color: Some((0.0, 0.0, 0.0, 0.5)),
+                children: Some({
+                    "Resume": (
+                        transform: (
+                            position: (x: 0.0, y: 0.0),
+                            size: Some((height: 35.0, width: 125.0)),
+                        ),
+                        content: Label((
+                            text: "Resume",
+                            font_size: 10.0,
+                            color: (0.0, 1.0, 0.0, 1.0),
+                            border_color: Some((0.0, 1.0, 0.0, 1.0)),
+                            alignment: Some("Center"),
+                        )),
+                    ),
+                    "Settings": (
+                        transform: (
+                            position: (x: 0.0, y: 0.0),
+                            size: Some((height: 35.0, width: 125.0)),
+                        ),
+                        content: Label((
+                            text: "Settings",
+                            font_size: 10.0,
+                            color: (0.0, 1.0, 0.0, 1.0),
+                            border_color: Some((0.0, 1.0, 0.0, 1.0)),
+                            alignment: Some("Center"),
+                        )),
+                    ),
+                    "Exit": (
+                        transform: (
+                            position: (x: 0.0, y: 0.0),
+                            size: Some((height: 35.0, width: 125.0)),
+                        ),
+                        content: Label((
+                            text: "Exit",
+                            font_size: 10.0,
+                            color: (0.0, 1.0, 0.0, 1.0),
+                            border_color: Some((0.0, 1.0, 0.0, 1.0)),
+                            alignment: Some("Center"),
+                        )),
+                    ),
+                }),
+            )),
+        ),
+    }
+)

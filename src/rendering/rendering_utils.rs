@@ -48,7 +48,8 @@ pub fn create_render_pipeline(device: &wgpu::Device, layout: &wgpu::PipelineLayo
         depth_stencil: depth_format.map(|format| wgpu::DepthStencilState {
             format,
             depth_write_enabled: true,
-            depth_compare: wgpu::CompareFunction::Less,
+            // Reversed-Z: near = 1.0, far = 0.0, so "closer" means "greater".
+            depth_compare: wgpu::CompareFunction::Greater,
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
@@ -92,7 +93,8 @@ pub fn create_line_render_pipeline(device: &wgpu::Device, layout: &wgpu::Pipelin
         depth_stencil: depth_format.map(|format| wgpu::DepthStencilState {
             format,
             depth_write_enabled: true,
-            depth_compare: wgpu::CompareFunction::Less,
+            // Reversed-Z: near = 1.0, far = 0.0, so "closer" means "greater".
+            depth_compare: wgpu::CompareFunction::Greater,
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),

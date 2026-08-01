@@ -1,109 +1,109 @@
 (
-    id: "test chamber",
+    id: "game_ui",
     children: {
         "data_box": (
-            transform: (position: (10.0, 10.0), size: Some((width: 200.0, height: 200.0))),
-            child: VerticalContainer((
+            transform: (
+                position: (x: 10.0, y: 10.0),
+                fit: Some((
+                    horizontal: true,
+                    vertical: true,
+                )),
+            ),
+            content: Container((
                 margin: Some(20.0),
-                separation: Some(5.0),
+                gap: Some(5.0),
                 background_color: Some((0.0, 0.0, 0.0, 0.5)),
                 children: Some({
                     "timer": (
                         transform: (
-                            position: (0.0, 0.0),
-                            size: Some((height: 35.0, width: 125.0))
-                        ), 
-                        child: Label((
+                            position: (x: 0.0, y: 0.0),
+                            size: Some((height: 35.0, width: 250.0)),
+                        ),
+                        content: Label((
                             text: "00:00:00:00",
                             font_size: 10.0,
                             color: (0.0, 1.0, 0.0, 1.0),
                             border_color: Some((0.0, 1.0, 0.0, 1.0)),
-                            border_thickness: Some(2.0),
                             alignment: Some("Center"),
-                        ))
+                        )),
                     ),
                     "framerate": (
                         transform: (
-                            position: (0.0, 0.0),
-                            size: Some((height: 35.0, width: 125.0))
-                        ), 
-                        child: Label((
+                            position: (x: 0.0, y: 0.0),
+                            size: Some((height: 35.0, width: 250.0)),
+                        ),
+                        content: Label((
                             text: "100fps",
                             font_size: 10.0,
                             color: (0.0, 1.0, 0.0, 1.0),
                             border_color: Some((0.0, 1.0, 0.0, 1.0)),
-                            border_thickness: Some(2.0),
                             alignment: Some("Center"),
                         )),
                     ),
                     "g": (
                         transform: (
-                            position: (0.0, 0.0),
-                            size: Some((height: 35.0, width: 125.0))
-                        ), 
-                        child: Label((
+                            position: (x: 0.0, y: 0.0),
+                            size: Some((height: 35.0, width: 250.0)),
+                        ),
+                        content: Label((
                             text: "1g",
                             font_size: 10.0,
                             color: (0.0, 1.0, 0.0, 1.0),
                             border_color: Some((0.0, 1.0, 0.0, 1.0)),
-                            border_thickness: Some(2.0),
                             alignment: Some("Center"),
                         )),
                     ),
                     "power": (
                         transform: (
-                            position: (0.0, 0.0),
-                            size: Some((height: 35.0, width: 250.0))
-                        ), 
-                        child: Label((
+                            position: (x: 0.0, y: 0.0),
+                            size: Some((height: 35.0, width: 250.0)),
+                        ),
+                        content: Label((
                             text: "0%",
                             font_size: 10.0,
                             color: (0.0, 1.0, 0.0, 1.0),
                             border_color: Some((0.0, 1.0, 0.0, 1.0)),
-                            border_thickness: Some(2.0),
                             alignment: Some("Center"),
                         )),
-                    )
+                    ),
                 }),
             )),
         ),
         "compass": (
             transform: (
-                position: (0.0, 10.0),
+                position: (x: 0.0, y: 10.0),
                 size: Some((height: 35.0, width: 100.0)),
-                anchor: Some("center_x"),
-            ), 
-            child: Label((
+                self_anchor: Some((horizontal: Center, vertical: Start)),
+            ),
+            content: Label((
                 text: "90°",
                 font_size: 10.0,
                 color: (0.0, 1.0, 0.0, 1.0),
                 border_color: Some((0.0, 1.0, 0.0, 1.0)),
-                border_thickness: Some(2.0),
                 alignment: Some("Center"),
-            ))
+            )),
         ),
         "speed": (
             transform: (
-                position: (0.0, 50.0),
+                position: (x: 0.0, y: 50.0),
                 size: Some((height: 35.0, width: 100.0)),
-                anchor: Some("center_x"),
-            ), 
-            child: Label((
-                text: "90°",
+                self_anchor: Some((horizontal: Center, vertical: Start)),
+            ),
+            content: Label((
+                text: "SPD",
                 font_size: 10.0,
                 color: (0.0, 1.0, 0.0, 1.0),
                 border_color: Some((0.0, 1.0, 0.0, 1.0)),
-                border_thickness: Some(2.0),
                 alignment: Some("Center"),
-            ))
+            )),
         ),
         "subtitles": (
             transform: (
-                position: (0.0, -150.0),
+                position: (x: 0.0, y: -150.0),
                 size: Some((width: 800.0, height: 35.0)),
-                anchor: Some("center_x, bottom"),
+                self_anchor: Some((horizontal: Center, vertical: End)),
             ),
-            child: Label((
+            content: Label((
                 text: "",
                 font_size: 15.0,
                 color: (1.0, 1.0, 1.0, 0.0),
@@ -113,11 +113,11 @@
         ),
         "velocity_marker": (
             transform: (
-                position: (0.0, 0.0),
+                position: (x: 0.0, y: 0.0),
                 size: Some((width: 20.0, height: 20.0)),
             ),
-            child: Label((
-                text: "◇",
+            content: Label((
+                text: "o",
                 font_size: 14.0,
                 color: (0.0, 1.0, 0.3, 1.0),
                 alignment: Some("Center"),

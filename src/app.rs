@@ -23,20 +23,15 @@ use crate::rendering::light::Light;
 use crate::rendering::ui::Ui;
 use crate::rendering::model::{self, DrawModel, Vertex};
 use crate::gameplay::{main_menu, plane_selection, play};
-use crate::resources::load_level;
+use crate::gameplay::scene::{Scene, ScenePool, FrameContext};
 use crate::input::input::InputSubsystem;
-
-#[derive(Clone)]
-pub enum GameState {
-    Playing,
-    MainMenu,
-    SelectingPlane
-}
 
 #[derive(Clone)]
 pub struct AppState {
     pub is_running: bool,
-    pub state: GameState,
+    // Key into the scene pool (see gameplay::scene::ScenePool) — adding a new scene
+    // means registering it under a new key here, not adding an enum variant + match arm.
+    pub state: String,
     pub reset: bool
 }
 
@@ -330,21 +325,9 @@ impl App<'_> {
             self.ui.ui_rendering.indices.clear();
             self.ui.ui_rendering.num_indices = 0;
 
-            for (_key, list) in &mut self.ui.renderizable_elements {
-                match list {
-                    crate::rendering::ui::UiContainer::Tagged(hash_map) => {
-                        for (_key, ui_node) in hash_map {
-                            let (textareas_to_merge, _vertices_to_add, _indices_to_add) = ui_node.node_content_preparation(&self.size, &mut self.ui.ui_rendering, &mut self.ui.text.font_system, self.time.delta_time);
-                            text_areas.extend(textareas_to_merge);
-                        }
-                    },
-                    crate::rendering::ui::UiContainer::Untagged(vec) => {
-                        for ui_node in vec {
-                            let (textareas_to_merge, _vertices_to_add, _indices_to_add) = ui_node.node_content_preparation(&self.size, &mut self.ui.ui_rendering, &mut self.ui.text.font_system, self.time.delta_time);
-                            text_areas.extend(textareas_to_merge);
-                        }
-                    },
-                }
+            for (_key, ui_node) in &mut self.ui.renderizable_elements {
+                let (textareas_to_merge, _vertices_to_add, _indices_to_add) = ui_node.node_content_preparation(&self.size, &mut self.ui.ui_rendering, &mut self.ui.text.font_system, self.time.delta_time);
+                text_areas.extend(textareas_to_merge);
             }
             
             // Only update buffers if we have data
@@ -390,7 +373,8 @@ impl App<'_> {
                 depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
                     view: &self.depth_render.texture.view,
                     depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
+                        // Reversed-Z: clear to 0.0 ("infinitely far") instead of 1.0.
+                        load: wgpu::LoadOp::Clear(0.0),
                         store: wgpu::StoreOp::Store,
                     }),
                     stencil_ops: None,
@@ -481,10 +465,20 @@ impl App<'_> {
             render_pass.set_bind_group(1, &self.camera.bind_group, &[]);
     
             if !self.show_depth_map && self.render_physics.visible {
-                // Prepare vertex and index buffers specifically for physics rendering
+                // Prepare vertex and index buffers specifically for physics rendering.
+                // Debug lines come from the physics thread in absolute world coordinates,
+                // so make them camera-relative here to match camera.view_proj.
+                let camera_position = self.camera.camera.position;
                 let vertices: Vec<ManualVertex> = self.render_physics.renderizable_lines.iter()
                 .flat_map(|line| line.to_vec())
+                .map(|mut vertex| {
+                    vertex.position[0] -= camera_position.x;
+                    vertex.position[1] -= camera_position.y;
+                    vertex.position[2] -= camera_position.z;
+                    vertex
+                })
                 .collect();
+
                 if !vertices.is_empty() {
                     self.render_physics.vertex_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some("Updated ManualVertex Buffer"),
@@ -546,19 +540,22 @@ impl App<'_> {
 
     pub fn update(mut self) {
         // SDL2
-        let mut app_state = AppState { is_running: true, state: GameState::Playing, reset: true};
+        let mut app_state = AppState { is_running: true, state: "playing".to_owned(), reset: true};
         let mut event_pump = self.context.event_pump().unwrap();
 
-        let mut play = play::GameLogic::new(&mut self);
-
-        let _main_menu = main_menu::GameLogic::new(&mut self);
-        let _selecting_plane = plane_selection::GameLogic::new(&mut self);
+        // Every scene the game knows about, keyed by the id AppState::state points at.
+        // Adding a new scene means implementing Scene for it and inserting it here —
+        // nothing else in this loop needs to change.
+        let mut scenes: ScenePool = HashMap::new();
+        scenes.insert("playing".to_owned(), Box::new(play::GameLogic::new(&mut self)) as Box<dyn Scene>);
+        scenes.insert("main_menu".to_owned(), Box::new(main_menu::GameLogic::new(&mut self)) as Box<dyn Scene>);
+        scenes.insert("selecting_plane".to_owned(), Box::new(plane_selection::GameLogic::new(&mut self)) as Box<dyn Scene>);
 
         let mut controller = Self::open_first_available_controller(&self.controller_subsystem);
         let _joystick = Self::open_first_avalible_joystick(&self.joystick_subsystem);
-        
+
         // physics handling
-        let physics_data_channel = physics_handling(&self.device, &self.config, &self.camera, "./assets/scenes/test_chamber".to_owned(), app_state.state.clone());
+        let physics_data_channel = physics_handling(&self.device, &self.config, &self.camera, "./assets/scenes/test_chamber".to_owned(), app_state.state == "playing");
 
         let mut input_subsystem = InputSubsystem::new(include_str!("../settings/input.ron"));
 
@@ -575,122 +572,134 @@ impl App<'_> {
                 break
             }
 
-            match app_state.state {
-                GameState::Playing => {
-                    if app_state.reset {
-                        load_level(&mut self, "./assets/scenes/test_chamber".to_owned());
-                        play = play::GameLogic::new(&mut self);
-                        self.ui.load_ui("./assets/ui/game_ui.ron", "static", self.config.width, self.config.height);
-                        app_state.reset = false;
-                    } else {
+            if app_state.reset {
+                if let Some(scene) = scenes.get_mut(&app_state.state) {
+                    scene.reset(&mut self);
+                } else {
+                    eprintln!("No scene registered for state '{}'", app_state.state);
+                }
+                app_state.reset = false;
+            } else {
+                // Request physics data from physics thread
+                if let Err(e) = physics_data_channel.request_data_tx.send(PhysicsCommand::RequestData) {
+                    eprintln!("Failed to send physics command: {}", e);
+                }
 
-                        
-                        // Request physics data from physics thread
-                        if let Err(e) = physics_data_channel.request_data_tx.send(PhysicsCommand::RequestData) {
-                            eprintln!("Failed to send physics command: {}", e);
-                        }
-                        
-                        // Toggle debug rendering with F2 (also shows console)
-                        if input_subsystem.is_just_pressed("toggle_debug") {
-                            self.render_physics.visible = !self.render_physics.visible;
-                            if let Err(e) = physics_data_channel.request_data_tx.send(PhysicsCommand::ToggleDebug) {
-                                eprintln!("Failed to send toggle debug command: {}", e);
-                            }
-                        }
-                        
-                        // Toggle console independently with F3
-                        if input_subsystem.is_just_pressed("toggle_console") {
-                            crate::tooling::debug_console::toggle_console();
-                        }
-                        
-                        // Toggle physics pause with F12
-                        if input_subsystem.is_just_pressed("toggle_pause") {
-                            if let Err(e) = physics_data_channel.request_data_tx.send(PhysicsCommand::TogglePause) {
-                                eprintln!("Failed to send toggle pause command: {}", e);
-                            }
-                        }
-                        
-                        // Update input subsystem first
-
-                        // Recibimos los datos del otro thread
-                        let physics_data = match physics_data_channel.physics_data_rx.try_recv() {
-                            Ok(data) => data,
-                            Err(_) => HashMap::new(),
-                        };
-
-                        // Drain all queued debug physics messages, keep only the latest
-                        let mut got_new = false;
-                        while let Ok(data) = physics_data_channel.debug_physics_rx.try_recv() {
-                            debug_physics = data;
-                            got_new = true;
-                        }
-                        if !got_new {
-                            debug_physics.clear();
-                        }
-
-                        // Clear previous debug lines and add new ones
-                        self.render_physics.renderizable_lines.clear();
-                        
-                        for message in &debug_physics {
-                            match message {
-                                DebugPhysicsMessageType::RenderizableLines(lines) => {
-                                    self.render_physics.renderizable_lines.push(lines.clone());
-                                },
-                                DebugPhysicsMessageType::RenderizablePoint(point) => {
-                                },
-                            }
-                        }
-
-                        // Apply physics data to transforms first with smoothing
-                        for (_key, renderizable) in &mut self.renderizable_instances {
-                            if let Some(physics_data) = physics_data.get(&_key.to_string()) {
-                                renderizable.instance.transform.position = physics_data.translation;
-                                renderizable.instance.transform.rotation = nalgebra::Unit::new_normalize(physics_data.rotation);
-                            }
-                        }
-
-                        play.update(&mut self, &input_subsystem, &physics_data_channel.plane_control_tx, &physics_data);
-
-                        // Update instance buffers efficiently - group by model type
-                        let mut model_instances: HashMap<String, Vec<InstanceRaw>> = HashMap::new();
-                        
-                        for (_key, renderizable) in &self.renderizable_instances {
-                            model_instances
-                                .entry(renderizable.model_ref.clone())
-                                .or_insert_with(Vec::new)
-                                .push(renderizable.instance.transform.to_raw());
-                        }
-
-                        // Write all instances for each model type at once
-                        for (model_ref, instances) in model_instances {
-                            if let Some(model) = self.game_models.get(&model_ref) {
-                                if !instances.is_empty() {
-                                    self.queue.write_buffer(&model.instance_buffer, 0, bytemuck::cast_slice(&instances));
-                                }
-                            }
-                        }
-
-                        // lighting update
-                        if let Some(sun) = self.renderizable_instances.get("sun") {
-                            self.light.uniform.position = (sun.instance.transform.position.x, sun.instance.transform.position.y, sun.instance.transform.position.z).into();
-                            match &sun.instance.metadata.lighting {
-                                Some(lighting_data) => {
-                                    self.light.uniform.color = lighting_data.color.into();
-                                },
-                                None => {},
-                            }
-                        }
-
-                        self.queue.write_buffer(&self.light.rendering_data.buffer, 0, bytemuck::cast_slice(&[self.light.uniform]));
-                        // lighting update
-
-                        self.camera.uniform.update_view_proj(&self.camera.camera, &self.camera.projection);
-                        self.queue.write_buffer(&self.camera.buffer, 0, bytemuck::cast_slice(&[self.camera.uniform]));
-                        self.queue.write_buffer(&self.depth_render.near_far_buffer, 0, bytemuck::cast_slice(&[self.depth_render.near_far_uniform]));
+                // Toggle debug rendering with F2 (also shows console)
+                if input_subsystem.is_just_pressed("toggle_debug") {
+                    self.render_physics.visible = !self.render_physics.visible;
+                    if let Err(e) = physics_data_channel.request_data_tx.send(PhysicsCommand::ToggleDebug) {
+                        eprintln!("Failed to send toggle debug command: {}", e);
                     }
-                },
-                GameState::MainMenu => {},
-                GameState::SelectingPlane => {}
+                }
+
+                // Toggle console independently with F3
+                if input_subsystem.is_just_pressed("toggle_console") {
+                    crate::tooling::debug_console::toggle_console();
+                }
+
+                // Toggle physics pause with F12
+                if input_subsystem.is_just_pressed("toggle_pause") {
+                    if let Err(e) = physics_data_channel.request_data_tx.send(PhysicsCommand::TogglePause) {
+                        eprintln!("Failed to send toggle pause command: {}", e);
+                    }
+                }
+
+                // Recibimos los datos del otro thread
+                let physics_data = match physics_data_channel.physics_data_rx.try_recv() {
+                    Ok(data) => data,
+                    Err(_) => HashMap::new(),
+                };
+
+                // Drain all queued debug physics messages, keep only the latest
+                let mut got_new = false;
+                while let Ok(data) = physics_data_channel.debug_physics_rx.try_recv() {
+                    debug_physics = data;
+                    got_new = true;
+                }
+                if !got_new {
+                    debug_physics.clear();
+                }
+
+                // Clear previous debug lines and add new ones
+                self.render_physics.renderizable_lines.clear();
+
+                for message in &debug_physics {
+                    match message {
+                        DebugPhysicsMessageType::RenderizableLines(lines) => {
+                            self.render_physics.renderizable_lines.push(lines.clone());
+                        },
+                        DebugPhysicsMessageType::RenderizablePoint(point) => {
+                        },
+                    }
+                }
+
+                // Apply physics data to transforms first with smoothing
+                for (_key, renderizable) in &mut self.renderizable_instances {
+                    if let Some(physics_data) = physics_data.get(&_key.to_string()) {
+                        renderizable.instance.transform.position = physics_data.translation;
+                        renderizable.instance.transform.rotation = nalgebra::Unit::new_normalize(physics_data.rotation);
+                    }
+                }
+
+                // Tick whichever scene is currently active. The key is captured up front
+                // since FrameContext below borrows app_state mutably.
+                let active_scene_key = app_state.state.clone();
+                let mut ctx = FrameContext {
+                    app_state: &mut app_state,
+                    event_pump: &mut event_pump,
+                    controller: &mut controller,
+                    input_subsystem: &input_subsystem,
+                    plane_control_tx: &physics_data_channel.plane_control_tx,
+                    physics_data: &physics_data,
+                    debug_physics: &debug_physics,
+                };
+                if let Some(scene) = scenes.get_mut(&active_scene_key) {
+                    scene.tick(&mut self, &mut ctx);
+                } else {
+                    eprintln!("No scene registered for state '{}'", active_scene_key);
+                }
+
+                // Update instance buffers efficiently - group by model type
+                let camera_position = self.camera.camera.position.coords;
+                let mut model_instances: HashMap<String, Vec<InstanceRaw>> = HashMap::new();
+
+                for (_key, renderizable) in &self.renderizable_instances {
+                    model_instances
+                        .entry(renderizable.model_ref.clone())
+                        .or_insert_with(Vec::new)
+                        .push(renderizable.instance.transform.to_raw(camera_position));
+                }
+
+                // Write all instances for each model type at once
+                for (model_ref, instances) in model_instances {
+                    if let Some(model) = self.game_models.get(&model_ref) {
+                        if !instances.is_empty() {
+                            self.queue.write_buffer(&model.instance_buffer, 0, bytemuck::cast_slice(&instances));
+                        }
+                    }
+                }
+
+                // lighting update
+                if let Some(sun) = self.renderizable_instances.get("sun") {
+                    // Camera-relative, same as the instance model matrices, since it's
+                    // consumed alongside camera-relative world positions in the shaders.
+                    let relative_light_position = sun.instance.transform.position - camera_position;
+                    self.light.uniform.position = (relative_light_position.x, relative_light_position.y, relative_light_position.z).into();
+                    match &sun.instance.metadata.lighting {
+                        Some(lighting_data) => {
+                            self.light.uniform.color = lighting_data.color.into();
+                        },
+                        None => {},
+                    }
+                }
+
+                self.queue.write_buffer(&self.light.rendering_data.buffer, 0, bytemuck::cast_slice(&[self.light.uniform]));
+                // lighting update
+
+                self.camera.uniform.update_view_proj(&self.camera.camera, &self.camera.projection);
+                self.queue.write_buffer(&self.camera.buffer, 0, bytemuck::cast_slice(&[self.camera.uniform]));
+                self.queue.write_buffer(&self.depth_render.near_far_buffer, 0, bytemuck::cast_slice(&[self.depth_render.near_far_uniform]));
             }
 
             match self.render() {

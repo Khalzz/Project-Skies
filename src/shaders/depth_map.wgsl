@@ -35,8 +35,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let near = u_near_far.x; // Get near value from uniform
     let far = u_near_far.y;   // Get far value from uniform
     
-    // Sample the depth texture
-    let depth = textureSample(t_shadow, s_shadow, in.tex_coords).x;
+    // Sample the depth texture. The buffer is reversed-Z (near = 1.0, far = 0.0),
+    // so flip it back to the standard 0..1 convention the linearization below expects.
+    let depth = 1.0 - textureSample(t_shadow, s_shadow, in.tex_coords).x;
 
     // Linearize the depth value from the depth texture
     let z_ndc = depth * 2.0 - 1.0; // Convert depth back to NDC space (-1 to 1)

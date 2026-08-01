@@ -27,11 +27,10 @@ mod game_nodes {
 
 mod ui {
     pub mod ui_structure;
-    pub mod vertical_container;
     pub mod ui_transform;
     pub mod ui_node;
     pub mod button;
-    pub mod label;
+    pub mod components;
 }
 
 mod audio {
@@ -48,6 +47,7 @@ mod gameplay {
     pub mod wheel;
     pub mod wing;
     pub mod play;
+    pub mod scene;
     pub mod plane {
         pub mod plane;
         pub mod physics_logic;

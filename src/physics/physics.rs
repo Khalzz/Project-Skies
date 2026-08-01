@@ -9,7 +9,6 @@ use crate::rendering::physics_rendering::RenderPhysics;
 use crate::rendering::camera::CameraRenderizable;
 use crate::physics::physics_handler::{Physics, RenderMessage, PhysicsCommand};
 use crate::physics::physics_resources::load_physics_from_level;
-use crate::app::GameState;
 use crate::gameplay::plane::plane::PlaneControls;
 use crate::primitive::manual_vertex::ManualVertex;
 
@@ -26,7 +25,7 @@ pub struct PhysicsDataTransmission {
     pub debug_physics_rx: Receiver<Vec<DebugPhysicsMessageType>>,
 }
 
-pub fn physics_handling(device: &Device, config: &SurfaceConfiguration, camera: &CameraRenderizable, level_path: String, state: GameState) -> PhysicsDataTransmission {
+pub fn physics_handling(device: &Device, config: &SurfaceConfiguration, camera: &CameraRenderizable, level_path: String, should_start: bool) -> PhysicsDataTransmission {
     // Data channels
     let (physics_data_tx, physics_data_rx) = channel::<HashMap<String, RenderMessage>>();
     let (request_data_tx, request_data_rx) = channel::<PhysicsCommand>();
@@ -52,15 +51,12 @@ pub fn physics_handling(device: &Device, config: &SurfaceConfiguration, camera: 
             eprintln!("============================");
         }));
 
-        match state {
-            GameState::Playing => {
-                let mut physics = Physics::new();
-                load_physics_from_level(level_path, &mut physics.collider_set, &mut physics.rigidbody_set, &mut physics.physics_elements);
-                physics.physics_thread(physics_data_tx, request_data_rx, plane_control_rx, debug_physics_tx);
-            },
-            _ => {
-                println!("Physics thread not started");
-            }
+        if should_start {
+            let mut physics = Physics::new();
+            load_physics_from_level(level_path, &mut physics.collider_set, &mut physics.rigidbody_set, &mut physics.physics_elements);
+            physics.physics_thread(physics_data_tx, request_data_rx, plane_control_rx, debug_physics_tx);
+        } else {
+            println!("Physics thread not started");
         }
     });
 

@@ -444,7 +444,7 @@ pub fn load_level(app: &mut App, mut level_path: String) {
                 }
 
                 // Create instance buffer once per model
-                let instance_buffer = create_instance_buffer(&model_instances, &app.device);
+                let instance_buffer = create_instance_buffer(&model_instances, &app.device, app.camera.camera.position.coords);
 
                 for (i, instance_data) in model_instances.iter().enumerate() {
                     match app.game_models.get_mut(model_name) {
@@ -485,9 +485,9 @@ pub fn load_level(app: &mut App, mut level_path: String) {
     }
 }
 
-pub fn create_instance_buffer(instances: &Vec<&GameObject>, device: &Device) -> Buffer {
+pub fn create_instance_buffer(instances: &Vec<&GameObject>, device: &Device, camera_position: Vector3<f32>) -> Buffer {
     let raw_instances: Vec<InstanceRaw> = instances.iter()
-    .map(|instance| instance.transform.to_raw())
+    .map(|instance| instance.transform.to_raw(camera_position))
     .collect();
 
     device.create_buffer_init(

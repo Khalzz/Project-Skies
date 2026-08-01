@@ -68,6 +68,30 @@
             label: "toggle_camera_debug",
             keys: ["F4"]
         ),
+        (
+            label: "trim_pitch_up",
+            keys: ["i"]
+        ),
+        (
+            label: "trim_pitch_down",
+            keys: ["k"]
+        ),
+        (
+            label: "trim_roll_left",
+            keys: ["j"]
+        ),
+        (
+            label: "trim_roll_right",
+            keys: ["l"]
+        ),
+        (
+            label: "trim_yaw_left",
+            keys: ["u"]
+        ),
+        (
+            label: "trim_yaw_right",
+            keys: ["o"]
+        ),
 
     ],
     mouse: (

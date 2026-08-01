@@ -72,20 +72,6 @@ impl AirFoil {
         (cl, cd)
     }
 
-    fn alpha_to_index(&self, alpha: f32) -> usize {
-        // we get the range between the maximum alpha on the data and the minimum
-        let range: f32 = self.max_alpha - self.min_alpha;
-
-        // if the range is 0, means that the max and min alpha are equal in numerical value
-        if range == 0.0 {
-            return 0; // Avoid division by zero
-        }
-        
-        let normalized_alpha = (alpha - self.min_alpha) / range;
-        let scaled_index = (normalized_alpha * (self.data.len() as f32 - 1.0)).round();
-        scaled_index as usize
-    }
-
     fn alpha_to_float_index(&self, alpha: f32) -> f32 {
         let range = self.max_alpha - self.min_alpha;
         if range == 0.0 {

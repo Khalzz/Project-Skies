@@ -4,7 +4,8 @@ use glyphon::{Cache, FontSystem, SwashCache, TextAtlas, TextRenderer};
 use ron::from_str;
 use wgpu::{Buffer, Device, Queue, RenderPipeline, SurfaceConfiguration};
 
-use crate::{rendering::{ui, vertex::VertexUi}, ui::{ui_node::{self, ChildrenType, Visibility}, ui_structure::{self, UiStructure}}};
+use crate::rendering::vertex::VertexUi;
+use crate::ui::ui_structure::UiStructure;
 use crate::ui::ui_node::{UiNode, UiNodeContent};
 
 
@@ -25,11 +26,6 @@ pub struct UiRendering {
     
 }
 
-// this code will make a direct reference to the UI rendering
-pub enum UiContainer {
-    Tagged(HashMap<String, UiNode>),
-    Untagged(Vec<UiNode>)
-}
 
 /// # Ui 
 /// This is the struct defined to mainly create and render ui elements in the screen, contains:
@@ -38,7 +34,7 @@ pub enum UiContainer {
 ///     - **text**: Usable data for text rendering, like font systems, text atrlas, and more... 
 
 pub struct Ui {
-    pub renderizable_elements: HashMap<String, UiContainer>,
+    pub renderizable_elements: HashMap<String, UiNode>,
     pub ui_pipeline: RenderPipeline,
     pub ui_rendering: UiRendering,
     pub text: TextRendering,
@@ -149,20 +145,16 @@ impl Ui {
         }
     }
 
-    pub fn load_ui(&mut self, path: &str, collection: &str, screen_width: u32, screen_height: u32) {
+    pub fn load_ui(&mut self, path: &str, screen_width: u32, screen_height: u32) {
         let ui_structure = self.open_ui(path);
         let sw = screen_width as f32;
         let sh = screen_height as f32;
 
         match ui_structure {
             Some(ui_structure) => {
-                if !self.renderizable_elements.contains_key(collection) {
-                    self.renderizable_elements.insert(collection.to_owned(), UiContainer::Tagged(HashMap::new()));
-                }
-
                 for (id, component) in &ui_structure.children {
                     let node = UiNode::from_component(component, &mut self.text.font_system, sw, sh);
-                    self.add_to_ui(collection.to_owned(), id.clone(), node);
+                    self.renderizable_elements.insert(id.clone(), node);
                 }
             },
             None => {
@@ -190,16 +182,32 @@ impl Ui {
         return None
     }
 
-    pub fn add_to_ui(&mut self, collection: String, id: String, element_to_add: UiNode) {
-        if let Some(static_list) = self.renderizable_elements.get_mut(&collection) {
-            match static_list{
-                UiContainer::Tagged(hash_map) => {
-                    hash_map.insert(id, element_to_add);
-                },
-                UiContainer::Untagged(vec) => {
-                    vec.push(element_to_add)
-                },
-            }
+    pub fn add_to_ui(&mut self, id: String, element_to_add: UiNode) {
+        self.renderizable_elements.insert(id, element_to_add);
+    }
+
+    /// Get a UI node by path. Supports nested access with `/` separator.
+    /// e.g. `"data_box/framerate"` gets the child `framerate` from the container `data_box`.
+    pub fn get_ui_node<'a>(elements: &'a mut HashMap<String, UiNode>, path: &str) -> Option<&'a mut UiNode> {
+        let mut parts = path.splitn(2, '/');
+        let root_key = parts.next()?;
+        let node = elements.get_mut(root_key)?;
+        match parts.next() {
+            Some(rest) => Self::traverse_node(node, rest),
+            None => Some(node),
+        }
+    }
+
+    fn traverse_node<'a>(node: &'a mut UiNode, path: &str) -> Option<&'a mut UiNode> {
+        let mut parts = path.splitn(2, '/');
+        let key = parts.next()?;
+        let child = match &mut node.content {
+            UiNodeContent::Container(container) => container.children.get_mut(key),
+            _ => None,
+        }?;
+        match parts.next() {
+            Some(rest) => Self::traverse_node(child, rest),
+            None => Some(child),
         }
     }
 }

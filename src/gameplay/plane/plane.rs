@@ -7,11 +7,14 @@ pub struct PlaneControls {
     pub elevator: f32,
     pub aileron: f32,
     pub rudder: f32,
+    pub trim_pitch: f32,
+    pub trim_roll: f32,
+    pub trim_yaw: f32,
 }
 
 impl PlaneControls {
     pub fn new() -> Self {
-        Self { throttle: 0.0, elevator: 0.0, aileron: 0.0, rudder: 0.0 }
+        Self { throttle: 0.0, elevator: 0.0, aileron: 0.0, rudder: 0.0, trim_pitch: 0.29, trim_roll: 0.0, trim_yaw: 0.0 }
     }
 }
 
@@ -21,12 +24,13 @@ pub struct Plane {
 
 impl Plane {
     pub fn new() -> Self {
-        Self { controls: PlaneControls { throttle: 0.0, elevator: 0.0, aileron: 0.0, rudder: 0.0 } }
+        Self { controls: PlaneControls { throttle: 0.0, elevator: 0.0, aileron: 0.0, rudder: 0.0, trim_pitch: 0.29, trim_roll: 0.0, trim_yaw: 0.0 } }
     }
 
     pub fn update(&mut self, delta_time: f32, input_subsystem: &InputSubsystem) {
         self.axis_logic(input_subsystem);
         self.throttle_logic(input_subsystem, delta_time);
+        self.trim_logic(input_subsystem, delta_time);
     }
 
     pub fn axis_logic(&mut self, input_subsystem: &InputSubsystem) {
@@ -42,6 +46,28 @@ impl Plane {
 
         if input_subsystem.is_pressed("throttle_down") {
             self.controls.throttle = (self.controls.throttle - 1.0 * delta_time).clamp(0.0, 1.0);
+        }
+    }
+
+    pub fn trim_logic(&mut self, input_subsystem: &InputSubsystem, delta_time: f32) {
+        let trim_speed = 0.5;
+        if input_subsystem.is_pressed("trim_pitch_up") {
+            self.controls.trim_pitch = (self.controls.trim_pitch + trim_speed * delta_time).clamp(-1.0, 1.0);
+        }
+        if input_subsystem.is_pressed("trim_pitch_down") {
+            self.controls.trim_pitch = (self.controls.trim_pitch - trim_speed * delta_time).clamp(-1.0, 1.0);
+        }
+        if input_subsystem.is_pressed("trim_roll_left") {
+            self.controls.trim_roll = (self.controls.trim_roll - trim_speed * delta_time).clamp(-1.0, 1.0);
+        }
+        if input_subsystem.is_pressed("trim_roll_right") {
+            self.controls.trim_roll = (self.controls.trim_roll + trim_speed * delta_time).clamp(-1.0, 1.0);
+        }
+        if input_subsystem.is_pressed("trim_yaw_left") {
+            self.controls.trim_yaw = (self.controls.trim_yaw - trim_speed * delta_time).clamp(-1.0, 1.0);
+        }
+        if input_subsystem.is_pressed("trim_yaw_right") {
+            self.controls.trim_yaw = (self.controls.trim_yaw + trim_speed * delta_time).clamp(-1.0, 1.0);
         }
     }
 }
