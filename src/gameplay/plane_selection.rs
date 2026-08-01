@@ -6,6 +6,7 @@ use glyphon::{cosmic_text::Align, Color};
 use crate::{app::{App, AppState}, transform::Transform, ui::{button, ui_node::{UiNode, UiNodeContent, Visibility}}, utils::lerps::{lerp_quaternion, lerp_vector3}};
 
 use super::controller::Controller;
+use super::scene::{FrameContext, Scene};
 
 pub struct ListOfPlanes {
     list: Vec<String>,
@@ -124,5 +125,15 @@ impl GameLogic {
         let rotated_position = rotation.transform_vector(&relative_position);
     
         rotated_position + pivot
+    }
+}
+
+impl Scene for GameLogic {
+    fn reset(&mut self, app: &mut App) {
+        *self = GameLogic::new(app);
+    }
+
+    fn tick(&mut self, app: &mut App, ctx: &mut FrameContext) {
+        self.update(ctx.app_state, ctx.event_pump, app, ctx.controller);
     }
 }

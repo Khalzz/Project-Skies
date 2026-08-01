@@ -3,11 +3,15 @@ use sdl2::rect::Point;
 use wgpu::{util::DeviceExt, BindGroup, BindGroupLayout, BindGroupLayoutDescriptor, Buffer, Device};
 use std::f32::consts::FRAC_PI_2;
 
+// Maps OpenGL's [-1, 1] NDC z-range to wgpu's [0, 1] range, and reverses it
+// (near -> 1, far -> 0) so depth precision concentrates on distant geometry
+// instead of being wasted right in front of the near plane. Must be paired
+// with CompareFunction::Greater and a depth clear value of 0.0.
 #[rustfmt::skip]
 pub const OPENGL_TO_WGPU_MATRIX: Matrix4<f32> = Matrix4::new(
     1.0, 0.0, 0.0, 0.0,
     0.0, 1.0, 0.0, 0.0,
-    0.0, 0.0, 0.5, 0.5,
+    0.0, 0.0, -0.5, 0.5,
     0.0, 0.0, 0.0, 1.0,
 );
 
@@ -74,6 +78,8 @@ impl CameraRenderizable {
     }
 
     pub fn world_to_screen(&self, pos_world: Point3<f32>, screen_width: u32, screen_height: u32) -> Option<Point> {
+        // view_proj now assumes the camera sits at the origin, so every
+        // position fed into it must first be made camera-relative.
         let camera_to_point = pos_world - self.camera.position;
         let forward = self.camera.calc_forward_direction();
 
@@ -82,7 +88,7 @@ impl CameraRenderizable {
         }
 
         let view_proj = Matrix4::from(self.uniform.view_proj);
-        let pos_homogeneous = view_proj * pos_world.to_homogeneous();
+        let pos_homogeneous = view_proj * Point3::from(camera_to_point).to_homogeneous();
 
         if pos_homogeneous.w != 0.0 {
             let ndc = pos_homogeneous.xyz() / pos_homogeneous.w;
@@ -139,12 +145,17 @@ impl Camera {
         Vector3::new(cos_pitch * cos_yaw, sin_pitch, cos_pitch * sin_yaw).normalize()
     }
 
+    // Builds a view matrix as if the camera were always at the world origin.
+    // Object positions are made relative to the camera before being uploaded
+    // (see Transform::to_raw), so the GPU never has to deal with the large
+    // absolute world coordinates that cause jitter/z-fighting far from (0,0,0).
     pub fn calc_matrix(&self) -> Matrix4<f32> {
         let direction = self.calc_forward_direction();
         let modified_direction = self.rotation_modifier * direction;
         let modified_up = self.rotation_modifier * self.up;
 
-        Matrix4::look_at_rh(&self.position, &(self.position + modified_direction), &modified_up)
+        let origin = Point3::origin();
+        Matrix4::look_at_rh(&origin, &(origin + modified_direction), &modified_up)
     }
 }
 
@@ -196,7 +207,8 @@ impl CameraUniform {
     }
 
     pub fn update_view_proj(&mut self, camera: &Camera, projection: &Projection) {
-        self.view_position = camera.position.to_homogeneous().into();
+        // The camera is always at the origin in the space these matrices operate in.
+        self.view_position = [0.0, 0.0, 0.0, 1.0];
         self.view_proj = (projection.calc_matrix() * camera.calc_matrix()).into();
     }
 }

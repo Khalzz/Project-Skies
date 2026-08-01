@@ -6,9 +6,10 @@ use rand::{rngs::ThreadRng, Rng};
 use rapier3d::prelude::RigidBody;
 use sdl2::{controller::GameController};
 use crate::{app::{App, AppState}, audio::subtitles::Subtitle, input::{input::InputSubsystem, utils::to_axis}, physics::physics_handler::{MetadataType, PhysicsData, RenderMessage}, primitive::manual_vertex::ManualVertex, rendering::{camera::CameraRenderizable, ui::Ui}, transform::Transform, ui::{ui_node::{UiNode, UiNodeContent, Visibility}, ui_transform::UiTransform}, utils::lerps::{lerp, lerp_quaternion}};
-use super::{airfoil::AirFoil, event_handling::EventSystem, plane::plane::Plane, wheel::Wheel, wing::Wing};
+use super::{airfoil::AirFoil, event_handling::EventSystem, plane::plane::Plane, scene::{FrameContext, Scene}, wheel::Wheel, wing::Wing};
 use std::sync::mpsc::Sender;
 use crate::gameplay::plane::plane::PlaneControls;
+use crate::resources::load_level;
 use crate::tooling::debug_console;
 use crate::debug_text;
 
@@ -517,7 +518,7 @@ impl GameLogic {
             let (target_position, target_look_at, target_up) = match self.camera_data.camera_state {
                 CameraState::Normal => {
                     app.camera.projection.znear = 0.1;
-                    let target_pos = player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 0.6, -3.0));
+                    let target_pos = player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 0.6, -45.0));
                     let look_at = player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 0.0, 100.0));
                     (target_pos, look_at, player.instance.transform.rotation * *Vector3::y_axis())
                 },
@@ -630,7 +631,7 @@ impl GameLogic {
                         delta_time * 12.0,
                     ));
 
-                    let target_pos = player.instance.transform.position + (self.camera_data.free_current_rotation * Vector3::new(0.0, 0.0, -5.0));
+                    let target_pos = player.instance.transform.position + (self.camera_data.free_current_rotation * Vector3::new(0.0, 0.0, -45.0));
                     let look_at = player.instance.transform.position;
                     (target_pos, look_at, *Vector3::y_axis())
                 },
@@ -857,5 +858,17 @@ impl GameLogic {
             CameraState::Frontal => self.camera_data.camera_state = CameraState::Normal,
             CameraState::Free => self.camera_data.camera_state = CameraState::Cockpit,
         }
+    }
+}
+
+impl Scene for GameLogic {
+    fn reset(&mut self, app: &mut App) {
+        load_level(app, "./assets/scenes/test_chamber".to_owned());
+        app.ui.load_ui("./assets/ui/game_ui.ron", app.config.width, app.config.height);
+        *self = GameLogic::new(app);
+    }
+
+    fn tick(&mut self, app: &mut App, ctx: &mut FrameContext) {
+        self.update(app, ctx.input_subsystem, ctx.plane_control_tx, ctx.physics_data);
     }
 }

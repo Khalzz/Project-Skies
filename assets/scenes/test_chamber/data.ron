@@ -24,23 +24,23 @@
             id: "player",
             model: "F16/f16.gltf",
             transform: (
-                position: (0.0, 0.5, 0.0),
+                position: (0.0, 100.0, 0.0),
                 rotation: (0.0, 0.0, 0.0),
-                scale: (1.0, 1.0, 1.0),
+                scale: (14.0, 14.0, 14.0),
             ),
             children: [],
             metadata: (
                 cameras: Some({
                     "cockpit": (
-                        position: (0.0, 0.125, 0.97),
+                        position: (0.0, 1.8, 13.5),
                         fov: 70.0,
                     ),
                     "cinematic": (
-                        position: (-0.626, 0.076, -0.628),
+                        position: (-7.626, 1.076, -10.628),
                         fov: 60.0,
                     ),
                     "frontal": (
-                        position: (0.0, 1.0, 3.0),
+                        position: (0.0, 6.0, 30.0),
                         fov: 60.0,
                     ),
                 }),
@@ -49,20 +49,20 @@
                         is_static: false,
                         mass: 8900,
                         center_of_mass: (0.0, 0.0, 0.5),
-                        initial_velocity: (0.0, 0.0, 0.1),
+                        initial_velocity: (0.0, 0.0, 200.4),
                     ),
                     colliders: [
                         Cuboid (
-                            half_extents: (0.1, 0.1, 0.7),
-                            position: (0.0, 0.0, 0.2)
+                            half_extents: (1.4, 1.4, 9.8),
+                            position: (0.0, 0.0, 2.8)
                         ),
                         Cuboid (
-                            half_extents: (0.3, 0.01, 0.2),
-                            position: (0.4, 0.03, 0.2)
+                            half_extents: (4.2, 0.14, 2.8),
+                            position: (6.0, 0.42, 2.8)
                         ),
                         Cuboid (
-                            half_extents: (0.3, 0.01, 0.2),
-                            position: (-0.4, 0.03, 0.2)
+                            half_extents: (4.2, 0.14, 2.8),
+                            position: (-6.0, 0.42, 2.8)
                         ),
                     ]     
                 )),
@@ -72,9 +72,9 @@
             id: "fellow_aviator",
             model: "F14/f14.gltf",
             transform: (
-                position: (10.0, 10.0, 0.0),
+                position: (50.0, 50.0, 0.0),
                 rotation: (0.0, 0.0, 0.0),
-                scale: (1.9, 1.9, 1.9),
+                scale: (19.0, 19.0, 19.0),
             ),
             children: [],
             metadata: (

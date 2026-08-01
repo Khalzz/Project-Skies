@@ -47,6 +47,7 @@ mod gameplay {
     pub mod wheel;
     pub mod wing;
     pub mod play;
+    pub mod scene;
     pub mod plane {
         pub mod plane;
         pub mod physics_logic;

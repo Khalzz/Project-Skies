@@ -23,9 +23,9 @@ pub struct PlanePhysicsLogic {
 impl PlanePhysicsLogic {
     pub fn new() -> Self {
         let wheels = vec![
-            Wheel::new("wheel-f".to_string(), vector![0.0, 0.0, 0.7], 0.4, 300000.0, 50000.0),
-            Wheel::new("wheel-lb".to_string(), vector![-0.1, 0.0, 0.0], 0.3, 100000.0, 20000.0),
-            Wheel::new("wheel-rb".to_string(), vector![0.1, 0.0, 0.0], 0.3, 100000.0, 20000.0)
+            Wheel::new("wheel-f".to_string(), vector![0.0, 0.0, 9.8], 4.2, 100000.0, 50000.0),
+            Wheel::new("wheel-lb".to_string(), vector![-1.4, 0.0, 0.0], 4.2, 500000.0, 50000.0),
+            Wheel::new("wheel-rb".to_string(), vector![1.4, 0.0, 0.0], 4.2, 500000.0, 50000.0)
         ];
 
         // load airfoil:
@@ -34,11 +34,11 @@ impl PlanePhysicsLogic {
 
         // i have to also add left and right ailerons
         let wings = vec![
-            Wing::new("Left wing".to_string(), vector![0.4, 0.0, 0.1], 16.5, 0.0, naca_2412.clone(), vector![1.0,0.0, 0.0], true, false, 4.0, 500_000.0), // left wing (+4° incidence, includes LEX area)
-            Wing::new("Right wing".to_string(), vector![-0.4, 0.0, 0.1], 16.5, 0.0, naca_2412.clone(), vector![1.0, 0.0, 0.0], true, false, 4.0, 500_000.0), // right wing (+4° incidence, includes LEX area)
-            Wing::new("Right elevator wing".to_string(), vector![0.3, 0.0, -0.5], 2.70, 0.0, naca_0012.clone(), vector![1.0, 0.0, 0.0], false, false, 0.0, 120_000.0), // right elevator wing
-            Wing::new("Left elevator wing".to_string(), vector![-0.3, 0.0, -0.5], 2.70, 0.0, naca_0012.clone(), vector![1.0, 0.0, 0.0], false, false, 0.0, 120_000.0), // left elevator wing
-            Wing::new("Rudder wing".to_string(), vector![0.0, 0.3, -0.8], 1.70, 0.0, naca_0012.clone(), vector![0.0, 1.0, 0.0], false, true, 0.0, 200_000.0) // rudder wing
+            Wing::new("Left wing".to_string(), vector![5.6, 0.0, 1.4], 16.5, 0.0, naca_2412.clone(), vector![1.0,0.0, 0.0], true, false, 4.0, 500_000.0), // left wing (+4° incidence, includes LEX area)
+            Wing::new("Right wing".to_string(), vector![-5.6, 0.0, 1.4], 16.5, 0.0, naca_2412.clone(), vector![1.0, 0.0, 0.0], true, false, 4.0, 500_000.0), // right wing (+4° incidence, includes LEX area)
+            Wing::new("Right elevator wing".to_string(), vector![4.2, 0.0, -7.0], 2.70, 0.0, naca_0012.clone(), vector![1.0, 0.0, 0.0], false, false, -1.5, 120_000.0), // right elevator wing (-5° trim to counter the main wings' +4° incidence pitching the nose up at cruise)
+            Wing::new("Left elevator wing".to_string(), vector![-4.2, 0.0, -7.0], 2.70, 0.0, naca_0012.clone(), vector![1.0, 0.0, 0.0], false, false, -1.5, 120_000.0), // left elevator wing (-5° trim to counter the main wings' +4° incidence pitching the nose up at cruise)
+            Wing::new("Rudder wing".to_string(), vector![0.0, 4.2, -11.2], 1.70, 0.0, naca_0012.clone(), vector![0.0, 1.0, 0.0], false, true, 0.0, 200_000.0) // rudder wing
         ];
 
         Self {

@@ -94,8 +94,12 @@ impl Wing {
             let drag_force = rigidbody.rotation() * (-velocity_dir_local * dynamic_pressure * self.wing_area * drag_coefficient);
 
             // Angular damping: resist pitch/roll oscillation proportional to angular velocity
-            // The wing's angular velocity contribution creates a local AoA change that opposes rotation
-            let damping_coefficient = 5000.0;
+            // The wing's angular velocity contribution creates a local AoA change that opposes rotation.
+            // This torque scales with pressure_center distance squared (once via the velocity-at-point
+            // cross product, once via the lever arm it's applied at), while rotational inertia doesn't
+            // grow nearly as fast — so this constant needs to shrink to match whatever pressure_center
+            // distances the wings are actually placed at, or roll ends up massively over-damped.
+            let damping_coefficient = 235.0;
             let angular_vel = rigidbody.angvel();
             let arm = rigidbody.rotation() * self.pressure_center;
             let damping_velocity = angular_vel.cross(&arm);
