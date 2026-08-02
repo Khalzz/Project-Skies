@@ -139,7 +139,7 @@ pub async fn _load_model_glb(file_name: &str, device: &wgpu::Device, queue: &wgp
     let mut mesh_lists = HashMap::new();
     for scene in gltf.scenes() {
         for node in scene.nodes() {
-            traverse_node(node, &buffer_data, device, queue, transform_bind_group_layout, &mut mesh_lists, file_name, None)?;
+            traverse_node(node, &buffer_data, device, queue, transform_bind_group_layout, &mut mesh_lists, file_name, None, materials.len())?;
         }
     }
 
@@ -268,11 +268,40 @@ pub async fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgp
         };
     }
 
+    // Primitives with no material assigned (valid glTF - it means "use the default material")
+    // fall back to this plain white material so they still render instead of indexing out of bounds.
+    let default_material_index = materials.len();
+    let default_texture = Texture::from_image(
+        &::image::DynamicImage::ImageRgba8(::image::RgbaImage::from_pixel(1, 1, ::image::Rgba([255, 255, 255, 255]))),
+        device,
+        queue,
+        Some("default_texture"),
+    ).expect("Couldn't create default texture");
+    let default_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        layout: &bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&default_texture.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&default_texture.sampler),
+            },
+        ],
+        label: Some("default_material_bind_group"),
+    });
+    materials.push(model::Material {
+        name: "Default Material".to_string(),
+        diffuse_texture: default_texture,
+        bind_group: default_bind_group,
+    });
+
     let mut mesh_lists = HashMap::new();
 
     for scene in gltf.scenes() {
         for node in scene.nodes() {
-            traverse_node(node, &buffer_data, device, queue, transform_bind_group_layout, &mut mesh_lists, file_name, None)?;
+            traverse_node(node, &buffer_data, device, queue, transform_bind_group_layout, &mut mesh_lists, file_name, None, default_material_index)?;
         }
     }
 
@@ -282,7 +311,7 @@ pub async fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgp
     })
 }
 
-fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::Device, queue: &wgpu::Queue, transform_bind_group_layout: &wgpu::BindGroupLayout, mesh_lists: &mut HashMap<String, HashMap<String, Mesh>>, file_name: &str, parent_transform: Option<([f32; 3], [f32; 4], [f32; 3])>) -> anyhow::Result<()> {
+fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::Device, queue: &wgpu::Queue, transform_bind_group_layout: &wgpu::BindGroupLayout, mesh_lists: &mut HashMap<String, HashMap<String, Mesh>>, file_name: &str, parent_transform: Option<([f32; 3], [f32; 4], [f32; 3])>, default_material_index: usize) -> anyhow::Result<()> {
         let mesh = node.mesh().expect("Got mesh");
         let primitives = mesh.primitives();
         primitives.for_each(|primitive| {
@@ -370,7 +399,7 @@ fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::D
                 vertex_buffer,
                 index_buffer,
                 num_elements: indices.len() as u32,
-                material: primitive.material().index().unwrap_or(0),
+                material: primitive.material().index().unwrap_or(default_material_index),
                 transform_buffer,
                 transform_bind_group,
                 transform,
@@ -387,7 +416,7 @@ fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::D
             
         });
     for child in node.children() {
-        traverse_node(child, buffer_data, device, queue, transform_bind_group_layout, mesh_lists, file_name, Some(node.transform().decomposed()))?;
+        traverse_node(child, buffer_data, device, queue, transform_bind_group_layout, mesh_lists, file_name, Some(node.transform().decomposed()), default_material_index)?;
     }
 
     Ok(())

@@ -21,6 +21,18 @@
             ),
         ),
         (
+            id: "ground",
+            model: "ground/ground.gltf",
+            transform: (
+                position: ( 0.0, 0.0, 0.0 ),
+                rotation: ( 0.0, 0.0, 0.0 ),
+                scale: ( 100000.0, 100000.0, 100000.0 ),
+            ),
+            children: [],
+            metadata: (
+            ),
+        ),
+        (
             id: "player",
             model: "F16/f16.gltf",
             transform: (

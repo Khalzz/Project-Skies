@@ -107,7 +107,7 @@ impl App<'_> {
         env::set_var("SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS", "0");
 
         // Create window in windowed mode first to avoid device loss
-        let mut window: Window = video_susbsystem.window(title, width, height as u32).build().expect("The window wasn't created");
+        let mut window: Window = video_susbsystem.window(title, width, height as u32).metal_view().build().expect("The window wasn't created");
         
         let instance = wgpu::Instance::new(&InstanceDescriptor::default());
         let surface = unsafe {
