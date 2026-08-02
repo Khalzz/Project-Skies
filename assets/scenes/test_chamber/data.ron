@@ -22,11 +22,11 @@
         ),
         (
             id: "ground",
-            model: "ground/ground.gltf",
+            model: "ground/ground.glb",
             transform: (
                 position: ( 0.0, 0.0, 0.0 ),
                 rotation: ( 0.0, 0.0, 0.0 ),
-                scale: ( 100000.0, 100000.0, 100000.0 ),
+                scale: ( 30000.0, 30000.0, 30000.0 ),
             ),
             children: [],
             metadata: (

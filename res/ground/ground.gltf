@@ -1,6 +1,6 @@
 {
 	"asset":{
-		"generator":"Khronos glTF Blender I/O v5.0.21",
+		"generator":"Khronos glTF Blender I/O v4.4.56",
 		"version":"2.0"
 	},
 	"scene":0,
@@ -18,6 +18,19 @@
 			"name":"Plane"
 		}
 	],
+	"materials":[
+		{
+			"doubleSided":true,
+			"name":"Material",
+			"pbrMetallicRoughness":{
+				"baseColorTexture":{
+					"index":0
+				},
+				"metallicFactor":0,
+				"roughnessFactor":0.5
+			}
+		}
+	],
 	"meshes":[
 		{
 			"name":"Plane",
@@ -28,16 +41,30 @@
 						"NORMAL":1,
 						"TEXCOORD_0":2
 					},
-					"indices":3
+					"indices":3,
+					"material":0
 				}
 			]
+		}
+	],
+	"textures":[
+		{
+			"sampler":0,
+			"source":0
+		}
+	],
+	"images":[
+		{
+			"mimeType":"image/png",
+			"name":"Material Base Color",
+			"uri":"Material%20Base%20Color.png"
 		}
 	],
 	"accessors":[
 		{
 			"bufferView":0,
 			"componentType":5126,
-			"count":40804,
+			"count":40834,
 			"max":[
 				1,
 				0.11933338642120361,
@@ -53,13 +80,13 @@
 		{
 			"bufferView":1,
 			"componentType":5126,
-			"count":40804,
+			"count":40834,
 			"type":"VEC3"
 		},
 		{
 			"bufferView":2,
 			"componentType":5126,
-			"count":40804,
+			"count":40834,
 			"type":"VEC2"
 		},
 		{
@@ -72,32 +99,38 @@
 	"bufferViews":[
 		{
 			"buffer":0,
-			"byteLength":489648,
+			"byteLength":490008,
 			"byteOffset":0,
 			"target":34962
 		},
 		{
 			"buffer":0,
-			"byteLength":489648,
-			"byteOffset":489648,
+			"byteLength":490008,
+			"byteOffset":490008,
 			"target":34962
 		},
 		{
 			"buffer":0,
-			"byteLength":326432,
-			"byteOffset":979296,
+			"byteLength":326672,
+			"byteOffset":980016,
 			"target":34962
 		},
 		{
 			"buffer":0,
 			"byteLength":122412,
-			"byteOffset":1305728,
+			"byteOffset":1306688,
 			"target":34963
+		}
+	],
+	"samplers":[
+		{
+			"magFilter":9729,
+			"minFilter":9987
 		}
 	],
 	"buffers":[
 		{
-			"byteLength":1428140,
+			"byteLength":1429100,
 			"uri":"ground.bin"
 		}
 	]

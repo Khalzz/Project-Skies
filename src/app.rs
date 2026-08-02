@@ -16,6 +16,7 @@ use crate::rendering::instance_management::{InstanceData, InstanceRaw, ModelData
 use crate::rendering::physics_rendering::RenderPhysics;
 use crate::rendering::depth_renderer::DepthRender;
 use crate::rendering::camera::CameraRenderizable;
+use crate::rendering::skybox_renderer::SkyboxRender;
 use crate::rendering::textures::Texture;
 use crate::game_nodes::timing::Timing;
 use crate::rendering::rendering_utils;
@@ -25,6 +26,7 @@ use crate::rendering::model::{self, DrawModel, Vertex};
 use crate::gameplay::{main_menu, plane_selection, play};
 use crate::gameplay::scene::{Scene, ScenePool, FrameContext};
 use crate::input::input::InputSubsystem;
+use crate::resources;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -63,6 +65,8 @@ pub struct App<'a> {
     pub camera: CameraRenderizable,
     pub depth_texture: Texture,
     pub depth_render: DepthRender,
+    // None when res/skybox/ isn't present - the scene just falls back to the plain clear color.
+    pub skybox: Option<SkyboxRender>,
     pub show_depth_map: bool,
     pub controller_subsystem: GameControllerSubsystem,
     pub joystick_subsystem: JoystickSubsystem,
@@ -249,6 +253,25 @@ impl App<'_> {
         let game_models = HashMap::new();
         let depth_render = DepthRender::new(&device, &config);
 
+        // Only build a skybox if res/skybox/ (with px/nx/py/ny/pz/nz face images) was provided -
+        // otherwise the scene just falls back to the plain clear color, no placeholder.
+        let skybox_dir = std::path::Path::new(env!("OUT_DIR")).join("res").join("skybox");
+        let skybox = if skybox_dir.is_dir() {
+            match resources::load_texture_cube(
+                ["skybox/px.png", "skybox/nx.png", "skybox/py.png", "skybox/ny.png", "skybox/pz.png", "skybox/nz.png"],
+                &device,
+                &queue,
+            ).await {
+                Ok(texture) => Some(SkyboxRender::new(&device, &config, &camera, texture)),
+                Err(err) => {
+                    eprintln!("res/skybox/ was found but its faces couldn't be loaded, skipping skybox: {err}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // physics rendering
         let render_physics = RenderPhysics::new(&device, &config, &camera);
 
@@ -274,6 +297,7 @@ impl App<'_> {
             camera,
             depth_texture,
             depth_render,
+            skybox,
             show_depth_map: false,
             controller_subsystem,
             joystick_subsystem,
@@ -382,6 +406,10 @@ impl App<'_> {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
+
+            if let Some(skybox) = &self.skybox {
+                skybox.render(&mut render_pass, &self.camera.bind_group);
+            }
 
             render_pass.set_pipeline(&self.render_pipeline);
 

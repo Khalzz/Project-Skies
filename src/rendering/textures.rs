@@ -184,4 +184,78 @@ impl Texture {
 
         Ok(Self { texture, view, sampler })
     }
+
+    /// Builds a single texture_cube from 6 already-decoded face images, in the
+    /// standard +X, -X, +Y, -Y, +Z, -Z order.
+    pub fn from_cube_images(images: [DynamicImage; 6], device: &Device, queue: &Queue, label: &str) -> Result<Self> {
+        let dimensions = images[0].dimensions();
+
+        let texture_size = Extent3d {
+            width: dimensions.0,
+            height: dimensions.1,
+            depth_or_array_layers: 6,
+        };
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        for (face_index, image) in images.iter().enumerate() {
+            let rgba = image.to_rgba8();
+            queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: 0, y: 0, z: face_index as u32 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &rgba,
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * dimensions.0),
+                    rows_per_image: Some(dimensions.1),
+                },
+                Extent3d { width: dimensions.0, height: dimensions.1, depth_or_array_layers: 1 },
+            );
+        }
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some(label),
+            dimension: Some(wgpu::TextureViewDimension::Cube),
+            array_layer_count: Some(6),
+            ..Default::default()
+        });
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        Ok(Self { texture, view, sampler })
+    }
+
+    /// Decodes 6 encoded face images (PNG/JPEG bytes, +X, -X, +Y, -Y, +Z, -Z order) into a cube texture.
+    pub fn from_cube_bytes(bytes: [&[u8]; 6], device: &Device, queue: &Queue, label: &str) -> Result<Self> {
+        let images = [
+            image::load_from_memory(bytes[0])?,
+            image::load_from_memory(bytes[1])?,
+            image::load_from_memory(bytes[2])?,
+            image::load_from_memory(bytes[3])?,
+            image::load_from_memory(bytes[4])?,
+            image::load_from_memory(bytes[5])?,
+        ];
+        Self::from_cube_images(images, device, queue, label)
+    }
 }

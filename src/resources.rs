@@ -1,4 +1,4 @@
-use std::{collections::HashMap, io::{BufReader, Cursor}, path::Path};
+use std::{collections::HashMap, path::Path};
 use gltf::{image,  Gltf};
 use nalgebra::{vector, Quaternion, Unit, Vector3};
 use rapier3d::prelude::{ColliderBuilder, RigidBodyBuilder};
@@ -7,13 +7,6 @@ use tokio::task;
 use wgpu::{util::DeviceExt, Buffer, Device};
 
 use crate::{app::App, game_nodes::{game_object::{self, GameObject}, scene::Scene}, rendering::{instance_management::{InstanceData, InstanceRaw, ModelDataInstance}, model::{self, Mesh, Model, ModelVertex}, textures::Texture}, transform::Transform};
-
-pub async fn load_string(file_name: &str) -> anyhow::Result<String> {
-    let path = std::path::Path::new(env!("OUT_DIR")).join("res").join(file_name);
-    let txt = std::fs::read_to_string(path).unwrap();
-
-    Ok(txt)
-}
 
 pub async fn load_binary(file_name: &str) -> anyhow::Result<Vec<u8>> {
     let path = std::path::Path::new(env!("OUT_DIR"))
@@ -28,130 +21,21 @@ pub async fn load_texture(file_name: &str, device: &wgpu::Device, queue: &wgpu::
     Texture::from_bytes(&data, device, queue, file_name)
 }
 
-pub async fn _load_model_glb(file_name: &str, device: &wgpu::Device, queue: &wgpu::Queue, transform_bind_group_layout: &wgpu::BindGroupLayout) -> anyhow::Result<Model> {
-    let glb_data = load_binary(file_name).await.unwrap();
-    let gltf = Gltf::from_slice(&glb_data).unwrap();
-
-    // Load buffers from the binary data
-    let mut buffer_data = Vec::new();
-    for buffer in gltf.buffers() {
-        match buffer.source() {
-            gltf::buffer::Source::Bin => {
-                if let Some(blob) = gltf.blob.as_deref() {
-                    buffer_data.push(blob.to_vec());
-                }
-            }
-            gltf::buffer::Source::Uri(uri) => {
-                let bin = load_binary(uri).await?;
-                buffer_data.push(bin);
-            }
-        }
+/// Loads a skybox cubemap from 6 face image files, in +X, -X, +Y, -Y, +Z, -Z order.
+pub async fn load_texture_cube(file_names: [&str; 6], device: &wgpu::Device, queue: &wgpu::Queue) -> anyhow::Result<Texture> {
+    let mut face_bytes: Vec<Vec<u8>> = Vec::with_capacity(6);
+    for file_name in file_names {
+        face_bytes.push(load_binary(file_name).await?);
     }
-
-    // Load materials
-    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    multisampled: false,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            },
-        ],
-        label: Some("texture_bind_group_layout"),
-    });
-            
-    let mut materials = Vec::new();
-    for material in gltf.materials() {
-        let pbr = material.pbr_metallic_roughness();
-        let texture_source = &pbr.base_color_texture()
-            .map(|tex| tex.texture().source().source())
-            .expect("texture");
-
-        match texture_source {
-            gltf::image::Source::View { view, .. } => {
-                let diffuse_texture = Texture::from_bytes(
-                    &buffer_data[view.buffer().index()],
-                    device,
-                    queue,
-                    file_name,
-                )
-                .expect("Couldn't load diffuse");
-
-                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    layout: &bind_group_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&diffuse_texture.view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&diffuse_texture.sampler),
-                        },
-                    ],
-                    label: None,
-                });
-
-                materials.push(model::Material {
-                    name: material.name().unwrap_or("Default Material").to_string(),
-                    diffuse_texture,
-                    bind_group,
-                });
-            }
-            image::Source::Uri { uri, mime_type: _ } => {
-                let diffuse_texture = load_texture(uri, device, queue).await?;
-
-                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    layout: &bind_group_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&diffuse_texture.view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&diffuse_texture.sampler),
-                        },
-                    ],
-                    label: None,
-                });
-
-                materials.push(model::Material {
-                    name: material.name().unwrap_or("Default Material").to_string(),
-                    diffuse_texture,
-                    bind_group,
-                });
-            }
-        };
-    }
-
-    let mut mesh_lists = HashMap::new();
-    for scene in gltf.scenes() {
-        for node in scene.nodes() {
-            traverse_node(node, &buffer_data, device, queue, transform_bind_group_layout, &mut mesh_lists, file_name, None, materials.len())?;
-        }
-    }
-
-    Ok(model::Model { mesh_lists, materials })
+    let face_slices: [&[u8]; 6] = std::array::from_fn(|i| face_bytes[i].as_slice());
+    Texture::from_cube_bytes(face_slices, device, queue, "skybox_cube_texture")
 }
 
 pub async fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgpu::Queue, transform_bind_group_layout: &wgpu::BindGroupLayout) -> anyhow::Result<Model> {
-    
-    let gltf_text = load_string(file_name).await.unwrap();
-    let gltf_cursor = Cursor::new(gltf_text);
-    let gltf_reader = BufReader::new(gltf_cursor);
-    let gltf = Gltf::from_reader(gltf_reader).unwrap();
+    // Gltf::from_slice auto-detects the format from the header, so this handles
+    // both text .gltf (JSON) and binary .glb files.
+    let gltf_data = load_binary(file_name).await?;
+    let gltf = Gltf::from_slice(&gltf_data).unwrap();
 
     // Load buffers
     let mut buffer_data = Vec::new();
@@ -197,19 +81,62 @@ pub async fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgp
     let mut materials = Vec::new();
     for material in gltf.materials() {
         let pbr = material.pbr_metallic_roughness();
-        let _base_color_texture = &pbr.base_color_texture();
 
-        let texture_source = &pbr
+        let texture_source = pbr
             .base_color_texture()
-            .map(|tex| {
-                tex.texture().source().source()
-            })
-            .expect("texture");
+            .map(|tex| tex.texture().source().source());
+
+        let Some(texture_source) = texture_source else {
+            // No base color texture assigned (e.g. a flat-color/procedural material) -
+            // fall back to a solid-color texture built from the material's base_color_factor.
+            let [r, g, b, a] = pbr.base_color_factor();
+            let solid_texture = Texture::from_image(
+                &::image::DynamicImage::ImageRgba8(::image::RgbaImage::from_pixel(
+                    1,
+                    1,
+                    ::image::Rgba([
+                        (r * 255.0) as u8,
+                        (g * 255.0) as u8,
+                        (b * 255.0) as u8,
+                        (a * 255.0) as u8,
+                    ]),
+                )),
+                device,
+                queue,
+                Some("solid_color_texture"),
+            ).expect("Couldn't create solid color texture");
+
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                layout: &bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&solid_texture.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&solid_texture.sampler),
+                    },
+                ],
+                label: None,
+            });
+
+            materials.push(model::Material {
+                name: material.name().unwrap_or("Default Material").to_string(),
+                diffuse_texture: solid_texture,
+                bind_group,
+            });
+
+            continue;
+        };
 
         match texture_source {
             gltf::image::Source::View { view, .. } => {
+                    let buffer = &buffer_data[view.buffer().index()];
+                    let start = view.offset();
+                    let end = start + view.length();
                     let diffuse_texture = Texture::from_bytes(
-                        &buffer_data[view.buffer().index()],
+                        &buffer[start..end],
                         device,
                         queue,
                         file_name,
