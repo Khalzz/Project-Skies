@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo run *)",
+      "Bash(cargo build *)",
+      "Bash(cargo tree *)",
+      "Bash(cargo search *)",
+      "Bash(curl -s https://crates.io/api/v1/crates/glyphon)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\([v['num'] for v in d['versions'][:15]]\\)\")",
+      "Bash(cargo update *)",
+      "Bash(tee /private/tmp/claude-501/-Users-khalz-Desktop-project-skies/87b829bf-7b7c-4a67-84a4-099e5b4d5b2f/scratchpad/build2.log)",
+      "Bash(python3 -c ' *)",
+      "Bash(curl -s https://crates.io/api/v1/crates/glyphon/versions)",
+      "Bash(curl -sv https://crates.io/api/v1/crates/glyphon/versions)",
+      "Bash(tee /private/tmp/claude-501/-Users-khalz-Desktop-project-skies/87b829bf-7b7c-4a67-84a4-099e5b4d5b2f/scratchpad/build3.log)",
+      "Bash(tee /private/tmp/claude-501/-Users-khalz-Desktop-project-skies/87b829bf-7b7c-4a67-84a4-099e5b4d5b2f/scratchpad/build4.log)",
+      "Bash(brew list *)",
+      "Bash(brew --prefix sdl2)",
+      "Read(//opt/homebrew/**)",
+      "Bash(mkdir -p /Users/khalz/Desktop/project-skies/.cargo)"
+    ],
+    "additionalDirectories": [
+      "/Users/khalz/Desktop/project-skies"
+    ]
+  }
+}

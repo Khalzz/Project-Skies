@@ -7,7 +7,7 @@ edition = "2021"
 [dependencies]
 sdl2 = {version = "*", default-features = false, features = ["raw-window-handle" ]}
 winit = "0.30.11"
-wgpu = "*"
+wgpu = "25"
 tokio = { version = "*", features = ["full"] }
 bytemuck = { version = "*", features = [ "derive" ] }
 image = { version = "*", default-features = false, features = ["png", "jpeg"] }
@@ -15,7 +15,7 @@ anyhow = "*"
 fs_extra = "*"
 glob = "*"
 rand = "0.8"
-glyphon = "*"
+glyphon = "0.9"
 rodio = "*"
 
 # Physics
@@ -27,9 +27,9 @@ serde = { version = "1.0", features = ["derive"] }
 ron = "*"
 
 # Tooling
-egui = "*"
-eframe = "*"
-egui_plot = "*"
+egui = "0.32"
+eframe = "0.32"
+egui_plot = "0.33"
 
 [dependencies.gltf]
 version = "1.4"
