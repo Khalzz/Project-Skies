@@ -75,6 +75,7 @@ mod rendering {
     pub mod textures;
     pub mod vertex;
     pub mod camera;
+    pub mod skybox_renderer;
     pub mod model;
     pub mod light;
     pub mod ui;
