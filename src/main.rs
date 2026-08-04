@@ -1,101 +1,39 @@
+use std::collections::HashMap;
+
 use app::App;
-use winit::{dpi::PhysicalSize, event::{Event, WindowEvent}, event_loop::{ControlFlow, EventLoop}};
+use game::{play, plane_selection};
+use engine::scene_manager::scene::{GameState, SceneManager, ScenePool};
 
 mod app;
 mod transform;
 mod resources;
 
-mod input {
-    pub mod pressable;
-    pub mod input;
-    pub mod mouse;
-    pub mod utils;
-}
+// Generic, game-agnostic infrastructure - reusable across different games.
+// Each directory declares its own children in its own file (see src/engine.rs,
+// src/engine/rendering.rs, etc.) instead of one tree here.
+pub mod engine;
 
-mod physics {
-    pub mod physics_resources;
-    pub mod physics_handler;
-    pub mod physics;
-}
-
-mod game_nodes {
-    pub mod game_object_2d;
-    pub mod game_object;
-    pub mod timing;
-    pub mod scene;
-}
-
-mod ui {
-    pub mod ui_structure;
-    pub mod ui_transform;
-    pub mod ui_node;
-    pub mod button;
-    pub mod components;
-}
-
-mod audio {
-    pub mod subtitles;
-    pub mod audio;
-}
-
-mod gameplay {
-    pub mod event_handling;
-    pub mod plane_selection;
-    pub mod controller;
-    pub mod main_menu;
-    pub mod airfoil;
-    pub mod wheel;
-    pub mod wing;
-    pub mod play;
-    pub mod scene;
-    pub mod plane {
-        pub mod plane;
-        pub mod physics_logic;
-        pub mod flight_system;
-        pub mod utils;
-    }
-}
-
-mod tooling {
-    pub mod tooling_manager;
-    pub mod base_frame;
-    pub mod debug_console;
-}
-
-mod primitive {
-    pub mod manual_vertex;
-}
-
-mod rendering {
-    pub mod instance_management;
-    pub mod physics_rendering;
-    pub mod rendering_utils;
-    pub mod depth_renderer;
-    pub mod render_line;
-    pub mod textures;
-    pub mod vertex;
-    pub mod camera;
-    pub mod skybox_renderer;
-    pub mod model;
-    pub mod light;
-    pub mod ui;
-}
-
-mod utils {
-    pub mod lerps;
-}
+// This game's own content - scenes, gameplay logic, flight model. Everything
+// here is specific to this game, not reusable engine machinery. Each directory
+// declares its own children in its own file (see src/game.rs, src/game/play.rs,
+// etc.) instead of one tree here, so adding a file means editing the file next
+// to it, not this one.
+pub mod game;
 
 // this tokio trait means that main WILL AND CAN be asyncronous (without tokio this is not achievable)
 #[tokio::main]
 async fn main() -> Result<(), String> {
-    let result = tooling::tooling_manager::tooling_handling();
+    // Game Tooling
+    match App::new("Pankarta Software", None, None).await {
+        Ok(mut app) => {
+            let mut scenes: ScenePool = HashMap::new();
+            scenes.insert(GameState::Playing, Box::new(play::play::GameLogic::new(&mut app)));
+            scenes.insert(GameState::SelectingPlane, Box::new(plane_selection::plane_selection::GameLogic::new(&mut app)));
 
-    if result.should_play {
-        // Game Tooling
-        match App::new("Pankarta Software", None, None).await {
-            Ok(app) => app.update(),
-            Err(err) => eprintln!("Something went wrong in the definition of the app: {}", err), 
-        }
+            app.scene_manager = SceneManager::new(scenes, GameState::Playing);
+            app.run();
+        },
+        Err(err) => eprintln!("Something went wrong in the definition of the app: {}", err),
     }
 
     Ok(())

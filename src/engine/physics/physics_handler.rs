@@ -1,0 +1,259 @@
+use rapier3d::prelude::{CCDSolver, ColliderSet, CollisionPipeline, DefaultBroadPhase, ImpulseJointSet, IntegrationParameters, IslandManager, MultibodyJointSet, NarrowPhase, PhysicsPipeline, QueryPipeline, RigidBodySet};
+use nalgebra:: {Quaternion, Vector3};
+use std::collections::HashMap;
+use rapier3d::prelude::{ColliderHandle, RigidBodyHandle};
+use std::sync::mpsc::{Sender, Receiver};
+use std::thread;
+use std::time::{Duration, Instant};
+use crate::game::play::plane::plane::{Plane, PlaneControls};
+use crate::game::play::plane::physics::wheels::wheel::WheelData;
+use serde::{Deserialize, Serialize};
+use crate::engine::physics::physics::DebugPhysicsMessageType;
+
+#[derive(Debug, Clone)]
+pub struct ColliderDebugData {
+    pub half_extents: Vector3<f32>,
+    pub local_offset: Vector3<f32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WingDebugData {
+    pub pressure_center: Vector3<f32>,
+    pub last_lift_force: Vector3<f32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SuspensionDebugData {
+    pub local_origin: Vector3<f32>,
+    pub local_wheel: Vector3<f32>,
+}
+
+#[derive(Debug, Clone)]
+pub enum MetadataType {
+    Translation(Vector3<f32>),
+    Rotation(Quaternion<f32>),
+    Wheels(HashMap<String, WheelData>),
+    Colliders(Vec<ColliderDebugData>),
+    Wings(Vec<WingDebugData>),
+    Suspensions(Vec<SuspensionDebugData>),
+}
+
+pub struct RenderMessage {
+    pub translation: Vector3<f32>,
+    pub rotation: Quaternion<f32>,
+    pub linvel: Vector3<f32>,
+    pub metadata: HashMap<String, MetadataType>
+}
+
+#[derive(Debug)]
+pub enum PhysicsCommand {
+    RequestData,      // Main thread requests physics data
+    Shutdown,         // Main thread signals shutdown
+    ToggleDebug,      // Toggle debug rendering
+    TogglePause,      // Toggle physics pause
+}
+
+pub struct PhysicsData {
+    pub rigidbody_handle: RigidBodyHandle,
+    pub collider_handles: Vec<ColliderHandle>,
+    pub metadata: HashMap<String, MetadataType>
+}
+
+/// Per-tick physics behavior, supplied by whichever scene wants physics (see
+/// Scene::physics) - this generic engine module doesn't know or care what kind of
+/// gameplay object is being simulated, only that something implements this.
+pub trait PhysicsTick {
+    fn tick(
+        &mut self,
+        controls: &PlaneControls,
+        collider_set: &ColliderSet,
+        rigidbody_set: &mut RigidBodySet,
+        query_pipeline: &QueryPipeline,
+        physics_elements: &mut HashMap<String, Option<PhysicsData>>,
+        debug_physics_tx: &Sender<Vec<DebugPhysicsMessageType>>,
+        delta_time: f32,
+    );
+
+    /// Toggles whatever debug visualization this tick implementation has (F2).
+    fn toggle_debug_rendering(&mut self);
+
+    /// Debug lines to forward to the render thread, refreshed each tick that sends data.
+    fn debug_lines(&self) -> &[DebugPhysicsMessageType];
+}
+
+pub struct Physics {
+    pub physics_pipeline: PhysicsPipeline,
+    pub colission_pipeline: CollisionPipeline,
+    pub query_pipeline: QueryPipeline,
+    pub gravity: Vector3<f32>,
+    
+    // Thread-safe physics data
+    pub rigidbody_set: RigidBodySet, 
+    pub collider_set: ColliderSet,
+
+    pub physics_elements: HashMap<String, Option<PhysicsData>>,
+    
+    // Delta time tracking
+    pub delta_time: f32,
+    pub last_physics_time: Instant,
+}
+
+impl Physics {
+    pub fn new() -> Self {
+        // Physics data
+        let physics = Physics {
+            physics_pipeline: PhysicsPipeline::new(),
+            colission_pipeline: CollisionPipeline::new(),
+            query_pipeline: QueryPipeline::new(),
+            gravity: Vector3::new(0.0, -9.81, 0.0),
+            rigidbody_set: RigidBodySet::new(),
+            collider_set: ColliderSet::new(),
+            physics_elements: HashMap::new(),
+            delta_time: 0.0,
+            last_physics_time: Instant::now(),
+        };
+
+        physics
+    }
+
+    pub fn physics_thread(&mut self, tx: Sender<HashMap<String, RenderMessage>>, rx: Receiver<PhysicsCommand>, plane_control_rx: Receiver<PlaneControls>, debug_physics_tx: Sender<Vec<DebugPhysicsMessageType>>, mut physics_tick: Box<dyn PhysicsTick + Send>) {
+        const FIXED_TIMESTEP: f32 = 1.0 / 120.0; // Fixed timestep for 120 FPS for more responsive physics
+        let mut accumulator = 0.0;
+        let mut last_update = Instant::now();
+        let mut should_send_data = false;
+
+        let integration_parameters = IntegrationParameters { dt: FIXED_TIMESTEP, ..Default::default() };
+        let mut island_manager = IslandManager::new();
+        let mut broad_phase = DefaultBroadPhase::new();
+        let mut narrow_phase = NarrowPhase::new();
+        let mut impulse_joint_set = ImpulseJointSet::new();
+        let mut multibody_joint_set = MultibodyJointSet::new();
+        let mut ccd_solver = CCDSolver::new();
+        let physics_hooks = ();
+        let event_handler = ();
+
+        let mut plane_controls: PlaneControls = PlaneControls::new();
+        let mut paused = false;
+        let mut shutdown = false;
+
+        loop {
+            match plane_control_rx.try_recv() {
+                Ok(plane_control) => {
+                    plane_controls = plane_control;
+                },
+                Err(_) => {
+                    // No message available, continuing with physics
+                }
+            }
+
+            let now = Instant::now();
+            let elapsed = now.duration_since(last_update).as_secs_f32();
+            accumulator += elapsed;
+            last_update = now;
+
+            // Apply forces before physics step (only if not paused)
+            if !paused {
+                physics_tick.tick(&plane_controls, &self.collider_set, &mut self.rigidbody_set, &self.query_pipeline, &mut self.physics_elements, &debug_physics_tx, self.delta_time);
+            }
+
+            // Step the physics pipeline with fixed timestep (only if not paused)
+            while accumulator >= FIXED_TIMESTEP && !paused {
+                // Calculate delta time for this physics step
+                let current_time = Instant::now();
+                self.delta_time = current_time.duration_since(self.last_physics_time).as_secs_f32();
+                self.last_physics_time = current_time;
+                
+                // Clamp delta time to prevent spiral of death
+                let clamped_delta_time = self.delta_time.min(FIXED_TIMESTEP * 2.0);
+                
+                self.physics_pipeline.step(
+                    &self.gravity,
+                    &integration_parameters,
+                    &mut island_manager,
+                    &mut broad_phase,
+                    &mut narrow_phase,
+                    &mut self.rigidbody_set,
+                    &mut self.collider_set,
+                    &mut impulse_joint_set,
+                    &mut multibody_joint_set,
+                    &mut ccd_solver,
+                    Some(&mut self.query_pipeline),
+                    &physics_hooks,
+                    &event_handler,
+                );
+
+                accumulator -= FIXED_TIMESTEP;
+            }
+
+            loop {
+                match rx.try_recv() {
+                    Ok(PhysicsCommand::RequestData) => {
+                        should_send_data = true;
+                    },
+                    Ok(PhysicsCommand::Shutdown) => {
+                        println!("Physics thread received shutdown command");
+                        shutdown = true;
+                        break;
+                    },
+                    Ok(PhysicsCommand::ToggleDebug) => {
+                        physics_tick.toggle_debug_rendering();
+                    },
+                    Ok(PhysicsCommand::TogglePause) => {
+                        paused = !paused;
+                        if !paused {
+                            accumulator = 0.0;
+                            last_update = Instant::now();
+                            self.last_physics_time = Instant::now();
+                        }
+                        println!("Physics {}", if paused { "PAUSED" } else { "RESUMED" });
+                    },
+                    Err(_) => {
+                        break;
+                    }
+                }
+            }
+
+            if shutdown {
+                break;
+            }
+
+            if should_send_data {
+                let mut new_render_messages: HashMap<String, RenderMessage> = HashMap::new();
+
+                for (key, physics_data) in &self.physics_elements {
+                    match physics_data {
+                        Some(physics_data) => {
+                            let metadata = physics_data.metadata.clone();
+                            let rb = self.rigidbody_set.get(physics_data.rigidbody_handle).unwrap();
+
+                            new_render_messages.insert(key.clone(), RenderMessage { translation: *rb.translation(), rotation: rb.rotation().into_inner(), linvel: *rb.linvel(), metadata: metadata });
+                        },
+                        None => {},
+                    }
+                }
+
+                if let Err(e) = tx.send(new_render_messages) {
+                    println!("Failed to send render messages: {}", e);
+                    break;
+                }
+
+                if let Err(e) = debug_physics_tx.send(physics_tick.debug_lines().to_vec()) {
+                    println!("Failed to send debug physics messages: {}", e);
+                }
+                
+                should_send_data = false; // Reset flag after sending
+            }
+        }
+    }
+    
+    // Getter method to access delta time from other parts of the code
+    pub fn get_delta_time(&self) -> f32 {
+        self.delta_time
+    }
+    
+    // Method to reset delta time (useful for debugging or when physics is paused)
+    pub fn reset_delta_time(&mut self) {
+        self.delta_time = 0.0;
+        self.last_physics_time = Instant::now();
+    }
+}
