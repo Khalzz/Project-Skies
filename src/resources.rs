@@ -6,7 +6,7 @@ use ron::from_str;
 use tokio::task;
 use wgpu::{util::DeviceExt, Buffer, Device};
 
-use crate::{app::App, game_nodes::{game_object::{self, GameObject}, scene::Scene}, rendering::{instance_management::{InstanceData, InstanceRaw, ModelDataInstance}, model::{self, Mesh, Model, ModelVertex}, textures::Texture}, transform::Transform};
+use crate::{app::App, engine::game_nodes::{game_object::GameObject, scene::Scene}, engine::rendering::{enviroment::environment::Environment, enviroment::skybox_renderer::SkyboxRender, instance_management::{InstanceData, InstanceRaw, ModelDataInstance}, models::model::{self, Mesh, Model, ModelVertex}, models::textures::Texture}, transform::Transform};
 
 pub async fn load_binary(file_name: &str) -> anyhow::Result<Vec<u8>> {
     let path = std::path::Path::new(env!("OUT_DIR"))
@@ -400,7 +400,7 @@ pub fn load_level(app: &mut App, mut level_path: String) {
                 }
 
                 // Create instance buffer once per model
-                let instance_buffer = create_instance_buffer(&model_instances, &app.device, app.camera.camera.position.coords);
+                let instance_buffer = create_instance_buffer(&model_instances, &app.renderer.device, app.camera.camera.position.coords);
 
                 for (i, instance_data) in model_instances.iter().enumerate() {
                     match app.game_models.get_mut(model_name) {
@@ -413,7 +413,7 @@ pub fn load_level(app: &mut App, mut level_path: String) {
                             let model = task::block_in_place( || {
                                 tokio::runtime::Runtime::new()
                                     .unwrap()
-                                    .block_on(load_model_gltf(&model_name, &app.device, &app.queue, &app.transform_bind_group_layout))
+                                    .block_on(load_model_gltf(&model_name, &app.renderer.device, &app.renderer.queue, &Mesh::create_bind_group_layout(&app.renderer.device)))
                             });
 
                             match model {
@@ -438,6 +438,38 @@ pub fn load_level(app: &mut App, mut level_path: String) {
             }
         },
         None => eprintln!("The instance data was not correctly loaded"),
+    }
+}
+
+/// Applies a scene's declared environment (flat color or skybox cubemap), replacing
+/// whatever the app currently has. Call from `Scene::reset`, same as `load_level`.
+pub fn apply_environment(app: &mut App, environment: Environment) {
+    match environment {
+        Environment::Color(color) => {
+            app.skybox = None;
+            app.clear_color = color;
+        }
+        Environment::Skybox(faces) => {
+            let texture = task::block_in_place(|| {
+                tokio::runtime::Runtime::new()
+                    .unwrap()
+                    .block_on(load_texture_cube(
+                        [&faces.px, &faces.nx, &faces.py, &faces.ny, &faces.pz, &faces.nz],
+                        &app.renderer.device,
+                        &app.renderer.queue,
+                    ))
+            });
+
+            match texture {
+                Ok(texture) => {
+                    app.skybox = Some(SkyboxRender::new(&app.renderer.device, &app.renderer.config, &app.camera, texture));
+                }
+                Err(err) => {
+                    eprintln!("Skybox faces couldn't be loaded, falling back to clear color: {err}");
+                    app.skybox = None;
+                }
+            }
+        }
     }
 }
 

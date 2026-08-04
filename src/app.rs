@@ -1,40 +1,35 @@
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
 use std::env;
-use std::thread;
-use std::sync::mpsc::{channel, Sender, Receiver};
 
-use wgpu::{BindGroupLayout, BindGroupLayoutDescriptor, Device, DeviceDescriptor, Features, InstanceDescriptor, Limits, Queue, RenderPassDepthStencilAttachment, Surface, SurfaceConfiguration, TextureUsages};
-use sdl2::{video::DisplayMode, joystick::Joystick, JoystickSubsystem, GameControllerSubsystem, HapticSubsystem, video::Window, Sdl, render::Canvas, controller::GameController};
+use wgpu::{BindGroupLayout, BindGroupLayoutDescriptor, Device, DeviceDescriptor, Features, InstanceDescriptor, Limits, Queue, Surface, SurfaceConfiguration, TextureUsages};
+use sdl2::{joystick::Joystick, JoystickSubsystem, GameControllerSubsystem, HapticSubsystem, controller::GameController};
 use glyphon::{Cache, Resolution, TextArea, Viewport};
 
-use crate::audio::audio::Audio;
-use crate::physics::physics::{physics_handling, DebugPhysicsMessageType};
-use crate::physics::physics_handler::{RenderMessage, PhysicsCommand};
-use crate::primitive::manual_vertex::ManualVertex;
-use crate::rendering::instance_management::{InstanceData, InstanceRaw, ModelDataInstance};
-use crate::rendering::physics_rendering::RenderPhysics;
-use crate::rendering::depth_renderer::DepthRender;
-use crate::rendering::camera::CameraRenderizable;
-use crate::rendering::skybox_renderer::SkyboxRender;
-use crate::rendering::textures::Texture;
-use crate::game_nodes::timing::Timing;
-use crate::rendering::rendering_utils;
-use crate::rendering::light::Light;
-use crate::rendering::ui::Ui;
-use crate::rendering::model::{self, DrawModel, Vertex};
-use crate::gameplay::{main_menu, plane_selection, play};
-use crate::gameplay::scene::{Scene, ScenePool, FrameContext};
-use crate::input::input::InputSubsystem;
+use crate::engine::audio::audio::Audio;
+use crate::engine::physics::physics::{physics_handling, DebugPhysicsMessageType, PhysicsDataTransmission};
+use crate::engine::physics::physics_handler::{RenderMessage, PhysicsCommand};
+use crate::engine::rendering::enviroment::skybox_renderer::SkyboxRender;
+use crate::engine::rendering::enviroment::environment;
+use crate::engine::rendering::instance_management::{InstanceData, InstanceRaw, ModelDataInstance};
+use crate::engine::rendering::render_pipeline::depth_renderer::DepthRender;
+use crate::engine::rendering::camera::CameraRenderizable;
+use crate::engine::rendering::models::textures::Texture;
+use crate::engine::game_nodes::timing::Timing;
+use crate::engine::rendering::enviroment::light::Light;
+use crate::engine::rendering::models::model::{self, Mesh, Model, Vertex};
+use crate::engine::rendering::renderer::Renderer;
+use crate::engine::scene_manager::scene::{Scene, ScenePool, FrameContext, GameState, SceneManager};
+use crate::engine::input::input::InputSubsystem;
+use crate::engine::rendering::ui::physics_rendering::RenderPhysics;
+use crate::engine::rendering::ui::rendering_utils;
+use crate::engine::rendering::ui::ui::Ui;
 use crate::resources;
+use crate::engine::window::window::{WindowManager, WindowSettings};
 
 #[derive(Clone)]
 pub struct AppState {
     pub is_running: bool,
-    // Key into the scene pool (see gameplay::scene::ScenePool) — adding a new scene
-    // means registering it under a new key here, not adding an enum variant + match arm.
-    pub state: String,
-    pub reset: bool
 }
 
 pub struct Size {
@@ -49,24 +44,19 @@ pub struct Throttling {
     pub controller_update_interval: Duration,
 }
 
-pub struct App<'a> {
-    pub cache: Cache,
-    pub viewport: Viewport,
-    pub context: Sdl,
-    pub size: Size,
-    pub canvas: Canvas<Window>,
-    pub current_display: DisplayMode,
-    pub surface: Surface<'a>,
-    pub queue: Queue,
-    pub device: Device,
-    pub config: SurfaceConfiguration,
+pub struct App {
+    pub window_manager: WindowManager,
+    pub renderer: Renderer,
+    // Placeholder pool/starting scene at construction time - the real configuration
+    // is assigned by the caller (see main.rs) before App::run is called.
+    pub scene_manager: SceneManager,
     pub render_pipeline: wgpu::RenderPipeline,
     pub ui: Ui,
     pub camera: CameraRenderizable,
-    pub depth_texture: Texture,
-    pub depth_render: DepthRender,
-    // None when res/skybox/ isn't present - the scene just falls back to the plain clear color.
+    // Configured per scene via resources::apply_environment (called from Scene::reset),
+    // not loaded automatically - None means the scene just wants clear_color.
     pub skybox: Option<SkyboxRender>,
+    pub clear_color: wgpu::Color,
     pub show_depth_map: bool,
     pub controller_subsystem: GameControllerSubsystem,
     pub joystick_subsystem: JoystickSubsystem,
@@ -74,7 +64,6 @@ pub struct App<'a> {
     // pub renderizable_instances: HashMap<String, HashMap<String, InstanceData>>,
     pub renderizable_instances: HashMap<String, InstanceData>,
     pub throttling: Throttling,
-    pub transform_bind_group_layout: BindGroupLayout,
     pub game_models: HashMap<String, ModelDataInstance>,
     pub light: Light,
     pub time: Timing,
@@ -83,166 +72,54 @@ pub struct App<'a> {
     pub render_physics: RenderPhysics,
 }
 
-impl App<'_> {
+impl App {
     pub async fn new(title: &str, ext_width: Option<u32>, ext_height: Option<u32>) -> Result<App, String> {
-        // base sdl2
-        let context = sdl2::init().expect("SDL2 wasn't initialized");
-        let video_susbsystem = context.video().expect("The Video subsystem wasn't initialized");
-        // let _audio_subsystem = context.audio().expect("The audio subsystem didnt loaded right");
-
-        // so the mouse position gets setted inside the camer (the  mouse can go further than the window size)
-        context.mouse().set_relative_mouse_mode(true);
-
-        let controller_subsystem = context.game_controller().unwrap();
-        let joystick_subsystem = context.joystick().unwrap();
-        let haptic_subsystem = context.haptic().unwrap();
-
-        let current_display = video_susbsystem.current_display_mode(0).unwrap();
+        // Window initialization
         
-        let width = match ext_width {
-            Some(w) => w,
-            None => current_display.w as u32,
-        };
-        let height =  match ext_height {
-            Some(h) => h,
-            None => current_display.h as u32,
-        };
+        let window_manager = WindowManager::new(WindowSettings {
+            tittle: title.to_string(),
+            size: None,
+            screen_index: None,
+            fullscreen: true,
+        });
 
         env::set_var("SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS", "0");
+        window_manager.context.mouse().set_relative_mouse_mode(true);
 
-        // Create window in windowed mode first to avoid device loss
-        let mut window: Window = video_susbsystem.window(title, width, height as u32).metal_view().build().expect("The window wasn't created");
-        
-        let instance = wgpu::Instance::new(&InstanceDescriptor::default());
-        let surface = unsafe {
-            match instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::from_window(&window).unwrap()) {
-                Ok(s) => s,
-                Err(e) => return Err(e.to_string()),
-            }
-        };
+        let controller_subsystem = window_manager.context.game_controller().unwrap();
+        let joystick_subsystem = window_manager.context.joystick().unwrap();
+        let haptic_subsystem = window_manager.context.haptic().unwrap();
 
-        let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            ..Default::default() // remember that this set every other parameter as their default values
-        }).await.unwrap();
-
-        let (device, queue) = adapter.request_device(
-            &DeviceDescriptor { 
-                label: None,
-                required_features: Features::empty(),
-                required_limits: Limits::default(),
-                memory_hints: wgpu::MemoryHints::Performance,
-                trace: wgpu::Trace::Off, 
-            },
-        ).await.unwrap();
-
-        // Surface settings
-        let surface_caps = surface.get_capabilities(&adapter);
-        let surface_format = surface_caps.formats;
-
-        let config = wgpu::SurfaceConfiguration {
-            usage: TextureUsages::RENDER_ATTACHMENT,
-            format: surface_format[0],
-            width,
-            height,
-            present_mode: wgpu::PresentMode::AutoNoVsync,
-            alpha_mode: surface_caps.alpha_modes[0],
-            view_formats: vec![],
-            desired_maximum_frame_latency: 1,
-        };
-
-        surface.configure(&device, &config);
-        
-        // Now switch to fullscreen after WGPU is configured
-        window.set_fullscreen(sdl2::video::FullscreenType::Desktop).expect("Failed to set fullscreen");
-        
-        let mut canvas = window.into_canvas().accelerated().build().expect("the canvas wasn't builded");
-
-        canvas.set_blend_mode(sdl2::render::BlendMode::Blend);
-
-        // G L Y P H O N
-        let cache = Cache::new(&device);
-        let mut viewport = Viewport::new(&device, &cache);
-
-        viewport.update(
-            &queue,
-            Resolution {
-                width: config.width,
-                height: config.height,
-            },
-        );
-
-        // depth
-        let depth_texture = Texture::create_depth_texture(&device, &config, "depth_texture");
-        // depth
-
-        let transform_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("transform_bind_group_layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
-
-        // The bindgroup describes resources and how the shader will access to them
-        let texture_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("texture_bind_group_layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        multisampled: false,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
+        // WGPU initialization
+        let renderer = Renderer::new(&window_manager).await?;
 
         // rendering elements
-        let ui = Ui::new(&device, &queue, &config, &cache);
-        let camera = CameraRenderizable::new(&device, &config);
-        let light = Light::new(&device, &config, &camera);
+        let ui = Ui::new(&renderer.device, &renderer.queue, &renderer.config, &renderer.glyphon.cache);
+        let camera = CameraRenderizable::new(&renderer.device, &renderer.config);
+        let light = Light::new(&renderer.device, &renderer.config, &camera);
 
-        let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        let render_pipeline_layout = renderer.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Render Pipeline Layout"),
             bind_group_layouts: &[
-                &texture_bind_group_layout,
+                &Texture::create_bind_group_layout(&renderer.device),
                 &camera.bind_group_layout,
-                &transform_bind_group_layout,
+                &Mesh::create_bind_group_layout(&renderer.device),
                 &light.rendering_data.bind_group_layout
             ],
             push_constant_ranges: &[],
         });
         
         // SHADERING PROCESS 
-        
         let render_pipeline = {
             let shader = wgpu::ShaderModuleDescriptor {
                 label: Some("Normal Shader"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/depth.wgsl").into()),
+                source: wgpu::ShaderSource::Wgsl(include_str!("engine/shaders/depth.wgsl").into()),
             };
             
             rendering_utils::create_render_pipeline(
-                &device,
+                &renderer.device,
                 &render_pipeline_layout,
-                config.format,
+                renderer.config.format,
                 Some(Texture::DEPTH_FORMAT),
                 &[model::ModelVertex::desc(), InstanceRaw::desc()],
                 shader,
@@ -251,60 +128,33 @@ impl App<'_> {
 
         let renderizable_instances = HashMap::new();
         let game_models = HashMap::new();
-        let depth_render = DepthRender::new(&device, &config);
 
-        // Only build a skybox if res/skybox/ (with px/nx/py/ny/pz/nz face images) was provided -
-        // otherwise the scene just falls back to the plain clear color, no placeholder.
-        let skybox_dir = std::path::Path::new(env!("OUT_DIR")).join("res").join("skybox");
-        let skybox = if skybox_dir.is_dir() {
-            match resources::load_texture_cube(
-                ["skybox/px.png", "skybox/nx.png", "skybox/py.png", "skybox/ny.png", "skybox/pz.png", "skybox/nz.png"],
-                &device,
-                &queue,
-            ).await {
-                Ok(texture) => Some(SkyboxRender::new(&device, &config, &camera, texture)),
-                Err(err) => {
-                    eprintln!("res/skybox/ was found but its faces couldn't be loaded, skipping skybox: {err}");
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        // No environment loaded yet - each scene declares its own via
+        // resources::apply_environment when it resets (see rendering::enviroment::environment).
+        let skybox = None;
+        let clear_color = environment::DEFAULT_CLEAR_COLOR;
 
         // physics rendering
-        let render_physics = RenderPhysics::new(&device, &config, &camera);
+        let render_physics = RenderPhysics::new(&renderer.device, &renderer.config, &camera);
 
         // Physics data
-
         let time = Timing::new();
 
-        
-
         Ok(App {
-            cache,
-            viewport,
-            current_display,
-            context,
-            size: Size {width, height},
-            canvas,
-            surface,
-            queue,
-            device,
-            config,
+            window_manager,
+            renderer,
+            scene_manager: SceneManager::new(HashMap::new(), GameState::Playing),
             render_pipeline,
             ui,
             camera,
-            depth_texture,
-            depth_render,
             skybox,
+            clear_color,
             show_depth_map: false,
             controller_subsystem,
             joystick_subsystem,
             renderizable_instances,
             throttling: Throttling { last_ui_update: Instant::now(), ui_update_interval: Duration::from_secs_f32(1.0/120.0), last_controller_update: Instant::now(), controller_update_interval: Duration::from_secs_f32(1.0/400.0) },
             _haptic_subsystem: haptic_subsystem,
-            transform_bind_group_layout,
             game_models,
             light,
             time,
@@ -315,275 +165,81 @@ impl App<'_> {
     }
 
     pub fn resize(&mut self) {
-        self.config.width = self.current_display.w as u32;
-        self.config.height = self.current_display.h as u32;
+        let width = self.window_manager.current_display.w as u32;
+        let height = self.window_manager.current_display.h as u32;
 
-        self.surface.configure(&self.device, &self.config);
-        self.depth_render.resize(&self.device, &self.config);
-        self.camera.projection.resize(self.size.width, self.size.height);
-
-        self.depth_texture = Texture::create_depth_texture(&self.device, &self.config, "depth_texture");
-
-        self.viewport.update(
-            &self.queue,
-            Resolution {
-                width: self.config.width,
-                height: self.config.height,
-            },
-        );
+        self.renderer.resize(width, height);
+        self.camera.projection.resize(width, height);
     }
 
-    // Pass to a especific element the values of "render pass" to the self structure, so they are made once and then used here
-    // Find a way to make that i can "set when the ui elements change"
-    // find a way to optimize the non transparent object rendering
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
-        let start_time = Instant::now();
-        
-        // UI - Only process if actually changed
-        if self.ui.has_changed {
-            let mut text_areas: Vec<TextArea> = Vec::new();
+        self.prepare_ui_content();
 
-            self.ui.ui_rendering.vertices.clear();
-            self.ui.ui_rendering.num_vertices = 0;
-            
-            self.ui.ui_rendering.indices.clear();
-            self.ui.ui_rendering.num_indices = 0;
-
-            for (_key, ui_node) in &mut self.ui.renderizable_elements {
-                let (textareas_to_merge, _vertices_to_add, _indices_to_add) = ui_node.node_content_preparation(&self.size, &mut self.ui.ui_rendering, &mut self.ui.text.font_system, self.time.delta_time);
-                text_areas.extend(textareas_to_merge);
-            }
-            
-            // Only update buffers if we have data
-            if !self.ui.ui_rendering.vertices.is_empty() {
-                self.queue.write_buffer(&self.ui.ui_rendering.vertex_buffer, 0, bytemuck::cast_slice(self.ui.ui_rendering.vertices.as_slice()));
-            }
-            if !self.ui.ui_rendering.indices.is_empty() {
-                self.queue.write_buffer(&self.ui.ui_rendering.index_buffer, 0, bytemuck::cast_slice(&self.ui.ui_rendering.indices));
-            }
-
-            // Only prepare text if we have text areas
-            if !text_areas.is_empty() {
-                self.ui.text.text_renderer.prepare(&self.device, &self.queue, &mut self.ui.text.font_system, &mut self.ui.text.text_atlas, &self.viewport, text_areas, &mut self.ui.text.text_cache).unwrap();
-            }
-            self.ui.has_changed = false;
-        }
-        
         // WGPU
-        let output = self.surface.get_current_texture()?;
+        let output = self.renderer.surface.get_current_texture()?;
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+
+        let mut encoder = self.renderer.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render Encoder"),
         });
-        
-        // Opaque pass
-        {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor { 
-                label: Some("Render Pass"), 
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.1,
-                            g: 0.2,
-                            b: 0.3,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
-                    view: &self.depth_render.texture.view,
-                    depth_ops: Some(wgpu::Operations {
-                        // Reversed-Z: clear to 0.0 ("infinitely far") instead of 1.0.
-                        load: wgpu::LoadOp::Clear(0.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                occlusion_query_set: None,
-                timestamp_writes: None,
-            });
 
-            if let Some(skybox) = &self.skybox {
-                skybox.render(&mut render_pass, &self.camera.bind_group);
-            }
+        self.render_scene_passes(&mut encoder, &view);
 
-            render_pass.set_pipeline(&self.render_pipeline);
-
-            // Group models by type to reduce state changes
-            let mut model_groups: HashMap<String, Vec<(&String, &InstanceData)>> = HashMap::new();
-            for (key, renderizable) in &self.renderizable_instances {
-                if key != "sun" {
-                    model_groups.entry(renderizable.model_ref.clone()).or_insert_with(Vec::new).push((key, renderizable));
-                }
-            }
-
-            // Render each model type once with all its instances
-            for (model_ref, _instances) in model_groups {
-                if let Some(model_data) = self.game_models.get(&model_ref) {
-                    render_pass.set_vertex_buffer(1, model_data.instance_buffer.slice(..));
-                    render_pass.draw_model_instanced_from_list(&model_data.model, 0..model_data.instance_count as u32, &self.camera.bind_group, &self.light.rendering_data.bind_group, &"opaque".to_string());
-                }
-            }
-        }
-
-        // Transparency pass
-        {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor { 
-                label: Some("Render Pass"), 
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
-                    view: &self.depth_render.texture.view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                occlusion_query_set: None,
-                timestamp_writes: None,
-            });
-            
-            render_pass.set_pipeline(&self.render_pipeline);
-            
-            // Group models by type to reduce state changes
-            let mut model_groups: HashMap<String, Vec<(&String, &InstanceData)>> = HashMap::new();
-            for (_key, renderizable) in &self.renderizable_instances {
-                model_groups.entry(renderizable.model_ref.clone()).or_insert_with(Vec::new).push((_key, renderizable));
-            }
-
-            // Render each model type once with all its instances
-            for (model_ref, _instances) in model_groups {
-                if let Some(model_data) = self.game_models.get(&model_ref) {
-                    render_pass.set_vertex_buffer(1, model_data.instance_buffer.slice(..));
-                    render_pass.draw_model_instanced_from_list(&model_data.model, 0..model_data.instance_count as u32, &self.camera.bind_group, &self.light.rendering_data.bind_group, &"transparent".to_string());
-                }
-            }
-        }
-        
-        // UI Pass - Only render if UI has content
-        if self.ui.ui_rendering.num_indices > 0 {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("UI Render Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                occlusion_query_set: None,
-                timestamp_writes: None,
-            });
-
-            render_pass.set_pipeline(&self.render_physics.render_pipeline);
-            render_pass.set_bind_group(0, &self.render_physics.bind_group, &[]);
-            render_pass.set_bind_group(1, &self.camera.bind_group, &[]);
-    
-            if !self.show_depth_map && self.render_physics.visible {
-                // Prepare vertex and index buffers specifically for physics rendering.
-                // Debug lines come from the physics thread in absolute world coordinates,
-                // so make them camera-relative here to match camera.view_proj.
-                let camera_position = self.camera.camera.position;
-                let vertices: Vec<ManualVertex> = self.render_physics.renderizable_lines.iter()
-                .flat_map(|line| line.to_vec())
-                .map(|mut vertex| {
-                    vertex.position[0] -= camera_position.x;
-                    vertex.position[1] -= camera_position.y;
-                    vertex.position[2] -= camera_position.z;
-                    vertex
-                })
-                .collect();
-
-                if !vertices.is_empty() {
-                    self.render_physics.vertex_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some("Updated ManualVertex Buffer"),
-                        size: (vertices.len() * std::mem::size_of::<ManualVertex>()) as u64,
-                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                        mapped_at_creation: true,
-                    });
-                    self.render_physics.vertex_buffer.slice(..).get_mapped_range_mut().copy_from_slice(bytemuck::cast_slice(&vertices));
-                    self.render_physics.vertex_buffer.unmap();
-
-                    // Update index buffer for all lines
-                    let mut indices = Vec::new();
-                    for i in 0..self.render_physics.renderizable_lines.len() {
-                        let base_index = (i * 2) as u16; // Each line has two vertices
-                        indices.push(base_index);
-                        indices.push(base_index + 1);
-                    }
-                    if !indices.is_empty() {
-                        self.render_physics.index_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                            label: Some("Index Buffer"),
-                            size: (indices.len() * std::mem::size_of::<u16>()) as u64,
-                            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                            mapped_at_creation: true,
-                        });
-                        self.render_physics.index_buffer.slice(..).get_mapped_range_mut().copy_from_slice(bytemuck::cast_slice(&indices));
-                        self.render_physics.index_buffer.unmap();
-
-                        // Set vertex and index buffers once before drawing
-                        render_pass.set_vertex_buffer(0, self.render_physics.vertex_buffer.slice(..));
-                        render_pass.set_index_buffer(self.render_physics.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-
-                        // Draw all lines
-                        render_pass.draw_indexed(0..(indices.len() as u32), 0, 0..1);
-                    }
-                }
-                
-            }
-
-            render_pass.set_pipeline(&self.ui.ui_pipeline);
-            render_pass.set_vertex_buffer(0, self.ui.ui_rendering.vertex_buffer.slice(..));
-            render_pass.set_index_buffer(self.ui.ui_rendering.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-            render_pass.draw_indexed(0..self.ui.ui_rendering.num_indices, 0, 0..1);
-
-            // Render text (text renderer handles empty content gracefully)
-            self.ui.text.text_renderer.render(&self.ui.text.text_atlas, &self.viewport, &mut render_pass).unwrap();
-        }
-
-        // Submit and present
-        self.queue.submit(std::iter::once(encoder.finish()));
+        self.renderer.queue.submit(std::iter::once(encoder.finish()));
         output.present();
         
-        // Only trim atlas occasionally to reduce overhead
-        if start_time.elapsed().as_millis() % 100 == 0 {
-            self.ui.text.text_atlas.trim();
-        }
-
         Ok(())
     }
 
-    pub fn update(mut self) {
-        // SDL2
-        let mut app_state = AppState { is_running: true, state: "playing".to_owned(), reset: true};
-        let mut event_pump = self.context.event_pump().unwrap();
+    // Rebuilds UI vertex/index/text buffers from the current node tree - only when
+    // something actually marked the UI dirty, so idle frames skip it entirely.
+    fn prepare_ui_content(&mut self) {
+        if !self.ui.has_changed {
+            return;
+        }
 
-        // Every scene the game knows about, keyed by the id AppState::state points at.
-        // Adding a new scene means implementing Scene for it and inserting it here —
-        // nothing else in this loop needs to change.
-        let mut scenes: ScenePool = HashMap::new();
-        scenes.insert("playing".to_owned(), Box::new(play::GameLogic::new(&mut self)) as Box<dyn Scene>);
-        scenes.insert("main_menu".to_owned(), Box::new(main_menu::GameLogic::new(&mut self)) as Box<dyn Scene>);
-        scenes.insert("selecting_plane".to_owned(), Box::new(plane_selection::GameLogic::new(&mut self)) as Box<dyn Scene>);
+        let mut text_areas: Vec<TextArea> = Vec::new();
+
+        self.ui.ui_rendering.vertices.clear();
+        self.ui.ui_rendering.num_vertices = 0;
+
+        self.ui.ui_rendering.indices.clear();
+        self.ui.ui_rendering.num_indices = 0;
+
+        for (_key, ui_node) in &mut self.ui.renderizable_elements {
+            let (textareas_to_merge, _vertices_to_add, _indices_to_add) = ui_node.node_content_preparation(&self.window_manager.size, &mut self.ui.ui_rendering, &mut self.ui.text.font_system, self.time.delta_time);
+            text_areas.extend(textareas_to_merge);
+        }
+
+        // Only update buffers if we have data
+        if !self.ui.ui_rendering.vertices.is_empty() {
+            self.renderer.queue.write_buffer(&self.ui.ui_rendering.vertex_buffer, 0, bytemuck::cast_slice(self.ui.ui_rendering.vertices.as_slice()));
+        }
+        if !self.ui.ui_rendering.indices.is_empty() {
+            self.renderer.queue.write_buffer(&self.ui.ui_rendering.index_buffer, 0, bytemuck::cast_slice(&self.ui.ui_rendering.indices));
+        }
+
+        // Only prepare text if we have text areas
+        if !text_areas.is_empty() {
+            self.ui.text.text_renderer.prepare(&self.renderer.device, &self.renderer.queue, &mut self.ui.text.font_system, &mut self.ui.text.text_atlas, &self.renderer.glyphon.viewport, text_areas, &mut self.ui.text.text_cache).unwrap();
+        }
+        self.ui.has_changed = false;
+    }
+
+    // self.scene_manager is configured by the caller (see main.rs) before run() is
+    // called - App only needs to know about the Scene trait / ScenePool, not any
+    // concrete scene type.
+    pub fn run(mut self) {
+        // SDL2
+        let mut app_state = AppState { is_running: true };
+        let mut event_pump = self.window_manager.context.event_pump().unwrap();
 
         let mut controller = Self::open_first_available_controller(&self.controller_subsystem);
         let _joystick = Self::open_first_avalible_joystick(&self.joystick_subsystem);
 
-        // physics handling
-        let physics_data_channel = physics_handling(&self.device, &self.config, &self.camera, "./assets/scenes/test_chamber".to_owned(), app_state.state == "playing");
+        // Started/stopped per scene switch below, based on the active scene's
+        // Scene::physics() - None until a physics-wanting scene resets.
+        let mut physics_data_channel: Option<PhysicsDataTransmission> = None;
 
         let mut input_subsystem = InputSubsystem::new(include_str!("../settings/input.ron"));
 
@@ -595,58 +251,94 @@ impl App<'_> {
             input_subsystem.update(&mut event_pump, self.time.delta_time, false);
 
             if !app_state.is_running {
-                // Send shutdown command to physics thread
-                let _ = physics_data_channel.request_data_tx.send(PhysicsCommand::Shutdown);
+                // Send shutdown command to physics thread, if one is running
+                if let Some(physics) = &physics_data_channel {
+                    let _ = physics.request_data_tx.send(PhysicsCommand::Shutdown);
+                }
                 break
             }
 
-            if app_state.reset {
-                if let Some(scene) = scenes.get_mut(&app_state.state) {
-                    scene.reset(&mut self);
-                } else {
-                    eprintln!("No scene registered for state '{}'", app_state.state);
-                }
-                app_state.reset = false;
-            } else {
-                // Request physics data from physics thread
-                if let Err(e) = physics_data_channel.request_data_tx.send(PhysicsCommand::RequestData) {
-                    eprintln!("Failed to send physics command: {}", e);
-                }
+            if self.scene_manager.reset {
+                let active = self.scene_manager.active;
 
-                // Toggle debug rendering with F2 (also shows console)
-                if input_subsystem.is_just_pressed("toggle_debug") {
-                    self.render_physics.visible = !self.render_physics.visible;
-                    if let Err(e) = physics_data_channel.request_data_tx.send(PhysicsCommand::ToggleDebug) {
-                        eprintln!("Failed to send toggle debug command: {}", e);
+                // Environment doesn't carry over between scenes (same as Godot: no
+                // WorldEnvironment in the new scene falls back to the default, it
+                // doesn't inherit whatever the previous scene had) - a scene that
+                // wants a skybox has to call apply_environment itself in reset/new.
+                self.skybox = None;
+                self.clear_color = environment::DEFAULT_CLEAR_COLOR;
+
+                // Scenes need &mut App to reset themselves, but the pool they're
+                // stored in lives on App too - take the scene out first so there's
+                // no conflicting borrow, then put it back once it's done with self.
+                if let Some(mut scene) = self.scene_manager.scenes.remove(&active) {
+                    // Physics doesn't carry over between scenes either - stop
+                    // whatever was running, then start whatever the new scene wants
+                    // (if anything). Scenes that don't override Scene::physics get
+                    // None here and simply never spin up a thread.
+                    if let Some(old_physics) = physics_data_channel.take() {
+                        let _ = old_physics.request_data_tx.send(PhysicsCommand::Shutdown);
                     }
+
+                    scene.reset(&mut self);
+
+                    physics_data_channel = scene.physics(&self).map(|(level_path, physics_tick)| {
+                        physics_handling(&self.renderer.device, &self.renderer.config, &self.camera, level_path, physics_tick)
+                    });
+
+                    self.scene_manager.scenes.insert(active, scene);
+                } else {
+                    eprintln!("No scene registered for state '{:?}'", active);
                 }
+                self.scene_manager.reset = false;
+            } else {
+                // Request physics data from physics thread, only if the active
+                // scene actually has one running.
+                let physics_data = if let Some(physics) = &physics_data_channel {
+                    if let Err(e) = physics.request_data_tx.send(PhysicsCommand::RequestData) {
+                        eprintln!("Failed to send physics command: {}", e);
+                    }
+
+                    // Toggle debug rendering with F2 (also shows console)
+                    if input_subsystem.is_just_pressed("toggle_debug") {
+                        self.render_physics.visible = !self.render_physics.visible;
+                        if let Err(e) = physics.request_data_tx.send(PhysicsCommand::ToggleDebug) {
+                            eprintln!("Failed to send toggle debug command: {}", e);
+                        }
+                    }
+
+                    // Toggle physics pause with F12
+                    if input_subsystem.is_just_pressed("toggle_pause") {
+                        if let Err(e) = physics.request_data_tx.send(PhysicsCommand::TogglePause) {
+                            eprintln!("Failed to send toggle pause command: {}", e);
+                        }
+                    }
+
+                    // Recibimos los datos del otro thread
+                    let physics_data = match physics.physics_data_rx.try_recv() {
+                        Ok(data) => data,
+                        Err(_) => HashMap::new(),
+                    };
+
+                    // Drain all queued debug physics messages, keep only the latest
+                    let mut got_new = false;
+                    while let Ok(data) = physics.debug_physics_rx.try_recv() {
+                        debug_physics = data;
+                        got_new = true;
+                    }
+                    if !got_new {
+                        debug_physics.clear();
+                    }
+
+                    physics_data
+                } else {
+                    debug_physics.clear();
+                    HashMap::new()
+                };
 
                 // Toggle console independently with F3
                 if input_subsystem.is_just_pressed("toggle_console") {
-                    crate::tooling::debug_console::toggle_console();
-                }
-
-                // Toggle physics pause with F12
-                if input_subsystem.is_just_pressed("toggle_pause") {
-                    if let Err(e) = physics_data_channel.request_data_tx.send(PhysicsCommand::TogglePause) {
-                        eprintln!("Failed to send toggle pause command: {}", e);
-                    }
-                }
-
-                // Recibimos los datos del otro thread
-                let physics_data = match physics_data_channel.physics_data_rx.try_recv() {
-                    Ok(data) => data,
-                    Err(_) => HashMap::new(),
-                };
-
-                // Drain all queued debug physics messages, keep only the latest
-                let mut got_new = false;
-                while let Ok(data) = physics_data_channel.debug_physics_rx.try_recv() {
-                    debug_physics = data;
-                    got_new = true;
-                }
-                if !got_new {
-                    debug_physics.clear();
+                    crate::engine::tooling::debug_console::toggle_console();
                 }
 
                 // Clear previous debug lines and add new ones
@@ -670,22 +362,23 @@ impl App<'_> {
                     }
                 }
 
-                // Tick whichever scene is currently active. The key is captured up front
-                // since FrameContext below borrows app_state mutably.
-                let active_scene_key = app_state.state.clone();
-                let mut ctx = FrameContext {
-                    app_state: &mut app_state,
-                    event_pump: &mut event_pump,
-                    controller: &mut controller,
-                    input_subsystem: &input_subsystem,
-                    plane_control_tx: &physics_data_channel.plane_control_tx,
-                    physics_data: &physics_data,
-                    debug_physics: &debug_physics,
-                };
-                if let Some(scene) = scenes.get_mut(&active_scene_key) {
+                // Tick whichever scene is currently active - same remove/reinsert
+                // dance as the reset branch, since tick also needs &mut App.
+                let active_scene_key = self.scene_manager.active;
+                if let Some(mut scene) = self.scene_manager.scenes.remove(&active_scene_key) {
+                    let mut ctx = FrameContext {
+                        app_state: &mut app_state,
+                        event_pump: &mut event_pump,
+                        controller: &mut controller,
+                        input_subsystem: &input_subsystem,
+                        plane_control_tx: physics_data_channel.as_ref().map(|physics| &physics.plane_control_tx),
+                        physics_data: &physics_data,
+                        debug_physics: &debug_physics,
+                    };
                     scene.tick(&mut self, &mut ctx);
+                    self.scene_manager.scenes.insert(active_scene_key, scene);
                 } else {
-                    eprintln!("No scene registered for state '{}'", active_scene_key);
+                    eprintln!("No scene registered for state '{:?}'", active_scene_key);
                 }
 
                 // Update instance buffers efficiently - group by model type
@@ -703,7 +396,7 @@ impl App<'_> {
                 for (model_ref, instances) in model_instances {
                     if let Some(model) = self.game_models.get(&model_ref) {
                         if !instances.is_empty() {
-                            self.queue.write_buffer(&model.instance_buffer, 0, bytemuck::cast_slice(&instances));
+                            self.renderer.queue.write_buffer(&model.instance_buffer, 0, bytemuck::cast_slice(&instances));
                         }
                     }
                 }
@@ -722,12 +415,12 @@ impl App<'_> {
                     }
                 }
 
-                self.queue.write_buffer(&self.light.rendering_data.buffer, 0, bytemuck::cast_slice(&[self.light.uniform]));
+                self.renderer.queue.write_buffer(&self.light.rendering_data.buffer, 0, bytemuck::cast_slice(&[self.light.uniform]));
                 // lighting update
 
                 self.camera.uniform.update_view_proj(&self.camera.camera, &self.camera.projection);
-                self.queue.write_buffer(&self.camera.buffer, 0, bytemuck::cast_slice(&[self.camera.uniform]));
-                self.queue.write_buffer(&self.depth_render.near_far_buffer, 0, bytemuck::cast_slice(&[self.depth_render.near_far_uniform]));
+                self.renderer.queue.write_buffer(&self.camera.buffer, 0, bytemuck::cast_slice(&[self.camera.uniform]));
+                self.renderer.queue.write_buffer(&self.renderer.depth_render.near_far_buffer, 0, bytemuck::cast_slice(&[self.renderer.depth_render.near_far_uniform]));
             }
 
             match self.render() {
