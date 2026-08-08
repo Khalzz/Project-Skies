@@ -1,98 +1,38 @@
 (
-    keys: [
-        (
-            label: "pitch_up",
-            keys: ["w"]
-        ),
-        (
-            label: "roll_left",
-            keys: ["a"]
-        ),
-        (
-            label: "pitch_down",
-            keys: ["s"]
-        ),
-        (
-            label: "roll_right",
-            keys: ["d"]
-        ),
-        (
-            label: "rudder_left",
-            keys: ["q"]
-        ),
-        (
-            label: "rudder_right",
-            keys: ["e"]
-        ),
-        (
-            label: "throttle_up",
-            keys: ["Up"]
-        ),
-        (
-            label: "throttle_down",
-            keys: ["Down"]
-        ),
-        (
-            label: "change_camera",
-            keys: ["v"]
-        ),
-        (
-            label: "fix_view",
-            keys: ["space"]
-        ),
-        (
-            label: "test",
-            keys: ["t"]
-        ),
-        (
-            label: "up_wheel",
-            keys: ["Right"]
-        ),
-        (
-            label: "down_wheel",
-            keys: ["Left"]
-        ),
-        (
-            label: "toggle_debug",
-            keys: ["F1"]
-        ),
-        (
-            label: "toggle_console",
-            keys: ["F3"]
-        ),
-        (
-            label: "toggle_pause",
-            keys: ["F12"]
-        ),
-        (
-            label: "toggle_camera_debug",
-            keys: ["F4"]
-        ),
-        (
-            label: "trim_pitch_up",
-            keys: ["i"]
-        ),
-        (
-            label: "trim_pitch_down",
-            keys: ["k"]
-        ),
-        (
-            label: "trim_roll_left",
-            keys: ["j"]
-        ),
-        (
-            label: "trim_roll_right",
-            keys: ["l"]
-        ),
-        (
-            label: "trim_yaw_left",
-            keys: ["u"]
-        ),
-        (
-            label: "trim_yaw_right",
-            keys: ["o"]
-        ),
-
+    actions: [
+        (action: "pitch_up", bindings: [Key("w"), ControllerAxis(axis: "LeftY", positive: false)]),
+        (action: "roll_left", bindings: [Key("a"), ControllerAxis(axis: "LeftX", positive: false)]),
+        (action: "pitch_down", bindings: [Key("s"), ControllerAxis(axis: "LeftY", positive: true)]),
+        (action: "roll_right", bindings: [Key("d"), ControllerAxis(axis: "LeftX", positive: true)]),
+        (action: "rudder_left", bindings: [Key("q"), ControllerButton("LeftShoulder")]),
+        (action: "rudder_right", bindings: [Key("e"), ControllerButton("RightShoulder")]),
+        (action: "throttle_up", bindings: [Key("Up"), ControllerAxis(axis: "TriggerRight", positive: true)]),
+        (action: "throttle_down", bindings: [Key("Down"), ControllerAxis(axis: "TriggerLeft", positive: true)]),
+        (action: "change_camera", bindings: [Key("v"), ControllerButton("Y")]),
+        (action: "fix_view", bindings: [Key("space")]),
+        (action: "test", bindings: [Key("t")]),
+        (action: "up_wheel", bindings: [Key("Right")]),
+        (action: "down_wheel", bindings: [Key("Left")]),
+        (action: "toggle_debug", bindings: [Key("F1")]),
+        (action: "toggle_ui_debug", bindings: [Key("F2")]),
+        (action: "toggle_console", bindings: [Key("F3")]),
+        (action: "toggle_pause", bindings: [Key("F12")]),
+        (action: "toggle_camera_debug", bindings: [Key("F4")]),
+        (action: "debug_cam_forward", bindings: [Key("w")]),
+        (action: "debug_cam_back", bindings: [Key("s")]),
+        (action: "debug_cam_left", bindings: [Key("a")]),
+        (action: "debug_cam_right", bindings: [Key("d")]),
+        (action: "debug_cam_up", bindings: [Key("space")]),
+        (action: "debug_cam_down", bindings: [Key("Left Ctrl")]),
+        (action: "trim_pitch_up", bindings: [Key("i")]),
+        (action: "trim_pitch_down", bindings: [Key("k")]),
+        (action: "trim_roll_left", bindings: [Key("j")]),
+        (action: "trim_roll_right", bindings: [Key("l")]),
+        (action: "trim_yaw_left", bindings: [Key("u")]),
+        (action: "trim_yaw_right", bindings: [Key("o")]),
+        (action: "ui_left", bindings: [Key("Left")]),
+        (action: "ui_right", bindings: [Key("Right")]),
+        (action: "ui_click", bindings: [MouseButton("left")]),
     ],
     mouse: (
         x_sensitivity: 0.5,

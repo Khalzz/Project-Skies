@@ -1,0 +1,11 @@
+EventSystem (
+    event_list: {
+        5000: Event (
+            event_type: PlayAudio(
+                AudioFile(
+                    file_name: "./assets/audio/ReasonToFight"
+                )
+            ),
+        )
+    }
+)

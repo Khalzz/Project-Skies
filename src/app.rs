@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::env;
 
 use wgpu::{BindGroupLayout, BindGroupLayoutDescriptor, Device, DeviceDescriptor, Features, InstanceDescriptor, Limits, Queue, Surface, SurfaceConfiguration, TextureUsages};
-use sdl2::{joystick::Joystick, JoystickSubsystem, GameControllerSubsystem, HapticSubsystem, controller::GameController};
+use sdl2::{JoystickSubsystem, GameControllerSubsystem, HapticSubsystem};
 use glyphon::{Cache, Resolution, TextArea, Viewport};
 
 use crate::engine::audio::audio::Audio;
@@ -13,14 +13,15 @@ use crate::engine::rendering::enviroment::skybox_renderer::SkyboxRender;
 use crate::engine::rendering::enviroment::environment;
 use crate::engine::rendering::instance_management::{InstanceData, InstanceRaw, ModelDataInstance};
 use crate::engine::rendering::render_pipeline::depth_renderer::DepthRender;
-use crate::engine::rendering::camera::CameraRenderizable;
+use crate::engine::rendering::camera::CameraHandler;
 use crate::engine::rendering::models::textures::Texture;
 use crate::engine::game_nodes::timing::Timing;
 use crate::engine::rendering::enviroment::light::Light;
 use crate::engine::rendering::models::model::{self, Mesh, Model, Vertex};
 use crate::engine::rendering::renderer::Renderer;
-use crate::engine::scene_manager::scene::{Scene, ScenePool, FrameContext, GameState, SceneManager};
-use crate::engine::input::input::InputSubsystem;
+use crate::engine::scene_manager::scene::{FrameContext, SceneManager};
+use crate::engine::splash_screen::SplashScreenConfig;
+use crate::engine::input::input;
 use crate::engine::rendering::ui::physics_rendering::RenderPhysics;
 use crate::engine::rendering::ui::rendering_utils;
 use crate::engine::rendering::ui::ui::Ui;
@@ -40,8 +41,6 @@ pub struct Size {
 pub struct Throttling {
     pub last_ui_update: Instant,
     pub ui_update_interval: Duration,
-    pub last_controller_update: Instant,
-    pub controller_update_interval: Duration,
 }
 
 pub struct App {
@@ -52,13 +51,12 @@ pub struct App {
     pub scene_manager: SceneManager,
     pub render_pipeline: wgpu::RenderPipeline,
     pub ui: Ui,
-    pub camera: CameraRenderizable,
+    pub camera: CameraHandler,
     // Configured per scene via resources::apply_environment (called from Scene::reset),
     // not loaded automatically - None means the scene just wants clear_color.
     pub skybox: Option<SkyboxRender>,
     pub clear_color: wgpu::Color,
     pub show_depth_map: bool,
-    pub controller_subsystem: GameControllerSubsystem,
     pub joystick_subsystem: JoystickSubsystem,
     pub _haptic_subsystem: HapticSubsystem,
     // pub renderizable_instances: HashMap<String, HashMap<String, InstanceData>>,
@@ -70,6 +68,8 @@ pub struct App {
     pub scene_openned: Option<String>,
     pub audio: Audio,
     pub render_physics: RenderPhysics,
+    // Opt-in: None by default, assign before calling run() to show a splash screen.
+    pub splash_screen: Option<SplashScreenConfig>,
 }
 
 impl App {
@@ -86,7 +86,6 @@ impl App {
         env::set_var("SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS", "0");
         window_manager.context.mouse().set_relative_mouse_mode(true);
 
-        let controller_subsystem = window_manager.context.game_controller().unwrap();
         let joystick_subsystem = window_manager.context.joystick().unwrap();
         let haptic_subsystem = window_manager.context.haptic().unwrap();
 
@@ -95,7 +94,7 @@ impl App {
 
         // rendering elements
         let ui = Ui::new(&renderer.device, &renderer.queue, &renderer.config, &renderer.glyphon.cache);
-        let camera = CameraRenderizable::new(&renderer.device, &renderer.config);
+        let camera = CameraHandler::new(&renderer.device, &renderer.config);
         let light = Light::new(&renderer.device, &renderer.config, &camera);
 
         let render_pipeline_layout = renderer.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -143,17 +142,16 @@ impl App {
         Ok(App {
             window_manager,
             renderer,
-            scene_manager: SceneManager::new(HashMap::new(), GameState::Playing),
+            scene_manager: SceneManager::new(),
             render_pipeline,
             ui,
             camera,
             skybox,
             clear_color,
             show_depth_map: false,
-            controller_subsystem,
             joystick_subsystem,
             renderizable_instances,
-            throttling: Throttling { last_ui_update: Instant::now(), ui_update_interval: Duration::from_secs_f32(1.0/120.0), last_controller_update: Instant::now(), controller_update_interval: Duration::from_secs_f32(1.0/400.0) },
+            throttling: Throttling { last_ui_update: Instant::now(), ui_update_interval: Duration::from_secs_f32(1.0/120.0) },
             _haptic_subsystem: haptic_subsystem,
             game_models,
             light,
@@ -161,6 +159,7 @@ impl App {
             scene_openned: None,
             audio: Audio::new(),
             render_physics,
+            splash_screen: None,
         })
     }
 
@@ -169,11 +168,12 @@ impl App {
         let height = self.window_manager.current_display.h as u32;
 
         self.renderer.resize(width, height);
-        self.camera.projection.resize(width, height);
+        self.camera.resize(width, height);
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         self.prepare_ui_content();
+        self.fire_ui_click_handlers();
 
         // WGPU
         let output = self.renderer.surface.get_current_texture()?;
@@ -206,7 +206,21 @@ impl App {
         self.ui.ui_rendering.indices.clear();
         self.ui.ui_rendering.num_indices = 0;
 
+        self.ui.ui_rendering.image_quads.clear();
+
         for (_key, ui_node) in &mut self.ui.renderizable_elements {
+            // Debug bounds overlay (F2) - has to run before node_content_preparation
+            // below, not after: that call's returned TextAreas keep *ui_node mutably
+            // borrowed for as long as they're alive (all the way to text_areas being
+            // consumed at the end of this function), so nothing else can borrow
+            // *ui_node again afterward. Reading the rect from the start of this frame
+            // (one frame stale for a node whose layout is still actively changing)
+            // instead of after this frame's update is an invisible tradeoff for a
+            // debug-only overlay.
+            if self.ui.debug_bounds {
+                ui_node.debug_bounds_preparation(&self.window_manager.size, &mut self.ui.ui_rendering);
+            }
+
             let (textareas_to_merge, _vertices_to_add, _indices_to_add) = ui_node.node_content_preparation(&self.window_manager.size, &mut self.ui.ui_rendering, &mut self.ui.text.font_system, self.time.delta_time);
             text_areas.extend(textareas_to_merge);
         }
@@ -223,32 +237,71 @@ impl App {
         if !text_areas.is_empty() {
             self.ui.text.text_renderer.prepare(&self.renderer.device, &self.renderer.queue, &mut self.ui.text.font_system, &mut self.ui.text.text_atlas, &self.renderer.glyphon.viewport, text_areas, &mut self.ui.text.text_cache).unwrap();
         }
+
+        // Rebuilt last: glyphon's TextArea values above still borrow from inside
+        // renderizable_elements (each label's Buffer), so nothing else can take a
+        // &mut of self.ui until text_areas is fully consumed.
+        self.ui.build_image_draws(&self.renderer.device);
+
         self.ui.has_changed = false;
     }
 
+    // Runs every node's .on_click(...) callback that was clicked this frame (see
+    // UiNode::is_clicked, set in node_content_preparation above). Two passes: first
+    // just walk the tree collecting (and removing, see Option::take) each clicked
+    // node's on_click closure paired with its path - a plain &mut borrow of
+    // self.ui.renderizable_elements, no &mut App needed yet. Only then, with that
+    // borrow fully released, call each closure with &mut self - since
+    // renderizable_elements was never emptied or taken out of self.ui (unlike an
+    // earlier version of this that did exactly that), a handler can freely look up
+    // and mutate ANY UI node via Ui::get_ui_node while it runs, including its own
+    // node or an ancestor (e.g. a button hiding the panel it's inside of).
+    fn fire_ui_click_handlers(&mut self) {
+        let mut pending: Vec<(String, Box<dyn FnMut(&mut App)>)> = Vec::new();
+        for (id, node) in self.ui.renderizable_elements.iter_mut() {
+            node.take_click_handlers(id, &mut pending);
+        }
+        for (path, mut on_click) in pending {
+            on_click(self);
+            if let Some(node) = Ui::get_ui_node(&mut self.ui.renderizable_elements, &path) {
+                node.restore_click_handler(on_click);
+            }
+        }
+    }
+
     // self.scene_manager is configured by the caller (see main.rs) before run() is
-    // called - App only needs to know about the Scene trait / ScenePool, not any
-    // concrete scene type.
+    // called - App only needs to know about the Scene trait, not any concrete scene
+    // type. This is safe to do before run() despite the splash screen running first:
+    // SceneManager::create_scene only registers a constructor (no side effects, it
+    // doesn't run), and open_scene just sets which one is active + requests a reset -
+    // the actual construction only happens once the main loop below processes that
+    // reset, which is unconditionally after run_splash_screen() regardless of when
+    // create_scene/open_scene were called.
     pub fn run(mut self) {
         // SDL2
         let mut app_state = AppState { is_running: true };
         let mut event_pump = self.window_manager.context.event_pump().unwrap();
 
-        let mut controller = Self::open_first_available_controller(&self.controller_subsystem);
-        let _joystick = Self::open_first_avalible_joystick(&self.joystick_subsystem);
-
         // Started/stopped per scene switch below, based on the active scene's
         // Scene::physics() - None until a physics-wanting scene resets.
         let mut physics_data_channel: Option<PhysicsDataTransmission> = None;
 
-        let mut input_subsystem = InputSubsystem::new(include_str!("../settings/input.ron"));
+        // Device connect/disconnect (hot-plug) is handled inside InputSubsystem itself
+        // from here on, not a one-shot "find a controller at startup" step. Obtained
+        // fresh here (rather than stored on App) so it can move into the input
+        // singleton without partially moving self, which self stays borrowed as a
+        // whole for the rest of this function.
+        let controller_subsystem = self.window_manager.context.game_controller().unwrap();
+        input::init(include_str!("../settings/input.ron"), controller_subsystem);
+
+        self.run_splash_screen(&mut event_pump);
 
         let mut debug_physics: Vec<DebugPhysicsMessageType> = Vec::new();
 
         loop {
             // Relevant subsystems update
             self.time.update();
-            input_subsystem.update(&mut event_pump, self.time.delta_time, false);
+            input::update(&mut event_pump, self.time.delta_time, false);
 
             if !app_state.is_running {
                 // Send shutdown command to physics thread, if one is running
@@ -259,7 +312,7 @@ impl App {
             }
 
             if self.scene_manager.reset {
-                let active = self.scene_manager.active;
+                let active = self.scene_manager.active.clone();
 
                 // Environment doesn't carry over between scenes (same as Godot: no
                 // WorldEnvironment in the new scene falls back to the default, it
@@ -268,10 +321,19 @@ impl App {
                 self.skybox = None;
                 self.clear_color = environment::DEFAULT_CLEAR_COLOR;
 
-                // Scenes need &mut App to reset themselves, but the pool they're
-                // stored in lives on App too - take the scene out first so there's
-                // no conflicting borrow, then put it back once it's done with self.
-                if let Some(mut scene) = self.scene_manager.scenes.remove(&active) {
+                // Same for UI - Ui::load_ui/add_to_ui only ever insert, they never
+                // clear, so without this whatever the previous scene added would just
+                // keep piling up/leaking into scenes that never asked for it. A scene
+                // that wants UI has to (re)build it itself in new(), same contract as
+                // the skybox above.
+                self.ui.renderizable_elements.clear();
+                self.ui.has_changed = true;
+
+                // The scene doesn't exist yet at this point - SceneManager::create_scene
+                // only registered its constructor. Clone the factory out first (rather
+                // than borrowing self.scene_manager.factories directly) so calling it
+                // with &mut self below doesn't conflict with that borrow.
+                if let Some(factory) = self.scene_manager.factory_for(&active) {
                     // Physics doesn't carry over between scenes either - stop
                     // whatever was running, then start whatever the new scene wants
                     // (if anything). Scenes that don't override Scene::physics get
@@ -280,15 +342,17 @@ impl App {
                         let _ = old_physics.request_data_tx.send(PhysicsCommand::Shutdown);
                     }
 
-                    scene.reset(&mut self);
+                    // This is the only place any scene's real constructor ever runs,
+                    // and only for the one actually becoming active.
+                    let scene = factory(&mut self);
 
-                    physics_data_channel = scene.physics(&self).map(|(level_path, physics_tick)| {
+                    physics_data_channel = scene.fixed_update(&self).map(|(level_path, physics_tick)| {
                         physics_handling(&self.renderer.device, &self.renderer.config, &self.camera, level_path, physics_tick)
                     });
 
-                    self.scene_manager.scenes.insert(active, scene);
+                    self.scene_manager.active_scene = Some(scene);
                 } else {
-                    eprintln!("No scene registered for state '{:?}'", active);
+                    eprintln!("No scene registered for state '{}'", active);
                 }
                 self.scene_manager.reset = false;
             } else {
@@ -300,7 +364,7 @@ impl App {
                     }
 
                     // Toggle debug rendering with F2 (also shows console)
-                    if input_subsystem.is_just_pressed("toggle_debug") {
+                    if input::is_action_just_pressed("toggle_debug") {
                         self.render_physics.visible = !self.render_physics.visible;
                         if let Err(e) = physics.request_data_tx.send(PhysicsCommand::ToggleDebug) {
                             eprintln!("Failed to send toggle debug command: {}", e);
@@ -308,7 +372,7 @@ impl App {
                     }
 
                     // Toggle physics pause with F12
-                    if input_subsystem.is_just_pressed("toggle_pause") {
+                    if input::is_action_just_pressed("toggle_pause") {
                         if let Err(e) = physics.request_data_tx.send(PhysicsCommand::TogglePause) {
                             eprintln!("Failed to send toggle pause command: {}", e);
                         }
@@ -337,8 +401,20 @@ impl App {
                 };
 
                 // Toggle console independently with F3
-                if input_subsystem.is_just_pressed("toggle_console") {
+                if input::is_action_just_pressed("toggle_console") {
                     crate::engine::tooling::debug_console::toggle_console();
+                }
+
+                // Toggle UI bounds overlay with F2 - force a rebuild on the toggle
+                // frame so it appears/disappears immediately, and every frame after
+                // while it's on, since the overlay has to track wherever nodes
+                // actually are right now, not just whenever something else last
+                // marked the UI dirty.
+                if input::is_action_just_pressed("toggle_ui_debug") {
+                    self.ui.debug_bounds = !self.ui.debug_bounds;
+                }
+                if self.ui.debug_bounds {
+                    self.ui.has_changed = true;
                 }
 
                 // Clear previous debug lines and add new ones
@@ -362,27 +438,24 @@ impl App {
                     }
                 }
 
-                // Tick whichever scene is currently active - same remove/reinsert
-                // dance as the reset branch, since tick also needs &mut App.
-                let active_scene_key = self.scene_manager.active;
-                if let Some(mut scene) = self.scene_manager.scenes.remove(&active_scene_key) {
+                // Tick the active scene - taken out of its slot first so there's no
+                // conflicting borrow with the &mut self it needs, put back once done.
+                if let Some(mut scene) = self.scene_manager.active_scene.take() {
                     let mut ctx = FrameContext {
                         app_state: &mut app_state,
                         event_pump: &mut event_pump,
-                        controller: &mut controller,
-                        input_subsystem: &input_subsystem,
                         plane_control_tx: physics_data_channel.as_ref().map(|physics| &physics.plane_control_tx),
                         physics_data: &physics_data,
                         debug_physics: &debug_physics,
                     };
-                    scene.tick(&mut self, &mut ctx);
-                    self.scene_manager.scenes.insert(active_scene_key, scene);
+                    scene.update(&mut self, &mut ctx);
+                    self.scene_manager.active_scene = Some(scene);
                 } else {
-                    eprintln!("No scene registered for state '{:?}'", active_scene_key);
+                    eprintln!("No active scene to update");
                 }
 
                 // Update instance buffers efficiently - group by model type
-                let camera_position = self.camera.camera.position.coords;
+                let camera_position = self.camera.active().camera.position.coords;
                 let mut model_instances: HashMap<String, Vec<InstanceRaw>> = HashMap::new();
 
                 for (_key, renderizable) in &self.renderizable_instances {
@@ -418,8 +491,7 @@ impl App {
                 self.renderer.queue.write_buffer(&self.light.rendering_data.buffer, 0, bytemuck::cast_slice(&[self.light.uniform]));
                 // lighting update
 
-                self.camera.uniform.update_view_proj(&self.camera.camera, &self.camera.projection);
-                self.renderer.queue.write_buffer(&self.camera.buffer, 0, bytemuck::cast_slice(&[self.camera.uniform]));
+                self.camera.update_buffer(&self.renderer.queue);
                 self.renderer.queue.write_buffer(&self.renderer.depth_render.near_far_buffer, 0, bytemuck::cast_slice(&[self.renderer.depth_render.near_far_uniform]));
             }
 
@@ -439,24 +511,4 @@ impl App {
 
     
 
-    fn open_first_available_controller(controller_subsystem: &GameControllerSubsystem) -> Option<GameController> {
-        for id in 0..controller_subsystem.num_joysticks().unwrap() {
-            if controller_subsystem.is_game_controller(id) {
-                // println!("{}", controller_subsystem.name_for_index(id).unwrap());
-                return Some(controller_subsystem.open(id).unwrap());
-            }
-        }
-        None
-    }
-
-    fn open_first_avalible_joystick(joystick_subsystem: &JoystickSubsystem) -> Option<Joystick> {
-        for index in 0..joystick_subsystem.num_joysticks().unwrap() {
-            let joy = joystick_subsystem.open(index).unwrap();
-            println!("{}: {}", index, joy.name());
-            return Some(joy)
-        }
-        None
-    }
-
-    
 }

@@ -1,5 +1,5 @@
 use wgpu::{util::DeviceExt, BindGroup, BindGroupLayout, Buffer, Device, PipelineLayout, RenderPipeline, SurfaceConfiguration};
-use crate::{engine::primitive::manual_vertex::ManualVertex, engine::rendering::{camera::CameraRenderizable, ui::rendering_utils}};
+use crate::{engine::primitive::manual_vertex::ManualVertex, engine::rendering::{camera::CameraHandler, ui::rendering_utils}};
 
 
 pub struct RenderPhysics {
@@ -13,7 +13,7 @@ pub struct RenderPhysics {
 }
 
 impl RenderPhysics {
-    pub fn new(device: &Device, config: &SurfaceConfiguration, camera: &CameraRenderizable) -> Self{
+    pub fn new(device: &Device, config: &SurfaceConfiguration, camera: &CameraHandler) -> Self{
         let vertex = [ManualVertex::default(); 2];
         let indices = [0, 1];
 

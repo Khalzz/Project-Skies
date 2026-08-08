@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use nalgebra::{Matrix4, Perspective3, Point3, UnitQuaternion, Vector3};
 use sdl2::rect::Point;
-use wgpu::{util::DeviceExt, BindGroup, BindGroupLayout, BindGroupLayoutDescriptor, Buffer, Device};
+use wgpu::{util::DeviceExt, BindGroup, BindGroupLayout, BindGroupLayoutDescriptor, Buffer, Device, Queue};
 use std::f32::consts::FRAC_PI_2;
 
 // Maps OpenGL's [-1, 1] NDC z-range to wgpu's [0, 1] range, and reverses it
@@ -24,24 +25,40 @@ pub struct NearFarUniform {
     pub far: f32,
 }
 
-pub struct CameraRenderizable {
+const DEFAULT_CAMERA_NAME: &str = "main";
+
+/// A single named camera's own settings - position/orientation (`Camera`) and lens
+/// (`Projection`). Cheap to create since it owns no GPU resources of its own; only
+/// the active one (see `CameraHandler`) actually drives what gets rendered.
+pub struct CameraInstance {
     pub camera: Camera,
     pub projection: Projection,
+}
+
+/// Owns every camera the game has registered plus the one shared set of GPU
+/// resources (uniform/buffer/bind group) that actually feeds the renderer each
+/// frame - only the active camera's settings ever get uploaded (see
+/// `update_buffer`), the same way engines like Unity only ever render from one
+/// active camera at a time even though many can exist in a scene.
+pub struct CameraHandler {
+    cameras: HashMap<String, CameraInstance>,
+    active: String,
+    // Remembered so create_camera never needs width/height passed in - every
+    // camera's aspect ratio is always just "whatever the screen currently is".
+    width: u32,
+    height: u32,
     pub uniform: CameraUniform,
     pub buffer: Buffer,
     pub bind_group_layout: BindGroupLayout,
     pub bind_group: BindGroup,
 }
 
-impl CameraRenderizable {
+impl CameraHandler {
     pub fn new(device: &Device, config: &wgpu::SurfaceConfiguration) -> Self {
         let near_far_uniform = NearFarUniform {
             near: 0.1,
             far: 100000.0,
         };
-
-        let camera = Camera::new(Point3::new(0.0, 0.0, 0.0), -90.0_f32.to_radians(), -20.0_f32.to_radians());
-        let projection = Projection::new(config.width, config.height, 45.0, near_far_uniform.near, near_far_uniform.far);
 
         let uniform = CameraUniform::new(near_far_uniform);
 
@@ -74,14 +91,97 @@ impl CameraRenderizable {
             }],
         });
 
-        CameraRenderizable { camera, projection, uniform, buffer, bind_group, bind_group_layout }
+        let mut handler = CameraHandler {
+            cameras: HashMap::new(),
+            active: DEFAULT_CAMERA_NAME.to_owned(),
+            width: config.width,
+            height: config.height,
+            uniform,
+            buffer,
+            bind_group_layout,
+            bind_group,
+        };
+
+        // Same defaults CameraRenderizable used to hardcode - existing code that
+        // never creates extra cameras sees no behavior change.
+        handler.create_camera(DEFAULT_CAMERA_NAME, Point3::new(0.0, 0.0, 0.0), -90.0, -20.0, 45.0);
+        handler
+    }
+
+    /// Registers (or replaces) a named camera. `fovy` is the only lens setting
+    /// exposed here since it's the one that actually varies per camera in
+    /// practice - near/far default to the handler's usual values but remain
+    /// plain public fields on the returned instance's `.projection` if a caller
+    /// ever needs to override them. Width/height are deliberately not
+    /// parameters: aspect ratio always comes from the handler's own tracked
+    /// screen size, kept current by `resize`.
+    pub fn create_camera(&mut self, name: impl Into<String>, position: Point3<f32>, yaw_deg: f32, pitch_deg: f32, fovy: f32) -> &mut CameraInstance {
+        let camera = Camera::new(position, yaw_deg.to_radians(), pitch_deg.to_radians());
+        let projection = Projection::new(self.width, self.height, fovy, 0.1, 100000.0);
+
+        let name = name.into();
+        self.cameras.insert(name.clone(), CameraInstance { camera, projection });
+        self.cameras.get_mut(&name).unwrap()
+    }
+
+    /// Switches the active camera. Returns false (no-op) if `name` isn't
+    /// registered, rather than panicking - callers can decide whether that's
+    /// worth logging.
+    pub fn select_camera(&mut self, name: &str) -> bool {
+        if self.cameras.contains_key(name) {
+            self.active = name.to_owned();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn active_name(&self) -> &str {
+        &self.active
+    }
+
+    pub fn active(&self) -> &CameraInstance {
+        self.cameras.get(&self.active).expect("active camera must always exist")
+    }
+
+    pub fn active_mut(&mut self) -> &mut CameraInstance {
+        self.cameras.get_mut(&self.active).expect("active camera must always exist")
+    }
+
+    pub fn get(&self, name: &str) -> Option<&CameraInstance> {
+        self.cameras.get(name)
+    }
+
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut CameraInstance> {
+        self.cameras.get_mut(name)
+    }
+
+    // Every registered camera's aspect stays in sync with the screen, not just
+    // the active one - so selecting a different camera later never shows a
+    // stale aspect ratio for a frame.
+    pub fn resize(&mut self, width: u32, height: u32) {
+        self.width = width;
+        self.height = height;
+        for instance in self.cameras.values_mut() {
+            instance.projection.resize(width, height);
+        }
+    }
+
+    // Recomputes the view_proj uniform from the active camera and uploads it -
+    // called once per frame from App, replacing what used to be two lines
+    // inlined at every call site.
+    pub fn update_buffer(&mut self, queue: &Queue) {
+        let active = self.cameras.get(&self.active).expect("active camera must always exist");
+        self.uniform.update_view_proj(&active.camera, &active.projection);
+        queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&[self.uniform]));
     }
 
     pub fn world_to_screen(&self, pos_world: Point3<f32>, screen_width: u32, screen_height: u32) -> Option<Point> {
         // view_proj now assumes the camera sits at the origin, so every
         // position fed into it must first be made camera-relative.
-        let camera_to_point = pos_world - self.camera.position;
-        let forward = self.camera.calc_forward_direction();
+        let active = self.active();
+        let camera_to_point = pos_world - active.camera.position;
+        let forward = active.camera.calc_forward_direction();
 
         if camera_to_point.dot(&forward) < 0.0 {
             return None;

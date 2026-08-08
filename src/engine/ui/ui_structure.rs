@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use serde::Deserialize;
-use super::ui_transform::{SelfAnchor, ChildAnchor, Direction, Fit};
+use super::ui_transform::{SelfAnchor, ChildAnchor, Orientation, Fit};
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct UiStructure {
@@ -33,7 +33,7 @@ pub struct Transform2D {
     pub size: Option<Size2D>,
     pub self_anchor: Option<SelfAnchor>,
     pub child_anchor: Option<ChildAnchor>,
-    pub direction: Option<Direction>,
+    pub direction: Option<Orientation>,
     pub fit: Option<Fit>,
 }
 
@@ -41,6 +41,14 @@ pub struct Transform2D {
 pub enum UiContent {
     Label(LabelData),
     Container(ContainerData),
+    Image(ImageData),
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct ImageData {
+    // Relative to res/ (same convention as resources::load_binary) - loaded once and
+    // cached by this exact path, see Ui::load_image.
+    pub path: String,
 }
 
 #[derive(Deserialize, Debug, Clone)]

@@ -16,6 +16,15 @@ pub async fn load_binary(file_name: &str) -> anyhow::Result<Vec<u8>> {
     Ok(data)
 }
 
+/// Reads a file relative to the project's assets/ directory - unlike load_binary
+/// (which reads from OUT_DIR/res/, a build-time copy baked in at compile time),
+/// this reads directly off the filesystem at runtime, the same convention
+/// Ui::open_ui already uses for .ron UI files. Used for content meant to be edited
+/// and picked up without a rebuild (UI images, UI/level definitions, ...).
+pub fn load_asset_binary(file_name: &str) -> std::io::Result<Vec<u8>> {
+    std::fs::read(std::path::Path::new("assets").join(file_name))
+}
+
 pub async fn load_texture(file_name: &str, device: &wgpu::Device, queue: &wgpu::Queue) -> anyhow::Result<Texture> {
     let data = load_binary(file_name).await?;
     Texture::from_bytes(&data, device, queue, file_name)
@@ -400,7 +409,7 @@ pub fn load_level(app: &mut App, mut level_path: String) {
                 }
 
                 // Create instance buffer once per model
-                let instance_buffer = create_instance_buffer(&model_instances, &app.renderer.device, app.camera.camera.position.coords);
+                let instance_buffer = create_instance_buffer(&model_instances, &app.renderer.device, app.camera.active().camera.position.coords);
 
                 for (i, instance_data) in model_instances.iter().enumerate() {
                     match app.game_models.get_mut(model_name) {

@@ -40,14 +40,14 @@ impl Subtitle {
         };
 
         let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "subtitles") else { return };
-        let UiNodeContent::Text(label) = &mut node.content else { return };
+        let UiNodeContent::Text(_) = &node.content else { return };
 
         if visible {
-            label.color = Color::rgba(255, 255, 255, 255);
-            node.visibility.background_color[3] = 0.7;
+            node.style.text_color = Some(Color::rgba(255, 255, 255, 255));
+            node.style.background_color = Some([0.0, 0.0, 0.0, 0.7]);
         } else {
-            label.color = Color::rgba(255, 255, 255, 0);
-            node.visibility.background_color[3] = 0.0;
+            node.style.text_color = Some(Color::rgba(255, 255, 255, 0));
+            node.style.background_color = Some([0.0, 0.0, 0.0, 0.0]);
         }
     }
 

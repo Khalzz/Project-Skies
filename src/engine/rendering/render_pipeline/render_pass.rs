@@ -78,7 +78,7 @@ impl App {
     // Physics debug lines and UI/text share this pass since they're both drawn on top,
     // without a depth buffer, gated on there being UI geometry to draw at all.
     fn render_ui_pass(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
-        if self.ui.ui_rendering.num_indices == 0 {
+        if self.ui.ui_rendering.num_indices == 0 && self.ui.image_draws.is_empty() {
             return;
         }
 
@@ -98,10 +98,25 @@ impl App {
             self.render_physics_debug_lines(&mut render_pass);
         }
 
-        render_pass.set_pipeline(&self.ui.ui_pipeline);
-        render_pass.set_vertex_buffer(0, self.ui.ui_rendering.vertex_buffer.slice(..));
-        render_pass.set_index_buffer(self.ui.ui_rendering.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-        render_pass.draw_indexed(0..self.ui.ui_rendering.num_indices, 0, 0..1);
+        if self.ui.ui_rendering.num_indices > 0 {
+            render_pass.set_pipeline(&self.ui.ui_pipeline);
+            render_pass.set_vertex_buffer(0, self.ui.ui_rendering.vertex_buffer.slice(..));
+            render_pass.set_index_buffer(self.ui.ui_rendering.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.draw_indexed(0..self.ui.ui_rendering.num_indices, 0, 0..1);
+        }
+
+        // One draw call per distinct image - see Ui::build_image_draws.
+        if !self.ui.image_draws.is_empty() {
+            render_pass.set_pipeline(&self.ui.image_pipeline);
+            for draw in &self.ui.image_draws {
+                if let Some(image) = self.ui.images.get(&draw.path) {
+                    render_pass.set_bind_group(0, &image.bind_group, &[]);
+                    render_pass.set_vertex_buffer(0, draw.vertex_buffer.slice(..));
+                    render_pass.set_index_buffer(draw.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                    render_pass.draw_indexed(0..draw.num_indices, 0, 0..1);
+                }
+            }
+        }
 
         // Render text (text renderer handles empty content gracefully)
         self.ui.text.text_renderer.render(&self.ui.text.text_atlas, &self.renderer.glyphon.viewport, &mut render_pass).unwrap();
@@ -110,7 +125,7 @@ impl App {
     // Debug lines come from the physics thread in absolute world coordinates,
     // so make them camera-relative here to match camera.view_proj.
     fn render_physics_debug_lines<'rp>(&mut self, render_pass: &mut wgpu::RenderPass<'rp>) {
-        let camera_position = self.camera.camera.position;
+        let camera_position = self.camera.active().camera.position;
         let vertices: Vec<ManualVertex> = self.render_physics.renderizable_lines.iter()
             .flat_map(|line| line.to_vec())
             .map(|mut vertex| {

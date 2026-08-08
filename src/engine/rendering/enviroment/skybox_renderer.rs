@@ -1,6 +1,6 @@
 use wgpu::{util::DeviceExt, BindGroup, BindGroupLayout, BindGroupLayoutDescriptor, Buffer, Device, RenderPipeline, SurfaceConfiguration};
 
-use crate::engine::rendering::{camera::CameraRenderizable, models::textures::Texture};
+use crate::engine::rendering::{camera::CameraHandler, models::textures::Texture};
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -56,7 +56,7 @@ pub struct SkyboxRender {
 }
 
 impl SkyboxRender {
-    pub fn new(device: &Device, config: &SurfaceConfiguration, camera: &CameraRenderizable, texture: Texture) -> Self {
+    pub fn new(device: &Device, config: &SurfaceConfiguration, camera: &CameraHandler, texture: Texture) -> Self {
         let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("skybox_bind_group_layout"),
             entries: &[

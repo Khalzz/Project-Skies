@@ -6,7 +6,7 @@ use std::panic;
 use nalgebra::Point3;
 
 use crate::engine::rendering::ui::physics_rendering::RenderPhysics;
-use crate::engine::rendering::camera::CameraRenderizable;
+use crate::engine::rendering::camera::CameraHandler;
 use crate::engine::physics::physics_handler::{Physics, RenderMessage, PhysicsCommand, PhysicsTick};
 use crate::engine::physics::physics_resources::load_physics_from_level;
 use crate::game::play::plane::plane::PlaneControls;
@@ -27,7 +27,7 @@ pub struct PhysicsDataTransmission {
 
 // Always starts the physics thread - callers only call this when a scene's
 // Scene::physics() actually returned Some(...); see App::run.
-pub fn physics_handling(device: &Device, config: &SurfaceConfiguration, camera: &CameraRenderizable, level_path: String, physics_tick: Box<dyn PhysicsTick + Send>) -> PhysicsDataTransmission {
+pub fn physics_handling(device: &Device, config: &SurfaceConfiguration, camera: &CameraHandler, level_path: String, physics_tick: Box<dyn PhysicsTick + Send>) -> PhysicsDataTransmission {
     // Data channels
     let (physics_data_tx, physics_data_rx) = channel::<HashMap<String, RenderMessage>>();
     let (request_data_tx, request_data_rx) = channel::<PhysicsCommand>();

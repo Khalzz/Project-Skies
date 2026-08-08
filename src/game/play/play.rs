@@ -5,7 +5,7 @@ use nalgebra::{vector, Point3, Quaternion, UnitQuaternion, Vector3};
 use rand::{rngs::ThreadRng, Rng};
 use rapier3d::prelude::RigidBody;
 use sdl2::{controller::GameController};
-use crate::{app::{App, AppState}, engine::audio::subtitles::Subtitle, engine::input::{input::InputSubsystem, utils::to_axis}, engine::physics::physics_handler::{MetadataType, PhysicsData, PhysicsTick, RenderMessage}, engine::primitive::manual_vertex::ManualVertex, engine::rendering::{camera::CameraRenderizable, ui::ui::Ui}, engine::scene_manager::scene::{FrameContext, Scene}, transform::Transform, engine::ui::{ui_node::{UiNode, UiNodeContent, Visibility}, ui_transform::UiTransform}, engine::utils::lerps::{lerp, lerp_quaternion}};
+use crate::{app::{App, AppState}, engine::audio::subtitles::Subtitle, engine::input::input, engine::physics::physics_handler::{MetadataType, PhysicsData, PhysicsTick, RenderMessage}, engine::primitive::manual_vertex::ManualVertex, engine::rendering::{camera::CameraHandler, ui::ui::Ui}, engine::scene_manager::scene::{FrameContext, Scene}, transform::Transform, engine::ui::{ui_node::{UiNode, UiNodeContent}, ui_transform::UiTransform}, engine::utils::lerps::{lerp, lerp_quaternion}};
 use super::{event_handling::EventSystem, plane::{physics_logic::PlanePhysicsLogic, plane::Plane}};
 use std::sync::mpsc::Sender;
 use crate::game::play::plane::plane::PlaneControls;
@@ -90,8 +90,13 @@ pub struct GameLogic { // here we define the data we use on our script
 impl GameLogic {
     // this is called once
     pub fn new(app: &mut App) -> Self {
+        // Moved here from the old Scene::init (now removed - a scene's constructor
+        // is the only thing that ever runs on activation, see SceneManager::create_scene).
+        load_level(app, "./assets/scenes/test_chamber".to_owned());
+        app.ui.load_ui("./assets/ui/game_ui.ron", app.renderer.config.width, app.renderer.config.height, &app.renderer.device, &app.renderer.queue);
+
         // UI ELEMENTS AND LIST
-        /* 
+        /*
         let altitude = UiNode::new(
             UiTransform::new(((app.config.width as f32 / 2.0) - (150.0 / 2.0)) - 400.0, (app.config.height as f32 / 2.0) - (30.0 / 2.0), 30.0, 150.0, 0.0, false), 
             Visibility::new([0.0, 0.0, 0.0, 0.0], [0.0, 255.0, 0.0, 255.0]),
@@ -277,15 +282,15 @@ impl GameLogic {
     }
 
     // this is called every frame
-    pub fn update(&mut self, app: &mut App, input_subsystem: &InputSubsystem, plane_control_tx: Option<&Sender<PlaneControls>>, physics_data: &HashMap<String, RenderMessage>) {
+    pub fn update(&mut self, app: &mut App, plane_control_tx: Option<&Sender<PlaneControls>>, physics_data: &HashMap<String, RenderMessage>) {
         self.game_time += app.time.delta_time as f64;
 
-        if input_subsystem.is_just_pressed("test") {
+        if input::is_action_just_pressed("test") {
             self.subtitle_data.add_text("SKIBIDI DAM DAM DAM YES YES", 3000, app);
         }
 
         // Debug console output (press F2 to show/hide)
-        self.plane.update(app.time.delta_time, input_subsystem);
+        self.plane.update(app.time.delta_time);
         if let Some(plane_control_tx) = plane_control_tx {
             let _ = plane_control_tx.send(self.plane.controls.clone());
         }
@@ -295,7 +300,7 @@ impl GameLogic {
             event_system.handle_events(self.game_time, app, &mut self.subtitle_data);
         }
         self.subtitle_data.update(app);
-        self.camera_control(app, app.time.delta_time, input_subsystem);
+        self.camera_control(app, app.time.delta_time);
         self.ui_control(app, app.time.delta_time);
     }
 
@@ -525,13 +530,13 @@ impl GameLogic {
         }
     }
 
-    fn camera_control(&mut self, app: &mut App, delta_time: f32, input_subsystem: &InputSubsystem) {
+    fn camera_control(&mut self, app: &mut App, delta_time: f32) {
         if let Some(player) = app.renderizable_instances.get_mut("player") {
             // Calculate target camera position and look-at point
             let (target_position, target_look_at, target_up) = match self.camera_data.camera_state {
                 CameraState::Normal => {
-                    app.camera.projection.znear = 0.1;
-                    let target_pos = player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 0.6, -45.0));
+                    app.camera.active_mut().projection.znear = 0.1;
+                    let target_pos = player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 8.0, -50.0));
                     let look_at = player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 0.0, 100.0));
                     (target_pos, look_at, player.instance.transform.rotation * *Vector3::y_axis())
                 },
@@ -545,24 +550,24 @@ impl GameLogic {
                     } else {
                         (player.instance.transform.rotation * Vector3::new(0.0, 0.2, 1.3), 70.0)
                     };
-                    app.camera.projection.znear = 0.01;
+                    app.camera.active_mut().projection.znear = 0.01;
 
                     // Mouse wheel adjusts target FOV
-                    let scroll = input_subsystem.mouse.get_scroll_y();
+                    let scroll = input::mouse_scroll_y();
                     if scroll != 0.0 {
                         self.camera_data.cockpit_target_fov = (self.camera_data.cockpit_target_fov - scroll * 5.0).clamp(20.0, 120.0);
                     }
                     // Lerp current FOV toward target
                     self.camera_data.cockpit_current_fov = lerp(self.camera_data.cockpit_current_fov, self.camera_data.cockpit_target_fov, delta_time * 8.0);
-                    app.camera.projection.fovy = self.camera_data.cockpit_current_fov;
+                    app.camera.active_mut().projection.fovy = self.camera_data.cockpit_current_fov;
 
                     let max_yaw: f32 = 170.0;
                     let max_pitch: f32 = 70.0;
-                    let sens = input_subsystem.mouse.get_sensitivity();
+                    let sens = input::mouse_sensitivity();
 
                     // Update yaw/pitch from relative mouse, clamp immediately so no over-accumulation
-                    self.camera_data.cockpit_yaw = (self.camera_data.cockpit_yaw - input_subsystem.mouse.get_rel_x() as f32 * sens.0).clamp(-max_yaw, max_yaw);
-                    self.camera_data.cockpit_pitch = (self.camera_data.cockpit_pitch + input_subsystem.mouse.get_rel_y() as f32 * sens.1).clamp(-max_pitch, max_pitch);
+                    self.camera_data.cockpit_yaw = (self.camera_data.cockpit_yaw - input::mouse_rel_x() as f32 * sens.0).clamp(-max_yaw, max_yaw);
+                    self.camera_data.cockpit_pitch = (self.camera_data.cockpit_pitch + input::mouse_rel_y() as f32 * sens.1).clamp(-max_pitch, max_pitch);
 
                     let yaw = self.camera_data.cockpit_yaw;
                     let pitch = self.camera_data.cockpit_pitch;
@@ -601,7 +606,7 @@ impl GameLogic {
                     } else {
                         (player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(-1.0, 3.0, -1.0)), 60.0)
                     };
-                    app.camera.projection.fovy = fov;
+                    app.camera.active_mut().projection.fovy = fov;
                     let look_at = player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(30.0, 0.0, 100.0));
                     (target_pos, look_at, player.instance.transform.rotation * *Vector3::y_axis())
                 },
@@ -615,24 +620,24 @@ impl GameLogic {
                     } else {
                         (player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 2.0, 3.0)), 60.0)
                     };
-                    app.camera.projection.fovy = fov;
+                    app.camera.active_mut().projection.fovy = fov;
                     let look_at = player.instance.transform.position;
                     (target_pos, look_at, player.instance.transform.rotation * *Vector3::y_axis())
                 },
                 CameraState::Free => {
-                    app.camera.projection.znear = 0.1;
+                    app.camera.active_mut().projection.znear = 0.1;
 
                     // Mouse wheel adjusts target FOV
-                    let scroll = input_subsystem.mouse.get_scroll_y();
+                    let scroll = input::mouse_scroll_y();
                     if scroll != 0.0 {
                         self.camera_data.free_target_fov = (self.camera_data.free_target_fov - scroll * 5.0).clamp(20.0, 120.0);
                     }
                     self.camera_data.free_current_fov = lerp(self.camera_data.free_current_fov, self.camera_data.free_target_fov, delta_time * 8.0);
-                    app.camera.projection.fovy = self.camera_data.free_current_fov;
+                    app.camera.active_mut().projection.fovy = self.camera_data.free_current_fov;
 
-                    let sens = input_subsystem.mouse.get_sensitivity();
-                    self.camera_data.free_yaw = self.camera_data.free_yaw - input_subsystem.mouse.get_rel_x() as f32 * sens.0;
-                    self.camera_data.free_pitch = (self.camera_data.free_pitch + input_subsystem.mouse.get_rel_y() as f32 * sens.1).clamp(-89.0, 89.0);
+                    let sens = input::mouse_sensitivity();
+                    self.camera_data.free_yaw = self.camera_data.free_yaw - input::mouse_rel_x() as f32 * sens.0;
+                    self.camera_data.free_pitch = (self.camera_data.free_pitch + input::mouse_rel_y() as f32 * sens.1).clamp(-89.0, 89.0);
 
                     let rotation_y = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), self.camera_data.free_yaw.to_radians());
                     let rotation_x = UnitQuaternion::from_axis_angle(&Vector3::x_axis(), self.camera_data.free_pitch.to_radians());
@@ -655,27 +660,27 @@ impl GameLogic {
                 let speed = 2.0 * delta_time;
                 let mut changed = false;
 
-                if input_subsystem.is_pressed("throttle_up") {
+                if input::is_action_pressed("throttle_up") {
                     self.camera_data.debug_offset.z += speed;
                     changed = true;
                 }
-                if input_subsystem.is_pressed("throttle_down") {
+                if input::is_action_pressed("throttle_down") {
                     self.camera_data.debug_offset.z -= speed;
                     changed = true;
                 }
-                if input_subsystem.is_pressed("up_wheel") {
+                if input::is_action_pressed("up_wheel") {
                     self.camera_data.debug_offset.x += speed;
                     changed = true;
                 }
-                if input_subsystem.is_pressed("down_wheel") {
+                if input::is_action_pressed("down_wheel") {
                     self.camera_data.debug_offset.x -= speed;
                     changed = true;
                 }
-                if input_subsystem.is_pressed("pitch_up") {
+                if input::is_action_pressed("pitch_up") {
                     self.camera_data.debug_offset.y += speed;
                     changed = true;
                 }
-                if input_subsystem.is_pressed("pitch_down") {
+                if input::is_action_pressed("pitch_down") {
                     self.camera_data.debug_offset.y -= speed;
                     changed = true;
                 }
@@ -694,15 +699,16 @@ impl GameLogic {
             };
 
             // Apply camera position directly (no interpolation to match object movement)
-            app.camera.camera.position = final_position.into();
-            app.camera.camera.look_at(target_look_at.into());
-            app.camera.camera.up = target_up;
+            let active = app.camera.active_mut();
+            active.camera.position = final_position.into();
+            active.camera.look_at(target_look_at.into());
+            active.camera.up = target_up;
         }
         // self.calculate_lockable(app);
-        if input_subsystem.is_just_pressed("change_camera") {
+        if input::is_action_just_pressed("change_camera") {
             self.next_camera(&mut app.camera);
         }
-        if input_subsystem.is_just_pressed("toggle_camera_debug") {
+        if input::is_action_just_pressed("toggle_camera_debug") {
             self.camera_data.debug_mode_active = !self.camera_data.debug_mode_active;
             println!("Camera debug mode: {}", if self.camera_data.debug_mode_active { "ON" } else { "OFF" });
         }
@@ -758,7 +764,7 @@ impl GameLogic {
                 label.set_text(&mut app.ui.text.font_system, &format!("SPD: {:.0}", self.plane_systems.flight_data.speedometer), true);
             }
 
-            let rotation = Self::map_to_range(app.camera.camera.yaw.into(), -PI as f64, PI  as f64, 0.0, 360.0).round();
+            let rotation = Self::map_to_range(app.camera.active().camera.yaw.into(), -PI as f64, PI  as f64, 0.0, 360.0).round();
             
             let text_compass = if rotation >= 355.0 || rotation <= 5.0 {
                 "N".to_owned()
@@ -790,16 +796,12 @@ impl GameLogic {
                                 marker.transform.rect.top = marker.transform.y;
                                 marker.transform.rect.right = marker.transform.x + marker.transform.width;
                                 marker.transform.rect.bottom = marker.transform.y + marker.transform.height;
-                                if let UiNodeContent::Text(label) = &mut marker.content {
-                                    label.color = Color::rgba(0, 255, 75, 255);
-                                }
+                                marker.style.text_color = Some(Color::rgba(0, 255, 75, 255));
                             }
                         } else {
                             // Off screen — hide marker
                             if let Some(marker) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "velocity_marker") {
-                                if let UiNodeContent::Text(label) = &mut marker.content {
-                                    label.color = Color::rgba(0, 255, 75, 0);
-                                }
+                                marker.style.text_color = Some(Color::rgba(0, 255, 75, 0));
                             }
                         }
                     }
@@ -840,28 +842,23 @@ impl GameLogic {
             blinking_alert.alert_state = false
         }
 
-        
-            match &mut blinkable.content {
-                UiNodeContent::Text(label) => {
-                    if blinking_alert.alert_state {
-                        blinkable.visibility.border_color = [1.0, 0.0, 0.0, 1.0];
-                        label.color = Color::rgba(255, 0, 0, 255);
-
-                    } else {
-                        blinkable.visibility.border_color = [0.0, 0.0, 0.0, 0.0];
-                        label.color = Color::rgba(0, 0, 0, 0);
-                    }
-                },
-                _ => {}
+        if matches!(&blinkable.content, UiNodeContent::Text(_)) {
+            if blinking_alert.alert_state {
+                blinkable.style.border_color = Some([1.0, 0.0, 0.0, 1.0]);
+                blinkable.style.text_color = Some(Color::rgba(255, 0, 0, 255));
+            } else {
+                blinkable.style.border_color = Some([0.0, 0.0, 0.0, 0.0]);
+                blinkable.style.text_color = Some(Color::rgba(0, 0, 0, 0));
             }
-        
+        }
+
     }
 
     fn map_to_range(x: f64, in_min: f64, in_max: f64, out_min: f64, out_max: f64) -> f64 {
         (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min
     }
 
-    fn next_camera(&mut self, camera: &mut CameraRenderizable) {
+    fn next_camera(&mut self, camera: &mut CameraHandler) {
         match self.camera_data.camera_state {
             CameraState::Normal => {
                 self.camera_data.camera_state = CameraState::Free;
@@ -875,17 +872,11 @@ impl GameLogic {
 }
 
 impl Scene for GameLogic {
-    fn reset(&mut self, app: &mut App) {
-        load_level(app, "./assets/scenes/test_chamber".to_owned());
-        app.ui.load_ui("./assets/ui/game_ui.ron", app.renderer.config.width, app.renderer.config.height);
-        *self = GameLogic::new(app);
+    fn update(&mut self, app: &mut App, ctx: &mut FrameContext) {
+        self.update(app, ctx.plane_control_tx, ctx.physics_data);
     }
 
-    fn tick(&mut self, app: &mut App, ctx: &mut FrameContext) {
-        self.update(app, ctx.input_subsystem, ctx.plane_control_tx, ctx.physics_data);
-    }
-
-    fn physics(&self, app: &App) -> Option<(String, Box<dyn PhysicsTick + Send>)> {
+    fn fixed_update(&self, app: &App) -> Option<(String, Box<dyn PhysicsTick + Send>)> {
         // reset() (via load_level) already set this to whatever level it just
         // loaded - reuse it instead of keeping a second, separately-typed copy.
         let level_path = app.scene_openned.clone()?;

@@ -52,8 +52,8 @@
                         fov: 60.0,
                     ),
                     "frontal": (
-                        position: (0.0, 6.0, 30.0),
-                        fov: 60.0,
+                        position: (0.0, 6.0, 35.0),
+                        fov: 40.0,
                     ),
                 }),
                 physics: Some((
