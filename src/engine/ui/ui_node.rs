@@ -173,6 +173,12 @@ pub struct UiNode {
     // transform.width/height to make room (see apply_padding).
     pub padding: Padding,
     pub hover: Option<Style>,
+    // Style overrides applied while the mouse is held down over this node - CSS's
+    // `:active` (distinct from `:hover`, which alone doesn't imply the button is
+    // being pressed). Layers on top of hover (see node_content_preparation) rather
+    // than replacing it, so a press can override just e.g. border_color while
+    // hover's background/text_color stay in effect underneath.
+    pub press: Option<Style>,
     // Set by `.set_transition(...)` - how long, in ms, style changes (hover in/out,
     // or a runtime change like set_alpha) take to visually settle instead of
     // applying instantly. `None` (the default) means instant, same as before this
@@ -188,6 +194,10 @@ pub struct UiNode {
     // position - exposed read-only in case callers want to react to it too, not
     // wired up here beyond driving the hover style.
     pub is_hovered: bool,
+    // Recomputed every frame alongside is_hovered - true for as long as the mouse
+    // button stays down over this node (unlike is_clicked, which is only true the
+    // one frame it goes down) - exposed read-only, drives the press style.
+    pub is_pressed: bool,
     // Callback registered via `.on_click(...)`, invoked from `take_click_handlers`
     // (called separately from `node_content_preparation` since firing it needs
     // `&mut App`, which that pass doesn't have - see `App::fire_ui_click_handlers`).
@@ -227,9 +237,11 @@ impl UiNode {
             is_active: true,
             padding: Padding::default(),
             hover: None,
+            press: None,
             transition_ms: None,
             current_style: None,
             is_hovered: false,
+            is_pressed: false,
             on_click: None,
             is_clicked: false,
             pending_size: None,
@@ -298,6 +310,7 @@ impl UiNode {
         self.is_active = active;
         if !active {
             self.is_hovered = false;
+            self.is_pressed = false;
             self.is_clicked = false;
         }
     }
@@ -342,6 +355,7 @@ impl UiNode {
         // below.
         if !self.is_active {
             self.is_hovered = false;
+            self.is_pressed = false;
             self.is_clicked = false;
             return (Vec::new(), 0, 0);
         }
@@ -357,15 +371,24 @@ impl UiNode {
         // not any click-specific state of its own.
         let mouse_over = point_in_rect(input::mouse_x() as f32, input::mouse_y() as f32, &self.transform.rect);
         self.is_hovered = self.hover.is_some() && mouse_over;
+        self.is_pressed = self.press.is_some() && mouse_over && input::is_action_pressed("ui_click");
 
         // Hover's Some(...) fields win over the resting style, its None fields fall
         // back to it - built fresh every frame (not written back into self.style),
         // so un-hovering next frame just goes back to reading the untouched resting
-        // style, no restore/undo bookkeeping needed.
-        let effective_style = if self.is_hovered {
+        // style, no restore/undo bookkeeping needed. Press then layers the same way
+        // on top of THAT (not the resting style directly) - a press implies the
+        // mouse is also hovering, so whatever hover changed stays in effect unless
+        // press explicitly overrides that same field too.
+        let hover_applied = if self.is_hovered {
             self.hover.as_ref().unwrap().or(&self.style)
         } else {
             self.style.clone()
+        };
+        let effective_style = if self.is_pressed {
+            self.press.as_ref().unwrap().or(&hover_applied)
+        } else {
+            hover_applied
         };
         self.is_clicked = mouse_over && input::is_action_just_pressed("ui_click");
 
@@ -486,6 +509,42 @@ impl UiNode {
                 let content_bottom = parent_rect.bottom - padding.bottom;
                 let content_w = content_right - content_left;
                 let content_h = content_bottom - content_top;
+
+                // Grow children (see SizeValue::Grow) split whatever main-axis space
+                // is left after every other active child's own size and the gaps
+                // between ALL active children are subtracted - same idea as CSS
+                // flexbox's flex-grow: 1. Has to run before total_children_main
+                // below, since that needs every active child's real main-axis size,
+                // Grow children included.
+                let is_grow = |c: &UiNode| match direction {
+                    Orientation::Vertical => c.transform.grow.vertical,
+                    Orientation::Horizontal => c.transform.grow.horizontal,
+                };
+                let grow_count = container.children.iter().filter(|(_, c)| c.is_active && is_grow(c)).count();
+                if grow_count > 0 {
+                    let fixed_main: f32 = container.children.iter()
+                        .filter(|(_, c)| c.is_active && !is_grow(c))
+                        .map(|(_, c)| match direction {
+                            Orientation::Vertical => c.transform.height,
+                            Orientation::Horizontal => c.transform.width,
+                        })
+                        .sum();
+                    let content_main = match direction {
+                        Orientation::Vertical => content_h,
+                        Orientation::Horizontal => content_w,
+                    };
+                    let available = (content_main - fixed_main - gap * (active_count.saturating_sub(1) as f32)).max(0.0);
+                    let grow_size = available / grow_count as f32;
+                    for (_, child) in &mut container.children {
+                        if child.is_active && is_grow(child) {
+                            match direction {
+                                Orientation::Vertical => child.transform.height = grow_size,
+                                Orientation::Horizontal => child.transform.width = grow_size,
+                            }
+                            child.transform.apply_transformation();
+                        }
+                    }
+                }
 
                 // Calculate total children size for centering/end alignment on main axis
                 let total_children_main: f32 = container.children.iter()
@@ -861,7 +920,14 @@ impl UiNode {
             self.transform.resolve_position(x, y, parent_width, parent_height);
         }
         if let UiNodeContent::Container(container) = &mut self.content {
-            let (width, height) = (self.transform.width, self.transform.height);
+            // Children resolve Percent/Grow against this container's *content* box
+            // (its own size minus its own padding), not its outer box - the same
+            // content_w/content_h every frame's layout pass already uses (see
+            // node_content_preparation) for the exact same reason: a child sized
+            // against the outer box would size itself out past this container's own
+            // padding instead of stopping at it.
+            let width = (self.transform.width - self.padding.left - self.padding.right).max(0.0);
+            let height = (self.transform.height - self.padding.top - self.padding.bottom).max(0.0);
             for (_, child) in &mut container.children {
                 child.resolve(width, height);
             }
@@ -873,6 +939,17 @@ impl UiNode {
     /// any node type, same as `.set_background_color`/`.set_border_color`.
     pub fn on_hover(mut self, hover: Style) -> Self {
         self.hover = Some(hover);
+        self
+    }
+
+    /// Sets the style overrides this node uses while the mouse is held down over it
+    /// - CSS's `:active`, checked fresh every frame in `node_content_preparation`
+    /// alongside `.on_hover(...)`, and layered on top of it (a press implies the
+    /// mouse is also hovering, so hover's effects stay live underneath - a press
+    /// style only needs to state what's *different* about being pressed, e.g. just
+    /// `border_color`).
+    pub fn on_press(mut self, press: Style) -> Self {
+        self.press = Some(press);
         self
     }
 

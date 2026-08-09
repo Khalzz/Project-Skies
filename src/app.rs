@@ -491,6 +491,9 @@ impl App {
                 self.renderer.queue.write_buffer(&self.light.rendering_data.buffer, 0, bytemuck::cast_slice(&[self.light.uniform]));
                 // lighting update
 
+                // No-op unless something called CameraHandler::transition_to(...) -
+                // advances the blend (if any) before this frame's view_proj upload.
+                self.camera.update_transition(self.time.delta_time);
                 self.camera.update_buffer(&self.renderer.queue);
                 self.renderer.queue.write_buffer(&self.renderer.depth_render.near_far_buffer, 0, bytemuck::cast_slice(&[self.renderer.depth_render.near_far_uniform]));
             }

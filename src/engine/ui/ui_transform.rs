@@ -46,6 +46,21 @@ pub struct Fit {
     pub vertical: bool,
 }
 
+/// Set by `SizeValue::Grow` (see `UiTransform::resolve_size`) - whether this node
+/// wants to expand to fill its parent container's *remaining* main-axis space,
+/// like CSS flexbox's `flex-grow`. Unlike `Fit` (which a node resolves for itself,
+/// from its own children), this flag is read by the *parent*'s layout pass (see
+/// `UiNode::node_content_preparation`'s Container branch) - only meaningful on the
+/// axis matching the parent's own `Orientation`; the cross axis isn't implemented
+/// (a `Grow`-flagged cross-axis just keeps whatever `resolve_size` gave it - the
+/// full parent size, same fallback a top-level node relies on, see
+/// `resolve_size`'s doc comment - not a shrink-to-`0.0` like an unresolved `Fit`).
+#[derive(Clone, Debug, Default)]
+pub struct Grow {
+    pub horizontal: bool,
+    pub vertical: bool,
+}
+
 /// Inset between a node's own box edges and its content, one value per side - the
 /// CSS `padding` shorthand's full generality. For a container, insets its children
 /// from its own edges; for a Text/Image node (no children to inset), grows the
@@ -103,6 +118,12 @@ pub enum SizeValue {
     Percent(f32),
     /// Size to children's natural size - containers only, same as `Fit` above.
     Fit,
+    /// Expand to fill whatever main-axis space is left in the parent container
+    /// after every sibling's own size and the gaps between them - containers only,
+    /// same as `Fit`, and only on the axis matching the parent's `Orientation` (see
+    /// `Grow`'s doc comment). Multiple `Grow` siblings split the remaining space
+    /// evenly, same as CSS flexbox's `flex-grow: 1` on all of them.
+    Grow,
 }
 
 /// A richer per-axis position than a raw pixel offset - resolved immediately (via
@@ -149,6 +170,7 @@ pub struct UiTransform {
     pub child_anchor: ChildAnchor,
     pub direction: Orientation,
     pub fit: Fit,
+    pub grow: Grow,
 }
 
 impl UiTransform {
@@ -172,6 +194,7 @@ impl UiTransform {
             child_anchor: ChildAnchor::default(),
             direction: Orientation::default(),
             fit: Fit::default(),
+            grow: Grow::default(),
         }
     }
 
@@ -233,23 +256,38 @@ impl UiTransform {
     }
 
     /// Resolves a `SizeValue` pair against `parent_width`/`parent_height`, writing
-    /// `self.width`/`self.height` and this node's own `fit` flags directly - `Fit`
-    /// leaves size at `0.0` since the real fit-to-children value only exists once
-    /// the per-frame layout pass runs (see `node_content_preparation`), same as
-    /// today's RON-loaded `Fit`-flagged containers.
+    /// `self.width`/`self.height` and this node's own `fit`/`grow` flags directly -
+    /// `Fit` leaves size at `0.0` since the real value only exists once this node's
+    /// own per-frame layout pass runs (see `node_content_preparation`), computed
+    /// from its children.
+    ///
+    /// `Grow` resolves to the *full* `parent_width`/`parent_height` here - not
+    /// `0.0` - so a `Grow`-sized node that's never a child inside a container's
+    /// `children` list (a top-level `Layer` node, for instance) still ends up
+    /// filling its parent, instead of silently falling back to `Fit`-like
+    /// shrink-to-content behavior for having a leftover `0.0` size. For a `Grow`
+    /// node that *is* such a child, this full-parent value only lasts until its
+    /// container's own layout pass runs, which overwrites it unconditionally with
+    /// its actual share of the remaining space (see `Grow`'s doc comment) - so this
+    /// full-size fallback never actually shows up there, only when nothing else
+    /// ever resolves it.
     pub fn resolve_size(&mut self, width: SizeValue, height: SizeValue, parent_width: f32, parent_height: f32) {
         self.fit.horizontal = matches!(width, SizeValue::Fit);
         self.fit.vertical = matches!(height, SizeValue::Fit);
+        self.grow.horizontal = matches!(width, SizeValue::Grow);
+        self.grow.vertical = matches!(height, SizeValue::Grow);
 
         self.width = match width {
             SizeValue::Pixels(px) => px,
             SizeValue::Percent(pct) => parent_width * pct / 100.0,
             SizeValue::Fit => 0.0,
+            SizeValue::Grow => parent_width,
         };
         self.height = match height {
             SizeValue::Pixels(px) => px,
             SizeValue::Percent(pct) => parent_height * pct / 100.0,
             SizeValue::Fit => 0.0,
+            SizeValue::Grow => parent_height,
         };
     }
 

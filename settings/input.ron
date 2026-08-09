@@ -24,6 +24,7 @@
         (action: "debug_cam_right", bindings: [Key("d")]),
         (action: "debug_cam_up", bindings: [Key("space")]),
         (action: "debug_cam_down", bindings: [Key("Left Ctrl")]),
+        (action: "debug_cam_sprint", bindings: [Key("Left Shift")]),
         (action: "trim_pitch_up", bindings: [Key("i")]),
         (action: "trim_pitch_down", bindings: [Key("k")]),
         (action: "trim_roll_left", bindings: [Key("j")]),

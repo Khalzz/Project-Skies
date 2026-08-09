@@ -27,7 +27,13 @@ const HUD_WIDTH: f32 = 360.0;
 const HUD_LINE_BOX_HEIGHT: f32 = 28.0;
 const HUD_LINE_SPACING: f32 = 32.0;
 
+// Toggle hint - always shown (enabled or not), so it lives below where the 4-line
+// HUD block ends instead of overlapping it.
+const HINT_KEY: &str = "__free_camera_hint";
+const HINT_Y: f32 = HUD_Y + HUD_LINE_SPACING * 4.0;
+
 const MOVE_SPEED: f32 = 15.0;
+const SPRINT_MULTIPLIER: f32 = 3.0;
 const MAX_PITCH_DEG: f32 = 89.0;
 const FOV_SCROLL_SPEED: f32 = 5.0;
 const FOV_MIN: f32 = 10.0;
@@ -36,24 +42,34 @@ const FOV_MAX: f32 = 120.0;
 // tolerate much bigger per-pixel angle jumps than a direct look-camera does - scaled
 // down here so a normal mouse swipe doesn't turn the view 90 degrees in one sample.
 const LOOK_SENSITIVITY_SCALE: f32 = 0.5;
+// How long handing control back to the previous camera takes to blend, instead of
+// an instant cut - see CameraHandler::transition_to. Purely cosmetic, so no
+// particular reasoning behind this exact number beyond "feels quick but not jarring".
+const HANDOFF_TRANSITION_SECS: f32 = 0.75;
 
 struct FreeCameraState {
     enabled: bool,
     // Which camera to hand control back to once this tool is toggled off.
     previous_camera: Option<String>,
+    // Cursor visibility to restore once this tool is toggled off, in case it wasn't
+    // showing to begin with (e.g. relative mouse mode already hides it in gameplay).
+    cursor_was_showing: Option<bool>,
 }
 
-static STATE: Mutex<FreeCameraState> = Mutex::new(FreeCameraState { enabled: false, previous_camera: None });
+static STATE: Mutex<FreeCameraState> = Mutex::new(FreeCameraState { enabled: false, previous_camera: None, cursor_was_showing: None });
 
 /// Dev-only free-fly camera tool for building/testing this game - toggled with the
 /// "toggle_camera_debug" action (F4), opt-in per scene by calling this once per frame
 /// from that scene's own update (see main_menu.rs). Doesn't touch whatever camera the
 /// scene already has active: it generates its own dedicated camera and switches to it
 /// while enabled (seeded from the current view, so the switch itself is invisible),
-/// then hands control back to whatever was active before once toggled back off - the
-/// scene's real camera is never mutated. While active: mouse look + WASD/Space/Left
-/// Ctrl fly the camera, scroll adjusts fov, and a HUD shows its live
-/// position/yaw/pitch/fov.
+/// then smoothly blends control back to whatever was active before once toggled back
+/// off (see CameraHandler::transition_to/HANDOFF_TRANSITION_SECS) instead of an
+/// instant cut - the scene's real camera is never mutated. While active: mouse look + WASD/Space/Left
+/// Ctrl fly the camera (hold Left Shift to sprint), scroll adjusts fov, and a HUD
+/// shows its live position/yaw/pitch/fov. The system cursor is hidden while active
+/// and restored to its prior visibility on toggle-off. A one-line hint showing the
+/// toggle button is always on screen, regardless of enabled state.
 pub fn update(app: &mut App) {
     let mut state = STATE.lock().unwrap();
 
@@ -68,9 +84,16 @@ pub fn update(app: &mut App) {
             app.camera.create_camera(FREE_CAMERA_NAME, pos, yaw_deg, pitch_deg, fovy);
             app.camera.select_camera(FREE_CAMERA_NAME);
             state.previous_camera = Some(previous_name);
+
+            let mouse = app.window_manager.context.mouse();
+            state.cursor_was_showing = Some(mouse.is_cursor_showing());
+            mouse.show_cursor(false);
         } else {
             if let Some(previous) = state.previous_camera.take() {
-                app.camera.select_camera(&previous);
+                app.camera.transition_to(&previous, HANDOFF_TRANSITION_SECS);
+            }
+            if let Some(was_showing) = state.cursor_was_showing.take() {
+                app.window_manager.context.mouse().show_cursor(was_showing);
             }
             for key in HUD_LINE_KEYS {
                 app.ui.renderizable_elements.remove(key);
@@ -78,6 +101,8 @@ pub fn update(app: &mut App) {
             app.ui.has_changed = true;
         }
     }
+
+    set_hint(app, state.enabled);
 
     if !state.enabled {
         return;
@@ -115,7 +140,8 @@ pub fn update(app: &mut App) {
     if input::is_action_pressed("debug_cam_down") { direction -= world_up; }
 
     if direction.norm_squared() > 0.0 {
-        active.camera.position += direction.normalize() * MOVE_SPEED * delta_time;
+        let speed = if input::is_action_pressed("debug_cam_sprint") { MOVE_SPEED * SPRINT_MULTIPLIER } else { MOVE_SPEED };
+        active.camera.position += direction.normalize() * speed * delta_time;
     }
 
     if scroll != 0.0 {
@@ -147,6 +173,25 @@ fn set_hud(app: &mut App, lines: &[String; 4]) {
                 .set_background_color([0.0, 0.0, 0.0, 0.55]);
             app.ui.add_to_ui(key.to_owned(), node);
         }
+    }
+
+    app.ui.has_changed = true;
+}
+
+fn set_hint(app: &mut App, enabled: bool) {
+    let text = if enabled { "F4: Exit Free Camera  (Shift: Sprint)" } else { "F4: Free Camera" };
+
+    if let Some(node) = app.ui.renderizable_elements.get_mut(HINT_KEY) {
+        if let UiNodeContent::Text(label) = &mut node.content {
+            label.set_text(&mut app.ui.text.font_system, text, false);
+        }
+    } else {
+        let node = UiNode::label(&mut app.ui.text.font_system, text, Some(HUD_WIDTH), Some(HUD_LINE_BOX_HEIGHT))
+            .at(HUD_X, HINT_Y)
+            .set_text_color(Color::rgba(255, 255, 255, 220))
+            .set_align(Align::Left)
+            .set_background_color([0.0, 0.0, 0.0, 0.55]);
+        app.ui.add_to_ui(HINT_KEY.to_owned(), node);
     }
 
     app.ui.has_changed = true;

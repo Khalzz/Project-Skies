@@ -1,9 +1,9 @@
 use std::time::Duration;
 
 use app::App;
-use game::{play, plane_selection};
+use game::{main_menu, play, plane_selection};
 
-use crate::{engine::splash_screen::SplashScreenConfig, game::main_menu::main_menu};
+use crate::engine::splash_screen::SplashScreenConfig;
 
 mod app;
 mod transform;
@@ -22,9 +22,9 @@ async fn main() -> Result<(), String> {
                     .with_text("A Pankarta Software Production")
             );
 
-            app.scene_manager.create_scene("playing", play::play::GameLogic::new);
-            app.scene_manager.create_scene("selecting_plane", plane_selection::plane_selection::GameLogic::new);
-            app.scene_manager.create_scene("main_menu", main_menu::GameLogic::new);
+            app.scene_manager.create_scene("playing", play::scene::GameLogic::new);
+            app.scene_manager.create_scene("selecting_plane", plane_selection::scene::GameLogic::new);
+            app.scene_manager.create_scene("main_menu", main_menu::scene::GameLogic::new);
 
             app.scene_manager.open_scene("main_menu");
 

@@ -3,6 +3,7 @@ use nalgebra::{Matrix4, Perspective3, Point3, UnitQuaternion, Vector3};
 use sdl2::rect::Point;
 use wgpu::{util::DeviceExt, BindGroup, BindGroupLayout, BindGroupLayoutDescriptor, Buffer, Device, Queue};
 use std::f32::consts::FRAC_PI_2;
+use crate::engine::utils::lerps::{lerp, lerp_point3, smoothstep};
 
 // Maps OpenGL's [-1, 1] NDC z-range to wgpu's [0, 1] range, and reverses it
 // (near -> 1, far -> 0) so depth precision concentrates on distant geometry
@@ -26,6 +27,20 @@ pub struct NearFarUniform {
 }
 
 const DEFAULT_CAMERA_NAME: &str = "main";
+// Same "dedicated hidden camera swapped in via select_camera" pattern
+// free_camera.rs already uses for its own tool camera - keeps a transition's
+// blended values out of both the source and destination camera's own stored
+// settings, so nothing reading those directly ever sees a mid-blend value.
+const TRANSITION_CAMERA_NAME: &str = "__camera_transition";
+
+// State for an in-progress transition_to(...) - see its doc comment.
+struct CameraTransition {
+    from: Camera,
+    from_fovy: f32,
+    to: String,
+    elapsed: f32,
+    duration: f32,
+}
 
 /// A single named camera's own settings - position/orientation (`Camera`) and lens
 /// (`Projection`). Cheap to create since it owns no GPU resources of its own; only
@@ -51,6 +66,9 @@ pub struct CameraHandler {
     pub buffer: Buffer,
     pub bind_group_layout: BindGroupLayout,
     pub bind_group: BindGroup,
+    // Some(...) while transition_to(...) is blending - see its doc comment and
+    // update_transition, which advances/clears this every frame.
+    transition: Option<CameraTransition>,
 }
 
 impl CameraHandler {
@@ -100,6 +118,7 @@ impl CameraHandler {
             buffer,
             bind_group_layout,
             bind_group,
+            transition: None,
         };
 
         // Same defaults CameraRenderizable used to hardcode - existing code that
@@ -129,10 +148,85 @@ impl CameraHandler {
     /// worth logging.
     pub fn select_camera(&mut self, name: &str) -> bool {
         if self.cameras.contains_key(name) {
+            // An instant cut here should really be instant - cancel any
+            // in-progress transition_to(...) so update_transition doesn't
+            // snap the view back to the transition camera next frame.
+            self.transition = None;
             self.active = name.to_owned();
             true
         } else {
             false
+        }
+    }
+
+    /// Smoothly blends the active view from wherever it is right now to camera
+    /// `name` over `duration` seconds, instead of `select_camera`'s instant cut -
+    /// opt-in, for cases like switching between two fixed viewpoints where a hard
+    /// cut would be jarring. Not meant to run continuously - call it once when you
+    /// want the switch to start; `update_transition` (already called every frame
+    /// from `App::render`) advances it and hands off to the real target camera via
+    /// `select_camera` once it finishes. Snapshots the *current* active camera's
+    /// position/yaw/pitch/fovy as the starting point, so it composes fine with a
+    /// camera that itself moves every frame (like the main menu's drift) - it just
+    /// blends from wherever that happened to be this frame. Returns `false`
+    /// (no-op, same as `select_camera`) if `name` isn't registered.
+    pub fn transition_to(&mut self, name: &str, duration: f32) -> bool {
+        if !self.cameras.contains_key(name) {
+            return false;
+        }
+        let active = self.active();
+        self.transition = Some(CameraTransition {
+            from: active.camera,
+            from_fovy: active.projection.fovy,
+            to: name.to_owned(),
+            elapsed: 0.0,
+            duration: duration.max(0.0001),
+        });
+        true
+    }
+
+    /// Advances any in-progress `transition_to(...)` by `delta_time` - a cheap
+    /// no-op if none is running. Blends into `TRANSITION_CAMERA_NAME` (created
+    /// lazily, same pattern free_camera.rs uses for its own tool camera) rather
+    /// than overwriting either the source or destination camera's own stored
+    /// settings, so `get`/`get_mut` on either always reflect their real values
+    /// regardless of whether a transition happens to be running. `smoothstep`
+    /// gives the blend an ease-in/ease-out instead of a constant-speed linear pan.
+    pub fn update_transition(&mut self, delta_time: f32) {
+        let Some(transition) = &mut self.transition else { return };
+        transition.elapsed += delta_time;
+        let t = smoothstep(transition.elapsed / transition.duration);
+        let done = transition.elapsed >= transition.duration;
+
+        let Some(target) = self.cameras.get(&transition.to) else {
+            // Target camera got removed mid-transition - bail out rather than
+            // keep blending toward something that no longer exists.
+            self.transition = None;
+            return;
+        };
+        let position = lerp_point3(transition.from.position, target.camera.position, t);
+        let yaw = lerp(transition.from.yaw, target.camera.yaw, t);
+        let pitch = lerp(transition.from.pitch, target.camera.pitch, t);
+        let fovy = lerp(transition.from_fovy, target.projection.fovy, t);
+        let to = transition.to.clone();
+
+        if self.get(TRANSITION_CAMERA_NAME).is_none() {
+            self.create_camera(TRANSITION_CAMERA_NAME, position, 0.0, 0.0, fovy);
+        }
+        // yaw/pitch computed above are already radians (Camera's own fields
+        // always are) - set directly rather than going through create_camera's
+        // degrees-in constructor again and double-converting.
+        if let Some(transition_camera) = self.cameras.get_mut(TRANSITION_CAMERA_NAME) {
+            transition_camera.camera.position = position;
+            transition_camera.camera.yaw = yaw;
+            transition_camera.camera.pitch = pitch;
+            transition_camera.projection.fovy = fovy;
+        }
+        self.active = TRANSITION_CAMERA_NAME.to_owned();
+
+        if done {
+            self.transition = None;
+            self.select_camera(&to);
         }
     }
 
