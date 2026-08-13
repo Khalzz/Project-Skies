@@ -1,11 +1,11 @@
 use std::{collections::HashMap, f32::consts::PI, hash::Hash, time::{Duration, Instant}};
 
-use glyphon::{cosmic_text::Align, Color, FontSystem};
+use glyphon::FontSystem;
 use nalgebra::{vector, Point3, Quaternion, UnitQuaternion, Vector3};
 use rand::{rngs::ThreadRng, Rng};
 use rapier3d::prelude::RigidBody;
 use sdl2::{controller::GameController};
-use crate::{app::{App, AppState}, engine::audio::subtitles::Subtitle, engine::input::input, engine::physics::physics_handler::{MetadataType, PhysicsData, PhysicsTick, RenderMessage}, engine::primitive::manual_vertex::ManualVertex, engine::rendering::{camera::CameraHandler, ui::ui::Ui}, engine::scene_manager::scene::{FrameContext, Scene}, transform::Transform, engine::ui::{ui_node::{UiNode, UiNodeContent}, ui_transform::UiTransform}, engine::utils::lerps::{lerp, lerp_quaternion}};
+use crate::{app::{App, AppState}, engine::audio::subtitles::Subtitle, engine::input::input, engine::physics::physics_handler::{MetadataType, PhysicsData, PhysicsTick, RenderMessage}, engine::primitive::manual_vertex::ManualVertex, engine::rendering::{camera::CameraHandler, ui::ui::Ui}, engine::scene_manager::scene::{FrameContext, Scene}, transform::Transform, engine::ui::{color::UiColor, ui_node::{UiNode, UiNodeContent}, ui_transform::UiTransform}, engine::utils::lerps::{lerp, lerp_quaternion}};
 use super::{event_handling::EventSystem, plane::{physics_logic::PlanePhysicsLogic, plane::Plane}};
 use std::sync::mpsc::Sender;
 use crate::game::play::plane::plane::PlaneControls;
@@ -796,12 +796,12 @@ impl GameLogic {
                                 marker.transform.rect.top = marker.transform.y;
                                 marker.transform.rect.right = marker.transform.x + marker.transform.width;
                                 marker.transform.rect.bottom = marker.transform.y + marker.transform.height;
-                                marker.style.text_color = Some(Color::rgba(0, 255, 75, 255));
+                                marker.style.text_color = Some(UiColor::Rgb(0, 255, 75));
                             }
                         } else {
                             // Off screen — hide marker
                             if let Some(marker) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "velocity_marker") {
-                                marker.style.text_color = Some(Color::rgba(0, 255, 75, 0));
+                                marker.style.text_color = Some(UiColor::Rgba(0, 255, 75, 0));
                             }
                         }
                     }
@@ -844,11 +844,11 @@ impl GameLogic {
 
         if matches!(&blinkable.content, UiNodeContent::Text(_)) {
             if blinking_alert.alert_state {
-                blinkable.style.border_color = Some([1.0, 0.0, 0.0, 1.0]);
-                blinkable.style.text_color = Some(Color::rgba(255, 0, 0, 255));
+                blinkable.style.border_color = Some(UiColor::Rgb(255, 0, 0).into());
+                blinkable.style.text_color = Some(UiColor::Rgb(255, 0, 0));
             } else {
-                blinkable.style.border_color = Some([0.0, 0.0, 0.0, 0.0]);
-                blinkable.style.text_color = Some(Color::rgba(0, 0, 0, 0));
+                blinkable.style.border_color = Some(UiColor::TRANSPARENT.into());
+                blinkable.style.text_color = Some(UiColor::TRANSPARENT);
             }
         }
 

@@ -41,6 +41,15 @@ pub struct VertexUi {
     pub border_color: [f32; 4],
     pub corner_radius: f32,
     pub border_width: f32,
+    // Backdrop blur radius in pixels for this quad's fill - 0.0 (the default, see
+    // Style::resolve_concrete) means "no blur, behave exactly as before". See
+    // UiNode::set_background_blur and text_shader.wgsl.
+    pub background_blur: f32,
+    // Bitmask (bit0=left,1=right,2=top,3=bottom) of which sides draw a border -
+    // see BorderEdges::to_bits/UiNode::set_border_edges. 15 (all 4 bits) is the
+    // default and reads in the shader as "use the original rounded-corner SDF
+    // border", same as every border before this field existed.
+    pub border_edges: u32,
 }
 
 impl VertexUi {
@@ -84,6 +93,18 @@ impl VertexUi {
                     offset: std::mem::size_of::<[f32; 16]>() as wgpu::BufferAddress,
                     shader_location: 5,
                     format: wgpu::VertexFormat::Float32,
+                },
+                // background blur
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 17]>() as wgpu::BufferAddress,
+                    shader_location: 6,
+                    format: wgpu::VertexFormat::Float32,
+                },
+                // border edges bitmask
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 18]>() as wgpu::BufferAddress,
+                    shader_location: 7,
+                    format: wgpu::VertexFormat::Uint32,
                 },
             ],
         }

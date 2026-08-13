@@ -1,10 +1,11 @@
 use std::time::{Duration, Instant};
 
-use glyphon::{cosmic_text::Align, Color};
+use glyphon::cosmic_text::Align;
 use tokio::task;
 
 use crate::app::App;
 use crate::engine::input::input;
+use crate::engine::ui::color::UiColor;
 use crate::engine::ui::ui_node::UiNode;
 use crate::engine::utils::lerps::smoothstep;
 
@@ -111,9 +112,9 @@ impl App {
 
             let node = UiNode::label(&mut self.ui.text.font_system, text, Some(width), Some(height))
                 .at(x, y)
-                .set_text_color(Color::rgba(255, 255, 255, 255))
+                .set_text_color(UiColor::WHITE)
                 .set_align(Align::Center)
-                .set_font_size(24.0);
+                .set_font_size(&mut self.ui.text.font_system, 24.0);
             self.ui.add_to_ui(SPLASH_TEXT_KEY.to_owned(), node);
             text_base = Some((x, y));
         }

@@ -1,11 +1,12 @@
 use std::f32::consts::PI;
 use std::sync::Mutex;
 
-use glyphon::{cosmic_text::Align, Color};
+use glyphon::cosmic_text::Align;
 use nalgebra::Vector3;
 
 use crate::app::App;
 use crate::engine::input::input;
+use crate::engine::ui::color::UiColor;
 use crate::engine::ui::ui_node::{UiNode, UiNodeContent};
 
 const FREE_CAMERA_NAME: &str = "__free_camera_tool";
@@ -102,8 +103,6 @@ pub fn update(app: &mut App) {
         }
     }
 
-    set_hint(app, state.enabled);
-
     if !state.enabled {
         return;
     }
@@ -168,30 +167,11 @@ fn set_hud(app: &mut App, lines: &[String; 4]) {
         } else {
             let node = UiNode::label(&mut app.ui.text.font_system, text, Some(HUD_WIDTH), Some(HUD_LINE_BOX_HEIGHT))
                 .at(HUD_X, HUD_Y + i as f32 * HUD_LINE_SPACING)
-                .set_text_color(Color::rgba(0, 255, 120, 255))
+                .set_text_color(UiColor::Rgb(0, 255, 120))
                 .set_align(Align::Left)
-                .set_background_color([0.0, 0.0, 0.0, 0.55]);
+                .set_background_color(UiColor::Rgba(0, 0, 0, 140));
             app.ui.add_to_ui(key.to_owned(), node);
         }
-    }
-
-    app.ui.has_changed = true;
-}
-
-fn set_hint(app: &mut App, enabled: bool) {
-    let text = if enabled { "F4: Exit Free Camera  (Shift: Sprint)" } else { "F4: Free Camera" };
-
-    if let Some(node) = app.ui.renderizable_elements.get_mut(HINT_KEY) {
-        if let UiNodeContent::Text(label) = &mut node.content {
-            label.set_text(&mut app.ui.text.font_system, text, false);
-        }
-    } else {
-        let node = UiNode::label(&mut app.ui.text.font_system, text, Some(HUD_WIDTH), Some(HUD_LINE_BOX_HEIGHT))
-            .at(HUD_X, HINT_Y)
-            .set_text_color(Color::rgba(255, 255, 255, 220))
-            .set_align(Align::Left)
-            .set_background_color([0.0, 0.0, 0.0, 0.55]);
-        app.ui.add_to_ui(HINT_KEY.to_owned(), node);
     }
 
     app.ui.has_changed = true;

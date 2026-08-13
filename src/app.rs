@@ -25,6 +25,7 @@ use crate::engine::input::input;
 use crate::engine::rendering::ui::physics_rendering::RenderPhysics;
 use crate::engine::rendering::ui::rendering_utils;
 use crate::engine::rendering::ui::ui::Ui;
+use crate::engine::ui::ui_node::UiNode;
 use crate::resources;
 use crate::engine::window::window::{WindowManager, WindowSettings};
 
@@ -93,7 +94,7 @@ impl App {
         let renderer = Renderer::new(&window_manager).await?;
 
         // rendering elements
-        let ui = Ui::new(&renderer.device, &renderer.queue, &renderer.config, &renderer.glyphon.cache);
+        let ui = Ui::new(&renderer.device, &renderer.queue, &renderer.config, &renderer.glyphon.cache, &renderer.blur.scene_color, &renderer.blur.blurred);
         let camera = CameraHandler::new(&renderer.device, &renderer.config);
         let light = Light::new(&renderer.device, &renderer.config, &camera);
 
@@ -169,6 +170,7 @@ impl App {
 
         self.renderer.resize(width, height);
         self.camera.resize(width, height);
+        self.ui.resize_blur_binding(&self.renderer.device, &self.renderer.queue, &self.renderer.blur.scene_color, &self.renderer.blur.blurred, width, height);
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -198,7 +200,13 @@ impl App {
             return;
         }
 
+        // Two separate batches (see TextRendering::text_renderer_on_top's own doc
+        // comment for why one shared Vec/one glyphon TextRenderer can't do this) -
+        // main pass's text, and always_on_top nodes' text, prepared+rendered as
+        // two independent draw calls so the latter actually lands above the
+        // former instead of every node's text piling into one shared final pass.
         let mut text_areas: Vec<TextArea> = Vec::new();
+        let mut text_areas_on_top: Vec<TextArea> = Vec::new();
 
         self.ui.ui_rendering.vertices.clear();
         self.ui.ui_rendering.num_vertices = 0;
@@ -208,34 +216,109 @@ impl App {
 
         self.ui.ui_rendering.image_quads.clear();
 
-        for (_key, ui_node) in &mut self.ui.renderizable_elements {
-            // Debug bounds overlay (F2) - has to run before node_content_preparation
-            // below, not after: that call's returned TextAreas keep *ui_node mutably
-            // borrowed for as long as they're alive (all the way to text_areas being
-            // consumed at the end of this function), so nothing else can borrow
-            // *ui_node again afterward. Reading the rect from the start of this frame
-            // (one frame stale for a node whose layout is still actively changing)
-            // instead of after this frame's update is an invisible tradeoff for a
-            // debug-only overlay.
-            if self.ui.debug_bounds {
-                ui_node.debug_bounds_preparation(&self.window_manager.size, &mut self.ui.ui_rendering);
+        // Taken out up front (rather than looked up in render order via repeated
+        // get_mut calls) because this function's TextAreas borrow from inside
+        // renderizable_elements for its own entire remaining duration (see the
+        // comment near the bottom) - a second borrow of the map partway through
+        // (which get_mut would be) conflicts with that. Same two-pass take/
+        // restore shape App::fire_ui_click_handlers uses, for the same
+        // underlying reason (something here needs to outlive a single map
+        // borrow) - restored right before the map is touched again, after
+        // text_areas has been fully consumed.
+        let mut on_top_nodes: Vec<(String, UiNode)> = Vec::new();
+        for key in &self.ui.always_on_top {
+            if let Some(node) = self.ui.renderizable_elements.remove(key) {
+                on_top_nodes.push((key.clone(), node));
             }
+        }
+        // Same take-out, for the opposite end - see Ui::always_on_bottom's own
+        // doc comment.
+        let mut on_bottom_nodes: Vec<(String, UiNode)> = Vec::new();
+        for key in &self.ui.always_on_bottom {
+            if let Some(node) = self.ui.renderizable_elements.remove(key) {
+                on_bottom_nodes.push((key.clone(), node));
+            }
+        }
 
-            let (textareas_to_merge, _vertices_to_add, _indices_to_add) = ui_node.node_content_preparation(&self.window_manager.size, &mut self.ui.ui_rendering, &mut self.ui.text.font_system, self.time.delta_time);
-            text_areas.extend(textareas_to_merge);
+        // An active always_on_top node (a modal, currently) should block input to
+        // literally everything else while it's up, the same way a real dialog
+        // does - otherwise it's only visually on top (see Ui::always_on_top's own
+        // doc comment for the rendering half of this), and clicks still fall
+        // through to whatever button happens to sit at the same screen position
+        // underneath. always_on_top nodes themselves stay hit-testable regardless
+        // (true below for that loop) - there's only ever one layer of "on top"
+        // today, so nothing can occlude them in turn.
+        let blocks_input = on_top_nodes.iter().any(|(_, n)| n.is_active);
+
+        // Debug bounds overlay (F2) - has to run before node_content_preparation
+        // below, not after: that call's returned TextAreas keep *ui_node mutably
+        // borrowed for as long as they're alive (all the way to text_areas being
+        // consumed further down), so nothing else can borrow *ui_node again
+        // afterward. Reading the rect from the start of this frame (one frame
+        // stale for a node whose layout is still actively changing) instead of
+        // after this frame's update is an invisible tradeoff for a debug-only
+        // overlay. Shared by both loops below rather than a closure, since a
+        // closure capturing &mut self.ui.ui_rendering would itself conflict with
+        // the &mut self.ui.renderizable_elements/on_top_nodes iteration around it.
+        macro_rules! prepare_node {
+            ($ui_node:expr, $hit_testable:expr, $text_areas:expr) => {
+                if self.ui.debug_bounds {
+                    $ui_node.debug_bounds_preparation(&self.window_manager.size, &mut self.ui.ui_rendering);
+                }
+                let (textareas_to_merge, _vertices_to_add, _indices_to_add) = $ui_node.node_content_preparation(&self.window_manager.size, &mut self.ui.ui_rendering, &mut self.ui.text.font_system, self.time.delta_time, $hit_testable);
+                $text_areas.extend(textareas_to_merge);
+            };
+        }
+
+        // always_on_bottom nodes first (see their own doc comment) - still subject
+        // to the same input-blocking as the regular pool below, not the always-
+        // hit-testable treatment on_top_nodes gets, since they're conceptually
+        // part of the same "everything except the modal" layer, just ordered to
+        // render first/behind within it.
+        for (_key, ui_node) in &mut on_bottom_nodes {
+            prepare_node!(ui_node, !blocks_input, text_areas);
+        }
+        for (_key, ui_node) in &mut self.ui.renderizable_elements {
+            prepare_node!(ui_node, !blocks_input, text_areas);
+        }
+        // Everything up to here is the main pass - see UiRendering::
+        // main_index_count's own doc comment for why this boundary is recorded,
+        // not just the two loops' existence.
+        self.ui.ui_rendering.main_index_count = self.ui.ui_rendering.num_indices;
+        for (_key, ui_node) in &mut on_top_nodes {
+            prepare_node!(ui_node, true, text_areas_on_top);
         }
 
         // Only update buffers if we have data
         if !self.ui.ui_rendering.vertices.is_empty() {
+            self.ui.ui_rendering.ensure_vertex_capacity(&self.renderer.device);
             self.renderer.queue.write_buffer(&self.ui.ui_rendering.vertex_buffer, 0, bytemuck::cast_slice(self.ui.ui_rendering.vertices.as_slice()));
         }
         if !self.ui.ui_rendering.indices.is_empty() {
+            self.ui.ui_rendering.ensure_index_capacity(&self.renderer.device);
             self.renderer.queue.write_buffer(&self.ui.ui_rendering.index_buffer, 0, bytemuck::cast_slice(&self.ui.ui_rendering.indices));
         }
 
-        // Only prepare text if we have text areas
-        if !text_areas.is_empty() {
-            self.ui.text.text_renderer.prepare(&self.renderer.device, &self.renderer.queue, &mut self.ui.text.font_system, &mut self.ui.text.text_atlas, &self.renderer.glyphon.viewport, text_areas, &mut self.ui.text.text_cache).unwrap();
+        // Always prepare, even with zero text areas - glyphon's prepare() is what
+        // clears its *previous* batch (it's cheap/safe to call empty: it just
+        // clears and returns, see glyphon::TextRenderer::render's own early-out
+        // for an empty batch). Skipping this call when there's currently nothing
+        // to show - e.g. the frame a modal closes, going from "had text" to
+        // "none" - left whatever was prepared last frame sitting in the
+        // renderer's buffer with nothing ever clearing it, so render() (called
+        // unconditionally every frame) kept drawing stale text that should've
+        // disappeared.
+        self.ui.text.text_renderer.prepare(&self.renderer.device, &self.renderer.queue, &mut self.ui.text.font_system, &mut self.ui.text.text_atlas, &self.renderer.glyphon.viewport, text_areas, &mut self.ui.text.text_cache).unwrap();
+        self.ui.text.text_renderer_on_top.prepare(&self.renderer.device, &self.renderer.queue, &mut self.ui.text.font_system, &mut self.ui.text.text_atlas, &self.renderer.glyphon.viewport, text_areas_on_top, &mut self.ui.text.text_cache).unwrap();
+
+        // Puts always_on_top/always_on_bottom nodes back now that text_areas (the
+        // last thing that held any borrow into them) is fully consumed - see
+        // where they were taken out, above.
+        for (key, node) in on_top_nodes {
+            self.ui.renderizable_elements.insert(key, node);
+        }
+        for (key, node) in on_bottom_nodes {
+            self.ui.renderizable_elements.insert(key, node);
         }
 
         // Rebuilt last: glyphon's TextArea values above still borrow from inside
@@ -327,6 +410,8 @@ impl App {
                 // that wants UI has to (re)build it itself in new(), same contract as
                 // the skybox above.
                 self.ui.renderizable_elements.clear();
+                self.ui.always_on_top.clear();
+                self.ui.always_on_bottom.clear();
                 self.ui.has_changed = true;
 
                 // The scene doesn't exist yet at this point - SceneManager::create_scene

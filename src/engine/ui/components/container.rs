@@ -30,10 +30,10 @@ impl Container {
         Self { gap, children }
     }
 
-    pub fn ui_node_data_creation(&self, _size: &Size, vertices: &mut Vec<VertexUi>, vertices_slice: &[VertexUi; 4], indices: &mut Vec<u16>, indices_slice: &[u16; 6]) -> (u16, u32) {
+    pub fn ui_node_data_creation(&self, _size: &Size, vertices: &mut Vec<VertexUi>, vertices_slice: &[VertexUi], indices: &mut Vec<u16>, indices_slice: &[u16]) -> (u16, u32) {
         vertices.extend_from_slice(vertices_slice);
         indices.extend_from_slice(indices_slice);
 
-        (vertices_slice.len() as u16, UiNode::NUM_INDICES)
+        (vertices_slice.len() as u16, indices_slice.len() as u32)
     }
 }

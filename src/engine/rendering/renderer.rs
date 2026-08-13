@@ -2,6 +2,7 @@ use wgpu::{Device, DeviceDescriptor, Features, InstanceDescriptor, Limits, Queue
 use glyphon::{Cache, Resolution, Viewport};
 
 use crate::engine::rendering::models::textures::Texture;
+use crate::engine::rendering::render_pipeline::blur_renderer::BlurRender;
 use crate::engine::rendering::render_pipeline::depth_renderer::DepthRender;
 use crate::engine::window::window::WindowManager;
 
@@ -25,6 +26,7 @@ pub struct Renderer {
   pub config: SurfaceConfiguration,
   pub depth_texture: Texture,
   pub depth_render: DepthRender,
+  pub blur: BlurRender,
   pub glyphon: Glyphon,
 }
 
@@ -62,8 +64,28 @@ impl Renderer {
         format: surface_format[0],
         width: window_manager.size.width,
         height: window_manager.size.height,
-        present_mode: wgpu::PresentMode::AutoNoVsync,
-        alpha_mode: surface_caps.alpha_modes[0],
+        // Vsync'd (locked to the display's refresh rate) instead of presenting
+        // uncapped - avoids the GPU spinning at max speed while idling on a menu
+        // that has nothing worth rendering thousands of FPS for.
+        present_mode: wgpu::PresentMode::Fifo,
+        // Explicitly Opaque rather than surface_caps.alpha_modes[0] (whatever the
+        // driver happens to report first) - this window is a fullscreen game, it
+        // should never be alpha-composited against the desktop behind it. Every
+        // frame's alpha channel already ends up 1.0 by the time it reaches the
+        // swapchain (DEFAULT_CLEAR_COLOR.a is 1.0 and the UI pass's own blend
+        // formula preserves full opacity once the destination already has it),
+        // but leaving the *declared* mode to chance still lets Windows' compositor
+        // treat this surface as alpha-aware for its own purposes - the likely
+        // cause of the Alt-Tab/taskbar live thumbnail blinking (DWM's main
+        // composited view apparently overrides this for a topmost, screen-
+        // covering window, but its separate thumbnail-generation path doesn't get
+        // the same override). Opaque is virtually always supported for a desktop
+        // swapchain, but fall back to whatever's first if it somehow isn't.
+        alpha_mode: if surface_caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::Opaque) {
+            wgpu::CompositeAlphaMode::Opaque
+        } else {
+            surface_caps.alpha_modes[0]
+        },
         view_formats: vec![],
         desired_maximum_frame_latency: 1,
     };
@@ -85,6 +107,7 @@ impl Renderer {
 
     let depth_texture = Texture::create_depth_texture(&device, &config, "depth_texture");
     let depth_render = DepthRender::new(&device, &config);
+    let blur = BlurRender::new(&device, &config);
 
     Ok(Renderer {
       surface,
@@ -93,6 +116,7 @@ impl Renderer {
       config,
       depth_texture,
       depth_render,
+      blur,
       glyphon: Glyphon {
         cache,
         viewport,
@@ -109,6 +133,7 @@ impl Renderer {
     self.surface.configure(&self.device, &self.config);
     self.depth_render.resize(&self.device, &self.config);
     self.depth_texture = Texture::create_depth_texture(&self.device, &self.config, "depth_texture");
+    self.blur.resize(&self.device, &self.config);
 
     self.glyphon.viewport.update(
       &self.queue,

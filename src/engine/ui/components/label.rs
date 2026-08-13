@@ -20,7 +20,6 @@ use glyphon::{cosmic_text::Align, Attrs, Buffer, Color, Family, FontSystem, Metr
 
 use crate::app::Size;
 use crate::engine::rendering::vertex::VertexUi;
-use crate::engine::ui::ui_node::UiNode;
 use crate::engine::ui::ui_transform::Rect;
 
 // Used as the fallback when a node's resolved Style has no font_size (see
@@ -32,12 +31,46 @@ pub const DEFAULT_FONT_SIZE: f32 = 20.0;
 // a fixed line height smaller than the glyph size was the previous source of
 // overlapping multi-line text (see AUTO_HEIGHT below).
 const LINE_HEIGHT_RATIO: f32 = 1.2;
+// Deliberately more generous than LINE_HEIGHT_RATIO - purely clip headroom for
+// min_height_for_font_size (below), doesn't touch the actual rendered line
+// spacing (see apply_style). A box sized to exactly one line's rendered height
+// leaves zero margin, and descenders (e.g. the "j" in "Project") sit close
+// enough to the bottom of that nominal line box that they still got clipped by
+// this label's own TextBounds (see `bounds` below, which is exactly this box) -
+// a bare 1:1 fit isn't actually safe in practice.
+const MIN_HEIGHT_RATIO: f32 = 1.5;
 const BASE_FONT: Family = Family::SansSerif;
-// Auto-height fallback for a single line of text - generous enough for the default
-// font size without clipping. Multi-line auto-sizing still isn't supported: this is
-// a flat value regardless of font_size, so a much larger custom size could still
-// clip - not fixed here, out of scope for enabling font_size itself.
+// Auto-height fallback for a single line of text - generous enough for
+// DEFAULT_FONT_SIZE without clipping. A larger custom font_size needs more than
+// this flat value gives, which is what min_height_for_font_size (below) is for
+// - see UiNode::set_font_size, the only place that reads it.
 const AUTO_HEIGHT: f32 = 28.0;
+
+// A box shorter than one line at `font_size` clips text instead of showing it -
+// this label's own box doubles as its TextBounds clip rect (see `bounds` below),
+// so a box sized for DEFAULT_FONT_SIZE (e.g. the AUTO_HEIGHT default) no longer
+// fits once a larger font_size is set. UiNode::set_font_size grows the box up to
+// this if it's currently smaller, rather than leaving it to clip silently.
+pub fn min_height_for_font_size(font_size: f32) -> f32 {
+    font_size * MIN_HEIGHT_RATIO
+}
+
+// Shared by `measure_or` (always measures at DEFAULT_FONT_SIZE) and
+// `Label::natural_width_at` (measures at whatever font_size is passed in) - a
+// scratch buffer, discarded after reading back its shaped, unwrapped line width,
+// so this never disturbs the caller's own buffer/shaping state. Width is left
+// unbounded (`None`) rather than passed through from the real box - wrapping is
+// off (`Wrap::None`) regardless, but an unbounded width is what actually reports
+// the text's true natural size instead of whatever the (possibly wrong, that's
+// the point of calling this) current box width would clip it to.
+fn natural_line_width(font_system: &mut FontSystem, text: &str, font_size: f32) -> f32 {
+    let mut buffer = Buffer::new(font_system, Metrics::new(font_size, font_size * LINE_HEIGHT_RATIO));
+    buffer.set_size(font_system, None, Some(font_size * LINE_HEIGHT_RATIO));
+    buffer.set_text(font_system, text, &Attrs::new().family(BASE_FONT), Shaping::Advanced);
+    buffer.set_wrap(font_system, glyphon::Wrap::None);
+    buffer.shape_until_scroll(font_system, true);
+    buffer.layout_runs().fold(0.0f32, |w, run| run.line_w.max(w))
+}
 
 #[derive(Debug)]
 pub struct TextWidth {
@@ -59,14 +92,7 @@ impl Label {
         let resolved_height = height.unwrap_or(AUTO_HEIGHT);
         let resolved_width = match width {
             Some(w) => w,
-            None => {
-                let mut buffer = Buffer::new(font_system, Metrics::new(DEFAULT_FONT_SIZE, DEFAULT_FONT_SIZE * LINE_HEIGHT_RATIO));
-                buffer.set_size(font_system, None, Some(resolved_height));
-                buffer.set_text(font_system, text, &Attrs::new().family(BASE_FONT), Shaping::Advanced);
-                buffer.set_wrap(font_system, glyphon::Wrap::None);
-                buffer.shape_until_scroll(font_system, true);
-                buffer.layout_runs().fold(0.0f32, |w, run| run.line_w.max(w))
-            }
+            None => natural_line_width(font_system, text, DEFAULT_FONT_SIZE),
         };
         (resolved_width, resolved_height)
     }
@@ -86,6 +112,17 @@ impl Label {
         Self { buffer, text: text.to_owned() }
     }
 
+    /// This label's own natural (unwrapped) line width if it were shaped at
+    /// `font_size` instead of whatever it's currently using - see
+    /// `UiNode::set_font_size`, which grows the node's box to at least this
+    /// whenever the box is currently narrower (e.g. still sized for whatever
+    /// font_size/width it had before, most commonly `DEFAULT_FONT_SIZE`'s natural
+    /// width from `measure_or`). Doesn't touch `self.buffer` - see
+    /// `natural_line_width`.
+    pub fn natural_width_at(&self, font_system: &mut FontSystem, font_size: f32) -> f32 {
+        natural_line_width(font_system, &self.text, font_size)
+    }
+
     /// Re-shapes this label's buffer at `font_size`/`align` - called fresh every
     /// applicable frame (see `UiNode::node_content_preparation`) from whatever the
     /// owning node's resolved `Style` says this frame (its own, or hover-
@@ -100,12 +137,15 @@ impl Label {
     }
 
     /// `color` - the owning UiNode's resolved Style color for this frame (own or
-    /// hover-overridden - see `UiNode::node_content_preparation`).
-    pub fn ui_node_data_creation(&self, _size: &Size, vertices: &mut Vec<VertexUi>, vertices_slice: &[VertexUi; 4], indices: &mut Vec<u16>, indices_slice: &[u16; 6], parent_rect: &Rect, color: Color) -> (TextArea, u16, u32) {
+    /// hover-overridden - see `UiNode::node_content_preparation`). `vertices_slice`/
+    /// `indices_slice` are plain slices, not fixed-size arrays - a node's own
+    /// background/border quad isn't always exactly 4 vertices/6 indices any more,
+    /// see `UiNode::compute_quad`.
+    pub fn ui_node_data_creation(&self, _size: &Size, vertices: &mut Vec<VertexUi>, vertices_slice: &[VertexUi], indices: &mut Vec<u16>, indices_slice: &[u16], parent_rect: &Rect, color: Color) -> (TextArea, u16, u32) {
         vertices.extend_from_slice(vertices_slice);
         indices.extend_from_slice(indices_slice);
 
-        (self.text_area(parent_rect, color), vertices_slice.len() as u16, UiNode::NUM_INDICES)
+        (self.text_area(parent_rect, color), vertices_slice.len() as u16, indices_slice.len() as u32)
     }
 
     pub fn text_area(&self, parent_rect: &Rect, color: Color) -> TextArea {

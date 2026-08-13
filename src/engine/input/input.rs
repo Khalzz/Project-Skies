@@ -44,9 +44,14 @@ const PRESS_THRESHOLD: f32 = 0.5;
 ///    - is_action_pressed(action) / is_action_just_pressed(action) / is_action_just_released(action)
 ///    - action_strength(action) -> the raw 0.0..=1.0 value, for analog reads (throttle, stick deflection)
 ///    - get_axis(negative, positive) -> action_strength(positive) - action_strength(negative)
-///    - begin_capture() / captured_binding() -> for a future rebinding menu: after
-///      begin_capture(), the next key/button pressed or axis pushed past its deadzone
-///      is captured instead of dispatched normally, and handed back via captured_binding()
+///    - begin_capture() / captured_binding() / cancel_capture() -> for a rebinding
+///      menu (see game::main_menu::rebind_modal): after begin_capture(), the next
+///      key/button pressed or axis pushed past its deadzone is captured instead of
+///      dispatched normally, and handed back via captured_binding() (polled once
+///      per frame until it returns Some); cancel_capture() aborts without one.
+///    - action_bindings(action) / rebind(action, binding) / unbind(action, index)
+///      -> read/add/remove an action's bindings at runtime (in-memory only, not
+///      persisted back to settings/input.ron).
 ///
 ///    settings/input.ron shape:
 ///    ```ron
@@ -229,6 +234,32 @@ impl InputSubsystem {
             action.bindings.push(binding);
         }
     }
+
+    /// Cloned out (not a reference) since a rebinding menu needs to render this
+    /// list into UI nodes it owns independently of the input subsystem's own
+    /// lifetime/borrow rules.
+    pub fn action_bindings(&self, action: &str) -> Vec<Binding> {
+        self.actions.get(action).map(|a| a.bindings.clone()).unwrap_or_default()
+    }
+
+    /// Removes one binding by its index in that action's list (see
+    /// action_bindings) - a no-op if the index is out of range, so a stale index
+    /// from a UI that hasn't refreshed yet can't panic.
+    pub fn unbind(&mut self, action: &str, index: usize) {
+        if let Some(action) = self.actions.get_mut(action) {
+            if index < action.bindings.len() {
+                action.bindings.remove(index);
+            }
+        }
+    }
+
+    /// Aborts an in-progress begin_capture() without producing a binding - e.g. a
+    /// rebinding menu's own "cancel" button, or closing the menu while still
+    /// waiting on input.
+    pub fn cancel_capture(&mut self) {
+        self.capturing = false;
+        self.captured_binding = None;
+    }
 }
 
 // Global input singleton - lets any code query input state (input::is_action_pressed("jump"))
@@ -331,4 +362,16 @@ pub fn captured_binding() -> Option<Binding> {
 
 pub fn rebind(action: &str, binding: Binding) {
     with_input_mut(|input| input.rebind(action, binding));
+}
+
+pub fn action_bindings(action: &str) -> Vec<Binding> {
+    with_input(|input| input.action_bindings(action))
+}
+
+pub fn unbind(action: &str, index: usize) {
+    with_input_mut(|input| input.unbind(action, index));
+}
+
+pub fn cancel_capture() {
+    with_input_mut(|input| input.cancel_capture());
 }

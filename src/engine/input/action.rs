@@ -27,6 +27,17 @@ pub enum Binding {
 }
 
 impl Binding {
+    /// Short human-readable label for a rebinding menu - e.g. "W", "Controller A",
+    /// "LeftY +". Not meant to round-trip back into a Binding, just for display.
+    pub fn label(&self) -> String {
+        match self {
+            Binding::Key(key) => key.clone(),
+            Binding::MouseButton(name) => format!("Mouse {name}"),
+            Binding::ControllerButton(name) => format!("Controller {name}"),
+            Binding::ControllerAxis { axis, positive, .. } => format!("{axis} {}", if *positive { "+" } else { "-" }),
+        }
+    }
+
     pub(crate) fn parse_mouse_button(name: &str) -> Option<MouseButton> {
         match name.to_lowercase().as_str() {
             "left" => Some(MouseButton::Left),

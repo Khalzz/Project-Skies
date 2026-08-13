@@ -1,0 +1,26 @@
+// Which actions (see settings/input.ron for their actual bindings) get a row in
+// the Controller settings tab, and in what order - see
+// main_menu::ui::controller_settings_list, the only reader. Deliberately a
+// curated subset, not every action in input.ron: debug/camera-debug/UI-internal
+// actions (toggle_debug, debug_cam_*, ui_click, ...) aren't meant to be
+// player-rebindable, so they're left out rather than showing up here too.
+[
+    "pitch_up",
+    "pitch_down",
+    "roll_left",
+    "roll_right",
+    "rudder_left",
+    "rudder_right",
+    "throttle_up",
+    "throttle_down",
+    "trim_pitch_up",
+    "trim_pitch_down",
+    "trim_roll_left",
+    "trim_roll_right",
+    "trim_yaw_left",
+    "trim_yaw_right",
+    "change_camera",
+    "fix_view",
+    "up_wheel",
+    "down_wheel",
+]

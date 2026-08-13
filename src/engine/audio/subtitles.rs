@@ -3,12 +3,12 @@ use std::{
     time::Instant,
 };
 
-use glyphon::Color;
 use serde::Deserialize;
 
 use crate::{
     app::App,
     engine::rendering::ui::ui::Ui,
+    engine::ui::color::UiColor,
     engine::ui::ui_node::UiNodeContent,
 };
 
@@ -43,11 +43,11 @@ impl Subtitle {
         let UiNodeContent::Text(_) = &node.content else { return };
 
         if visible {
-            node.style.text_color = Some(Color::rgba(255, 255, 255, 255));
-            node.style.background_color = Some([0.0, 0.0, 0.0, 0.7]);
+            node.style.text_color = Some(UiColor::WHITE);
+            node.style.background_color = Some(UiColor::Rgba(0, 0, 0, 179).into());
         } else {
-            node.style.text_color = Some(Color::rgba(255, 255, 255, 0));
-            node.style.background_color = Some([0.0, 0.0, 0.0, 0.0]);
+            node.style.text_color = Some(UiColor::Rgba(255, 255, 255, 0));
+            node.style.background_color = Some(UiColor::TRANSPARENT.into());
         }
     }
 
