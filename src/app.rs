@@ -19,13 +19,14 @@ use crate::engine::game_nodes::timing::Timing;
 use crate::engine::rendering::enviroment::light::Light;
 use crate::engine::rendering::models::model::{self, Mesh, Model, Vertex};
 use crate::engine::rendering::renderer::Renderer;
-use crate::engine::scene_manager::scene::{FrameContext, SceneManager};
+use crate::engine::scene_manager::scene::{FrameContext, PendingSceneLoad, SceneManager};
 use crate::engine::splash_screen::SplashScreenConfig;
 use crate::engine::input::input;
 use crate::engine::rendering::ui::physics_rendering::RenderPhysics;
 use crate::engine::rendering::ui::rendering_utils;
 use crate::engine::rendering::ui::ui::Ui;
 use crate::engine::ui::ui_node::UiNode;
+use crate::game::loading::scene::{LoadingScreenScene, FADE_OUT_SECS, PANEL_KEY};
 use crate::resources;
 use crate::engine::window::window::{WindowManager, WindowSettings};
 
@@ -53,8 +54,9 @@ pub struct App {
     pub render_pipeline: wgpu::RenderPipeline,
     pub ui: Ui,
     pub camera: CameraHandler,
-    // Configured per scene via resources::apply_environment (called from Scene::reset),
-    // not loaded automatically - None means the scene just wants clear_color.
+    // Configured per scene via PreparedSceneAssets::apply (called from a heavy
+    // scene's finish()), not loaded automatically - None means the scene just wants
+    // clear_color.
     pub skybox: Option<SkyboxRender>,
     pub clear_color: wgpu::Color,
     pub show_depth_map: bool,
@@ -404,7 +406,8 @@ impl App {
                 // Environment doesn't carry over between scenes (same as Godot: no
                 // WorldEnvironment in the new scene falls back to the default, it
                 // doesn't inherit whatever the previous scene had) - a scene that
-                // wants a skybox has to call apply_environment itself in reset/new.
+                // wants a skybox declares it via create_loaded_scene's `environment`
+                // argument (or, for a cheap create_scene scene, sets it directly).
                 self.skybox = None;
                 self.clear_color = environment::DEFAULT_CLEAR_COLOR;
 
@@ -418,20 +421,21 @@ impl App {
                 self.ui.always_on_bottom.clear();
                 self.ui.has_changed = true;
 
-                // The scene doesn't exist yet at this point - SceneManager::create_scene
-                // only registered its constructor. Clone the factory out first (rather
-                // than borrowing self.scene_manager.factories directly) so calling it
+                // Physics doesn't carry over between scenes either - stop whatever was
+                // running now. The new scene's own physics (if any) starts once it's
+                // actually constructed: immediately below for a cheap scene, or once
+                // its background load finishes for a heavy one (see the `else` branch
+                // below, where PendingSceneLoad gets polled).
+                if let Some(old_physics) = physics_data_channel.take() {
+                    let _ = old_physics.request_data_tx.send(PhysicsCommand::Shutdown);
+                }
+
+                // The scene doesn't exist yet at this point - SceneManager::create_scene/
+                // create_loaded_scene only registered its constructor. Clone it out first
+                // (rather than borrowing self.scene_manager's maps directly) so calling it
                 // with &mut self below doesn't conflict with that borrow.
                 if let Some(factory) = self.scene_manager.factory_for(&active) {
-                    // Physics doesn't carry over between scenes either - stop
-                    // whatever was running, then start whatever the new scene wants
-                    // (if anything). Scenes that don't override Scene::physics get
-                    // None here and simply never spin up a thread.
-                    if let Some(old_physics) = physics_data_channel.take() {
-                        let _ = old_physics.request_data_tx.send(PhysicsCommand::Shutdown);
-                    }
-
-                    // This is the only place any scene's real constructor ever runs,
+                    // This is the only place a cheap scene's real constructor ever runs,
                     // and only for the one actually becoming active.
                     let scene = factory(&mut self);
 
@@ -457,11 +461,63 @@ impl App {
                     });
 
                     self.scene_manager.active_scene = Some(scene);
+                } else if let Some(spec) = self.scene_manager.loader_for(&active) {
+                    // Heavy scene (registered via create_loaded_scene): load its models/
+                    // textures on a background thread instead of blocking the loop here,
+                    // so render() below keeps presenting every frame instead of the window
+                    // freezing for however long loading takes - the same std::thread::spawn
+                    // + std::sync::mpsc pattern the physics thread already uses (see
+                    // physics::physics_handling). Device/Queue/BindGroupLayout are cheap,
+                    // Arc-backed and Clone in wgpu, so the spawned thread can build real GPU
+                    // resources (buffers, textures) itself - no raw bytes need to cross back.
+                    //
+                    // Mirrors load_level's own old eager reset (now split out since only
+                    // this main-thread step, not the loading itself, can touch game_models).
+                    for model in self.game_models.values_mut() {
+                        model.instance_count = 0;
+                    }
+
+                    let device = self.renderer.device.clone();
+                    let queue = self.renderer.queue.clone();
+                    let camera_bind_group_layout = self.camera.bind_group_layout.clone();
+                    let config = self.renderer.config.clone();
+                    let camera_position = self.camera.active().camera.position.coords;
+                    let existing_models: std::collections::HashSet<String> = self.game_models.keys().cloned().collect();
+                    let level_path = spec.level_path.clone();
+                    let environment = spec.environment.clone();
+
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    std::thread::spawn(move || {
+                        let level = resources::prepare_level_assets(&device, &queue, camera_position, &existing_models, level_path.clone());
+                        let environment = resources::prepare_environment(&device, &queue, &camera_bind_group_layout, &config, environment);
+                        let _ = tx.send(resources::PreparedSceneAssets { level_path, level, environment });
+                    });
+
+                    self.scene_manager.active_scene = Some(Box::new(LoadingScreenScene::new(&mut self)));
+                    self.scene_manager.loading = Some(PendingSceneLoad { receiver: rx, finish: spec.finish.clone(), ready: None });
                 } else {
                     eprintln!("No scene registered for state '{}'", active);
                 }
                 self.scene_manager.reset = false;
             } else {
+                // If a heavy scene's background load (kicked off above on whichever
+                // earlier frame set scene_manager.loading) has just finished, don't
+                // swap immediately - start fading LoadingScreenScene's own UI back
+                // out first (PendingSceneLoad::ready; the actual fade progression and
+                // the eventual swap happen further below, *after* this frame's scene
+                // tick - see that block's own comment for why the ordering matters).
+                // Non-blocking, same try_recv() polling the physics channel below
+                // already uses. Until this fires, active_scene stays the
+                // LoadingScreenScene the reset branch put there, so this and every
+                // frame in between still renders normally.
+                if let Some(pending) = self.scene_manager.loading.as_mut() {
+                    if pending.ready.is_none() {
+                        if let Ok(prepared) = pending.receiver.try_recv() {
+                            pending.ready = Some((prepared, 0.0));
+                        }
+                    }
+                }
+
                 // Request physics data from physics thread, only if the active
                 // scene actually has one running.
                 let physics_data = if let Some(physics) = &physics_data_channel {
@@ -558,6 +614,58 @@ impl App {
                     self.scene_manager.active_scene = Some(scene);
                 } else {
                     eprintln!("No active scene to update");
+                }
+
+                // Advance LoadingScreenScene's fade-out once its background load has
+                // actually finished (PendingSceneLoad::ready, set above) - deliberately
+                // placed *after* the scene tick above: LoadingScreenScene::update just
+                // ran and would have overwritten the loading label's alpha with its own
+                // pulse animation, so setting the real fade-out alpha has to happen
+                // afterward in the same frame to actually be the value that renders.
+                if let Some(mut pending) = self.scene_manager.loading.take() {
+                    if let Some((prepared, mut fade_elapsed)) = pending.ready.take() {
+                        fade_elapsed += self.time.delta_time;
+                        let t = (fade_elapsed / FADE_OUT_SECS).clamp(0.0, 1.0);
+                        // Only the "Loading..." text fades - the black backdrop stays
+                        // fully opaque right up until the swap below clears it, so the
+                        // transition into the real scene's own opaque black intro
+                        // backdrop (see play::scene::GameLogic::finish) reads as
+                        // seamless instead of the background itself visibly fading.
+                        if let Some(node) = Ui::get_ui_node(&mut self.ui.renderizable_elements, &format!("{PANEL_KEY}/label")) {
+                            node.set_alpha(1.0 - t);
+                        }
+                        self.ui.has_changed = true;
+
+                        if t >= 1.0 {
+                            // LoadingScreenScene's own UI is now fully transparent -
+                            // clear it the same way the reset branch clears the
+                            // outgoing scene's UI, so the real scene's own finish()
+                            // draws onto a clean slate instead of it ending up stuck
+                            // underneath the (now invisible, but still present) loading
+                            // card forever.
+                            self.ui.renderizable_elements.clear();
+                            self.ui.always_on_top.clear();
+                            self.ui.always_on_bottom.clear();
+                            self.ui.has_changed = true;
+
+                            let scene = (pending.finish)(&mut self, prepared);
+
+                            // Same rebaseline + physics-spawn steps the sync path runs
+                            // right after its own constructor returns - see that
+                            // comment further up.
+                            self.time.update();
+                            physics_data_channel = scene.fixed_update(&self).map(|(level_path, physics_tick)| {
+                                physics_handling(&self.renderer.device, &self.renderer.config, &self.camera, level_path, physics_tick)
+                            });
+                            self.scene_manager.active_scene = Some(scene);
+                            // pending (and scene_manager.loading) stays cleared - don't put it back.
+                        } else {
+                            pending.ready = Some((prepared, fade_elapsed));
+                            self.scene_manager.loading = Some(pending);
+                        }
+                    } else {
+                        self.scene_manager.loading = Some(pending);
+                    }
                 }
 
                 // Update instance buffers efficiently - group by model type

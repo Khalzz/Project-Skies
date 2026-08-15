@@ -11,19 +11,26 @@ use std::sync::mpsc::Sender;
 use crate::game::play::plane::plane::PlaneControls;
 use crate::game::selected_level::SELECTED_LEVEL;
 use crate::game::ui::label;
-use crate::resources::{apply_environment, load_level};
-use crate::engine::rendering::enviroment::environment::{Environment, SkyboxFaces};
+use crate::resources::PreparedSceneAssets;
 use crate::engine::tooling::debug_console;
 use crate::debug_text;
 
 /// Which top-level `game_ui.ron` nodes make up the normal flight HUD (see
 /// `assets/ui/game_ui.ron`) - hidden while the mission-intro card (below) is
-/// showing, restored the instant it finishes. Not every key `ui_control`
-/// reaches for exists in that RON file today ("altitude"/"altitude_alert"/
-/// "stall_alert" are stale references to nodes that were never added there -
-/// `Ui::get_ui_node` just no-ops on a missing key) - this list only needs the
-/// ones that actually do.
-const HUD_KEYS: [&str; 5] = ["data_box", "compass", "speed", "subtitles", "velocity_marker"];
+/// showing, faded back in once it finishes (see `GameLogic::mission_intro_update`'s
+/// `HudFadeIn` phase). Not every key `ui_control` reaches for exists in that RON
+/// file today ("altitude"/"altitude_alert"/"stall_alert" are stale references to
+/// nodes that were never added there - `Ui::get_ui_node` just no-ops on a missing
+/// key) - this list only needs the ones that actually do.
+///
+/// Deliberately does NOT include "subtitles" - dialogue outranks the mission-intro
+/// card, so a line queued right at scene start should still be readable over it
+/// rather than getting suppressed until the intro finishes. Its own alpha is
+/// already fully owned by `Subtitle::update` (it rests at alpha 0 in
+/// assets/ui/game_ui.ron, only shown when there's actually a line queued), so
+/// simply never touching it here - not hiding it, not fading it back in - is
+/// enough to leave it live through every phase of the intro.
+const HUD_KEYS: [&str; 4] = ["data_box", "compass", "speed", "velocity_marker"];
 
 // Add a way of setting timing that can be agnostic to real time (or that will not be affected by the player pausing)
 pub enum CameraState {
@@ -65,14 +72,12 @@ pub struct BlinkingAlert {
 }
 
 /// The mission-intro card's own state machine (see `GameLogic::new`'s own
-/// intro-building block and `GameLogic::mission_intro_update`) - a full-
-/// screen black backdrop that fades to transparent *once*, revealing a title
-/// card (mission title/location/date, staged in `SELECTED_LEVEL` by
-/// `main_menu::ui::show_level`) that fades in alongside it, holds, then fades
-/// back out **on its own** (the backdrop is untouched from here on - it
-/// already opened, it doesn't close again) before finally revealing the
-/// normal flight HUD (see `HUD_KEYS`) - the HUD stays hidden for the entire
-/// sequence, not just during the fades.
+/// intro-building block and `GameLogic::mission_intro_update`) - four beats:
+/// the screen starts fully black, the title card's text fades in on top of it
+/// (`TextFadeIn`), both hold together (`Hold`), the backdrop *and* text fade
+/// out together revealing the game world with no HUD yet (`FadeOut`), then
+/// the flight HUD (see `HUD_KEYS`) itself fades in (`HudFadeIn`) rather than
+/// snapping straight to visible.
 ///
 /// Deliberately does NOT use `UiNode::set_transition`/the engine's own
 /// automatic style-lerp for the fade itself - `elapsed` (below) directly
@@ -86,9 +91,11 @@ pub struct BlinkingAlert {
 /// own blocking asset load) entirely - every tick sets the exact alpha this
 /// point in the sequence should show, not a delta to lerp toward.
 enum MissionIntroPhase {
-    FadeIn,
+    Wait,
+    TextFadeIn,
     Hold,
     FadeOut,
+    HudFadeIn,
     Done,
 }
 
@@ -101,14 +108,26 @@ struct MissionIntro {
 
 impl MissionIntro {
     fn new() -> Self {
-        Self { phase: MissionIntroPhase::FadeIn, elapsed: 0.0 }
+        Self { phase: MissionIntroPhase::Wait, elapsed: 0.0 }
     }
 }
 
 // Tunable timing for the mission-intro sequence (see MissionIntro/
 // GameLogic::mission_intro_update), all in seconds.
-const MISSION_INTRO_FADE_SECS: f32 = 1.0;
-const MISSION_INTRO_HOLD_SECS: f32 = 2.0;
+// Screen just sits fully black (see MissionIntroPhase::Wait) before the text
+// starts fading in - a beat to let the scene settle instead of the text
+// appearing the instant the black screen itself does.
+const MISSION_INTRO_WAIT_SECS: f32 = 2.0;
+const MISSION_INTRO_TEXT_FADE_IN_SECS: f32 = 1.5;
+const MISSION_INTRO_HOLD_SECS: f32 = 5.0;
+const MISSION_INTRO_FADE_OUT_SECS: f32 = 0.8;
+const HUD_FADE_IN_SECS: f32 = 0.6;
+// Must match assets/ui/game_ui.ron's "data_box" node's background_color alpha -
+// UiNode::set_alpha is a no-op on containers (it has no single color of its own
+// to fade, see that fn's doc comment), so data_box's translucent background is
+// faded manually during HudFadeIn using this as the "fully visible" target
+// instead of the RON's raw color, which fade_hud_node never actually reads.
+const HUD_DATA_BOX_BG_ALPHA: f32 = 0.5;
 
 pub struct BaseRotations {
     left_aleron: Option<Quaternion<f32>>,
@@ -146,11 +165,13 @@ pub struct GameLogic { // here we define the data we use on our script
 }
 
 impl GameLogic {
-    // this is called once
-    pub fn new(app: &mut App) -> Self {
-        // Moved here from the old Scene::init (now removed - a scene's constructor
-        // is the only thing that ever runs on activation, see SceneManager::create_scene).
-        load_level(app, "./assets/scenes/test_chamber".to_owned());
+    // This is the fast, main-thread half of scene construction, called once the
+    // model/texture loading `assets` (kicked off in the background by App::run's
+    // reset handling - see SceneManager::create_loaded_scene) has finished. Mirrors
+    // the old Scene::init/new (now removed - a scene's constructor only runs on
+    // activation, see SceneManager::create_scene/create_loaded_scene).
+    pub fn finish(app: &mut App, assets: PreparedSceneAssets) -> Self {
+        assets.apply(app);
         app.ui.load_ui("./assets/ui/game_ui.ron", app.renderer.config.width, app.renderer.config.height, &app.renderer.device, &app.renderer.queue);
 
         // Mission-intro card: hide the normal flight HUD immediately (see
@@ -190,10 +211,15 @@ impl GameLogic {
         // (renderizable_elements is a HashMap) - always_on_top guarantees
         // both render above every other UI element (the HUD, even though
         // it's inactive right now) *and*, since it's processed in this Vec's
-        // own order, that "mission_intro" (pushed second) lands on top of
-        // "mission_intro_backdrop" (pushed first) rather than the reverse.
+        // own order, that each later entry lands on top of the earlier ones.
         app.ui.always_on_top.push("mission_intro_backdrop".to_owned());
         app.ui.always_on_top.push("mission_intro".to_owned());
+        // "subtitles" goes on top of both (pushed last) - dialogue outranks the
+        // mission-intro card (see HUD_KEYS's own doc comment on why it's never
+        // hidden/faded by the intro sequence at all), so without this it'd stay
+        // correctly *active* through the intro but still render underneath the
+        // opaque black backdrop, effectively invisible anyway.
+        app.ui.always_on_top.push("subtitles".to_owned());
 
         let mission_intro_line = |app: &mut App, text: &str, size: f32, color: UiColor| {
             label(app, text)
@@ -375,15 +401,9 @@ impl GameLogic {
             },
         };
 
-        // This scene's environment - swap for Environment::Color(...) for a flat background instead.
-        apply_environment(app, Environment::Skybox(SkyboxFaces {
-            px: "skybox/px.png".to_owned(),
-            nx: "skybox/nx.png".to_owned(),
-            py: "skybox/py.png".to_owned(),
-            ny: "skybox/ny.png".to_owned(),
-            pz: "skybox/pz.png".to_owned(),
-            nz: "skybox/nz.png".to_owned(),
-        }));
+        // This scene's environment (skybox vs flat color) is declared where it's
+        // registered - see main.rs's create_loaded_scene("playing", ...) call -
+        // and already applied above via assets.apply(app).
 
         Self {
             camera_data,
@@ -420,7 +440,7 @@ impl GameLogic {
         }
         self.subtitle_data.update(app);
         self.camera_control(app, app.time.delta_time);
-        self.ui_control(app, app.time.delta_time);
+        self.ui_control(app);
     }
 
     fn plane_movement (&mut self, app: &mut App, delta_time: f32, physics_data: &HashMap<String, RenderMessage>) {
@@ -857,9 +877,32 @@ impl GameLogic {
         format!("{:02}:{:02}:{:02}:{:03}", hours, minutes, seconds, milliseconds)
     }
 
-    fn ui_control(&mut self, app: &mut App, delta_time: f32) {
-        if app.throttling.last_ui_update.elapsed() >= app.throttling.ui_update_interval {
-            self.mission_intro_update(app, delta_time);
+    fn ui_control(&mut self, app: &mut App) {
+        // How much real time actually passed since the last throttled tick - NOT
+        // app.time.delta_time (the current frame's own delta). At framerates above
+        // the throttle's own rate (ui_update_interval, ~120Hz), most frames fail the
+        // gate below and this fn simply doesn't run for them - passing only the
+        // triggering frame's own (tiny) delta_time would silently drop every skipped
+        // frame's worth of real time from anything here that accumulates elapsed
+        // seconds (mission_intro_update, blinking_alert), making both run far slower
+        // than real time the faster the game renders (confirmed via logging: the
+        // mission intro's 1s fade-in was taking 8+ real seconds at this project's
+        // uncapped framerate).
+        // Capped: last_ui_update is a single cross-scene timestamp that's never
+        // reset on a scene switch, so the very first tick after this scene starts
+        // (or after any other long gap - a paused/backgrounded window, a debugger
+        // breakpoint) would otherwise report however long it's been since the
+        // *previous* scene last ran ui_control, potentially several seconds. Fed
+        // straight into mission_intro_update, that one huge tick would blow
+        // through the entire TextFadeIn phase in a single step, rendering the
+        // text already at full alpha on its first-ever frame instead of actually
+        // fading in. 100ms is comfortably above ui_update_interval (so normal
+        // per-tick values are never affected), but caps a stale gap down to
+        // something that just reads as a slightly-longer-than-usual frame.
+        let ui_elapsed = app.throttling.last_ui_update.elapsed().min(Duration::from_millis(100));
+        if ui_elapsed >= app.throttling.ui_update_interval {
+            let ui_delta_time = ui_elapsed.as_secs_f32();
+            self.mission_intro_update(app, ui_delta_time);
 
             if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "data_box/framerate").and_then(|n| n.as_label_mut()) {
                 label.set_text(&mut app.ui.text.font_system, &format!("FPS: {}", app.time.get_fps()), true);
@@ -930,11 +973,11 @@ impl GameLogic {
             }
 
             if let Some(altitude_alert) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "altitude_alert") {
-                self.blinking_alert("altitude".to_owned(), altitude_alert, self.plane_systems.flight_data.altimeter < 1000.0, delta_time);
+                self.blinking_alert("altitude".to_owned(), altitude_alert, self.plane_systems.flight_data.altimeter < 1000.0, ui_delta_time);
             }
 
             if let Some(stall_alert) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "stall_alert") {
-                self.blinking_alert("stall".to_owned(), stall_alert, self.plane_systems.stall, delta_time);
+                self.blinking_alert("stall".to_owned(), stall_alert, self.plane_systems.stall, ui_delta_time);
             }
 
             app.ui.has_changed = true; // Mark UI as changed so it gets processed
@@ -943,8 +986,8 @@ impl GameLogic {
     }
 
     /// Advances the mission-intro card's state machine (see `MissionIntro`) -
-    /// called every `ui_control` tick, cheap no-op once `Done`. `FadeIn`/
-    /// `FadeOut` recompute and *set* the exact alpha this point in the fade
+    /// called every `ui_control` tick, cheap no-op once `Done`. Every phase
+    /// recomputes and *sets* the exact alpha this point in the sequence
     /// should show every single tick (see `MissionIntro`'s own doc comment
     /// for why this doesn't just set a target once and let a
     /// `UiNode::set_transition` lerp toward it, the way every other fade in
@@ -972,13 +1015,18 @@ impl GameLogic {
         }
         self.mission_intro.elapsed += delta_time;
         match self.mission_intro.phase {
-            MissionIntroPhase::FadeIn => {
-                let t = (self.mission_intro.elapsed / MISSION_INTRO_FADE_SECS).clamp(0.0, 1.0);
-                // Backdrop only ever fades here (black -> transparent, once) -
-                // FadeOut below deliberately never touches it again, see this
-                // fn's own doc comment on the bug that happens if it does.
+            MissionIntroPhase::Wait => {
+                if self.mission_intro.elapsed >= MISSION_INTRO_WAIT_SECS {
+                    self.mission_intro.phase = MissionIntroPhase::TextFadeIn;
+                    self.mission_intro.elapsed = 0.0;
+                }
+            }
+            MissionIntroPhase::TextFadeIn => {
+                // Backdrop is already fully opaque black from construction (see
+                // GameLogic::finish) and stays that way for this whole phase -
+                // only the text fades in on top of it.
+                let t = (self.mission_intro.elapsed / MISSION_INTRO_TEXT_FADE_IN_SECS).clamp(0.0, 1.0);
                 Self::set_mission_intro_text_alpha(app, t);
-                Self::set_mission_intro_backdrop_alpha(app, 1.0 - t);
                 if t >= 1.0 {
                     self.mission_intro.phase = MissionIntroPhase::Hold;
                     self.mission_intro.elapsed = 0.0;
@@ -991,33 +1039,42 @@ impl GameLogic {
                 }
             }
             MissionIntroPhase::FadeOut => {
-                let t = (self.mission_intro.elapsed / MISSION_INTRO_FADE_SECS).clamp(0.0, 1.0);
-                // Text only - the backdrop is already transparent (from FadeIn,
-                // above) and stays that way. Previously this called the same
-                // combined text+backdrop setter FadeIn uses, with a *decreasing*
-                // alpha - since that setter computes the backdrop's own alpha
-                // as `1.0 - alpha`, a decreasing input made the backdrop's
-                // value *increase*, fading the black backdrop back to fully
-                // opaque at the same time the text faded out, instead of
-                // leaving it alone. Both then got deactivated together the
-                // instant FadeOut finished, which looked like "screen turns
-                // black, then the HUD just appears" - not the intended "text
-                // fades out over an already-clear background".
+                // Text and backdrop fade out together this time (unlike
+                // TextFadeIn, which only touched the text) - by the end the
+                // screen has gone from "black card" straight to "bare game
+                // world, no HUD yet" in one continuous fade.
+                let t = (self.mission_intro.elapsed / MISSION_INTRO_FADE_OUT_SECS).clamp(0.0, 1.0);
                 Self::set_mission_intro_text_alpha(app, 1.0 - t);
+                Self::set_mission_intro_backdrop_alpha(app, 1.0 - t);
                 if t >= 1.0 {
-                    // The HUD reappears instantly, not lerped - only the
-                    // intro card/backdrop themselves fade, see MissionIntro's
-                    // own doc comment.
-                    for key in HUD_KEYS {
-                        if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, key) {
-                            node.set_active(true);
-                        }
-                    }
                     for key in ["mission_intro", "mission_intro_backdrop"] {
                         if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, key) {
                             node.set_active(false);
                         }
                     }
+                    // Activate the HUD now but start it fully transparent -
+                    // HudFadeIn (below) brings it up to its designed alpha over
+                    // the next tick(s), rather than it popping in instantly.
+                    for key in HUD_KEYS {
+                        if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, key) {
+                            node.set_active(true);
+                            Self::fade_hud_node(node, 0.0);
+                        }
+                    }
+                    Self::set_hud_data_box_alpha(app, 0.0);
+                    self.mission_intro.phase = MissionIntroPhase::HudFadeIn;
+                    self.mission_intro.elapsed = 0.0;
+                }
+            }
+            MissionIntroPhase::HudFadeIn => {
+                let t = (self.mission_intro.elapsed / HUD_FADE_IN_SECS).clamp(0.0, 1.0);
+                for key in HUD_KEYS {
+                    if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, key) {
+                        Self::fade_hud_node(node, t);
+                    }
+                }
+                Self::set_hud_data_box_alpha(app, t);
+                if t >= 1.0 {
                     self.mission_intro.phase = MissionIntroPhase::Done;
                 }
             }
@@ -1037,6 +1094,28 @@ impl GameLogic {
     fn set_mission_intro_backdrop_alpha(app: &mut App, alpha: f32) {
         if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "mission_intro_backdrop") {
             node.update_style(|s| s.set_background_color(UiColor::Rgba(0, 0, 0, 255).with_alpha(alpha)));
+        }
+    }
+
+    /// Fades every text/image leaf under `node` to `alpha` (0=invisible, 1=as
+    /// authored) - recurses into containers since `UiNode::set_alpha` only
+    /// affects the node it's called on, and every HUD_KEYS entry except
+    /// "data_box" is a single leaf label anyway (data_box is a container of 4
+    /// labels, see assets/ui/game_ui.ron - its own background is handled
+    /// separately by `set_hud_data_box_alpha`, since containers have no color
+    /// of their own for `set_alpha` to touch).
+    fn fade_hud_node(node: &mut UiNode, alpha: f32) {
+        node.set_alpha(alpha);
+        if let Some(children) = node.get_children_mut() {
+            for (_, child) in children.iter_mut() {
+                Self::fade_hud_node(child, alpha);
+            }
+        }
+    }
+
+    fn set_hud_data_box_alpha(app: &mut App, t: f32) {
+        if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "data_box") {
+            node.update_style(|s| s.set_background_color(UiColor::Rgba(0, 0, 0, 255).with_alpha(t * HUD_DATA_BOX_BG_ALPHA)));
         }
     }
 

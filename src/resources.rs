@@ -1,14 +1,13 @@
-use std::{collections::HashMap, path::Path};
+use std::{collections::HashMap, collections::HashSet, path::Path};
 use gltf::{image,  Gltf};
 use nalgebra::{vector, Quaternion, Unit, Vector3};
 use rapier3d::prelude::{ColliderBuilder, RigidBodyBuilder};
 use ron::from_str;
-use tokio::task;
-use wgpu::{util::DeviceExt, Buffer, Device};
+use wgpu::{util::DeviceExt, BindGroupLayout, Buffer, Device, Queue, SurfaceConfiguration};
 
 use crate::{app::App, engine::game_nodes::{game_object::GameObject, scene::Scene}, engine::rendering::{enviroment::environment::Environment, enviroment::skybox_renderer::SkyboxRender, instance_management::{InstanceData, InstanceRaw, ModelDataInstance}, models::model::{self, Mesh, Model, ModelVertex}, models::textures::Texture}, transform::Transform};
 
-pub async fn load_binary(file_name: &str) -> anyhow::Result<Vec<u8>> {
+pub fn load_binary(file_name: &str) -> anyhow::Result<Vec<u8>> {
     let path = std::path::Path::new(env!("OUT_DIR"))
     .join("res")
     .join(file_name);
@@ -25,25 +24,25 @@ pub fn load_asset_binary(file_name: &str) -> std::io::Result<Vec<u8>> {
     std::fs::read(std::path::Path::new("assets").join(file_name))
 }
 
-pub async fn load_texture(file_name: &str, device: &wgpu::Device, queue: &wgpu::Queue) -> anyhow::Result<Texture> {
-    let data = load_binary(file_name).await?;
+pub fn load_texture(file_name: &str, device: &wgpu::Device, queue: &wgpu::Queue) -> anyhow::Result<Texture> {
+    let data = load_binary(file_name)?;
     Texture::from_bytes(&data, device, queue, file_name)
 }
 
 /// Loads a skybox cubemap from 6 face image files, in +X, -X, +Y, -Y, +Z, -Z order.
-pub async fn load_texture_cube(file_names: [&str; 6], device: &wgpu::Device, queue: &wgpu::Queue) -> anyhow::Result<Texture> {
+pub fn load_texture_cube(file_names: [&str; 6], device: &wgpu::Device, queue: &wgpu::Queue) -> anyhow::Result<Texture> {
     let mut face_bytes: Vec<Vec<u8>> = Vec::with_capacity(6);
     for file_name in file_names {
-        face_bytes.push(load_binary(file_name).await?);
+        face_bytes.push(load_binary(file_name)?);
     }
     let face_slices: [&[u8]; 6] = std::array::from_fn(|i| face_bytes[i].as_slice());
     Texture::from_cube_bytes(face_slices, device, queue, "skybox_cube_texture")
 }
 
-pub async fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgpu::Queue, transform_bind_group_layout: &wgpu::BindGroupLayout) -> anyhow::Result<Model> {
+pub fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgpu::Queue, transform_bind_group_layout: &wgpu::BindGroupLayout) -> anyhow::Result<Model> {
     // Gltf::from_slice auto-detects the format from the header, so this handles
     // both text .gltf (JSON) and binary .glb files.
-    let gltf_data = load_binary(file_name).await?;
+    let gltf_data = load_binary(file_name)?;
     let gltf = Gltf::from_slice(&gltf_data).unwrap();
 
     // Load buffers
@@ -58,7 +57,7 @@ pub async fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgp
             gltf::buffer::Source::Uri(uri) => {
                 let file_dir = Path::new(file_name).parent().unwrap_or(Path::new(""));
                 let full_path = file_dir.join(uri);
-                let bin = load_binary(full_path.to_str().unwrap()).await?;
+                let bin = load_binary(full_path.to_str().unwrap())?;
                 buffer_data.push(bin);
             }
         }
@@ -178,7 +177,7 @@ pub async fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgp
 
                 // Join the GLTF directory with the URI to get the correct path.
                 let full_path = file_dir.join(uri);
-                let diffuse_texture = load_texture(full_path.to_str().unwrap(), device, queue).await?;
+                let diffuse_texture = load_texture(full_path.to_str().unwrap(), device, queue)?;
 
                 let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     layout: &bind_group_layout,
@@ -372,17 +371,32 @@ fn add_or_init_mesh_list(mesh_lists: &mut HashMap<String, HashMap<String, Mesh>>
     }
 }
 
-pub fn load_level(app: &mut App, mut level_path: String) {
+/// Output of `prepare_level_assets` - GPU resources already built (models loaded,
+/// buffers uploaded), just not merged into `App` yet. Call `PreparedSceneAssets::apply`
+/// on the main thread to do that merge; nothing here needs `&mut App` to produce.
+pub struct PreparedLevel {
+    /// Freshly gltf-loaded models, keyed by model_ref - only for models that weren't
+    /// already in `existing_models` when this was prepared.
+    pub new_models: HashMap<String, ModelDataInstance>,
+    /// For models that WERE already resident: the freshly-built instance buffer + count
+    /// to swap onto the existing `ModelDataInstance` entry.
+    pub instance_buffer_updates: HashMap<String, (Buffer, u32)>,
+    pub renderizable_instances: HashMap<String, InstanceData>,
+}
 
-    app.scene_openned = Some(level_path.clone());
+/// Pure (no `&mut App`) version of the old `load_level` - safe to call from a
+/// background thread given cloned `Device`/`Queue` handles (both cheap, Arc-backed,
+/// and `Clone` in wgpu). `existing_models` is a snapshot of `app.game_models.keys()`
+/// taken before this call, so already-loaded models are reused instead of reloaded,
+/// same "load a model's GLTF once, keep it cached across scenes" behavior the
+/// original had - see `PreparedSceneAssets::apply` for the merge step that actually
+/// reads/writes `app.game_models`.
+pub fn prepare_level_assets(device: &Device, queue: &Queue, camera_position: Vector3<f32>, existing_models: &HashSet<String>, mut level_path: String) -> PreparedLevel {
     level_path += "/data.ron";
 
-    // i get the json data
-    app.renderizable_instances = HashMap::new();
-
-    for (_key, model) in &mut app.game_models {
-        model.instance_count = 0;
-    }
+    let mut new_models: HashMap<String, ModelDataInstance> = HashMap::new();
+    let mut instance_buffer_updates: HashMap<String, (Buffer, u32)> = HashMap::new();
+    let mut renderizable_instances: HashMap<String, InstanceData> = HashMap::new();
 
     let instances_data_to_load = load_instances(level_path);
     match instances_data_to_load {
@@ -409,76 +423,99 @@ pub fn load_level(app: &mut App, mut level_path: String) {
                 }
 
                 // Create instance buffer once per model
-                let instance_buffer = create_instance_buffer(&model_instances, &app.renderer.device, app.camera.active().camera.position.coords);
+                let instance_buffer = create_instance_buffer(&model_instances, device, camera_position);
+                let instance_count = model_instances.len() as u32;
+
+                if existing_models.contains(model_name) {
+                    instance_buffer_updates.insert(model_name.clone(), (instance_buffer, instance_count));
+                } else {
+                    match load_model_gltf(model_name, device, queue, &Mesh::create_bind_group_layout(device)) {
+                        Ok(correct_model) => {
+                            new_models.insert(
+                                model_name.to_string(),
+                                ModelDataInstance {
+                                    model: correct_model,
+                                    instance_count,
+                                    instance_buffer,
+                                }
+                            );
+                        },
+                        Err(e) => eprintln!("The element was not loaded as an instance: {}", e),
+                    }
+                }
 
                 for (i, instance_data) in model_instances.iter().enumerate() {
-                    match app.game_models.get_mut(model_name) {
-                        Some(model_data) => {
-                            model_data.instance_count += 1;
-                            // Update the instance buffer with the new one created above
-                            model_data.instance_buffer = instance_buffer.clone();
-                        },
-                        None => {
-                            let model = task::block_in_place( || {
-                                tokio::runtime::Runtime::new()
-                                    .unwrap()
-                                    .block_on(load_model_gltf(&model_name, &app.renderer.device, &app.renderer.queue, &Mesh::create_bind_group_layout(&app.renderer.device)))
-                            });
-
-                            match model {
-                                Ok(correct_model) => {
-                                    app.game_models.insert(
-                                        model_name.to_string(), 
-                                        ModelDataInstance {
-                                            model: correct_model,
-                                            instance_count: 1,
-                                            instance_buffer: instance_buffer.clone()
-                                        }
-                                    );
-                                },
-                                Err(e) => eprintln!("The element was not loaded as an instance: {}", e),
-                            }
-                        },
-                    }
-
-                    // println!("loaded data: {}", ids[i]);
-                    app.renderizable_instances.insert(ids[i].clone(), InstanceData { renderizable_transform: instance_data.transform.clone(), instance: (**instance_data).clone(), model_ref: model_name.clone() });
+                    renderizable_instances.insert(ids[i].clone(), InstanceData { renderizable_transform: instance_data.transform.clone(), instance: (**instance_data).clone(), model_ref: model_name.clone() });
                 }
             }
         },
         None => eprintln!("The instance data was not correctly loaded"),
     }
+
+    PreparedLevel { new_models, instance_buffer_updates, renderizable_instances }
 }
 
-/// Applies a scene's declared environment (flat color or skybox cubemap), replacing
-/// whatever the app currently has. Call from `Scene::reset`, same as `load_level`.
-pub fn apply_environment(app: &mut App, environment: Environment) {
+pub struct PreparedEnvironment {
+    pub skybox: Option<SkyboxRender>,
+    pub clear_color: wgpu::Color,
+}
+
+/// Pure (no `&mut App`) version of the old `apply_environment` - see
+/// `prepare_level_assets` for why this shape is safe to call off the main thread.
+/// `camera_bind_group_layout` is the one piece `SkyboxRender::new` needs out of the
+/// full `CameraHandler` (see that fn's own comment).
+pub fn prepare_environment(device: &Device, queue: &Queue, camera_bind_group_layout: &BindGroupLayout, config: &SurfaceConfiguration, environment: Environment) -> PreparedEnvironment {
     match environment {
-        Environment::Color(color) => {
-            app.skybox = None;
-            app.clear_color = color;
-        }
+        Environment::Color(color) => PreparedEnvironment { skybox: None, clear_color: color },
         Environment::Skybox(faces) => {
-            let texture = task::block_in_place(|| {
-                tokio::runtime::Runtime::new()
-                    .unwrap()
-                    .block_on(load_texture_cube(
-                        [&faces.px, &faces.nx, &faces.py, &faces.ny, &faces.pz, &faces.nz],
-                        &app.renderer.device,
-                        &app.renderer.queue,
-                    ))
-            });
+            let texture = load_texture_cube(
+                [&faces.px, &faces.nx, &faces.py, &faces.ny, &faces.pz, &faces.nz],
+                device,
+                queue,
+            );
 
             match texture {
-                Ok(texture) => {
-                    app.skybox = Some(SkyboxRender::new(&app.renderer.device, &app.renderer.config, &app.camera, texture));
-                }
+                Ok(texture) => PreparedEnvironment {
+                    skybox: Some(SkyboxRender::new(device, config, camera_bind_group_layout, texture)),
+                    clear_color: crate::engine::rendering::enviroment::environment::DEFAULT_CLEAR_COLOR,
+                },
                 Err(err) => {
                     eprintln!("Skybox faces couldn't be loaded, falling back to clear color: {err}");
-                    app.skybox = None;
+                    PreparedEnvironment { skybox: None, clear_color: crate::engine::rendering::enviroment::environment::DEFAULT_CLEAR_COLOR }
                 }
             }
         }
+    }
+}
+
+/// Everything a heavy scene's `finish(app, assets)` needs to merge into `App` before
+/// running the rest of what used to be its `new()` - the combined output of
+/// `prepare_level_assets` + `prepare_environment`, built entirely off the main thread.
+pub struct PreparedSceneAssets {
+    pub level_path: String,
+    pub level: PreparedLevel,
+    pub environment: PreparedEnvironment,
+}
+
+impl PreparedSceneAssets {
+    /// The fast, main-thread merge step - mirrors what `load_level`/`apply_environment`
+    /// used to do directly. Call this first thing in a heavy scene's `finish`.
+    pub fn apply(self, app: &mut App) {
+        app.scene_openned = Some(self.level_path);
+
+        for (name, model) in self.level.new_models {
+            app.game_models.insert(name, model);
+        }
+        for (name, (buffer, count)) in self.level.instance_buffer_updates {
+            if let Some(model) = app.game_models.get_mut(&name) {
+                model.instance_buffer = buffer;
+                model.instance_count = count;
+            }
+        }
+        app.renderizable_instances = self.level.renderizable_instances;
+
+        app.skybox = self.environment.skybox;
+        app.clear_color = self.environment.clear_color;
     }
 }
 
