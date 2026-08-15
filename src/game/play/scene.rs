@@ -1,18 +1,29 @@
 use std::{collections::HashMap, f32::consts::PI, hash::Hash, time::{Duration, Instant}};
 
-use glyphon::{cosmic_text::Align, Color, FontSystem};
+use glyphon::FontSystem;
 use nalgebra::{vector, Point3, Quaternion, UnitQuaternion, Vector3};
 use rand::{rngs::ThreadRng, Rng};
 use rapier3d::prelude::RigidBody;
 use sdl2::{controller::GameController};
-use crate::{app::{App, AppState}, engine::audio::subtitles::Subtitle, engine::input::{input::InputSubsystem, utils::to_axis}, engine::physics::physics_handler::{MetadataType, PhysicsData, PhysicsTick, RenderMessage}, engine::primitive::manual_vertex::ManualVertex, engine::rendering::{camera::CameraRenderizable, ui::ui::Ui}, engine::scene_manager::scene::{FrameContext, Scene}, transform::Transform, engine::ui::{ui_node::{UiNode, UiNodeContent, Visibility}, ui_transform::UiTransform}, engine::utils::lerps::{lerp, lerp_quaternion}};
+use crate::{app::{App, AppState}, engine::audio::subtitles::Subtitle, engine::input::input, engine::physics::physics_handler::{MetadataType, PhysicsData, PhysicsTick, RenderMessage}, engine::primitive::manual_vertex::ManualVertex, engine::rendering::{camera::CameraHandler, ui::ui::Ui}, engine::scene_manager::scene::{FrameContext, Scene}, transform::Transform, engine::ui::{color::UiColor, ui_node::{UiNode, UiNodeContent}, ui_transform::{Anchor, Orientation, PositionValue, SizeValue, UiTransform}}, engine::utils::lerps::{lerp, lerp_quaternion}};
 use super::{event_handling::EventSystem, plane::{physics_logic::PlanePhysicsLogic, plane::Plane}};
 use std::sync::mpsc::Sender;
 use crate::game::play::plane::plane::PlaneControls;
+use crate::game::selected_level::SELECTED_LEVEL;
+use crate::game::ui::label;
 use crate::resources::{apply_environment, load_level};
 use crate::engine::rendering::enviroment::environment::{Environment, SkyboxFaces};
 use crate::engine::tooling::debug_console;
 use crate::debug_text;
+
+/// Which top-level `game_ui.ron` nodes make up the normal flight HUD (see
+/// `assets/ui/game_ui.ron`) - hidden while the mission-intro card (below) is
+/// showing, restored the instant it finishes. Not every key `ui_control`
+/// reaches for exists in that RON file today ("altitude"/"altitude_alert"/
+/// "stall_alert" are stale references to nodes that were never added there -
+/// `Ui::get_ui_node` just no-ops on a missing key) - this list only needs the
+/// ones that actually do.
+const HUD_KEYS: [&str; 5] = ["data_box", "compass", "speed", "subtitles", "velocity_marker"];
 
 // Add a way of setting timing that can be agnostic to real time (or that will not be affected by the player pausing)
 pub enum CameraState {
@@ -53,6 +64,52 @@ pub struct BlinkingAlert {
     time_alert: f32
 }
 
+/// The mission-intro card's own state machine (see `GameLogic::new`'s own
+/// intro-building block and `GameLogic::mission_intro_update`) - a full-
+/// screen black backdrop that fades to transparent *once*, revealing a title
+/// card (mission title/location/date, staged in `SELECTED_LEVEL` by
+/// `main_menu::ui::show_level`) that fades in alongside it, holds, then fades
+/// back out **on its own** (the backdrop is untouched from here on - it
+/// already opened, it doesn't close again) before finally revealing the
+/// normal flight HUD (see `HUD_KEYS`) - the HUD stays hidden for the entire
+/// sequence, not just during the fades.
+///
+/// Deliberately does NOT use `UiNode::set_transition`/the engine's own
+/// automatic style-lerp for the fade itself - `elapsed` (below) directly
+/// drives the alpha every tick (see `mission_intro_update`) instead. That
+/// automatic lerp needs a *previous* frame's `current_style` to interpolate
+/// from, which a just-constructed node doesn't have yet (its first-ever
+/// render just snaps straight to whatever the target already is that frame -
+/// see `UiNode::node_content_preparation`'s `(Some(current), Some(ms)) => ...
+/// _ => target` split), and computing our own `t` from `elapsed` sidesteps
+/// that (and any per-frame delta_time spike, e.g. right after this scene's
+/// own blocking asset load) entirely - every tick sets the exact alpha this
+/// point in the sequence should show, not a delta to lerp toward.
+enum MissionIntroPhase {
+    FadeIn,
+    Hold,
+    FadeOut,
+    Done,
+}
+
+struct MissionIntro {
+    phase: MissionIntroPhase,
+    // Seconds into the *current* phase - reset to 0.0 on every phase change,
+    // not a running total.
+    elapsed: f32,
+}
+
+impl MissionIntro {
+    fn new() -> Self {
+        Self { phase: MissionIntroPhase::FadeIn, elapsed: 0.0 }
+    }
+}
+
+// Tunable timing for the mission-intro sequence (see MissionIntro/
+// GameLogic::mission_intro_update), all in seconds.
+const MISSION_INTRO_FADE_SECS: f32 = 1.0;
+const MISSION_INTRO_HOLD_SECS: f32 = 2.0;
+
 pub struct BaseRotations {
     left_aleron: Option<Quaternion<f32>>,
     right_aleron: Option<Quaternion<f32>>,
@@ -85,13 +142,79 @@ pub struct GameLogic { // here we define the data we use on our script
     rng: ThreadRng,
     pub game_time: f64,
     pub plane: Plane,
-} 
+    mission_intro: MissionIntro,
+}
 
 impl GameLogic {
     // this is called once
     pub fn new(app: &mut App) -> Self {
+        // Moved here from the old Scene::init (now removed - a scene's constructor
+        // is the only thing that ever runs on activation, see SceneManager::create_scene).
+        load_level(app, "./assets/scenes/test_chamber".to_owned());
+        app.ui.load_ui("./assets/ui/game_ui.ron", app.renderer.config.width, app.renderer.config.height, &app.renderer.device, &app.renderer.queue);
+
+        // Mission-intro card: hide the normal flight HUD immediately (see
+        // HUD_KEYS - GameLogic::mission_intro_update brings it back once the
+        // card's done), build a full-screen black backdrop plus the
+        // (invisible-at-rest) title/location/date stack from whatever
+        // main_menu::ui::show_level last staged in SELECTED_LEVEL (falling
+        // back to placeholder text if the scene was somehow opened without
+        // going through Play Select first) - both fade in/out together, see
+        // GameLogic::mission_intro_update.
+        for key in HUD_KEYS {
+            if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, key) {
+                node.set_active(false);
+            }
+        }
+        let selected = SELECTED_LEVEL.lock().unwrap().clone();
+        let (mission_title, location, mission_date) = match selected {
+            Some(level) => (level.mission_title, level.location, level.mission_date),
+            None => ("Unknown Mission".to_owned(), String::new(), String::new()),
+        };
+        let screen_width = app.renderer.config.width as f32;
+        let screen_height = app.renderer.config.height as f32;
+
+        let mut backdrop = UiNode::container()
+            .set_size(SizeValue::Percent(100.0), SizeValue::Percent(100.0))
+            .set_position(PositionValue::Start(0.0), PositionValue::Start(0.0))
+            .set_background_color(UiColor::Rgba(0, 0, 0, 255));
+        // Ui::add_to_ui (below) inserts straight into renderizable_elements,
+        // unlike a Layer::build-constructed node - nothing else ever resolves
+        // this node's pending Percent size/Start position against the real
+        // screen size, so without this explicit call it'd silently stay at
+        // whatever 0-sized/0-positioned default UiTransform::new gives a
+        // brand new node.
+        backdrop.resolve(screen_width, screen_height);
+        app.ui.add_to_ui("mission_intro_backdrop".to_owned(), backdrop);
+        // Regular top-level nodes have no guaranteed render order
+        // (renderizable_elements is a HashMap) - always_on_top guarantees
+        // both render above every other UI element (the HUD, even though
+        // it's inactive right now) *and*, since it's processed in this Vec's
+        // own order, that "mission_intro" (pushed second) lands on top of
+        // "mission_intro_backdrop" (pushed first) rather than the reverse.
+        app.ui.always_on_top.push("mission_intro_backdrop".to_owned());
+        app.ui.always_on_top.push("mission_intro".to_owned());
+
+        let mission_intro_line = |app: &mut App, text: &str, size: f32, color: UiColor| {
+            label(app, text)
+                .set_font_size(&mut app.ui.text.font_system, size)
+                .set_text_color(color.with_alpha(0.0))
+        };
+        let mut mission_intro = UiNode::container()
+            .set_orientation(Orientation::Vertical)
+            .set_size(SizeValue::Fit, SizeValue::Fit)
+            .set_position(PositionValue::Start(60.0), PositionValue::Center(0.0))
+            .set_background_color(UiColor::TRANSPARENT)
+            .set_child_anchor(Anchor::Start, Anchor::Start)
+            .set_gap(8.0)
+            .set_child("title", mission_intro_line(app, &mission_title, 34.0, UiColor::WHITE))
+            .set_child("location", mission_intro_line(app, &location, 20.0, UiColor::Rgb(210, 210, 210)))
+            .set_child("date", mission_intro_line(app, &mission_date, 16.0, UiColor::Rgb(170, 170, 170)));
+        mission_intro.resolve(screen_width, screen_height);
+        app.ui.add_to_ui("mission_intro".to_owned(), mission_intro);
+
         // UI ELEMENTS AND LIST
-        /* 
+        /*
         let altitude = UiNode::new(
             UiTransform::new(((app.config.width as f32 / 2.0) - (150.0 / 2.0)) - 400.0, (app.config.height as f32 / 2.0) - (30.0 / 2.0), 30.0, 150.0, 0.0, false), 
             Visibility::new([0.0, 0.0, 0.0, 0.0], [0.0, 255.0, 0.0, 255.0]),
@@ -273,19 +396,20 @@ impl GameLogic {
             subtitle_data,
             game_time: 0.0,
             plane: Plane::new(),
+            mission_intro: MissionIntro::new(),
         }
     }
 
     // this is called every frame
-    pub fn update(&mut self, app: &mut App, input_subsystem: &InputSubsystem, plane_control_tx: Option<&Sender<PlaneControls>>, physics_data: &HashMap<String, RenderMessage>) {
+    pub fn update(&mut self, app: &mut App, plane_control_tx: Option<&Sender<PlaneControls>>, physics_data: &HashMap<String, RenderMessage>) {
         self.game_time += app.time.delta_time as f64;
 
-        if input_subsystem.is_just_pressed("test") {
+        if input::is_action_just_pressed("test") {
             self.subtitle_data.add_text("SKIBIDI DAM DAM DAM YES YES", 3000, app);
         }
 
         // Debug console output (press F2 to show/hide)
-        self.plane.update(app.time.delta_time, input_subsystem);
+        self.plane.update(app.time.delta_time);
         if let Some(plane_control_tx) = plane_control_tx {
             let _ = plane_control_tx.send(self.plane.controls.clone());
         }
@@ -295,7 +419,7 @@ impl GameLogic {
             event_system.handle_events(self.game_time, app, &mut self.subtitle_data);
         }
         self.subtitle_data.update(app);
-        self.camera_control(app, app.time.delta_time, input_subsystem);
+        self.camera_control(app, app.time.delta_time);
         self.ui_control(app, app.time.delta_time);
     }
 
@@ -525,13 +649,13 @@ impl GameLogic {
         }
     }
 
-    fn camera_control(&mut self, app: &mut App, delta_time: f32, input_subsystem: &InputSubsystem) {
+    fn camera_control(&mut self, app: &mut App, delta_time: f32) {
         if let Some(player) = app.renderizable_instances.get_mut("player") {
             // Calculate target camera position and look-at point
             let (target_position, target_look_at, target_up) = match self.camera_data.camera_state {
                 CameraState::Normal => {
-                    app.camera.projection.znear = 0.1;
-                    let target_pos = player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 0.6, -45.0));
+                    app.camera.active_mut().projection.znear = 0.1;
+                    let target_pos = player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 8.0, -50.0));
                     let look_at = player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 0.0, 100.0));
                     (target_pos, look_at, player.instance.transform.rotation * *Vector3::y_axis())
                 },
@@ -545,24 +669,24 @@ impl GameLogic {
                     } else {
                         (player.instance.transform.rotation * Vector3::new(0.0, 0.2, 1.3), 70.0)
                     };
-                    app.camera.projection.znear = 0.01;
+                    app.camera.active_mut().projection.znear = 0.01;
 
                     // Mouse wheel adjusts target FOV
-                    let scroll = input_subsystem.mouse.get_scroll_y();
+                    let scroll = input::mouse_scroll_y();
                     if scroll != 0.0 {
                         self.camera_data.cockpit_target_fov = (self.camera_data.cockpit_target_fov - scroll * 5.0).clamp(20.0, 120.0);
                     }
                     // Lerp current FOV toward target
                     self.camera_data.cockpit_current_fov = lerp(self.camera_data.cockpit_current_fov, self.camera_data.cockpit_target_fov, delta_time * 8.0);
-                    app.camera.projection.fovy = self.camera_data.cockpit_current_fov;
+                    app.camera.active_mut().projection.fovy = self.camera_data.cockpit_current_fov;
 
                     let max_yaw: f32 = 170.0;
                     let max_pitch: f32 = 70.0;
-                    let sens = input_subsystem.mouse.get_sensitivity();
+                    let sens = input::mouse_sensitivity();
 
                     // Update yaw/pitch from relative mouse, clamp immediately so no over-accumulation
-                    self.camera_data.cockpit_yaw = (self.camera_data.cockpit_yaw - input_subsystem.mouse.get_rel_x() as f32 * sens.0).clamp(-max_yaw, max_yaw);
-                    self.camera_data.cockpit_pitch = (self.camera_data.cockpit_pitch + input_subsystem.mouse.get_rel_y() as f32 * sens.1).clamp(-max_pitch, max_pitch);
+                    self.camera_data.cockpit_yaw = (self.camera_data.cockpit_yaw - input::mouse_rel_x() as f32 * sens.0).clamp(-max_yaw, max_yaw);
+                    self.camera_data.cockpit_pitch = (self.camera_data.cockpit_pitch + input::mouse_rel_y() as f32 * sens.1).clamp(-max_pitch, max_pitch);
 
                     let yaw = self.camera_data.cockpit_yaw;
                     let pitch = self.camera_data.cockpit_pitch;
@@ -601,7 +725,7 @@ impl GameLogic {
                     } else {
                         (player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(-1.0, 3.0, -1.0)), 60.0)
                     };
-                    app.camera.projection.fovy = fov;
+                    app.camera.active_mut().projection.fovy = fov;
                     let look_at = player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(30.0, 0.0, 100.0));
                     (target_pos, look_at, player.instance.transform.rotation * *Vector3::y_axis())
                 },
@@ -615,24 +739,24 @@ impl GameLogic {
                     } else {
                         (player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 2.0, 3.0)), 60.0)
                     };
-                    app.camera.projection.fovy = fov;
+                    app.camera.active_mut().projection.fovy = fov;
                     let look_at = player.instance.transform.position;
                     (target_pos, look_at, player.instance.transform.rotation * *Vector3::y_axis())
                 },
                 CameraState::Free => {
-                    app.camera.projection.znear = 0.1;
+                    app.camera.active_mut().projection.znear = 0.1;
 
                     // Mouse wheel adjusts target FOV
-                    let scroll = input_subsystem.mouse.get_scroll_y();
+                    let scroll = input::mouse_scroll_y();
                     if scroll != 0.0 {
                         self.camera_data.free_target_fov = (self.camera_data.free_target_fov - scroll * 5.0).clamp(20.0, 120.0);
                     }
                     self.camera_data.free_current_fov = lerp(self.camera_data.free_current_fov, self.camera_data.free_target_fov, delta_time * 8.0);
-                    app.camera.projection.fovy = self.camera_data.free_current_fov;
+                    app.camera.active_mut().projection.fovy = self.camera_data.free_current_fov;
 
-                    let sens = input_subsystem.mouse.get_sensitivity();
-                    self.camera_data.free_yaw = self.camera_data.free_yaw - input_subsystem.mouse.get_rel_x() as f32 * sens.0;
-                    self.camera_data.free_pitch = (self.camera_data.free_pitch + input_subsystem.mouse.get_rel_y() as f32 * sens.1).clamp(-89.0, 89.0);
+                    let sens = input::mouse_sensitivity();
+                    self.camera_data.free_yaw = self.camera_data.free_yaw - input::mouse_rel_x() as f32 * sens.0;
+                    self.camera_data.free_pitch = (self.camera_data.free_pitch + input::mouse_rel_y() as f32 * sens.1).clamp(-89.0, 89.0);
 
                     let rotation_y = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), self.camera_data.free_yaw.to_radians());
                     let rotation_x = UnitQuaternion::from_axis_angle(&Vector3::x_axis(), self.camera_data.free_pitch.to_radians());
@@ -655,27 +779,27 @@ impl GameLogic {
                 let speed = 2.0 * delta_time;
                 let mut changed = false;
 
-                if input_subsystem.is_pressed("throttle_up") {
+                if input::is_action_pressed("throttle_up") {
                     self.camera_data.debug_offset.z += speed;
                     changed = true;
                 }
-                if input_subsystem.is_pressed("throttle_down") {
+                if input::is_action_pressed("throttle_down") {
                     self.camera_data.debug_offset.z -= speed;
                     changed = true;
                 }
-                if input_subsystem.is_pressed("up_wheel") {
+                if input::is_action_pressed("up_wheel") {
                     self.camera_data.debug_offset.x += speed;
                     changed = true;
                 }
-                if input_subsystem.is_pressed("down_wheel") {
+                if input::is_action_pressed("down_wheel") {
                     self.camera_data.debug_offset.x -= speed;
                     changed = true;
                 }
-                if input_subsystem.is_pressed("pitch_up") {
+                if input::is_action_pressed("pitch_up") {
                     self.camera_data.debug_offset.y += speed;
                     changed = true;
                 }
-                if input_subsystem.is_pressed("pitch_down") {
+                if input::is_action_pressed("pitch_down") {
                     self.camera_data.debug_offset.y -= speed;
                     changed = true;
                 }
@@ -694,15 +818,16 @@ impl GameLogic {
             };
 
             // Apply camera position directly (no interpolation to match object movement)
-            app.camera.camera.position = final_position.into();
-            app.camera.camera.look_at(target_look_at.into());
-            app.camera.camera.up = target_up;
+            let active = app.camera.active_mut();
+            active.camera.position = final_position.into();
+            active.camera.look_at(target_look_at.into());
+            active.camera.up = target_up;
         }
         // self.calculate_lockable(app);
-        if input_subsystem.is_just_pressed("change_camera") {
+        if input::is_action_just_pressed("change_camera") {
             self.next_camera(&mut app.camera);
         }
-        if input_subsystem.is_just_pressed("toggle_camera_debug") {
+        if input::is_action_just_pressed("toggle_camera_debug") {
             self.camera_data.debug_mode_active = !self.camera_data.debug_mode_active;
             println!("Camera debug mode: {}", if self.camera_data.debug_mode_active { "ON" } else { "OFF" });
         }
@@ -734,6 +859,8 @@ impl GameLogic {
 
     fn ui_control(&mut self, app: &mut App, delta_time: f32) {
         if app.throttling.last_ui_update.elapsed() >= app.throttling.ui_update_interval {
+            self.mission_intro_update(app, delta_time);
+
             if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "data_box/framerate").and_then(|n| n.as_label_mut()) {
                 label.set_text(&mut app.ui.text.font_system, &format!("FPS: {}", app.time.get_fps()), true);
             }
@@ -758,7 +885,7 @@ impl GameLogic {
                 label.set_text(&mut app.ui.text.font_system, &format!("SPD: {:.0}", self.plane_systems.flight_data.speedometer), true);
             }
 
-            let rotation = Self::map_to_range(app.camera.camera.yaw.into(), -PI as f64, PI  as f64, 0.0, 360.0).round();
+            let rotation = Self::map_to_range(app.camera.active().camera.yaw.into(), -PI as f64, PI  as f64, 0.0, 360.0).round();
             
             let text_compass = if rotation >= 355.0 || rotation <= 5.0 {
                 "N".to_owned()
@@ -790,16 +917,12 @@ impl GameLogic {
                                 marker.transform.rect.top = marker.transform.y;
                                 marker.transform.rect.right = marker.transform.x + marker.transform.width;
                                 marker.transform.rect.bottom = marker.transform.y + marker.transform.height;
-                                if let UiNodeContent::Text(label) = &mut marker.content {
-                                    label.color = Color::rgba(0, 255, 75, 255);
-                                }
+                                marker.update_style(|s| s.set_text_color(UiColor::Rgb(0, 255, 75)));
                             }
                         } else {
                             // Off screen — hide marker
                             if let Some(marker) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "velocity_marker") {
-                                if let UiNodeContent::Text(label) = &mut marker.content {
-                                    label.color = Color::rgba(0, 255, 75, 0);
-                                }
+                                marker.update_style(|s| s.set_text_color(UiColor::Rgba(0, 255, 75, 0)));
                             }
                         }
                     }
@@ -816,6 +939,104 @@ impl GameLogic {
 
             app.ui.has_changed = true; // Mark UI as changed so it gets processed
             app.throttling.last_ui_update = Instant::now();
+        }
+    }
+
+    /// Advances the mission-intro card's state machine (see `MissionIntro`) -
+    /// called every `ui_control` tick, cheap no-op once `Done`. `FadeIn`/
+    /// `FadeOut` recompute and *set* the exact alpha this point in the fade
+    /// should show every single tick (see `MissionIntro`'s own doc comment
+    /// for why this doesn't just set a target once and let a
+    /// `UiNode::set_transition` lerp toward it, the way every other fade in
+    /// this codebase does).
+    ///
+    /// `elapsed` accumulates the *real* `delta_time` unclamped - the scene's
+    /// very first tick used to see a `delta_time` of multiple seconds
+    /// (confirmed via logging: `GameLogic::new`'s model/texture loading is
+    /// synchronous/blocking, and that whole duration landed in whatever
+    /// frame's `delta_time` got measured right after it finally returned),
+    /// which is now fixed at the source - `App::run` re-baselines the frame
+    /// clock immediately after a scene's blocking constructor returns (see
+    /// its own comment) - rather than papering over it here with a per-tick
+    /// cap. A cap here was tried first and made things *worse* than the bug
+    /// it fixed: at a low, sustained frame rate (a debug build doing real 3D
+    /// rendering + physics easily runs at a few FPS), every tick's genuine
+    /// delta_time exceeds a small cap, so capping it throttles how much of
+    /// this sequence's own "fade time" can pass per tick regardless of how
+    /// much real time actually passed - stretching what should be a ~4
+    /// second sequence out to tens of real seconds, strictly worse than the
+    /// one-time spike it was meant to guard against.
+    fn mission_intro_update(&mut self, app: &mut App, delta_time: f32) {
+        if matches!(self.mission_intro.phase, MissionIntroPhase::Done) {
+            return;
+        }
+        self.mission_intro.elapsed += delta_time;
+        match self.mission_intro.phase {
+            MissionIntroPhase::FadeIn => {
+                let t = (self.mission_intro.elapsed / MISSION_INTRO_FADE_SECS).clamp(0.0, 1.0);
+                // Backdrop only ever fades here (black -> transparent, once) -
+                // FadeOut below deliberately never touches it again, see this
+                // fn's own doc comment on the bug that happens if it does.
+                Self::set_mission_intro_text_alpha(app, t);
+                Self::set_mission_intro_backdrop_alpha(app, 1.0 - t);
+                if t >= 1.0 {
+                    self.mission_intro.phase = MissionIntroPhase::Hold;
+                    self.mission_intro.elapsed = 0.0;
+                }
+            }
+            MissionIntroPhase::Hold => {
+                if self.mission_intro.elapsed >= MISSION_INTRO_HOLD_SECS {
+                    self.mission_intro.phase = MissionIntroPhase::FadeOut;
+                    self.mission_intro.elapsed = 0.0;
+                }
+            }
+            MissionIntroPhase::FadeOut => {
+                let t = (self.mission_intro.elapsed / MISSION_INTRO_FADE_SECS).clamp(0.0, 1.0);
+                // Text only - the backdrop is already transparent (from FadeIn,
+                // above) and stays that way. Previously this called the same
+                // combined text+backdrop setter FadeIn uses, with a *decreasing*
+                // alpha - since that setter computes the backdrop's own alpha
+                // as `1.0 - alpha`, a decreasing input made the backdrop's
+                // value *increase*, fading the black backdrop back to fully
+                // opaque at the same time the text faded out, instead of
+                // leaving it alone. Both then got deactivated together the
+                // instant FadeOut finished, which looked like "screen turns
+                // black, then the HUD just appears" - not the intended "text
+                // fades out over an already-clear background".
+                Self::set_mission_intro_text_alpha(app, 1.0 - t);
+                if t >= 1.0 {
+                    // The HUD reappears instantly, not lerped - only the
+                    // intro card/backdrop themselves fade, see MissionIntro's
+                    // own doc comment.
+                    for key in HUD_KEYS {
+                        if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, key) {
+                            node.set_active(true);
+                        }
+                    }
+                    for key in ["mission_intro", "mission_intro_backdrop"] {
+                        if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, key) {
+                            node.set_active(false);
+                        }
+                    }
+                    self.mission_intro.phase = MissionIntroPhase::Done;
+                }
+            }
+            MissionIntroPhase::Done => {}
+        }
+    }
+
+    fn set_mission_intro_text_alpha(app: &mut App, alpha: f32) {
+        for line in ["title", "location", "date"] {
+            if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &format!("mission_intro/{line}")) {
+                let current = node.style.text_color.unwrap_or(UiColor::WHITE);
+                node.update_style(|s| s.set_text_color(current.with_alpha(alpha)));
+            }
+        }
+    }
+
+    fn set_mission_intro_backdrop_alpha(app: &mut App, alpha: f32) {
+        if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "mission_intro_backdrop") {
+            node.update_style(|s| s.set_background_color(UiColor::Rgba(0, 0, 0, 255).with_alpha(alpha)));
         }
     }
 
@@ -840,28 +1061,21 @@ impl GameLogic {
             blinking_alert.alert_state = false
         }
 
-        
-            match &mut blinkable.content {
-                UiNodeContent::Text(label) => {
-                    if blinking_alert.alert_state {
-                        blinkable.visibility.border_color = [1.0, 0.0, 0.0, 1.0];
-                        label.color = Color::rgba(255, 0, 0, 255);
-
-                    } else {
-                        blinkable.visibility.border_color = [0.0, 0.0, 0.0, 0.0];
-                        label.color = Color::rgba(0, 0, 0, 0);
-                    }
-                },
-                _ => {}
+        if matches!(&blinkable.content, UiNodeContent::Text(_)) {
+            if blinking_alert.alert_state {
+                blinkable.update_style(|s| s.set_border_color(UiColor::Rgb(255, 0, 0)).set_text_color(UiColor::Rgb(255, 0, 0)));
+            } else {
+                blinkable.update_style(|s| s.set_border_color(UiColor::TRANSPARENT).set_text_color(UiColor::TRANSPARENT));
             }
-        
+        }
+
     }
 
     fn map_to_range(x: f64, in_min: f64, in_max: f64, out_min: f64, out_max: f64) -> f64 {
         (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min
     }
 
-    fn next_camera(&mut self, camera: &mut CameraRenderizable) {
+    fn next_camera(&mut self, camera: &mut CameraHandler) {
         match self.camera_data.camera_state {
             CameraState::Normal => {
                 self.camera_data.camera_state = CameraState::Free;
@@ -875,17 +1089,11 @@ impl GameLogic {
 }
 
 impl Scene for GameLogic {
-    fn reset(&mut self, app: &mut App) {
-        load_level(app, "./assets/scenes/test_chamber".to_owned());
-        app.ui.load_ui("./assets/ui/game_ui.ron", app.renderer.config.width, app.renderer.config.height);
-        *self = GameLogic::new(app);
+    fn update(&mut self, app: &mut App, ctx: &mut FrameContext) {
+        self.update(app, ctx.plane_control_tx, ctx.physics_data);
     }
 
-    fn tick(&mut self, app: &mut App, ctx: &mut FrameContext) {
-        self.update(app, ctx.input_subsystem, ctx.plane_control_tx, ctx.physics_data);
-    }
-
-    fn physics(&self, app: &App) -> Option<(String, Box<dyn PhysicsTick + Send>)> {
+    fn fixed_update(&self, app: &App) -> Option<(String, Box<dyn PhysicsTick + Send>)> {
         // reset() (via load_level) already set this to whatever level it just
         // loaded - reuse it instead of keeping a second, separately-typed copy.
         let level_path = app.scene_openned.clone()?;

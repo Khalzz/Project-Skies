@@ -1,10 +1,9 @@
 use nalgebra::{ AbstractRotation, Point3, Quaternion, Rotation2, Unit, UnitQuaternion, Vector2, Vector3};
 use std::{collections::HashMap, f64::consts::PI, time::{Duration, Instant}};
-use sdl2::controller::GameController;
 
-use crate::{app::{App, AppState}, engine::rendering::enviroment::environment::Environment, resources::apply_environment, transform::Transform, engine::ui::{button, ui_node::{UiNode, UiNodeContent, Visibility}}, engine::utils::lerps::{lerp_quaternion, lerp_vector3}};
+use crate::{app::App, engine::rendering::enviroment::environment::Environment, resources::apply_environment, transform::Transform, engine::ui::{button, ui_node::{UiNode, UiNodeContent}}, engine::utils::lerps::{lerp_quaternion, lerp_vector3}};
 
-use crate::game::play::controller::Controller;
+use crate::engine::input::input;
 use crate::engine::scene_manager::scene::{FrameContext, Scene};
 
 pub struct ListOfPlanes {
@@ -13,10 +12,9 @@ pub struct ListOfPlanes {
 }
 
 pub struct GameLogic { // here we define the data we use on our script
-    pub controller: Controller,
     pub plane_list: ListOfPlanes,
     pub controller_simulation: Vector2<f32>
-} 
+}
 
 impl GameLogic {
     // this is called once
@@ -24,20 +22,19 @@ impl GameLogic {
 
         app.ui.renderizable_elements.clear();
 
-        app.camera.camera.position = [0.0, 7.0, 50.0].into();
+        app.camera.active_mut().camera.position = [0.0, 7.0, 50.0].into();
 
         let plane_list = ListOfPlanes { list: vec!["f16".to_string(), "f14".to_string()], index: 0 };
 
 
         Self {
-            controller: Controller::new(0.3, 0.2),
             plane_list,
             controller_simulation: Vector2::new(0.0, 1.0)
         }
     }
 
     // this is called every frame
-    pub fn update(&mut self, mut app_state: &mut AppState, mut event_pump: &mut sdl2::EventPump, app: &mut App, controller: &mut Option<GameController>) {
+    pub fn update(&mut self, app: &mut App) {
         if let Some(plane) = app.renderizable_instances.get_mut(&self.plane_list.list[self.plane_list.index]) {
             if let Some(plane_model) = app.game_models.get_mut(&plane.instance.model) {
                 if let Some(meshes) = plane_model.model.mesh_lists.get_mut("transparent") {
@@ -100,20 +97,20 @@ impl GameLogic {
         }
 
         self.camera_control(app, app.time.delta_time);
-        self.controller.update(&mut app_state, &mut event_pump, app, controller, app.time.delta_time);
     }
 
     fn camera_control(&mut self, app: &mut App, delta_time: f32) {
-        let new_position = Self::rotate_camera_position(app.camera.camera.position.coords, Vector3::zeros(), 40.0, Vector3::new(0.0, 1.0, 0.0), delta_time);
+        let new_position = Self::rotate_camera_position(app.camera.active().camera.position.coords, Vector3::zeros(), 40.0, Vector3::new(0.0, 1.0, 0.0), delta_time);
 
-        app.camera.camera.position = Point3::new(new_position.x, new_position.y, new_position.z);
-        app.camera.camera.look_at([0.0, 0.0, 0.0].into());
+        let active = app.camera.active_mut();
+        active.camera.position = Point3::new(new_position.x, new_position.y, new_position.z);
+        active.camera.look_at([0.0, 0.0, 0.0].into());
 
-        if self.controller.ui_left && self.plane_list.index > 0 {
+        if input::is_action_just_pressed("ui_left") && self.plane_list.index > 0 {
             self.plane_list.index -= 1;
         }
 
-        if self.controller.ui_right && self.plane_list.index < self.plane_list.list.len() - 1 {
+        if input::is_action_just_pressed("ui_right") && self.plane_list.index < self.plane_list.list.len() - 1 {
             self.plane_list.index += 1;
         }
     }
@@ -129,11 +126,8 @@ impl GameLogic {
 }
 
 impl Scene for GameLogic {
-    fn reset(&mut self, app: &mut App) {
-        *self = GameLogic::new(app);
-    }
-
-    fn tick(&mut self, app: &mut App, ctx: &mut FrameContext) {
-        self.update(ctx.app_state, ctx.event_pump, app, ctx.controller);
+    fn update(&mut self, app: &mut App, ctx: &mut FrameContext) {
+        let _ = ctx;
+        self.update(app);
     }
 }

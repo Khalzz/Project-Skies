@@ -28,9 +28,10 @@ pub struct ChildAnchor {
     pub vertical: Anchor,
 }
 
-/// Direction children are stacked in a container.
+/// Orientation children are stacked in a container - like a flex container's
+/// `flex-direction`.
 #[derive(Clone, Debug, Deserialize, Default, PartialEq)]
-pub enum Direction {
+pub enum Orientation {
     #[default]
     Vertical,
     Horizontal,
@@ -43,6 +44,159 @@ pub struct Fit {
     pub horizontal: bool,
     #[serde(default)]
     pub vertical: bool,
+}
+
+/// Set by `SizeValue::Grow` (see `UiTransform::resolve_size`) - whether this node
+/// wants to expand to fill its parent container's space. This flag is read by the
+/// *parent*'s layout pass (see `UiNode::node_content_preparation`'s Container
+/// branch), which handles it differently per axis:
+/// - On the axis matching the parent's own `Orientation` (the main axis), it
+///   behaves like CSS flexbox's `flex-grow: 1`, splitting whatever space is left
+///   after every other active sibling's own size and the gaps between them.
+/// - On the other axis (the cross axis), it behaves like CSS flexbox's
+///   `align-items: stretch`, filling that container's current content box on
+///   that axis. Both are re-applied every frame (not resolved once at
+///   `resolve_size` time) since an ancestor that's itself `Grow`/`Fit`-sized
+///   might not settle into its real size until its own parent's main-axis
+///   pre-pass runs later in the same frame - a value resolved once up front
+///   against an earlier, too-generous estimate could end up oversized.
+/// `resolve_size` still gives it an initial fallback of the full parent size (not
+/// a shrink-to-`0.0` like an unresolved `Fit`) for the one case nothing else ever
+/// re-resolves it: a top-level node that's never any container's `children`.
+#[derive(Clone, Debug, Default)]
+pub struct Grow {
+    pub horizontal: bool,
+    pub vertical: bool,
+}
+
+/// Inset between a node's own box edges and its content, one value per side - the
+/// CSS `padding` shorthand's full generality. For a container, insets its children
+/// from its own edges; for a Text/Image node (no children to inset), grows the
+/// node's own box instead and insets the rendered content within it - see
+/// `UiNode::apply_padding`. Built via `UiNode::set_padding(impl Into<Padding>)`,
+/// which accepts any of the three `From` impls below - one method, three shapes,
+/// matching CSS's own `padding` shorthand:
+/// - `.set_padding(10.0)` - every side.
+/// - `.set_padding((10.0, 2.0))` - `(x, y)`, i.e. left+right, top+bottom.
+/// - `.set_padding([10.0, 2.0, 4.0, 4.0])` - `[top, bottom, left, right]`.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct Padding {
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+    pub left: f32,
+}
+
+impl Padding {
+    pub fn all(value: f32) -> Self {
+        Self { top: value, right: value, bottom: value, left: value }
+    }
+}
+
+impl From<f32> for Padding {
+    fn from(value: f32) -> Self {
+        Padding::all(value)
+    }
+}
+
+/// `(x, y)` - x is left+right, y is top+bottom.
+impl From<(f32, f32)> for Padding {
+    fn from((x, y): (f32, f32)) -> Self {
+        Padding { top: y, bottom: y, left: x, right: x }
+    }
+}
+
+/// `[top, bottom, left, right]`.
+impl From<[f32; 4]> for Padding {
+    fn from([top, bottom, left, right]: [f32; 4]) -> Self {
+        Padding { top, bottom, left, right }
+    }
+}
+
+/// Which sides of a node's own box actually draw its border - see
+/// `UiNode::set_border_edges`. Defaults to all 4 (`BorderEdges::ALL`), matching
+/// every border before this existed - only an explicit `.set_border_edges(...)`
+/// call ever narrows it, e.g. `BorderEdges::LEFT` for a sidebar-style accent bar
+/// on just one side. All 4 edges together render through the same rounded-corner
+/// SDF border every node already used (see `text_shader.wgsl`'s `border_mix`);
+/// fewer than 4 switches to independent straight bands per enabled edge instead,
+/// since there's no single "distance to nearest enabled edge" that still respects
+/// corner rounding correctly for an arbitrary subset - a partial border is drawn
+/// straight regardless of `corner_radius`, which is fine for the sharp-cornered
+/// case this exists for (a hover accent bar) but won't visually follow a rounded
+/// corner if used on one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BorderEdges {
+    pub left: bool,
+    pub right: bool,
+    pub top: bool,
+    pub bottom: bool,
+}
+
+impl BorderEdges {
+    pub const ALL: BorderEdges = BorderEdges { left: true, right: true, top: true, bottom: true };
+    pub const LEFT: BorderEdges = BorderEdges { left: true, right: false, top: false, bottom: false };
+    pub const RIGHT: BorderEdges = BorderEdges { left: false, right: true, top: false, bottom: false };
+    pub const TOP: BorderEdges = BorderEdges { left: false, right: false, top: true, bottom: false };
+    pub const BOTTOM: BorderEdges = BorderEdges { left: false, right: false, top: false, bottom: true };
+
+    /// Packs into the bitmask `compute_quad`/the shader actually use - bit 0 =
+    /// left, 1 = right, 2 = top, 3 = bottom. `15` (`0b1111`) means "all 4", which
+    /// the shader reads as "use the original rounded-SDF border" rather than the
+    /// straight-band path - see this type's own doc comment.
+    pub(crate) fn to_bits(self) -> u32 {
+        (self.left as u32) | (self.right as u32) << 1 | (self.top as u32) << 2 | (self.bottom as u32) << 3
+    }
+}
+
+impl Default for BorderEdges {
+    fn default() -> Self {
+        BorderEdges::ALL
+    }
+}
+
+/// A richer per-axis size than a raw pixel value - resolved immediately (via
+/// `UiTransform::resolve_size`) against the parent's known size, same as everything
+/// else in this UI system (nothing re-resolves later, e.g. on window resize).
+/// `Fit` just sets the same `Fit` flags above - the actual size-to-children
+/// computation already happens in `node_content_preparation`'s per-frame layout,
+/// this doesn't duplicate it. Not `Deserialize` yet - code-first only for now.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SizeValue {
+    Pixels(f32),
+    /// Percent of the parent's size on this axis (0.0..=100.0).
+    Percent(f32),
+    /// Size to children's natural size - containers only, same as `Fit` above.
+    Fit,
+    /// Expand to fill whatever main-axis space is left in the parent container
+    /// after every sibling's own size and the gaps between them - containers only,
+    /// same as `Fit`, and only on the axis matching the parent's `Orientation` (see
+    /// `Grow`'s doc comment). Multiple `Grow` siblings split the remaining space
+    /// evenly, same as CSS flexbox's `flex-grow: 1` on all of them.
+    Grow,
+}
+
+/// A richer per-axis position than a raw pixel offset - resolved immediately (via
+/// `UiTransform::resolve_position`) against the parent's known size and this node's
+/// own already-resolved size (so resolve size first if setting both). `Start`/
+/// `Center`/`End` anchor to that edge/the middle and then add their own pixel
+/// offset - e.g. `End(-10.0)` sits 10px in from the far edge, `Start(0.0)` sits
+/// flush against the near edge. This is the same math `SelfAnchor`/`Anchor` already
+/// do for RON-loaded top-level nodes, just as one self-contained value per axis
+/// instead of an anchor plus a separately-set raw offset.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PositionValue {
+    /// Offset from the parent's start edge, as a percent of the parent's size (0.0..=100.0).
+    Percent(f32),
+    /// Anchored to the start (left/top) edge, plus this many pixels - `Start(0.0)` is
+    /// flush against the edge; this also covers plain "N pixels from the top-left"
+    /// positioning, since that's mathematically the same thing.
+    Start(f32),
+    /// Anchored to the center, plus this many pixels.
+    Center(f32),
+    /// Anchored to the end (right/bottom) edge, plus this many pixels - typically
+    /// negative, to sit inward from the edge instead of past it.
+    End(f32),
 }
 
 #[derive(Clone, Debug)]
@@ -64,8 +218,9 @@ pub struct UiTransform {
     pub smooth_change: bool,
     pub self_anchor: SelfAnchor,
     pub child_anchor: ChildAnchor,
-    pub direction: Direction,
+    pub direction: Orientation,
     pub fit: Fit,
+    pub grow: Grow,
 }
 
 impl UiTransform {
@@ -87,12 +242,13 @@ impl UiTransform {
             smooth_change,
             self_anchor: SelfAnchor::default(),
             child_anchor: ChildAnchor::default(),
-            direction: Direction::default(),
+            direction: Orientation::default(),
             fit: Fit::default(),
+            grow: Grow::default(),
         }
     }
 
-    pub fn with_anchors(mut self, self_anchor: SelfAnchor, child_anchor: ChildAnchor, direction: Direction, fit: Fit) -> Self {
+    pub fn with_anchors(mut self, self_anchor: SelfAnchor, child_anchor: ChildAnchor, direction: Orientation, fit: Fit) -> Self {
         self.self_anchor = self_anchor;
         self.child_anchor = child_anchor;
         self.direction = direction;
@@ -147,5 +303,106 @@ impl UiTransform {
             bottom: self.y + self.height,
             right: self.x + self.width,
         };
+    }
+
+    /// Resolves a `SizeValue` pair against `parent_width`/`parent_height`, writing
+    /// `self.width`/`self.height` and this node's own `fit`/`grow` flags directly -
+    /// `Fit` leaves size at `0.0` since the real value only exists once this node's
+    /// own per-frame layout pass runs (see `node_content_preparation`), computed
+    /// from its children.
+    ///
+    /// `Grow` resolves to the *full* `parent_width`/`parent_height` here - not
+    /// `0.0` - so a `Grow`-sized node that's never a child inside a container's
+    /// `children` list (a top-level `Layer` node, for instance) still ends up
+    /// filling its parent, instead of silently falling back to `Fit`-like
+    /// shrink-to-content behavior for having a leftover `0.0` size. For a `Grow`
+    /// node that *is* such a child, this full-parent value only lasts until its
+    /// container's own layout pass runs, which overwrites it unconditionally with
+    /// its actual share of the remaining space (see `Grow`'s doc comment) - so this
+    /// full-size fallback never actually shows up there, only when nothing else
+    /// ever resolves it.
+    pub fn resolve_size(&mut self, width: SizeValue, height: SizeValue, parent_width: f32, parent_height: f32) {
+        self.fit.horizontal = matches!(width, SizeValue::Fit);
+        self.fit.vertical = matches!(height, SizeValue::Fit);
+        self.grow.horizontal = matches!(width, SizeValue::Grow);
+        self.grow.vertical = matches!(height, SizeValue::Grow);
+
+        self.width = match width {
+            SizeValue::Pixels(px) => px,
+            SizeValue::Percent(pct) => parent_width * pct / 100.0,
+            SizeValue::Fit => 0.0,
+            SizeValue::Grow => parent_width,
+        };
+        self.height = match height {
+            SizeValue::Pixels(px) => px,
+            SizeValue::Percent(pct) => parent_height * pct / 100.0,
+            SizeValue::Fit => 0.0,
+            SizeValue::Grow => parent_height,
+        };
+    }
+
+    /// Resolves a `PositionValue` pair against `parent_width`/`parent_height` - just
+    /// `resolve_position_in_rect` against a parent rect assumed to start at the
+    /// origin (0,0), which is true for every call site this has (a top-level node,
+    /// whose parent is the whole screen). See that method for the actual math/doc.
+    pub fn resolve_position(&mut self, x: PositionValue, y: PositionValue, parent_width: f32, parent_height: f32) {
+        let origin_rect = Rect { top: 0.0, left: 0.0, bottom: parent_height, right: parent_width };
+        self.resolve_position_in_rect(x, y, &origin_rect);
+    }
+
+    /// Resolves a `PositionValue` pair against an arbitrary parent rect (real
+    /// origin, not just a width/height) - `Center`/`End` measure using
+    /// `self.width`/`self.height`, so call `resolve_size` first if setting both (if
+    /// that size is `SizeValue::Fit`, both are still `0.0` at this point - see
+    /// `self_anchor` below). Refreshes `rect` afterward, same as
+    /// `apply_transformation`.
+    ///
+    /// Also records which anchor was used into `self.self_anchor` (Percent counts as
+    /// Start) - a `Fit`-sized container's real size isn't known until the per-frame
+    /// layout pass runs (`node_content_preparation`), so an End/Center-anchored axis
+    /// resolves here against a `0.0` placeholder. That pass reads `self_anchor` back
+    /// to grow from the correct edge once the real size is known, instead of always
+    /// growing right/down from a corner that was only ever correct for `Start`.
+    ///
+    /// `self.x`/`self.y` end up holding the fully-resolved `rect.left`/`rect.top` -
+    /// NOT a raw offset from the anchor (unlike `resolve_in_parent`, which expects
+    /// `self.x`/`self.y` to be just the pixel offset and adds its own freshly
+    /// computed anchor base on top). A self-positioned container child (see
+    /// `UiNode::node_content_preparation`) needs to re-resolve through *this*
+    /// method every frame against its container's current content rect (a
+    /// `Fit`-sized child's real width/height isn't known until its own layout pass
+    /// runs, so this can't just resolve once) - calling `resolve_in_parent` there
+    /// instead double-counts the `Center`/`End` offset already baked into
+    /// `self.x`/`self.y` from this method, which is what put it at the bottom of
+    /// the screen instead of centered.
+    pub fn resolve_position_in_rect(&mut self, x: PositionValue, y: PositionValue, parent_rect: &Rect) {
+        let parent_width = parent_rect.right - parent_rect.left;
+        let parent_height = parent_rect.bottom - parent_rect.top;
+
+        self.self_anchor.horizontal = match x {
+            PositionValue::End(_) => Anchor::End,
+            PositionValue::Center(_) => Anchor::Center,
+            PositionValue::Percent(_) | PositionValue::Start(_) => Anchor::Start,
+        };
+        self.self_anchor.vertical = match y {
+            PositionValue::End(_) => Anchor::End,
+            PositionValue::Center(_) => Anchor::Center,
+            PositionValue::Percent(_) | PositionValue::Start(_) => Anchor::Start,
+        };
+
+        self.x = parent_rect.left + match x {
+            PositionValue::Percent(pct) => parent_width * pct / 100.0,
+            PositionValue::Start(offset) => offset,
+            PositionValue::Center(offset) => (parent_width - self.width) / 2.0 + offset,
+            PositionValue::End(offset) => parent_width - self.width + offset,
+        };
+        self.y = parent_rect.top + match y {
+            PositionValue::Percent(pct) => parent_height * pct / 100.0,
+            PositionValue::Start(offset) => offset,
+            PositionValue::Center(offset) => (parent_height - self.height) / 2.0 + offset,
+            PositionValue::End(offset) => parent_height - self.height + offset,
+        };
+
+        self.apply_transformation();
     }
 }

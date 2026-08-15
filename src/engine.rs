@@ -5,6 +5,7 @@ pub mod game_nodes;
 pub mod ui;
 pub mod audio;
 pub mod scene_manager;
+pub mod splash_screen;
 pub mod tooling;
 pub mod primitive;
 pub mod rendering;

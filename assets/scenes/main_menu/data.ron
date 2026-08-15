@@ -1,0 +1,59 @@
+(
+    id: "test chamber",
+    description: "This level is a testing place, where the player could fly freely, this is set mainly to test mechanics",
+    children: [
+        (
+            id: "sun",
+            model: "F16/f16.gltf",
+            transform: (
+                position: ( 1000.0, 1000000.0, 1000.0 ),
+                rotation: ( 0.0, 0.0, 0.0 ),
+                scale: ( 1.0, 1.0, 1.0 ),
+            ),
+            children: [],
+            metadata: (
+                lighting: Some(
+                    (
+                        intensity: 1.0,
+                        color: (0.7, 0.7, 0.8),
+                    ),
+                ),
+            ),
+        ),
+        (
+            id: "plane",
+            model: "F16/f16.gltf",
+            transform: (
+                position: (-5.0, 20.0, 25.0),
+                rotation: (0.0, 180.0, -45.0),
+                scale: (14.0, 14.0, 14.0),
+            ),
+            children: [],
+            metadata: (),
+        ),
+        (
+            id: "world",
+            model: "Water/water.gltf",
+            transform: (
+                position: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0),
+                scale: (100000.0, 1.0, 100000.0),
+            ),
+            children: [],
+            metadata: (
+                physics: Some((
+                    rigidbody: ( 
+                        is_static: true, 
+                        mass: 0.0,
+                        center_of_mass: (0.0, 0.0, 0.0),
+                        initial_velocity: (0.0, 0.0, 0.0),
+                    ),
+                    colliders: [ HalfSpace (
+                            normal: (0.0, 1.0, 0.0)
+                    )]  
+                ))
+            ),
+        )
+        // more game objects if needed
+    ]   
+)

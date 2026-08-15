@@ -1,6 +1,6 @@
 use wgpu::{util::DeviceExt, BindGroup, BindGroupLayout, Buffer, Device, RenderPipeline, SurfaceConfiguration};
 
-use crate::engine::rendering::{camera::CameraRenderizable, models::{model::{self, Vertex}, textures::Texture}, ui::rendering_utils};
+use crate::engine::rendering::{camera::CameraHandler, models::{model::{self, Vertex}, textures::Texture}, ui::rendering_utils};
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -30,7 +30,7 @@ pub struct Light {
 }
 
 impl Light {
-    pub fn new(device: &Device, config: &SurfaceConfiguration, camera: &CameraRenderizable) -> Self {
+    pub fn new(device: &Device, config: &SurfaceConfiguration, camera: &CameraHandler) -> Self {
         let uniform = LightUniform {
             position: [0.0, 5.0, 0.0],
             _padding: 0,

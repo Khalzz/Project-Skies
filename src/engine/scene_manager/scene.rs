@@ -1,88 +1,94 @@
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::mpsc::Sender;
 
-use sdl2::{controller::GameController, EventPump};
+use sdl2::EventPump;
 
 use crate::app::{App, AppState};
 use crate::game::play::plane::plane::PlaneControls;
-use crate::engine::input::input::InputSubsystem;
 use crate::engine::physics::physics::DebugPhysicsMessageType;
 use crate::engine::physics::physics_handler::{PhysicsTick, RenderMessage};
 
 
 /// Everything a scene might need out of a single frame, bundled so `Scene::tick`
 /// keeps one stable signature no matter which of these fields a given scene actually
-/// uses (a menu scene only cares about event_pump/controller, Playing only cares
-/// about input_subsystem/plane_control_tx/physics_data).
+/// uses (a menu scene only cares about event_pump, Playing only cares about
+/// plane_control_tx/physics_data). Input state isn't here - query it directly via
+/// crate::engine::input::input (a global singleton, which also owns controller
+/// connect/disconnect - see that module).
 pub struct FrameContext<'a> {
     pub app_state: &'a mut AppState,
     pub event_pump: &'a mut EventPump,
-    pub controller: &'a mut Option<GameController>,
-    pub input_subsystem: &'a InputSubsystem,
     // None whenever the active scene's Scene::physics() doesn't want physics.
     pub plane_control_tx: Option<&'a Sender<PlaneControls>>,
     pub physics_data: &'a HashMap<String, RenderMessage>,
     pub debug_physics: &'a [DebugPhysicsMessageType],
 }
 
-/// Identifies a "screen" the game can be in. `AppState::state` holds whichever
-/// variant is active; the `ScenePool` is keyed by it. Adding a new scene means
-/// adding a variant here, implementing `Scene` for it, and registering it wherever
-/// the pool is built (see main.rs).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum GameState {
-    Playing,
-    SelectingPlane,
-}
-
 /// A "screen" the game can be in (main menu, plane selection, playing, ...).
-/// `SceneManager::active` holds the key of whichever entry of the `ScenePool` is
-/// active; `App::run`'s loop looks it up and drives it instead of hand-matching on state.
+/// `SceneManager::active` holds the name of whichever scene is active; `App::run`'s
+/// loop drives it instead of hand-matching on state. There's no `init`/construction
+/// hook here - a scene's real constructor (its `new`, registered via
+/// `SceneManager::create_scene`) only ever runs when it's actually becoming active,
+/// so there's nothing left for a separate init step to do.
 pub trait Scene {
-    /// Runs once whenever this scene becomes the active one — on a state switch,
-    /// or whenever SceneManager::reset is requested.
-    fn reset(&mut self, app: &mut App);
+    fn update(&mut self, app: &mut App, ctx: &mut FrameContext);
 
-    /// Runs every frame this scene is the active one.
-    fn tick(&mut self, app: &mut App, ctx: &mut FrameContext);
-
-    /// Level to load and the per-tick physics update to run against it while this
-    /// scene is active, or None (the default) if this scene doesn't use physics -
-    /// App::run() starts/stops the physics thread automatically based on this, once
-    /// per scene switch, right after calling reset(). Nothing to override unless a
-    /// scene actually wants physics. Takes `app` so the level path can be read back
-    /// from whatever reset() (e.g. resources::load_level) already loaded, instead of
-    /// needing its own separately-maintained copy of the path.
-    fn physics(&self, app: &App) -> Option<(String, Box<dyn PhysicsTick + Send>)> {
+    fn fixed_update(&self, app: &App) -> Option<(String, Box<dyn PhysicsTick + Send>)> {
         let _ = app;
         None
     }
 }
 
-/// All scenes the game knows about, keyed by `GameState`. Adding a new scene means
-/// implementing `Scene` for it and registering it here (or wherever the pool is
-/// built) — no match arm elsewhere required.
-pub type ScenePool = HashMap<GameState, Box<dyn Scene>>;
-
-/// Owns the registered scenes and tracks which one is active - lives on `App` as
-/// `app.scene_manager`. Configure it once with the pool and a starting scene (see
-/// main.rs), then drive scene switches through `switch_to` from anywhere holding `&mut App`.
+/// Owns every registered scene's constructor plus whichever one is currently active -
+/// lives on `App` as `app.scene_manager`. Register scenes with `create_scene`, then
+/// activate one with `open_scene` (see main.rs) from anywhere holding `&mut App`.
 pub struct SceneManager {
-    pub scenes: ScenePool,
-    pub active: GameState,
+    // Rc, not Box: App::run needs to call a factory with &mut App, which means
+    // cloning it out of this map first (same reason `active` below is read via
+    // .clone()) - a Box can't be cheaply cloned, an Rc can.
+    factories: HashMap<String, Rc<dyn Fn(&mut App) -> Box<dyn Scene>>>,
+    // Only one scene is ever meaningfully alive at a time (inactive scenes never
+    // tick), so this is a single slot rather than a map of every registered scene's
+    // instance - those don't exist until create_scene's factory actually runs for
+    // whichever one becomes active (see App::run's reset handling).
+    pub active_scene: Option<Box<dyn Scene>>,
+    pub active: String,
     pub reset: bool,
 }
 
 impl SceneManager {
-    pub fn new(scenes: ScenePool, starting_scene: GameState) -> Self {
-        Self { scenes, active: starting_scene, reset: true }
+    pub fn new() -> Self {
+        Self { factories: HashMap::new(), active_scene: None, active: String::new(), reset: false }
     }
 
-    /// Switches the active scene and requests its `reset` for the next frame -
-    /// use this instead of setting `active`/`reset` separately, since forgetting
+    /// Registers a scene's constructor under `name` - nothing runs yet, `factory`
+    /// only gets called once this scene actually becomes active (see `open_scene`).
+    /// Since a scene's own `new(app: &mut App) -> Self` already has exactly this
+    /// shape, it can be passed directly: `create_scene("main_menu", main_menu::GameLogic::new)`.
+    /// Overwrites whatever was previously registered under the same name.
+    pub fn create_scene<S: Scene + 'static>(&mut self, name: impl Into<String>, factory: impl Fn(&mut App) -> S + 'static) {
+        self.factories.insert(name.into(), Rc::new(move |app: &mut App| Box::new(factory(app)) as Box<dyn Scene>));
+    }
+
+    /// Switches the active scene and requests its `reset` for the next frame - use
+    /// this instead of setting `active`/`reset` separately, since forgetting
     /// `reset = true` leaves the new scene running with the old one's leftover data.
-    pub fn switch_to(&mut self, state: GameState) {
-        self.active = state;
-        self.reset = true;
+    /// Logs an error and leaves the current scene active if `name` isn't registered,
+    /// rather than switching to a scene that doesn't exist.
+    pub fn open_scene(&mut self, name: &str) {
+        if self.factories.contains_key(name) {
+            self.active = name.to_owned();
+            self.reset = true;
+        } else {
+            eprintln!("SceneManager::open_scene: no scene registered named '{}'", name);
+        }
+    }
+
+    /// Clones out the factory registered for `name`, if any - used by App::run's
+    /// reset handling, which needs to call it with `&mut App` while `self` (and thus
+    /// this map) is itself reachable through that same `&mut App`.
+    pub(crate) fn factory_for(&self, name: &str) -> Option<Rc<dyn Fn(&mut App) -> Box<dyn Scene>>> {
+        self.factories.get(name).cloned()
     }
 }

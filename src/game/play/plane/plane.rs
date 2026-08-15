@@ -1,5 +1,4 @@
-use crate::engine::input::input::InputSubsystem;
-use crate::engine::input::utils::to_axis;
+use crate::engine::input::input;
 
 #[derive(Clone)]
 pub struct PlaneControls {
@@ -27,48 +26,48 @@ impl Plane {
         Self { controls: PlaneControls { throttle: 0.0, elevator: 0.0, aileron: 0.0, rudder: 0.0, trim_pitch: 0.29, trim_roll: 0.0, trim_yaw: 0.0 } }
     }
 
-    pub fn update(&mut self, delta_time: f32, input_subsystem: &InputSubsystem) {
-        self.axis_logic(input_subsystem);
-        self.throttle_logic(input_subsystem, delta_time);
-        self.trim_logic(input_subsystem, delta_time);
+    pub fn update(&mut self, delta_time: f32) {
+        self.axis_logic();
+        self.throttle_logic(delta_time);
+        self.trim_logic(delta_time);
     }
 
-    pub fn axis_logic(&mut self, input_subsystem: &InputSubsystem) {
-        self.controls.elevator = to_axis(input_subsystem.is_pressed("pitch_up"), input_subsystem.is_pressed("pitch_down"));
-        self.controls.aileron = to_axis(input_subsystem.is_pressed("roll_left"), input_subsystem.is_pressed("roll_right"));
-        self.controls.rudder = to_axis(input_subsystem.is_pressed("rudder_left"), input_subsystem.is_pressed("rudder_right"));
+    pub fn axis_logic(&mut self) {
+        // get_axis reads continuous strength (not just pressed/not-pressed), so a stick
+        // binding gives proportional deflection while a keyboard binding still cleanly
+        // resolves to -1.0/0.0/1.0 (a key's strength is always exactly 0.0 or 1.0).
+        self.controls.elevator = input::get_axis("pitch_up", "pitch_down");
+        self.controls.aileron = input::get_axis("roll_left", "roll_right");
+        self.controls.rudder = input::get_axis("rudder_left", "rudder_right");
     }
 
-    pub fn throttle_logic(&mut self, input_subsystem: &InputSubsystem, delta_time: f32) {
-        if input_subsystem.is_pressed("throttle_up") {
-            self.controls.throttle = (self.controls.throttle + 1.0 * delta_time).clamp(0.0, 1.0);
-        }
-
-        if input_subsystem.is_pressed("throttle_down") {
-            self.controls.throttle = (self.controls.throttle - 1.0 * delta_time).clamp(0.0, 1.0);
-        }
+    pub fn throttle_logic(&mut self, _delta_time: f32) {
+        // Absolute position, not a ramp: a trigger's deflection directly sets throttle,
+        // like a real lever - so releasing both throttle_up/throttle_down now returns
+        // throttle to 0 instead of holding its last value (that "hold when idle" feel
+        // was a keyboard-only accommodation, not something a real throttle does).
+        self.controls.throttle = input::get_axis("throttle_down", "throttle_up").clamp(0.0, 1.0);
     }
 
-    pub fn trim_logic(&mut self, input_subsystem: &InputSubsystem, delta_time: f32) {
+    pub fn trim_logic(&mut self, delta_time: f32) {
         let trim_speed = 0.5;
-        if input_subsystem.is_pressed("trim_pitch_up") {
+        if input::is_action_pressed("trim_pitch_up") {
             self.controls.trim_pitch = (self.controls.trim_pitch + trim_speed * delta_time).clamp(-1.0, 1.0);
         }
-        if input_subsystem.is_pressed("trim_pitch_down") {
+        if input::is_action_pressed("trim_pitch_down") {
             self.controls.trim_pitch = (self.controls.trim_pitch - trim_speed * delta_time).clamp(-1.0, 1.0);
         }
-        if input_subsystem.is_pressed("trim_roll_left") {
+        if input::is_action_pressed("trim_roll_left") {
             self.controls.trim_roll = (self.controls.trim_roll - trim_speed * delta_time).clamp(-1.0, 1.0);
         }
-        if input_subsystem.is_pressed("trim_roll_right") {
+        if input::is_action_pressed("trim_roll_right") {
             self.controls.trim_roll = (self.controls.trim_roll + trim_speed * delta_time).clamp(-1.0, 1.0);
         }
-        if input_subsystem.is_pressed("trim_yaw_left") {
+        if input::is_action_pressed("trim_yaw_left") {
             self.controls.trim_yaw = (self.controls.trim_yaw - trim_speed * delta_time).clamp(-1.0, 1.0);
         }
-        if input_subsystem.is_pressed("trim_yaw_right") {
+        if input::is_action_pressed("trim_yaw_right") {
             self.controls.trim_yaw = (self.controls.trim_yaw + trim_speed * delta_time).clamp(-1.0, 1.0);
         }
     }
 }
-

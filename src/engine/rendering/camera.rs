@@ -1,7 +1,9 @@
+use std::collections::HashMap;
 use nalgebra::{Matrix4, Perspective3, Point3, UnitQuaternion, Vector3};
 use sdl2::rect::Point;
-use wgpu::{util::DeviceExt, BindGroup, BindGroupLayout, BindGroupLayoutDescriptor, Buffer, Device};
+use wgpu::{util::DeviceExt, BindGroup, BindGroupLayout, BindGroupLayoutDescriptor, Buffer, Device, Queue};
 use std::f32::consts::FRAC_PI_2;
+use crate::engine::utils::lerps::{lerp, lerp_point3, smoothstep};
 
 // Maps OpenGL's [-1, 1] NDC z-range to wgpu's [0, 1] range, and reverses it
 // (near -> 1, far -> 0) so depth precision concentrates on distant geometry
@@ -24,24 +26,57 @@ pub struct NearFarUniform {
     pub far: f32,
 }
 
-pub struct CameraRenderizable {
+const DEFAULT_CAMERA_NAME: &str = "main";
+// Same "dedicated hidden camera swapped in via select_camera" pattern
+// free_camera.rs already uses for its own tool camera - keeps a transition's
+// blended values out of both the source and destination camera's own stored
+// settings, so nothing reading those directly ever sees a mid-blend value.
+const TRANSITION_CAMERA_NAME: &str = "__camera_transition";
+
+// State for an in-progress transition_to(...) - see its doc comment.
+struct CameraTransition {
+    from: Camera,
+    from_fovy: f32,
+    to: String,
+    elapsed: f32,
+    duration: f32,
+}
+
+/// A single named camera's own settings - position/orientation (`Camera`) and lens
+/// (`Projection`). Cheap to create since it owns no GPU resources of its own; only
+/// the active one (see `CameraHandler`) actually drives what gets rendered.
+pub struct CameraInstance {
     pub camera: Camera,
     pub projection: Projection,
+}
+
+/// Owns every camera the game has registered plus the one shared set of GPU
+/// resources (uniform/buffer/bind group) that actually feeds the renderer each
+/// frame - only the active camera's settings ever get uploaded (see
+/// `update_buffer`), the same way engines like Unity only ever render from one
+/// active camera at a time even though many can exist in a scene.
+pub struct CameraHandler {
+    cameras: HashMap<String, CameraInstance>,
+    active: String,
+    // Remembered so create_camera never needs width/height passed in - every
+    // camera's aspect ratio is always just "whatever the screen currently is".
+    width: u32,
+    height: u32,
     pub uniform: CameraUniform,
     pub buffer: Buffer,
     pub bind_group_layout: BindGroupLayout,
     pub bind_group: BindGroup,
+    // Some(...) while transition_to(...) is blending - see its doc comment and
+    // update_transition, which advances/clears this every frame.
+    transition: Option<CameraTransition>,
 }
 
-impl CameraRenderizable {
+impl CameraHandler {
     pub fn new(device: &Device, config: &wgpu::SurfaceConfiguration) -> Self {
         let near_far_uniform = NearFarUniform {
             near: 0.1,
             far: 100000.0,
         };
-
-        let camera = Camera::new(Point3::new(0.0, 0.0, 0.0), -90.0_f32.to_radians(), -20.0_f32.to_radians());
-        let projection = Projection::new(config.width, config.height, 45.0, near_far_uniform.near, near_far_uniform.far);
 
         let uniform = CameraUniform::new(near_far_uniform);
 
@@ -74,14 +109,173 @@ impl CameraRenderizable {
             }],
         });
 
-        CameraRenderizable { camera, projection, uniform, buffer, bind_group, bind_group_layout }
+        let mut handler = CameraHandler {
+            cameras: HashMap::new(),
+            active: DEFAULT_CAMERA_NAME.to_owned(),
+            width: config.width,
+            height: config.height,
+            uniform,
+            buffer,
+            bind_group_layout,
+            bind_group,
+            transition: None,
+        };
+
+        // Same defaults CameraRenderizable used to hardcode - existing code that
+        // never creates extra cameras sees no behavior change.
+        handler.create_camera(DEFAULT_CAMERA_NAME, Point3::new(0.0, 0.0, 0.0), -90.0, -20.0, 45.0);
+        handler
+    }
+
+    /// Registers (or replaces) a named camera. `fovy` is the only lens setting
+    /// exposed here since it's the one that actually varies per camera in
+    /// practice - near/far default to the handler's usual values but remain
+    /// plain public fields on the returned instance's `.projection` if a caller
+    /// ever needs to override them. Width/height are deliberately not
+    /// parameters: aspect ratio always comes from the handler's own tracked
+    /// screen size, kept current by `resize`.
+    pub fn create_camera(&mut self, name: impl Into<String>, position: Point3<f32>, yaw_deg: f32, pitch_deg: f32, fovy: f32) -> &mut CameraInstance {
+        let camera = Camera::new(position, yaw_deg.to_radians(), pitch_deg.to_radians());
+        let projection = Projection::new(self.width, self.height, fovy, 0.1, 100000.0);
+
+        let name = name.into();
+        self.cameras.insert(name.clone(), CameraInstance { camera, projection });
+        self.cameras.get_mut(&name).unwrap()
+    }
+
+    /// Switches the active camera. Returns false (no-op) if `name` isn't
+    /// registered, rather than panicking - callers can decide whether that's
+    /// worth logging.
+    pub fn select_camera(&mut self, name: &str) -> bool {
+        if self.cameras.contains_key(name) {
+            // An instant cut here should really be instant - cancel any
+            // in-progress transition_to(...) so update_transition doesn't
+            // snap the view back to the transition camera next frame.
+            self.transition = None;
+            self.active = name.to_owned();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Smoothly blends the active view from wherever it is right now to camera
+    /// `name` over `duration` seconds, instead of `select_camera`'s instant cut -
+    /// opt-in, for cases like switching between two fixed viewpoints where a hard
+    /// cut would be jarring. Not meant to run continuously - call it once when you
+    /// want the switch to start; `update_transition` (already called every frame
+    /// from `App::render`) advances it and hands off to the real target camera via
+    /// `select_camera` once it finishes. Snapshots the *current* active camera's
+    /// position/yaw/pitch/fovy as the starting point, so it composes fine with a
+    /// camera that itself moves every frame (like the main menu's drift) - it just
+    /// blends from wherever that happened to be this frame. Returns `false`
+    /// (no-op, same as `select_camera`) if `name` isn't registered.
+    pub fn transition_to(&mut self, name: &str, duration: f32) -> bool {
+        if !self.cameras.contains_key(name) {
+            return false;
+        }
+        let active = self.active();
+        self.transition = Some(CameraTransition {
+            from: active.camera,
+            from_fovy: active.projection.fovy,
+            to: name.to_owned(),
+            elapsed: 0.0,
+            duration: duration.max(0.0001),
+        });
+        true
+    }
+
+    /// Advances any in-progress `transition_to(...)` by `delta_time` - a cheap
+    /// no-op if none is running. Blends into `TRANSITION_CAMERA_NAME` (created
+    /// lazily, same pattern free_camera.rs uses for its own tool camera) rather
+    /// than overwriting either the source or destination camera's own stored
+    /// settings, so `get`/`get_mut` on either always reflect their real values
+    /// regardless of whether a transition happens to be running. `smoothstep`
+    /// gives the blend an ease-in/ease-out instead of a constant-speed linear pan.
+    pub fn update_transition(&mut self, delta_time: f32) {
+        let Some(transition) = &mut self.transition else { return };
+        transition.elapsed += delta_time;
+        let t = smoothstep(transition.elapsed / transition.duration);
+        let done = transition.elapsed >= transition.duration;
+
+        let Some(target) = self.cameras.get(&transition.to) else {
+            // Target camera got removed mid-transition - bail out rather than
+            // keep blending toward something that no longer exists.
+            self.transition = None;
+            return;
+        };
+        let position = lerp_point3(transition.from.position, target.camera.position, t);
+        let yaw = lerp(transition.from.yaw, target.camera.yaw, t);
+        let pitch = lerp(transition.from.pitch, target.camera.pitch, t);
+        let fovy = lerp(transition.from_fovy, target.projection.fovy, t);
+        let to = transition.to.clone();
+
+        if self.get(TRANSITION_CAMERA_NAME).is_none() {
+            self.create_camera(TRANSITION_CAMERA_NAME, position, 0.0, 0.0, fovy);
+        }
+        // yaw/pitch computed above are already radians (Camera's own fields
+        // always are) - set directly rather than going through create_camera's
+        // degrees-in constructor again and double-converting.
+        if let Some(transition_camera) = self.cameras.get_mut(TRANSITION_CAMERA_NAME) {
+            transition_camera.camera.position = position;
+            transition_camera.camera.yaw = yaw;
+            transition_camera.camera.pitch = pitch;
+            transition_camera.projection.fovy = fovy;
+        }
+        self.active = TRANSITION_CAMERA_NAME.to_owned();
+
+        if done {
+            self.transition = None;
+            self.select_camera(&to);
+        }
+    }
+
+    pub fn active_name(&self) -> &str {
+        &self.active
+    }
+
+    pub fn active(&self) -> &CameraInstance {
+        self.cameras.get(&self.active).expect("active camera must always exist")
+    }
+
+    pub fn active_mut(&mut self) -> &mut CameraInstance {
+        self.cameras.get_mut(&self.active).expect("active camera must always exist")
+    }
+
+    pub fn get(&self, name: &str) -> Option<&CameraInstance> {
+        self.cameras.get(name)
+    }
+
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut CameraInstance> {
+        self.cameras.get_mut(name)
+    }
+
+    // Every registered camera's aspect stays in sync with the screen, not just
+    // the active one - so selecting a different camera later never shows a
+    // stale aspect ratio for a frame.
+    pub fn resize(&mut self, width: u32, height: u32) {
+        self.width = width;
+        self.height = height;
+        for instance in self.cameras.values_mut() {
+            instance.projection.resize(width, height);
+        }
+    }
+
+    // Recomputes the view_proj uniform from the active camera and uploads it -
+    // called once per frame from App, replacing what used to be two lines
+    // inlined at every call site.
+    pub fn update_buffer(&mut self, queue: &Queue) {
+        let active = self.cameras.get(&self.active).expect("active camera must always exist");
+        self.uniform.update_view_proj(&active.camera, &active.projection);
+        queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&[self.uniform]));
     }
 
     pub fn world_to_screen(&self, pos_world: Point3<f32>, screen_width: u32, screen_height: u32) -> Option<Point> {
         // view_proj now assumes the camera sits at the origin, so every
         // position fed into it must first be made camera-relative.
-        let camera_to_point = pos_world - self.camera.position;
-        let forward = self.camera.calc_forward_direction();
+        let active = self.active();
+        let camera_to_point = pos_world - active.camera.position;
+        let forward = active.camera.calc_forward_direction();
 
         if camera_to_point.dot(&forward) < 0.0 {
             return None;

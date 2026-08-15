@@ -59,12 +59,16 @@ impl Mouse {
         self.rel_y
     }
 
-    pub fn set_rel_x(&mut self, rel_x: i32) {
-        self.rel_x = rel_x;
+    // Accumulates rather than overwrites - a single frame can contain more than one
+    // MouseMotion event (mice commonly report well above render framerate), so
+    // summing every event's delta is what makes get_rel_x/y reflect the mouse's
+    // actual total movement that frame instead of just the last event's.
+    pub fn add_rel_x(&mut self, delta: i32) {
+        self.rel_x += delta;
     }
 
-    pub fn set_rel_y(&mut self, rel_y: i32) {
-        self.rel_y = rel_y;
+    pub fn add_rel_y(&mut self, delta: i32) {
+        self.rel_y += delta;
     }
 
     
@@ -92,6 +96,14 @@ impl Mouse {
 
     pub fn set_raw_y(&mut self, y: i32) {
         self.raw_y = y;
+    }
+
+    pub fn get_raw_x(&self) -> i32 {
+        self.raw_x
+    }
+
+    pub fn get_raw_y(&self) -> i32 {
+        self.raw_y
     }
 
     pub fn get_scroll_y(&self) -> f32 {
