@@ -1,0 +1,24 @@
+// Which levels show up in the Play screen's list, and in what order - see
+// main_menu::ui's play_select_ui/show_level, the only reader. `scene` must
+// match a name registered via SceneManager::create_scene in main.rs (today
+// just "playing", which loads assets/scenes/test_chamber - see play::scene::
+// GameLogic::new); `id` is this list's own stable key (UI node paths,
+// SELECTED_LEVEL) and doesn't have to match `scene`.
+//
+// mission_title/location/mission_date are separate from name/description
+// above - those two are for the Play Select list/details panel, these three
+// are for the in-scene mission-intro card shown once the level itself opens
+// (see play::scene::GameLogic's own mission-intro doc comment) - a level's
+// selection-screen blurb and its cinematic title card don't have to say the
+// same thing.
+[
+    (
+        id: "test_chamber",
+        name: "Test Chamber",
+        description: "This level is a testing place, where the player could fly freely, this is set mainly to test mechanics.",
+        scene: "playing",
+        mission_title: "The Chosen One",
+        location: "Mexican Gulf",
+        mission_date: "0100 hrs. 02 April 1998",
+    ),
+]

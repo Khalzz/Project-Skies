@@ -43,11 +43,9 @@ impl Subtitle {
         let UiNodeContent::Text(_) = &node.content else { return };
 
         if visible {
-            node.style.text_color = Some(UiColor::WHITE);
-            node.style.background_color = Some(UiColor::Rgba(0, 0, 0, 179).into());
+            node.update_style(|s| s.set_text_color(UiColor::WHITE).set_background_color(UiColor::Rgba(0, 0, 0, 179)));
         } else {
-            node.style.text_color = Some(UiColor::Rgba(255, 255, 255, 0));
-            node.style.background_color = Some(UiColor::TRANSPARENT.into());
+            node.update_style(|s| s.set_text_color(UiColor::Rgba(255, 255, 255, 0)).set_background_color(UiColor::TRANSPARENT));
         }
     }
 

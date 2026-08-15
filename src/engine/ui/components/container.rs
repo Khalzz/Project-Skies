@@ -23,11 +23,25 @@ pub struct Container {
     // iteration-order guarantee at all, which made .set_child(...) render in a
     // different order than it was called in).
     pub children: Vec<(String, UiNode)>,
+    // Set via UiNode::set_scrollable - whether this container clips its children
+    // to its own content rect and lets mouse-wheel input scroll through whatever
+    // overflows (Vertical orientation only), instead of always growing to fit
+    // every child like a plain container. See UiNode::node_content_preparation's
+    // Container branch for the actual scroll/clip logic.
+    pub scrollable: bool,
+    // Current, lerped-each-frame scroll position in pixels (see
+    // node_content_preparation's SCROLL_SMOOTH_MS) - what children are actually
+    // laid out against. Always 0.0 unless scrollable.
+    pub scroll_offset: f32,
+    // Where scroll_offset is lerping toward - bumped by mouse-wheel input while
+    // hovered, clamped to [0.0, max_scroll] every frame (see
+    // node_content_preparation) so it can't run away past the real content.
+    pub scroll_target: f32,
 }
 
 impl Container {
     pub fn new(gap: f32, children: Vec<(String, UiNode)>) -> Self {
-        Self { gap, children }
+        Self { gap, children, scrollable: false, scroll_offset: 0.0, scroll_target: 0.0 }
     }
 
     pub fn ui_node_data_creation(&self, _size: &Size, vertices: &mut Vec<VertexUi>, vertices_slice: &[VertexUi], indices: &mut Vec<u16>, indices_slice: &[u16]) -> (u16, u32) {

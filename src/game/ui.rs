@@ -2,7 +2,7 @@ use glyphon::cosmic_text::Align::{Center, Left};
 
 use crate::app::App;
 use crate::engine::ui::color::{Fill, GradientDirection, GradientStop, UiColor};
-use crate::engine::ui::ui_node::{Style, UiNode};
+use crate::engine::ui::ui_node::UiNode;
 use crate::engine::ui::ui_transform::BorderEdges;
 use crate::engine::ui::ui_transform::Orientation::Horizontal;
 use crate::engine::ui::ui_transform::PositionValue;
@@ -43,7 +43,7 @@ pub fn button(app: &mut App, text: &str, on_click: impl Fn(&mut App) + 'static) 
     // .set_corner_radius(10.0)
     .set_padding((10.0, 2.0))
     .set_font_size(&mut app.ui.text.font_system, 20.0)
-    .on_hover(Style { background_color: Some(UiColor::Rgba(0, 0, 0, 128).into()), text_color: Some(UiColor::WHITE), ..Default::default() })
+    .on_hover(|s| s.set_background_color(UiColor::Rgba(0, 0, 0, 128)).set_text_color(UiColor::WHITE))
     .set_transition(50.0)
     .on_click(on_click)
     .set_border_width(1.0)
@@ -68,10 +68,7 @@ pub fn with_left_accent(node: UiNode) -> UiNode {
         .set_border_edges(BorderEdges::LEFT)
         .set_border_width(3.0)
         .set_border_color(UiColor::TRANSPARENT)
-        .on_hover(Style {
-            border_color: Some(UiColor::WHITE.into()),
-            ..Default::default()
-        })
+        .on_hover(|s| s.set_border_color(UiColor::WHITE))
 }
 
 pub fn modal(app: &mut App) -> UiNode {

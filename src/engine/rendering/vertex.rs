@@ -50,6 +50,14 @@ pub struct VertexUi {
     // default and reads in the shader as "use the original rounded-corner SDF
     // border", same as every border before this field existed.
     pub border_edges: u32,
+    // [top, left, bottom, right] (same packing as `rect` above) screen-space
+    // rect this fragment gets discarded outside of - see UiNode::set_scrollable/
+    // node_content_preparation's clip_rect. A huge sentinel rect (not a smaller
+    // real one) is the "no clip" default, so discard never triggers for the
+    // overwhelming majority of nodes that were never inside a scrollable
+    // container - same "off by default, no behavior change otherwise" shape as
+    // background_blur/border_edges above.
+    pub clip_rect: [f32; 4],
 }
 
 impl VertexUi {
@@ -105,6 +113,13 @@ impl VertexUi {
                     offset: std::mem::size_of::<[f32; 18]>() as wgpu::BufferAddress,
                     shader_location: 7,
                     format: wgpu::VertexFormat::Uint32,
+                },
+                // clip rect - offset skips the u32 border_edges (4 bytes, same
+                // size as f32) at index 18, so clip_rect starts at index 19.
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 19]>() as wgpu::BufferAddress,
+                    shader_location: 8,
+                    format: wgpu::VertexFormat::Float32x4,
                 },
             ],
         }

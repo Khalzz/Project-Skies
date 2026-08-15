@@ -141,14 +141,14 @@ impl Label {
     /// `indices_slice` are plain slices, not fixed-size arrays - a node's own
     /// background/border quad isn't always exactly 4 vertices/6 indices any more,
     /// see `UiNode::compute_quad`.
-    pub fn ui_node_data_creation(&self, _size: &Size, vertices: &mut Vec<VertexUi>, vertices_slice: &[VertexUi], indices: &mut Vec<u16>, indices_slice: &[u16], parent_rect: &Rect, color: Color) -> (TextArea, u16, u32) {
+    pub fn ui_node_data_creation(&self, _size: &Size, vertices: &mut Vec<VertexUi>, vertices_slice: &[VertexUi], indices: &mut Vec<u16>, indices_slice: &[u16], parent_rect: &Rect, color: Color, clip_rect: Option<&Rect>) -> (TextArea, u16, u32) {
         vertices.extend_from_slice(vertices_slice);
         indices.extend_from_slice(indices_slice);
 
-        (self.text_area(parent_rect, color), vertices_slice.len() as u16, indices_slice.len() as u32)
+        (self.text_area(parent_rect, color, clip_rect), vertices_slice.len() as u16, indices_slice.len() as u32)
     }
 
-    pub fn text_area(&self, parent_rect: &Rect, color: Color) -> TextArea {
+    pub fn text_area(&self, parent_rect: &Rect, color: Color, clip_rect: Option<&Rect>) -> TextArea {
         let text_width = self.get_text_width();
         let TextWidth { width, buffer_width } = text_width;
 
@@ -163,7 +163,7 @@ impl Label {
             left: parent_rect.left - text_overlap,
             top: self.vertical_positioning_in_rect(parent_rect),
             scale: 1.0,
-            bounds: self.bounds(parent_rect),
+            bounds: self.bounds(parent_rect, clip_rect),
             default_color: color,
             custom_glyphs: &[],
         }
@@ -178,12 +178,22 @@ impl Label {
         }
     }
 
-    fn bounds(&self, rect: &Rect) -> TextBounds {
+    // Intersected with clip_rect (this label's tightest scrollable ancestor's
+    // own content rect, if any - see UiNode::set_scrollable/
+    // node_content_preparation's clip_rect) rather than just this label's own
+    // rect - glyphon already clips every glyph to TextBounds on its own, so a
+    // scrolled-out label's text needs no shader-side work, unlike the
+    // background/border quads (see text_shader.wgsl's clip discard).
+    fn bounds(&self, rect: &Rect, clip_rect: Option<&Rect>) -> TextBounds {
+        let left = rect.left.max(clip_rect.map_or(f32::MIN, |c| c.left));
+        let top = rect.top.max(clip_rect.map_or(f32::MIN, |c| c.top));
+        let right = rect.right.min(clip_rect.map_or(f32::MAX, |c| c.right));
+        let bottom = rect.bottom.min(clip_rect.map_or(f32::MAX, |c| c.bottom));
         TextBounds {
-            left: rect.left as i32,
-            top: rect.top as i32,
-            right: rect.right as i32,
-            bottom: rect.bottom as i32,
+            left: left as i32,
+            top: top as i32,
+            right: right as i32,
+            bottom: bottom as i32,
         }
     }
 

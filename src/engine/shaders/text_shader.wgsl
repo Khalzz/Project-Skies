@@ -13,6 +13,14 @@ struct VertexInput {
     // original rounded-corner SDF border below"; anything else switches to
     // straight per-edge bands instead - see the fragment shader's own comment.
     @location(7) border_edges: u32,
+    // [top, left, bottom, right] (same packing as `rect` above), in the same
+    // screen-pixel space as `rect`/`clip_position.xy` - see UiNode::
+    // set_scrollable/node_content_preparation's clip_rect (Rust side). Any
+    // fragment outside this gets discarded (see fs_main below) - a huge
+    // sentinel rect (Self::NO_CLIP, Rust side) is the "no clip" default, not a
+    // smaller real one, so this never triggers for the overwhelming majority
+    // of nodes that were never inside a scrollable container.
+    @location(8) clip_rect: vec4<f32>,
 }
 
 struct VertexOutput {
@@ -27,6 +35,7 @@ struct VertexOutput {
     // reject this without it) - harmless here since every vertex of a given quad
     // already carries the same value anyway, same as corner_radius/border_width.
     @location(6) @interpolate(flat) border_edges: u32,
+    @location(7) clip_rect: vec4<f32>,
 }
 
 @vertex
@@ -41,6 +50,7 @@ fn vertex(model: VertexInput) -> VertexOutput {
     out.border_width = model.border_width;
     out.background_blur = model.background_blur;
     out.border_edges = model.border_edges;
+    out.clip_rect = model.clip_rect;
 
     return out;
 }
@@ -93,6 +103,16 @@ fn adjust_saturation(color: vec3<f32>, amount: f32) -> vec3<f32> {
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Scroll clipping (see UiNode::set_scrollable/node_content_preparation's
+    // clip_rect, Rust side) - discard anything outside the tightest scrollable
+    // ancestor's own content rect, same [top, left, bottom, right] packing as
+    // `rect` below. A no-op for the overwhelming majority of nodes, which carry
+    // the huge NO_CLIP sentinel instead of a real rect.
+    if (in.clip_position.x < in.clip_rect[1] || in.clip_position.x > in.clip_rect[3]
+        || in.clip_position.y < in.clip_rect[0] || in.clip_position.y > in.clip_rect[2]) {
+        discard;
+    }
+
     var border_width: f32 = in.border_width;
     var top: f32 = in.rect[0];
     var left: f32 = in.rect[1];
@@ -179,8 +199,24 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         // border through the identical backdrop keeps the two visually
         // identical whenever their underlying colors actually match, same as
         // it already worked before background_blur existed.
-        fill_color = vec4<f32>(mix(backdrop, in.color.rgb, in.color.a), in.color.a);
-        border_color = vec4<f32>(mix(backdrop, in.border_color.rgb, in.border_color.a), in.border_color.a);
+        // Alpha forced to 1.0 here (not in.color.a/in.border_color.a) - .rgb above
+        // already blends this node's own tint with `backdrop` (the blurred/sharp
+        // crossfade), which IS the correct final color, matching real CSS
+        // backdrop-filter semantics: the blurred backdrop fully replaces whatever
+        // was behind this node: nothing further should show through. Outputting
+        // the node's own alpha here instead (as every other, non-blurred node
+        // correctly does two lines up) would additionally hardware-blend this
+        // result against the destination - but the destination the UI pass draws
+        // into already holds the raw, UNBLURRED sharp scene (see BlurRender's own
+        // doc comment: it blits the sharp copy to the swapchain before this pass
+        // runs) rather than `backdrop`. That let a `background_color` alpha low
+        // enough to make the blur actually visible also leak that same fraction
+        // of the literal sharp scene straight through, completely bypassing
+        // `t_blurred` - a bright sky behind a nominally "dark, heavily blurred"
+        // panel read as barely-tinted white, no matter how high the blur radius
+        // was cranked, since that leak was never routed through the blur at all.
+        fill_color = vec4<f32>(mix(backdrop, in.color.rgb, in.color.a), 1.0);
+        border_color = vec4<f32>(mix(backdrop, in.border_color.rgb, in.border_color.a), 1.0);
     }
 
     var border_mix: f32;

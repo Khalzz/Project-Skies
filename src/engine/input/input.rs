@@ -49,9 +49,10 @@ const PRESS_THRESHOLD: f32 = 0.5;
 ///      key/button pressed or axis pushed past its deadzone is captured instead of
 ///      dispatched normally, and handed back via captured_binding() (polled once
 ///      per frame until it returns Some); cancel_capture() aborts without one.
-///    - action_bindings(action) / rebind(action, binding) / unbind(action, index)
-///      -> read/add/remove an action's bindings at runtime (in-memory only, not
-///      persisted back to settings/input.ron).
+///    - action_bindings(action) / rebind(action, binding) / rebind_at(action,
+///      index, binding) / unbind(action, index) -> read/append/replace-in-place/
+///      remove an action's bindings at runtime (in-memory only, not persisted
+///      back to settings/input.ron).
 ///
 ///    settings/input.ron shape:
 ///    ```ron
@@ -235,6 +236,17 @@ impl InputSubsystem {
         }
     }
 
+    /// Like rebind, but replaces one binding in place by its index (see
+    /// action_bindings) instead of appending - a no-op if the index is out of
+    /// range, so a stale index from a UI that hasn't refreshed yet can't panic.
+    pub fn rebind_at(&mut self, action: &str, index: usize, binding: Binding) {
+        if let Some(action) = self.actions.get_mut(action) {
+            if index < action.bindings.len() {
+                action.bindings[index] = binding;
+            }
+        }
+    }
+
     /// Cloned out (not a reference) since a rebinding menu needs to render this
     /// list into UI nodes it owns independently of the input subsystem's own
     /// lifetime/borrow rules.
@@ -362,6 +374,10 @@ pub fn captured_binding() -> Option<Binding> {
 
 pub fn rebind(action: &str, binding: Binding) {
     with_input_mut(|input| input.rebind(action, binding));
+}
+
+pub fn rebind_at(action: &str, index: usize, binding: Binding) {
+    with_input_mut(|input| input.rebind_at(action, index, binding));
 }
 
 pub fn action_bindings(action: &str) -> Vec<Binding> {

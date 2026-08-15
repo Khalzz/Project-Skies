@@ -5,14 +5,25 @@ use nalgebra::{vector, Point3, Quaternion, UnitQuaternion, Vector3};
 use rand::{rngs::ThreadRng, Rng};
 use rapier3d::prelude::RigidBody;
 use sdl2::{controller::GameController};
-use crate::{app::{App, AppState}, engine::audio::subtitles::Subtitle, engine::input::input, engine::physics::physics_handler::{MetadataType, PhysicsData, PhysicsTick, RenderMessage}, engine::primitive::manual_vertex::ManualVertex, engine::rendering::{camera::CameraHandler, ui::ui::Ui}, engine::scene_manager::scene::{FrameContext, Scene}, transform::Transform, engine::ui::{color::UiColor, ui_node::{UiNode, UiNodeContent}, ui_transform::UiTransform}, engine::utils::lerps::{lerp, lerp_quaternion}};
+use crate::{app::{App, AppState}, engine::audio::subtitles::Subtitle, engine::input::input, engine::physics::physics_handler::{MetadataType, PhysicsData, PhysicsTick, RenderMessage}, engine::primitive::manual_vertex::ManualVertex, engine::rendering::{camera::CameraHandler, ui::ui::Ui}, engine::scene_manager::scene::{FrameContext, Scene}, transform::Transform, engine::ui::{color::UiColor, ui_node::{UiNode, UiNodeContent}, ui_transform::{Anchor, Orientation, PositionValue, SizeValue, UiTransform}}, engine::utils::lerps::{lerp, lerp_quaternion}};
 use super::{event_handling::EventSystem, plane::{physics_logic::PlanePhysicsLogic, plane::Plane}};
 use std::sync::mpsc::Sender;
 use crate::game::play::plane::plane::PlaneControls;
+use crate::game::selected_level::SELECTED_LEVEL;
+use crate::game::ui::label;
 use crate::resources::{apply_environment, load_level};
 use crate::engine::rendering::enviroment::environment::{Environment, SkyboxFaces};
 use crate::engine::tooling::debug_console;
 use crate::debug_text;
+
+/// Which top-level `game_ui.ron` nodes make up the normal flight HUD (see
+/// `assets/ui/game_ui.ron`) - hidden while the mission-intro card (below) is
+/// showing, restored the instant it finishes. Not every key `ui_control`
+/// reaches for exists in that RON file today ("altitude"/"altitude_alert"/
+/// "stall_alert" are stale references to nodes that were never added there -
+/// `Ui::get_ui_node` just no-ops on a missing key) - this list only needs the
+/// ones that actually do.
+const HUD_KEYS: [&str; 5] = ["data_box", "compass", "speed", "subtitles", "velocity_marker"];
 
 // Add a way of setting timing that can be agnostic to real time (or that will not be affected by the player pausing)
 pub enum CameraState {
@@ -53,6 +64,52 @@ pub struct BlinkingAlert {
     time_alert: f32
 }
 
+/// The mission-intro card's own state machine (see `GameLogic::new`'s own
+/// intro-building block and `GameLogic::mission_intro_update`) - a full-
+/// screen black backdrop that fades to transparent *once*, revealing a title
+/// card (mission title/location/date, staged in `SELECTED_LEVEL` by
+/// `main_menu::ui::show_level`) that fades in alongside it, holds, then fades
+/// back out **on its own** (the backdrop is untouched from here on - it
+/// already opened, it doesn't close again) before finally revealing the
+/// normal flight HUD (see `HUD_KEYS`) - the HUD stays hidden for the entire
+/// sequence, not just during the fades.
+///
+/// Deliberately does NOT use `UiNode::set_transition`/the engine's own
+/// automatic style-lerp for the fade itself - `elapsed` (below) directly
+/// drives the alpha every tick (see `mission_intro_update`) instead. That
+/// automatic lerp needs a *previous* frame's `current_style` to interpolate
+/// from, which a just-constructed node doesn't have yet (its first-ever
+/// render just snaps straight to whatever the target already is that frame -
+/// see `UiNode::node_content_preparation`'s `(Some(current), Some(ms)) => ...
+/// _ => target` split), and computing our own `t` from `elapsed` sidesteps
+/// that (and any per-frame delta_time spike, e.g. right after this scene's
+/// own blocking asset load) entirely - every tick sets the exact alpha this
+/// point in the sequence should show, not a delta to lerp toward.
+enum MissionIntroPhase {
+    FadeIn,
+    Hold,
+    FadeOut,
+    Done,
+}
+
+struct MissionIntro {
+    phase: MissionIntroPhase,
+    // Seconds into the *current* phase - reset to 0.0 on every phase change,
+    // not a running total.
+    elapsed: f32,
+}
+
+impl MissionIntro {
+    fn new() -> Self {
+        Self { phase: MissionIntroPhase::FadeIn, elapsed: 0.0 }
+    }
+}
+
+// Tunable timing for the mission-intro sequence (see MissionIntro/
+// GameLogic::mission_intro_update), all in seconds.
+const MISSION_INTRO_FADE_SECS: f32 = 1.0;
+const MISSION_INTRO_HOLD_SECS: f32 = 2.0;
+
 pub struct BaseRotations {
     left_aleron: Option<Quaternion<f32>>,
     right_aleron: Option<Quaternion<f32>>,
@@ -85,7 +142,8 @@ pub struct GameLogic { // here we define the data we use on our script
     rng: ThreadRng,
     pub game_time: f64,
     pub plane: Plane,
-} 
+    mission_intro: MissionIntro,
+}
 
 impl GameLogic {
     // this is called once
@@ -94,6 +152,66 @@ impl GameLogic {
         // is the only thing that ever runs on activation, see SceneManager::create_scene).
         load_level(app, "./assets/scenes/test_chamber".to_owned());
         app.ui.load_ui("./assets/ui/game_ui.ron", app.renderer.config.width, app.renderer.config.height, &app.renderer.device, &app.renderer.queue);
+
+        // Mission-intro card: hide the normal flight HUD immediately (see
+        // HUD_KEYS - GameLogic::mission_intro_update brings it back once the
+        // card's done), build a full-screen black backdrop plus the
+        // (invisible-at-rest) title/location/date stack from whatever
+        // main_menu::ui::show_level last staged in SELECTED_LEVEL (falling
+        // back to placeholder text if the scene was somehow opened without
+        // going through Play Select first) - both fade in/out together, see
+        // GameLogic::mission_intro_update.
+        for key in HUD_KEYS {
+            if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, key) {
+                node.set_active(false);
+            }
+        }
+        let selected = SELECTED_LEVEL.lock().unwrap().clone();
+        let (mission_title, location, mission_date) = match selected {
+            Some(level) => (level.mission_title, level.location, level.mission_date),
+            None => ("Unknown Mission".to_owned(), String::new(), String::new()),
+        };
+        let screen_width = app.renderer.config.width as f32;
+        let screen_height = app.renderer.config.height as f32;
+
+        let mut backdrop = UiNode::container()
+            .set_size(SizeValue::Percent(100.0), SizeValue::Percent(100.0))
+            .set_position(PositionValue::Start(0.0), PositionValue::Start(0.0))
+            .set_background_color(UiColor::Rgba(0, 0, 0, 255));
+        // Ui::add_to_ui (below) inserts straight into renderizable_elements,
+        // unlike a Layer::build-constructed node - nothing else ever resolves
+        // this node's pending Percent size/Start position against the real
+        // screen size, so without this explicit call it'd silently stay at
+        // whatever 0-sized/0-positioned default UiTransform::new gives a
+        // brand new node.
+        backdrop.resolve(screen_width, screen_height);
+        app.ui.add_to_ui("mission_intro_backdrop".to_owned(), backdrop);
+        // Regular top-level nodes have no guaranteed render order
+        // (renderizable_elements is a HashMap) - always_on_top guarantees
+        // both render above every other UI element (the HUD, even though
+        // it's inactive right now) *and*, since it's processed in this Vec's
+        // own order, that "mission_intro" (pushed second) lands on top of
+        // "mission_intro_backdrop" (pushed first) rather than the reverse.
+        app.ui.always_on_top.push("mission_intro_backdrop".to_owned());
+        app.ui.always_on_top.push("mission_intro".to_owned());
+
+        let mission_intro_line = |app: &mut App, text: &str, size: f32, color: UiColor| {
+            label(app, text)
+                .set_font_size(&mut app.ui.text.font_system, size)
+                .set_text_color(color.with_alpha(0.0))
+        };
+        let mut mission_intro = UiNode::container()
+            .set_orientation(Orientation::Vertical)
+            .set_size(SizeValue::Fit, SizeValue::Fit)
+            .set_position(PositionValue::Start(60.0), PositionValue::Center(0.0))
+            .set_background_color(UiColor::TRANSPARENT)
+            .set_child_anchor(Anchor::Start, Anchor::Start)
+            .set_gap(8.0)
+            .set_child("title", mission_intro_line(app, &mission_title, 34.0, UiColor::WHITE))
+            .set_child("location", mission_intro_line(app, &location, 20.0, UiColor::Rgb(210, 210, 210)))
+            .set_child("date", mission_intro_line(app, &mission_date, 16.0, UiColor::Rgb(170, 170, 170)));
+        mission_intro.resolve(screen_width, screen_height);
+        app.ui.add_to_ui("mission_intro".to_owned(), mission_intro);
 
         // UI ELEMENTS AND LIST
         /*
@@ -278,6 +396,7 @@ impl GameLogic {
             subtitle_data,
             game_time: 0.0,
             plane: Plane::new(),
+            mission_intro: MissionIntro::new(),
         }
     }
 
@@ -740,6 +859,8 @@ impl GameLogic {
 
     fn ui_control(&mut self, app: &mut App, delta_time: f32) {
         if app.throttling.last_ui_update.elapsed() >= app.throttling.ui_update_interval {
+            self.mission_intro_update(app, delta_time);
+
             if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "data_box/framerate").and_then(|n| n.as_label_mut()) {
                 label.set_text(&mut app.ui.text.font_system, &format!("FPS: {}", app.time.get_fps()), true);
             }
@@ -796,12 +917,12 @@ impl GameLogic {
                                 marker.transform.rect.top = marker.transform.y;
                                 marker.transform.rect.right = marker.transform.x + marker.transform.width;
                                 marker.transform.rect.bottom = marker.transform.y + marker.transform.height;
-                                marker.style.text_color = Some(UiColor::Rgb(0, 255, 75));
+                                marker.update_style(|s| s.set_text_color(UiColor::Rgb(0, 255, 75)));
                             }
                         } else {
                             // Off screen — hide marker
                             if let Some(marker) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "velocity_marker") {
-                                marker.style.text_color = Some(UiColor::Rgba(0, 255, 75, 0));
+                                marker.update_style(|s| s.set_text_color(UiColor::Rgba(0, 255, 75, 0)));
                             }
                         }
                     }
@@ -818,6 +939,104 @@ impl GameLogic {
 
             app.ui.has_changed = true; // Mark UI as changed so it gets processed
             app.throttling.last_ui_update = Instant::now();
+        }
+    }
+
+    /// Advances the mission-intro card's state machine (see `MissionIntro`) -
+    /// called every `ui_control` tick, cheap no-op once `Done`. `FadeIn`/
+    /// `FadeOut` recompute and *set* the exact alpha this point in the fade
+    /// should show every single tick (see `MissionIntro`'s own doc comment
+    /// for why this doesn't just set a target once and let a
+    /// `UiNode::set_transition` lerp toward it, the way every other fade in
+    /// this codebase does).
+    ///
+    /// `elapsed` accumulates the *real* `delta_time` unclamped - the scene's
+    /// very first tick used to see a `delta_time` of multiple seconds
+    /// (confirmed via logging: `GameLogic::new`'s model/texture loading is
+    /// synchronous/blocking, and that whole duration landed in whatever
+    /// frame's `delta_time` got measured right after it finally returned),
+    /// which is now fixed at the source - `App::run` re-baselines the frame
+    /// clock immediately after a scene's blocking constructor returns (see
+    /// its own comment) - rather than papering over it here with a per-tick
+    /// cap. A cap here was tried first and made things *worse* than the bug
+    /// it fixed: at a low, sustained frame rate (a debug build doing real 3D
+    /// rendering + physics easily runs at a few FPS), every tick's genuine
+    /// delta_time exceeds a small cap, so capping it throttles how much of
+    /// this sequence's own "fade time" can pass per tick regardless of how
+    /// much real time actually passed - stretching what should be a ~4
+    /// second sequence out to tens of real seconds, strictly worse than the
+    /// one-time spike it was meant to guard against.
+    fn mission_intro_update(&mut self, app: &mut App, delta_time: f32) {
+        if matches!(self.mission_intro.phase, MissionIntroPhase::Done) {
+            return;
+        }
+        self.mission_intro.elapsed += delta_time;
+        match self.mission_intro.phase {
+            MissionIntroPhase::FadeIn => {
+                let t = (self.mission_intro.elapsed / MISSION_INTRO_FADE_SECS).clamp(0.0, 1.0);
+                // Backdrop only ever fades here (black -> transparent, once) -
+                // FadeOut below deliberately never touches it again, see this
+                // fn's own doc comment on the bug that happens if it does.
+                Self::set_mission_intro_text_alpha(app, t);
+                Self::set_mission_intro_backdrop_alpha(app, 1.0 - t);
+                if t >= 1.0 {
+                    self.mission_intro.phase = MissionIntroPhase::Hold;
+                    self.mission_intro.elapsed = 0.0;
+                }
+            }
+            MissionIntroPhase::Hold => {
+                if self.mission_intro.elapsed >= MISSION_INTRO_HOLD_SECS {
+                    self.mission_intro.phase = MissionIntroPhase::FadeOut;
+                    self.mission_intro.elapsed = 0.0;
+                }
+            }
+            MissionIntroPhase::FadeOut => {
+                let t = (self.mission_intro.elapsed / MISSION_INTRO_FADE_SECS).clamp(0.0, 1.0);
+                // Text only - the backdrop is already transparent (from FadeIn,
+                // above) and stays that way. Previously this called the same
+                // combined text+backdrop setter FadeIn uses, with a *decreasing*
+                // alpha - since that setter computes the backdrop's own alpha
+                // as `1.0 - alpha`, a decreasing input made the backdrop's
+                // value *increase*, fading the black backdrop back to fully
+                // opaque at the same time the text faded out, instead of
+                // leaving it alone. Both then got deactivated together the
+                // instant FadeOut finished, which looked like "screen turns
+                // black, then the HUD just appears" - not the intended "text
+                // fades out over an already-clear background".
+                Self::set_mission_intro_text_alpha(app, 1.0 - t);
+                if t >= 1.0 {
+                    // The HUD reappears instantly, not lerped - only the
+                    // intro card/backdrop themselves fade, see MissionIntro's
+                    // own doc comment.
+                    for key in HUD_KEYS {
+                        if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, key) {
+                            node.set_active(true);
+                        }
+                    }
+                    for key in ["mission_intro", "mission_intro_backdrop"] {
+                        if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, key) {
+                            node.set_active(false);
+                        }
+                    }
+                    self.mission_intro.phase = MissionIntroPhase::Done;
+                }
+            }
+            MissionIntroPhase::Done => {}
+        }
+    }
+
+    fn set_mission_intro_text_alpha(app: &mut App, alpha: f32) {
+        for line in ["title", "location", "date"] {
+            if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &format!("mission_intro/{line}")) {
+                let current = node.style.text_color.unwrap_or(UiColor::WHITE);
+                node.update_style(|s| s.set_text_color(current.with_alpha(alpha)));
+            }
+        }
+    }
+
+    fn set_mission_intro_backdrop_alpha(app: &mut App, alpha: f32) {
+        if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "mission_intro_backdrop") {
+            node.update_style(|s| s.set_background_color(UiColor::Rgba(0, 0, 0, 255).with_alpha(alpha)));
         }
     }
 
@@ -844,11 +1063,9 @@ impl GameLogic {
 
         if matches!(&blinkable.content, UiNodeContent::Text(_)) {
             if blinking_alert.alert_state {
-                blinkable.style.border_color = Some(UiColor::Rgb(255, 0, 0).into());
-                blinkable.style.text_color = Some(UiColor::Rgb(255, 0, 0));
+                blinkable.update_style(|s| s.set_border_color(UiColor::Rgb(255, 0, 0)).set_text_color(UiColor::Rgb(255, 0, 0)));
             } else {
-                blinkable.style.border_color = Some(UiColor::TRANSPARENT.into());
-                blinkable.style.text_color = Some(UiColor::TRANSPARENT);
+                blinkable.update_style(|s| s.set_border_color(UiColor::TRANSPARENT).set_text_color(UiColor::TRANSPARENT));
             }
         }
 

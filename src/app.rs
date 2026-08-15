@@ -265,7 +265,11 @@ impl App {
                 if self.ui.debug_bounds {
                     $ui_node.debug_bounds_preparation(&self.window_manager.size, &mut self.ui.ui_rendering);
                 }
-                let (textareas_to_merge, _vertices_to_add, _indices_to_add) = $ui_node.node_content_preparation(&self.window_manager.size, &mut self.ui.ui_rendering, &mut self.ui.text.font_system, self.time.delta_time, $hit_testable);
+                // None - top-level nodes start unclipped; a scrollable
+                // container establishes its own clip for its descendants
+                // further down the recursion (see node_content_preparation's
+                // Container branch/clip_rect's own doc comment).
+                let (textareas_to_merge, _vertices_to_add, _indices_to_add) = $ui_node.node_content_preparation(&self.window_manager.size, &mut self.ui.ui_rendering, &mut self.ui.text.font_system, self.time.delta_time, $hit_testable, None);
                 $text_areas.extend(textareas_to_merge);
             };
         }
@@ -430,6 +434,23 @@ impl App {
                     // This is the only place any scene's real constructor ever runs,
                     // and only for the one actually becoming active.
                     let scene = factory(&mut self);
+
+                    // Re-baseline the frame clock right after a (synchronous, possibly
+                    // multi-second - model/texture loading, all blocking) scene
+                    // constructor returns. self.time.update() measures delta_time as
+                    // "time since the last update() call" - without this, that call
+                    // was the one at the top of THIS frame's loop iteration, before
+                    // `factory` ran, so the very first delta_time the new scene's own
+                    // update() ever sees would silently include however long its own
+                    // loading just took (confirmed via logging: 3+ real seconds for
+                    // this project's one test level) - enough to make anything relying
+                    // on that first tick's delta_time (e.g. a state machine measuring
+                    // elapsed seconds) skip straight past its own timing entirely. This
+                    // makes delta_time start counting from "the scene is actually
+                    // playable", not "whenever the previous scene's last frame happened
+                    // to render" - every other per-frame system gets this for free, not
+                    // just the ones that happened to need a manual clamp already.
+                    self.time.update();
 
                     physics_data_channel = scene.fixed_update(&self).map(|(level_path, physics_tick)| {
                         physics_handling(&self.renderer.device, &self.renderer.config, &self.camera, level_path, physics_tick)
