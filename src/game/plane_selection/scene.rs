@@ -1,7 +1,7 @@
 use nalgebra::{ AbstractRotation, Point3, Quaternion, Rotation2, Unit, UnitQuaternion, Vector2, Vector3};
 use std::{collections::HashMap, f64::consts::PI, time::{Duration, Instant}};
 
-use crate::{app::App, engine::rendering::enviroment::environment::Environment, resources::apply_environment, transform::Transform, engine::ui::{button, ui_node::{UiNode, UiNodeContent}}, engine::utils::lerps::{lerp_quaternion, lerp_vector3}};
+use crate::{app::App, engine::rendering::enviroment::environment::Environment, transform::Transform, engine::ui::{button, ui_node::{UiNode, UiNodeContent}}, engine::utils::lerps::{lerp_quaternion, lerp_vector3}};
 
 use crate::engine::input::input;
 use crate::engine::scene_manager::scene::{FrameContext, Scene};

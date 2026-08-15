@@ -1,6 +1,6 @@
 use wgpu::{util::DeviceExt, BindGroup, BindGroupLayout, BindGroupLayoutDescriptor, Buffer, Device, RenderPipeline, SurfaceConfiguration};
 
-use crate::engine::rendering::{camera::CameraHandler, models::textures::Texture};
+use crate::engine::rendering::models::textures::Texture;
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -56,7 +56,10 @@ pub struct SkyboxRender {
 }
 
 impl SkyboxRender {
-    pub fn new(device: &Device, config: &SurfaceConfiguration, camera: &CameraHandler, texture: Texture) -> Self {
+    // Only needs the camera's bind group layout (to build a matching pipeline layout),
+    // not the whole CameraHandler - keeps this callable from a background asset-loading
+    // thread that only has cloned GPU handles, not access to `App`/`CameraHandler`.
+    pub fn new(device: &Device, config: &SurfaceConfiguration, camera_bind_group_layout: &BindGroupLayout, texture: Texture) -> Self {
         let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("skybox_bind_group_layout"),
             entries: &[
@@ -89,7 +92,7 @@ impl SkyboxRender {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Skybox Pipeline Layout"),
-            bind_group_layouts: &[&camera.bind_group_layout, &bind_group_layout],
+            bind_group_layouts: &[camera_bind_group_layout, &bind_group_layout],
             push_constant_ranges: &[],
         });
 

@@ -3,7 +3,19 @@ use std::time::Duration;
 use app::App;
 use game::{main_menu, play, plane_selection};
 
+use crate::engine::rendering::enviroment::environment::{Environment, SkyboxFaces};
 use crate::engine::splash_screen::SplashScreenConfig;
+
+fn default_skybox() -> Environment {
+    Environment::Skybox(SkyboxFaces {
+        px: "skybox/px.png".to_owned(),
+        nx: "skybox/nx.png".to_owned(),
+        py: "skybox/py.png".to_owned(),
+        ny: "skybox/ny.png".to_owned(),
+        pz: "skybox/pz.png".to_owned(),
+        nz: "skybox/nz.png".to_owned(),
+    })
+}
 
 mod app;
 mod transform;
@@ -22,9 +34,9 @@ async fn main() -> Result<(), String> {
                     .with_text("A Pankarta Software Production")
             );
 
-            app.scene_manager.create_scene("playing", play::scene::GameLogic::new);
+            app.scene_manager.create_loaded_scene("playing", "./assets/scenes/test_chamber", default_skybox(), play::scene::GameLogic::finish);
             app.scene_manager.create_scene("selecting_plane", plane_selection::scene::GameLogic::new);
-            app.scene_manager.create_scene("main_menu", main_menu::scene::GameLogic::new);
+            app.scene_manager.create_loaded_scene("main_menu", "./assets/scenes/main_menu", default_skybox(), main_menu::scene::GameLogic::finish);
 
             app.scene_manager.open_scene("main_menu");
 

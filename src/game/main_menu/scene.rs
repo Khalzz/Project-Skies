@@ -2,8 +2,7 @@ use nalgebra::{Point3, Vector3};
 
 use crate::app::App;
 use crate::engine::scene_manager::scene::{FrameContext, Scene};
-use crate::resources::{apply_environment, load_level};
-use crate::engine::rendering::enviroment::environment::{Environment, SkyboxFaces};
+use crate::resources::PreparedSceneAssets;
 use crate::game::tooling::free_camera;
 
 use super::rebind_modal;
@@ -19,22 +18,15 @@ pub struct GameLogic {
 }
 
 impl GameLogic {
-    // this is called once
-    pub fn new(app: &mut App) -> Self {
-        load_level(app, "./assets/scenes/main_menu".to_owned());
+    // Fast, main-thread half of construction - see play::scene::GameLogic::finish's
+    // own doc comment for the full rationale. `assets` was loaded in the background
+    // (level + skybox, declared via main.rs's create_loaded_scene("main_menu", ...)).
+    pub fn finish(app: &mut App, assets: PreparedSceneAssets) -> Self {
+        assets.apply(app);
 
         app.window_manager.context.mouse().set_relative_mouse_mode(false);
 
         ui::build(app);
-
-        apply_environment(app, Environment::Skybox(SkyboxFaces {
-            px: "skybox/px.png".to_owned(),
-            nx: "skybox/nx.png".to_owned(),
-            py: "skybox/py.png".to_owned(),
-            ny: "skybox/ny.png".to_owned(),
-            pz: "skybox/pz.png".to_owned(),
-            nz: "skybox/nz.png".to_owned(),
-        }));
 
         let base_position: Point3<f32> = [2.45, 24.58, -6.39].into();
         let base_yaw = 93.0;
