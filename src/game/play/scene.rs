@@ -5,7 +5,7 @@ use nalgebra::{vector, Point3, Quaternion, UnitQuaternion, Vector3};
 use rand::{rngs::ThreadRng, Rng};
 use rapier3d::prelude::RigidBody;
 use sdl2::{controller::GameController};
-use crate::{app::{App, AppState}, engine::audio::subtitles::Subtitle, engine::input::input, engine::physics::physics_handler::{MetadataType, PhysicsData, PhysicsTick, RenderMessage}, engine::primitive::manual_vertex::ManualVertex, engine::rendering::{camera::CameraHandler, ui::ui::Ui}, engine::scene_manager::scene::{FrameContext, Scene}, transform::Transform, engine::ui::{color::UiColor, ui_node::{UiNode, UiNodeContent}, ui_transform::{Anchor, Orientation, PositionValue, SizeValue, UiTransform}}, engine::utils::lerps::{lerp, lerp_quaternion}};
+use crate::{app::{App, AppState}, engine::audio::subtitles::Subtitle, engine::input::input, engine::physics::physics_handler::{MetadataType, PhysicsCommand, PhysicsData, PhysicsTick, RenderMessage}, engine::primitive::manual_vertex::ManualVertex, engine::rendering::{camera::CameraHandler, ui::ui::Ui}, engine::scene_manager::scene::{FrameContext, Scene}, transform::Transform, engine::ui::{color::UiColor, ui_node::{UiNode, UiNodeContent}, ui_transform::{Anchor, Orientation, PositionValue, SizeValue, UiTransform}}, engine::utils::lerps::{lerp, lerp_quaternion}};
 use super::{event_handling::EventSystem, plane::{physics_logic::PlanePhysicsLogic, plane::Plane}};
 use std::sync::mpsc::Sender;
 use crate::game::play::plane::plane::PlaneControls;
@@ -16,9 +16,10 @@ use crate::engine::tooling::debug_console;
 use crate::debug_text;
 
 /// Which top-level `game_ui.ron` nodes make up the normal flight HUD (see
-/// `assets/ui/game_ui.ron`) - hidden while the mission-intro card (below) is
-/// showing, faded back in once it finishes (see `GameLogic::mission_intro_update`'s
-/// `HudFadeIn` phase). Not every key `ui_control` reaches for exists in that RON
+/// `assets/ui/game_ui.ron`) - hidden here at scene start, reactivated + faded
+/// back in by the `Active`/`Alpha` tracks in `level_planning.ron` (see
+/// `docs/animation_tracks.md`) once the mission-intro card is done. Not every
+/// key `ui_control` reaches for exists in that RON
 /// file today ("altitude"/"altitude_alert"/"stall_alert" are stale references to
 /// nodes that were never added there - `Ui::get_ui_node` just no-ops on a missing
 /// key) - this list only needs the ones that actually do.
@@ -31,6 +32,14 @@ use crate::debug_text;
 /// simply never touching it here - not hiding it, not fading it back in - is
 /// enough to leave it live through every phase of the intro.
 const HUD_KEYS: [&str; 4] = ["data_box", "compass", "speed", "velocity_marker"];
+
+// The normal flight follow-cam's own FOV - matches CameraHandler::new's default
+// for "main". Asserted every frame by CameraState::Normal (see camera_control)
+// so a CameraTrack::LookAt's FOV push-in (see level_planning.ron's camera_tracks)
+// reliably lets go once its own end_time passes, instead of leaving the last
+// keyframe's value stuck forever - every other CameraState already sets fovy
+// unconditionally each frame for the same reason, Normal just never did.
+const NORMAL_CAMERA_FOV: f32 = 45.0;
 
 // Add a way of setting timing that can be agnostic to real time (or that will not be affected by the player pausing)
 pub enum CameraState {
@@ -71,64 +80,6 @@ pub struct BlinkingAlert {
     time_alert: f32
 }
 
-/// The mission-intro card's own state machine (see `GameLogic::new`'s own
-/// intro-building block and `GameLogic::mission_intro_update`) - four beats:
-/// the screen starts fully black, the title card's text fades in on top of it
-/// (`TextFadeIn`), both hold together (`Hold`), the backdrop *and* text fade
-/// out together revealing the game world with no HUD yet (`FadeOut`), then
-/// the flight HUD (see `HUD_KEYS`) itself fades in (`HudFadeIn`) rather than
-/// snapping straight to visible.
-///
-/// Deliberately does NOT use `UiNode::set_transition`/the engine's own
-/// automatic style-lerp for the fade itself - `elapsed` (below) directly
-/// drives the alpha every tick (see `mission_intro_update`) instead. That
-/// automatic lerp needs a *previous* frame's `current_style` to interpolate
-/// from, which a just-constructed node doesn't have yet (its first-ever
-/// render just snaps straight to whatever the target already is that frame -
-/// see `UiNode::node_content_preparation`'s `(Some(current), Some(ms)) => ...
-/// _ => target` split), and computing our own `t` from `elapsed` sidesteps
-/// that (and any per-frame delta_time spike, e.g. right after this scene's
-/// own blocking asset load) entirely - every tick sets the exact alpha this
-/// point in the sequence should show, not a delta to lerp toward.
-enum MissionIntroPhase {
-    Wait,
-    TextFadeIn,
-    Hold,
-    FadeOut,
-    HudFadeIn,
-    Done,
-}
-
-struct MissionIntro {
-    phase: MissionIntroPhase,
-    // Seconds into the *current* phase - reset to 0.0 on every phase change,
-    // not a running total.
-    elapsed: f32,
-}
-
-impl MissionIntro {
-    fn new() -> Self {
-        Self { phase: MissionIntroPhase::Wait, elapsed: 0.0 }
-    }
-}
-
-// Tunable timing for the mission-intro sequence (see MissionIntro/
-// GameLogic::mission_intro_update), all in seconds.
-// Screen just sits fully black (see MissionIntroPhase::Wait) before the text
-// starts fading in - a beat to let the scene settle instead of the text
-// appearing the instant the black screen itself does.
-const MISSION_INTRO_WAIT_SECS: f32 = 2.0;
-const MISSION_INTRO_TEXT_FADE_IN_SECS: f32 = 1.5;
-const MISSION_INTRO_HOLD_SECS: f32 = 5.0;
-const MISSION_INTRO_FADE_OUT_SECS: f32 = 0.8;
-const HUD_FADE_IN_SECS: f32 = 0.6;
-// Must match assets/ui/game_ui.ron's "data_box" node's background_color alpha -
-// UiNode::set_alpha is a no-op on containers (it has no single color of its own
-// to fade, see that fn's doc comment), so data_box's translucent background is
-// faded manually during HudFadeIn using this as the "fully visible" target
-// instead of the RON's raw color, which fade_hud_node never actually reads.
-const HUD_DATA_BOX_BG_ALPHA: f32 = 0.5;
-
 pub struct BaseRotations {
     left_aleron: Option<Quaternion<f32>>,
     right_aleron: Option<Quaternion<f32>>,
@@ -161,7 +112,9 @@ pub struct GameLogic { // here we define the data we use on our script
     rng: ThreadRng,
     pub game_time: f64,
     pub plane: Plane,
-    mission_intro: MissionIntro,
+    // Last frame's CameraTrack::LookAt-active state - lets `update` detect the
+    // exact rising/falling edge to pause/resume physics on, see its own comment.
+    was_cinematic_active: bool,
 }
 
 impl GameLogic {
@@ -172,16 +125,25 @@ impl GameLogic {
     // activation, see SceneManager::create_scene/create_loaded_scene).
     pub fn finish(app: &mut App, assets: PreparedSceneAssets) -> Self {
         assets.apply(app);
+
+        // The main menu switches the active camera to its own "main_menu" one
+        // (see main_menu::scene::MENU_CAMERA_NAME) and nothing ever switches it
+        // back - without this, gameplay (camera_control and every CameraTrack
+        // targeting "main") keeps writing into the "main" CameraInstance while
+        // "main_menu" stays the one actually rendered, so none of it is ever
+        // visible.
+        app.camera.select_camera("main");
+
         app.ui.load_ui("./assets/ui/game_ui.ron", app.renderer.config.width, app.renderer.config.height, &app.renderer.device, &app.renderer.queue);
 
         // Mission-intro card: hide the normal flight HUD immediately (see
-        // HUD_KEYS - GameLogic::mission_intro_update brings it back once the
-        // card's done), build a full-screen black backdrop plus the
-        // (invisible-at-rest) title/location/date stack from whatever
+        // HUD_KEYS - the `Active`/`Alpha` ui_tracks in level_planning.ron bring
+        // it back once the card's done), build a full-screen black backdrop plus
+        // the (invisible-at-rest) title/location/date stack from whatever
         // main_menu::ui::show_level last staged in SELECTED_LEVEL (falling
         // back to placeholder text if the scene was somehow opened without
-        // going through Play Select first) - both fade in/out together, see
-        // GameLogic::mission_intro_update.
+        // going through Play Select first) - both fade in/out together, driven
+        // by the same ui_tracks (see docs/animation_tracks.md).
         for key in HUD_KEYS {
             if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, key) {
                 node.set_active(false);
@@ -416,20 +378,62 @@ impl GameLogic {
             subtitle_data,
             game_time: 0.0,
             plane: Plane::new(),
-            mission_intro: MissionIntro::new(),
+            was_cinematic_active: false,
         }
     }
 
     // this is called every frame
-    pub fn update(&mut self, app: &mut App, plane_control_tx: Option<&Sender<PlaneControls>>, physics_data: &HashMap<String, RenderMessage>) {
+    pub fn update(&mut self, app: &mut App, plane_control_tx: Option<&Sender<PlaneControls>>, physics_command_tx: Option<&Sender<PhysicsCommand>>, physics_data: &HashMap<String, RenderMessage>) {
         self.game_time += app.time.delta_time as f64;
 
         if input::is_action_just_pressed("test") {
             self.subtitle_data.add_text("SKIBIDI DAM DAM DAM YES YES", 3000, app);
         }
 
+        // While a CameraTrack::LookAt cinematic is driving the camera (see
+        // level_planning.ron's camera_tracks), the player doesn't get flight
+        // controls - skipping Plane::update leaves `controls` at whatever they
+        // already are (neutral, since nothing else ever touches them). The plane
+        // itself is expected to be driven by a matching Object3DTrack targeting
+        // "player" for the same window (see level_planning.ron) rather than
+        // physics - see the pause/resume handling right below.
+        let cinematic_active = match &self.event_system {
+            Some(event_system) => event_system.is_cinematic_camera_active(self.game_time),
+            None => false,
+        };
+
+        // Rising/falling edge of the cinematic window - pause physics for its
+        // duration (so the rigidbody's own simulated position doesn't drift away
+        // from wherever the scripted Object3DTrack is putting the plane, which
+        // would otherwise cause a visible snap the instant physics starts
+        // driving the render transform again), then on the way out, teleport the
+        // rigidbody to match exactly where the script left the plane before
+        // un-pausing - see PhysicsCommand::SetTransform's own doc comment.
+        if let Some(physics_command_tx) = physics_command_tx {
+            if cinematic_active && !self.was_cinematic_active {
+                let _ = physics_command_tx.send(PhysicsCommand::TogglePause);
+            } else if !cinematic_active && self.was_cinematic_active {
+                if let Some(player) = app.renderizable_instances.get("player") {
+                    let transform = player.instance.transform;
+                    let _ = physics_command_tx.send(PhysicsCommand::SetTransform {
+                        name: "player".to_owned(),
+                        translation: transform.position,
+                        rotation: transform.rotation.into_inner(),
+                        // Matches data.ron's own player initial_velocity - a
+                        // reasonable cruise speed to resume normal flight at
+                        // regardless of exactly what the cinematic's own path was.
+                        linvel: Vector3::new(0.0, 0.0, 200.4),
+                    });
+                }
+                let _ = physics_command_tx.send(PhysicsCommand::TogglePause);
+            }
+        }
+        self.was_cinematic_active = cinematic_active;
+
         // Debug console output (press F2 to show/hide)
-        self.plane.update(app.time.delta_time);
+        if !cinematic_active {
+            self.plane.update(app.time.delta_time);
+        }
         if let Some(plane_control_tx) = plane_control_tx {
             let _ = plane_control_tx.send(self.plane.controls.clone());
         }
@@ -441,6 +445,25 @@ impl GameLogic {
         self.subtitle_data.update(app);
         self.camera_control(app, app.time.delta_time);
         self.ui_control(app);
+
+        // Applied last so a running animation track is the final word for this
+        // frame - e.g. a Position/Fov track targeting the "main" camera visibly
+        // overrides camera_control's flight follow-cam for as long as it runs
+        // (see CameraTrack's own doc comment for the tradeoffs of that).
+        if let Some(event_system) = &self.event_system {
+            event_system.apply_tracks(self.game_time, app);
+        }
+
+        // TEMP DEBUG (press F2 to view) - remove once the LookAt cinematic is confirmed working.
+        if cinematic_active {
+            if let Some(cam) = app.camera.get("main") {
+                debug_text!("[cine] cam pos: {:.1?} yaw: {:.1} pitch: {:.1}", cam.camera.position, cam.camera.yaw.to_degrees(), cam.camera.pitch.to_degrees());
+            }
+            if let Some(player) = app.renderizable_instances.get("player") {
+                debug_text!("[cine] player pos: {:.1?}", player.instance.transform.position);
+            }
+            debug_text!("[cine] active camera name: {}", app.camera.active_name());
+        }
     }
 
     fn plane_movement (&mut self, app: &mut App, delta_time: f32, physics_data: &HashMap<String, RenderMessage>) {
@@ -674,7 +697,9 @@ impl GameLogic {
             // Calculate target camera position and look-at point
             let (target_position, target_look_at, target_up) = match self.camera_data.camera_state {
                 CameraState::Normal => {
-                    app.camera.active_mut().projection.znear = 0.1;
+                    let active = app.camera.active_mut();
+                    active.projection.znear = 0.1;
+                    active.projection.fovy = NORMAL_CAMERA_FOV;
                     let target_pos = player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 8.0, -50.0));
                     let look_at = player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 0.0, 100.0));
                     (target_pos, look_at, player.instance.transform.rotation * *Vector3::y_axis())
@@ -884,25 +909,27 @@ impl GameLogic {
         // gate below and this fn simply doesn't run for them - passing only the
         // triggering frame's own (tiny) delta_time would silently drop every skipped
         // frame's worth of real time from anything here that accumulates elapsed
-        // seconds (mission_intro_update, blinking_alert), making both run far slower
-        // than real time the faster the game renders (confirmed via logging: the
-        // mission intro's 1s fade-in was taking 8+ real seconds at this project's
-        // uncapped framerate).
+        // seconds (blinking_alert), making it run far slower than real time the
+        // faster the game renders.
         // Capped: last_ui_update is a single cross-scene timestamp that's never
         // reset on a scene switch, so the very first tick after this scene starts
         // (or after any other long gap - a paused/backgrounded window, a debugger
         // breakpoint) would otherwise report however long it's been since the
-        // *previous* scene last ran ui_control, potentially several seconds. Fed
-        // straight into mission_intro_update, that one huge tick would blow
-        // through the entire TextFadeIn phase in a single step, rendering the
-        // text already at full alpha on its first-ever frame instead of actually
-        // fading in. 100ms is comfortably above ui_update_interval (so normal
-        // per-tick values are never affected), but caps a stale gap down to
-        // something that just reads as a slightly-longer-than-usual frame.
+        // *previous* scene last ran ui_control, potentially several seconds. 100ms
+        // is comfortably above ui_update_interval (so normal per-tick values are
+        // never affected), but caps a stale gap down to something that just reads
+        // as a slightly-longer-than-usual frame.
+        //
+        // The mission-intro sequence (backdrop/title/HUD fades) used to be driven
+        // from here too, but now runs off `self.game_time` via the `ui_tracks` in
+        // `level_planning.ron` (see `EventSystem::apply_tracks`, called at the end
+        // of `GameLogic::update`) - `game_time` accumulates every real frame's own
+        // `delta_time` (already re-baselined after this scene's blocking asset
+        // load, see `App::run`'s own comment on that), not this throttled/capped
+        // `ui_elapsed`, so it doesn't need the same clamping.
         let ui_elapsed = app.throttling.last_ui_update.elapsed().min(Duration::from_millis(100));
         if ui_elapsed >= app.throttling.ui_update_interval {
             let ui_delta_time = ui_elapsed.as_secs_f32();
-            self.mission_intro_update(app, ui_delta_time);
 
             if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "data_box/framerate").and_then(|n| n.as_label_mut()) {
                 label.set_text(&mut app.ui.text.font_system, &format!("FPS: {}", app.time.get_fps()), true);
@@ -985,140 +1012,6 @@ impl GameLogic {
         }
     }
 
-    /// Advances the mission-intro card's state machine (see `MissionIntro`) -
-    /// called every `ui_control` tick, cheap no-op once `Done`. Every phase
-    /// recomputes and *sets* the exact alpha this point in the sequence
-    /// should show every single tick (see `MissionIntro`'s own doc comment
-    /// for why this doesn't just set a target once and let a
-    /// `UiNode::set_transition` lerp toward it, the way every other fade in
-    /// this codebase does).
-    ///
-    /// `elapsed` accumulates the *real* `delta_time` unclamped - the scene's
-    /// very first tick used to see a `delta_time` of multiple seconds
-    /// (confirmed via logging: `GameLogic::new`'s model/texture loading is
-    /// synchronous/blocking, and that whole duration landed in whatever
-    /// frame's `delta_time` got measured right after it finally returned),
-    /// which is now fixed at the source - `App::run` re-baselines the frame
-    /// clock immediately after a scene's blocking constructor returns (see
-    /// its own comment) - rather than papering over it here with a per-tick
-    /// cap. A cap here was tried first and made things *worse* than the bug
-    /// it fixed: at a low, sustained frame rate (a debug build doing real 3D
-    /// rendering + physics easily runs at a few FPS), every tick's genuine
-    /// delta_time exceeds a small cap, so capping it throttles how much of
-    /// this sequence's own "fade time" can pass per tick regardless of how
-    /// much real time actually passed - stretching what should be a ~4
-    /// second sequence out to tens of real seconds, strictly worse than the
-    /// one-time spike it was meant to guard against.
-    fn mission_intro_update(&mut self, app: &mut App, delta_time: f32) {
-        if matches!(self.mission_intro.phase, MissionIntroPhase::Done) {
-            return;
-        }
-        self.mission_intro.elapsed += delta_time;
-        match self.mission_intro.phase {
-            MissionIntroPhase::Wait => {
-                if self.mission_intro.elapsed >= MISSION_INTRO_WAIT_SECS {
-                    self.mission_intro.phase = MissionIntroPhase::TextFadeIn;
-                    self.mission_intro.elapsed = 0.0;
-                }
-            }
-            MissionIntroPhase::TextFadeIn => {
-                // Backdrop is already fully opaque black from construction (see
-                // GameLogic::finish) and stays that way for this whole phase -
-                // only the text fades in on top of it.
-                let t = (self.mission_intro.elapsed / MISSION_INTRO_TEXT_FADE_IN_SECS).clamp(0.0, 1.0);
-                Self::set_mission_intro_text_alpha(app, t);
-                if t >= 1.0 {
-                    self.mission_intro.phase = MissionIntroPhase::Hold;
-                    self.mission_intro.elapsed = 0.0;
-                }
-            }
-            MissionIntroPhase::Hold => {
-                if self.mission_intro.elapsed >= MISSION_INTRO_HOLD_SECS {
-                    self.mission_intro.phase = MissionIntroPhase::FadeOut;
-                    self.mission_intro.elapsed = 0.0;
-                }
-            }
-            MissionIntroPhase::FadeOut => {
-                // Text and backdrop fade out together this time (unlike
-                // TextFadeIn, which only touched the text) - by the end the
-                // screen has gone from "black card" straight to "bare game
-                // world, no HUD yet" in one continuous fade.
-                let t = (self.mission_intro.elapsed / MISSION_INTRO_FADE_OUT_SECS).clamp(0.0, 1.0);
-                Self::set_mission_intro_text_alpha(app, 1.0 - t);
-                Self::set_mission_intro_backdrop_alpha(app, 1.0 - t);
-                if t >= 1.0 {
-                    for key in ["mission_intro", "mission_intro_backdrop"] {
-                        if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, key) {
-                            node.set_active(false);
-                        }
-                    }
-                    // Activate the HUD now but start it fully transparent -
-                    // HudFadeIn (below) brings it up to its designed alpha over
-                    // the next tick(s), rather than it popping in instantly.
-                    for key in HUD_KEYS {
-                        if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, key) {
-                            node.set_active(true);
-                            Self::fade_hud_node(node, 0.0);
-                        }
-                    }
-                    Self::set_hud_data_box_alpha(app, 0.0);
-                    self.mission_intro.phase = MissionIntroPhase::HudFadeIn;
-                    self.mission_intro.elapsed = 0.0;
-                }
-            }
-            MissionIntroPhase::HudFadeIn => {
-                let t = (self.mission_intro.elapsed / HUD_FADE_IN_SECS).clamp(0.0, 1.0);
-                for key in HUD_KEYS {
-                    if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, key) {
-                        Self::fade_hud_node(node, t);
-                    }
-                }
-                Self::set_hud_data_box_alpha(app, t);
-                if t >= 1.0 {
-                    self.mission_intro.phase = MissionIntroPhase::Done;
-                }
-            }
-            MissionIntroPhase::Done => {}
-        }
-    }
-
-    fn set_mission_intro_text_alpha(app: &mut App, alpha: f32) {
-        for line in ["title", "location", "date"] {
-            if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &format!("mission_intro/{line}")) {
-                let current = node.style.text_color.unwrap_or(UiColor::WHITE);
-                node.update_style(|s| s.set_text_color(current.with_alpha(alpha)));
-            }
-        }
-    }
-
-    fn set_mission_intro_backdrop_alpha(app: &mut App, alpha: f32) {
-        if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "mission_intro_backdrop") {
-            node.update_style(|s| s.set_background_color(UiColor::Rgba(0, 0, 0, 255).with_alpha(alpha)));
-        }
-    }
-
-    /// Fades every text/image leaf under `node` to `alpha` (0=invisible, 1=as
-    /// authored) - recurses into containers since `UiNode::set_alpha` only
-    /// affects the node it's called on, and every HUD_KEYS entry except
-    /// "data_box" is a single leaf label anyway (data_box is a container of 4
-    /// labels, see assets/ui/game_ui.ron - its own background is handled
-    /// separately by `set_hud_data_box_alpha`, since containers have no color
-    /// of their own for `set_alpha` to touch).
-    fn fade_hud_node(node: &mut UiNode, alpha: f32) {
-        node.set_alpha(alpha);
-        if let Some(children) = node.get_children_mut() {
-            for (_, child) in children.iter_mut() {
-                Self::fade_hud_node(child, alpha);
-            }
-        }
-    }
-
-    fn set_hud_data_box_alpha(app: &mut App, t: f32) {
-        if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "data_box") {
-            node.update_style(|s| s.set_background_color(UiColor::Rgba(0, 0, 0, 255).with_alpha(t * HUD_DATA_BOX_BG_ALPHA)));
-        }
-    }
-
     fn blinking_alert(&mut self, blinking_alert: String ,blinkable: &mut UiNode, condition: bool, delta_time: f32) {
         let blinking_alert = self.blinking_alerts.get_mut(&blinking_alert).unwrap();
 
@@ -1169,7 +1062,7 @@ impl GameLogic {
 
 impl Scene for GameLogic {
     fn update(&mut self, app: &mut App, ctx: &mut FrameContext) {
-        self.update(app, ctx.plane_control_tx, ctx.physics_data);
+        self.update(app, ctx.plane_control_tx, ctx.physics_command_tx, ctx.physics_data);
     }
 
     fn fixed_update(&self, app: &App) -> Option<(String, Box<dyn PhysicsTick + Send>)> {

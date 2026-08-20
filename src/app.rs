@@ -607,6 +607,7 @@ impl App {
                         app_state: &mut app_state,
                         event_pump: &mut event_pump,
                         plane_control_tx: physics_data_channel.as_ref().map(|physics| &physics.plane_control_tx),
+                        physics_command_tx: physics_data_channel.as_ref().map(|physics| &physics.request_data_tx),
                         physics_data: &physics_data,
                         debug_physics: &debug_physics,
                     };
@@ -710,6 +711,17 @@ impl App {
                 self.camera.update_transition(self.time.delta_time);
                 self.camera.update_buffer(&self.renderer.queue);
                 self.renderer.queue.write_buffer(&self.renderer.depth_render.near_far_buffer, 0, bytemuck::cast_slice(&[self.renderer.depth_render.near_far_uniform]));
+
+                // TEMP: debug_text!/F3 messages have nowhere on-screen to render yet
+                // (drain_messages() was write-only - nothing ever called it) - dump to
+                // stdout for now so debug_text! is actually visible somewhere. Remove
+                // once there's a real on-screen console, or replace with one.
+                let messages = crate::engine::tooling::debug_console::drain_messages();
+                if crate::engine::tooling::debug_console::is_console_visible() {
+                    for message in messages {
+                        println!("{message}");
+                    }
+                }
             }
 
             match self.render() {

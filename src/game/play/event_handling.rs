@@ -4,6 +4,7 @@ use serde::Deserialize;
 use crate::engine::audio::audio::{self, Audio};
 use crate::app::App;
 use crate::engine::audio::subtitles::{Subtitle, SubtitleData};
+use super::animation_tracks::{self, CameraTrack, Object3DTrack, UiTrack};
 
 #[derive(Debug, Deserialize)]
 pub struct AudioFile {
@@ -28,7 +29,17 @@ pub struct Event {
 
 #[derive(Debug, Deserialize)]
 pub struct EventSystem {
-    pub event_list: HashMap<u64, Event>
+    pub event_list: HashMap<u64, Event>,
+    // Keyframed parameter animation - see animation_tracks.rs. Kept as separate
+    // lists (rather than folded into `event_list`) since a track is continuous
+    // ("what's the value right now") while an Event is a one-shot trigger that
+    // latches once fired - see `handle_events` vs `apply_tracks`.
+    #[serde(default)]
+    pub object_3d_tracks: Vec<Object3DTrack>,
+    #[serde(default)]
+    pub ui_tracks: Vec<UiTrack>,
+    #[serde(default)]
+    pub camera_tracks: Vec<CameraTrack>,
 }
 
 impl EventSystem {
@@ -40,7 +51,14 @@ impl EventSystem {
                 match std::fs::read_to_string(path.to_owned() + "/level_planning.ron") {
                     Ok(ron_result_string) => {
                         match ron::from_str::<EventSystem>(&ron_result_string) {
-                            Ok(event_system) => Ok(event_system),
+                            Ok(mut event_system) => {
+                                animation_tracks::normalize_all(
+                                    &mut event_system.object_3d_tracks,
+                                    &mut event_system.ui_tracks,
+                                    &mut event_system.camera_tracks,
+                                );
+                                Ok(event_system)
+                            },
                             Err(error) => Err(format!("Something went wrong structuring the event: {}", error)),
                         }
                     }
@@ -49,6 +67,25 @@ impl EventSystem {
             },
             None => Err("There is no scene openned yet".to_string())
         }
+    }
+
+    /// Applies every `object_3d_tracks`/`ui_tracks`/`camera_tracks` entry for the
+    /// current scene time - see `animation_tracks` for the keyframe/lerp model.
+    /// Stateless (unlike `handle_events`' `activated` latch): every frame just
+    /// recomputes "what should this target's value be right now," so scrubbing
+    /// `seconds` backward (e.g. a paused/rewound scene) works with no extra logic.
+    pub fn apply_tracks(&self, seconds: f64, app: &mut App) {
+        let game_time_ms = Duration::from_secs_f64(seconds).as_millis() as u64;
+        animation_tracks::apply_all(&self.object_3d_tracks, &self.ui_tracks, &self.camera_tracks, game_time_ms, app);
+    }
+
+    /// Whether a `CameraTrack::LookAt` cinematic shot is currently driving the
+    /// camera - `GameLogic::update` uses this to lock player flight controls off
+    /// for the same window the shot runs in, rather than duplicating that window
+    /// as a separate hardcoded value in Rust.
+    pub fn is_cinematic_camera_active(&self, seconds: f64) -> bool {
+        let game_time_ms = Duration::from_secs_f64(seconds).as_millis() as u64;
+        animation_tracks::any_look_at_active(&self.camera_tracks, game_time_ms)
     }
 
 

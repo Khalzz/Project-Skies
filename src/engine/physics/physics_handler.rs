@@ -51,6 +51,15 @@ pub enum PhysicsCommand {
     Shutdown,         // Main thread signals shutdown
     ToggleDebug,      // Toggle debug rendering
     TogglePause,      // Toggle physics pause
+    /// Teleports a named rigidbody (see `Physics::physics_elements`) to an exact
+    /// translation/rotation/velocity - meant to be sent right before un-pausing
+    /// after a scripted cinematic (see `CameraTrack::LookAt` /
+    /// `GameLogic::update`'s cinematic handling) has been moving that object's
+    /// *render* transform directly while physics sat paused. Without this, the
+    /// rigidbody resumes stepping from wherever it was when it got paused -
+    /// wherever the script left it visually - causing a visible snap the instant
+    /// physics starts writing the render transform again.
+    SetTransform { name: String, translation: Vector3<f32>, rotation: Quaternion<f32>, linvel: Vector3<f32> },
 }
 
 pub struct PhysicsData {
@@ -206,6 +215,15 @@ impl Physics {
                             self.last_physics_time = Instant::now();
                         }
                         println!("Physics {}", if paused { "PAUSED" } else { "RESUMED" });
+                    },
+                    Ok(PhysicsCommand::SetTransform { name, translation, rotation, linvel }) => {
+                        if let Some(Some(physics_data)) = self.physics_elements.get(&name) {
+                            if let Some(rb) = self.rigidbody_set.get_mut(physics_data.rigidbody_handle) {
+                                rb.set_translation(translation, true);
+                                rb.set_rotation(nalgebra::Unit::new_normalize(rotation), true);
+                                rb.set_linvel(linvel, true);
+                            }
+                        }
                     },
                     Err(_) => {
                         break;

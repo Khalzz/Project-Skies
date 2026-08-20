@@ -8,7 +8,7 @@ use crate::app::{App, AppState};
 use crate::engine::rendering::enviroment::environment::Environment;
 use crate::game::play::plane::plane::PlaneControls;
 use crate::engine::physics::physics::DebugPhysicsMessageType;
-use crate::engine::physics::physics_handler::{PhysicsTick, RenderMessage};
+use crate::engine::physics::physics_handler::{PhysicsCommand, PhysicsTick, RenderMessage};
 use crate::resources::PreparedSceneAssets;
 
 
@@ -23,6 +23,10 @@ pub struct FrameContext<'a> {
     pub event_pump: &'a mut EventPump,
     // None whenever the active scene's Scene::physics() doesn't want physics.
     pub plane_control_tx: Option<&'a Sender<PlaneControls>>,
+    // Same None-ness as plane_control_tx - lets a scene pause/resume/teleport a
+    // physics-driven object (see PhysicsCommand::SetTransform) for a scripted
+    // cinematic, e.g. CameraTrack::LookAt.
+    pub physics_command_tx: Option<&'a Sender<PhysicsCommand>>,
     pub physics_data: &'a HashMap<String, RenderMessage>,
     pub debug_physics: &'a [DebugPhysicsMessageType],
 }

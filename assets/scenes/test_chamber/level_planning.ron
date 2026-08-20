@@ -7,5 +7,164 @@ EventSystem (
                 )
             ),
         )
-    }
+    },
+    // Demo: fellow_aviator drifts sideways from 2s to 6s into the scene, then
+    // holds at (150, 50, 0). See docs/animation_tracks.md for the full schema.
+    object_3d_tracks: [
+        Position(
+            target: "fellow_aviator",
+            start_time: 2000,
+            keyframes: [
+                (time: 0,    value: (x: 50.0,  y: 50.0, z: 0.0)),
+                (time: 4000, value: (x: 150.0, y: 50.0, z: 0.0)),
+            ],
+        ),
+        // Scripted flight path for the intro cinematic below - physics is
+        // paused for "player" for this exact 3600-9000ms window (see
+        // GameLogic::update's cinematic pause/resume handling), so this track
+        // *is* the plane's position for the duration, not fighting physics for
+        // it. `start_time` matches camera_tracks' LookAt below and sits at
+        // 3600ms deliberately - the instant the mission-intro backdrop's own
+        // Color track (see ui_tracks below) finishes its hold and starts
+        // fading, so the plane snaps into its low-pass position and the camera
+        // locks onto it while the screen is still fully opaque black, with
+        // 800ms to spare before the backdrop even begins clearing. `end_time`
+        // matches camera_tracks' LookAt below so the track releases control at
+        // the same instant physics resumes (un-paused and teleported to
+        // wherever this left off) - otherwise it'd keep reasserting its last
+        // keyframe and freeze the plane in place forever once flight resumes.
+        // Chosen altitude (300) is deliberately much lower than data.ron's own
+        // spawn (6000) - a low, close pass is the point of the ground-level
+        // camera watching it; physics resumes at this lower altitude too, so
+        // it's the plane's *effective* spawn from here on.
+        Position(
+            target: "player",
+            start_time: 3600,
+            end_time: Some(9000),
+            keyframes: [
+                (time: 0,    value: (x: 0.0, y: 1000.0, z: -1000.0)),
+                (time: 9000, value: (x: 0.0, y: 1000.0, z: 900.0)),
+            ],
+        ),
+    ],
+    // Mission-intro sequence: black title card -> the black screen clears to
+    // reveal the intro cinematic (see camera_tracks below) already in progress
+    // -> cut to the normal flight camera as the HUD appears. Node creation
+    // (backdrop, "mission_intro" title/location/date text, the initial
+    // HUD_KEYS set_active(false)) still happens in GameLogic::finish - this is
+    // just the timeline that used to be the hardcoded MissionIntroPhase state
+    // machine. Beats (see docs/animation_tracks.md):
+    //   0 - 800ms     black screen, silent
+    //   800 - 1600ms  title/location/date fade in
+    //   1600 - 3600ms hold (readable)
+    //   3600 - 4400ms title text + backdrop fade out together
+    //   4400 - 9000ms backdrop gone - cinematic camera fully visible (see
+    //                 camera_tracks; it's been running since 0, just hidden
+    //                 behind the backdrop until now)
+    //   9000 - 9600ms cut to flight camera, flight HUD fades in
+    //
+    // Got the earlier version of this backwards: the backdrop used to stay
+    // opaque all the way to 8500ms and the cinematic ended at 9300ms, so the
+    // camera work was running entirely *behind* the black screen - visible for
+    // a sliver of a second at best. This version front-loads the black-screen
+    // beat so there's an actual ~4.6s window to see the shot.
+    ui_tracks: [
+        Alpha(
+            target: "mission_intro/title",
+            keyframes: [
+                (time: 0,    value: 0.0),
+                (time: 800,  value: 0.0),
+                (time: 1600, value: 1.0),
+                (time: 3600, value: 1.0),
+                (time: 4400, value: 0.0),
+            ],
+        ),
+        Alpha(
+            target: "mission_intro/location",
+            keyframes: [
+                (time: 0,    value: 0.0),
+                (time: 800,  value: 0.0),
+                (time: 1600, value: 1.0),
+                (time: 3600, value: 1.0),
+                (time: 4400, value: 0.0),
+            ],
+        ),
+        Alpha(
+            target: "mission_intro/date",
+            keyframes: [
+                (time: 0,    value: 0.0),
+                (time: 800,  value: 0.0),
+                (time: 1600, value: 1.0),
+                (time: 3600, value: 1.0),
+                (time: 4400, value: 0.0),
+            ],
+        ),
+        Color(
+            target: "mission_intro_backdrop",
+            keyframes: [
+                (time: 0,    value: (r: 0, g: 0, b: 0, a: 255)),
+                (time: 3600, value: (r: 0, g: 0, b: 0, a: 255)),
+                (time: 4400, value: (r: 0, g: 0, b: 0, a: 0)),
+            ],
+        ),
+        // Stop blocking input / rendering once the card is fully gone.
+        Active(target: "mission_intro", start_time: 4400, keyframes: [ (time: 0, value: false) ]),
+        Active(target: "mission_intro_backdrop", start_time: 4400, keyframes: [ (time: 0, value: false) ]),
+
+        // Flight HUD - reactivated (GameLogic::finish starts it hidden) and
+        // faded in once the cinematic camera hands back (see camera_tracks'
+        // end_time, which matches this start_time exactly).
+        Active(target: "data_box", start_time: 9000, keyframes: [ (time: 0, value: true) ]),
+        Active(target: "compass", start_time: 9000, keyframes: [ (time: 0, value: true) ]),
+        Active(target: "speed", start_time: 9000, keyframes: [ (time: 0, value: true) ]),
+        Active(target: "velocity_marker", start_time: 9000, keyframes: [ (time: 0, value: true) ]),
+
+        Alpha(target: "data_box/timer", start_time: 9000, keyframes: [ (time: 0, value: 0.0), (time: 600, value: 1.0) ]),
+        Alpha(target: "data_box/framerate", start_time: 9000, keyframes: [ (time: 0, value: 0.0), (time: 600, value: 1.0) ]),
+        Alpha(target: "data_box/g", start_time: 9000, keyframes: [ (time: 0, value: 0.0), (time: 600, value: 1.0) ]),
+        Alpha(target: "data_box/power", start_time: 9000, keyframes: [ (time: 0, value: 0.0), (time: 600, value: 1.0) ]),
+        Alpha(target: "compass", start_time: 9000, keyframes: [ (time: 0, value: 0.0), (time: 600, value: 1.0) ]),
+        Alpha(target: "speed", start_time: 9000, keyframes: [ (time: 0, value: 0.0), (time: 600, value: 1.0) ]),
+        Alpha(target: "velocity_marker", start_time: 9000, keyframes: [ (time: 0, value: 0.0), (time: 600, value: 1.0) ]),
+
+        // data_box's translucent background - UiNode::set_alpha is a no-op on
+        // containers, so its background fades via a Color track instead (final
+        // alpha 128/255 ~= the old HUD_DATA_BOX_BG_ALPHA of 0.5).
+        Color(
+            target: "data_box",
+            start_time: 9000,
+            keyframes: [
+                (time: 0,   value: (r: 0, g: 0, b: 0, a: 0)),
+                (time: 600, value: (r: 0, g: 0, b: 0, a: 128)),
+            ],
+        ),
+    ],
+    // Intro cinematic: a low, fixed camera near the ground, looking up at the
+    // player plane as it flies a scripted low pass overhead (see the "player"
+    // Object3DTrack::Position above - physics is paused for this exact window,
+    // not just coasting on its own velocity like before), zooming in a little
+    // as it approaches. Starts exactly when the black screen/title card clears
+    // (4400ms) - no point running earlier, nothing would be visible behind the
+    // backdrop - and ends exactly when the flight HUD starts fading in (9000ms),
+    // so the cut back to the normal camera and the HUD appearing read as one
+    // beat. Tune position/fov/timing to taste - can't be previewed from here.
+    camera_tracks: [
+        LookAt(
+            target: "main",
+            look_at: "player",
+            position: (x: -500.0, y: 800.0, z: 1000.0),
+            // Keyframe times are local to this track's own start_time (3600) -
+            // the whole shot only stays active for end_time - start_time =
+            // 5400ms, so every keyframe here has to land inside that span or it
+            // never fires (a keyframe past 5400 is simply unreachable - the
+            // track goes silent at end_time before local_time ever gets there).
+            fov: [
+                (time: 0,    value: 80.0),
+                (time: 4200, value: 80.0),
+                (time: 5400, value: 20.0),
+            ],
+            start_time: 3600,
+            end_time: 9000,
+        ),
+    ],
 )
