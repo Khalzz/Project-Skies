@@ -34,7 +34,7 @@ const HINT_KEY: &str = "__free_camera_hint";
 const HINT_Y: f32 = HUD_Y + HUD_LINE_SPACING * 4.0;
 
 const MOVE_SPEED: f32 = 15.0;
-const SPRINT_MULTIPLIER: f32 = 3.0;
+const SPRINT_MULTIPLIER: f32 = 8.0;
 const MAX_PITCH_DEG: f32 = 89.0;
 const FOV_SCROLL_SPEED: f32 = 5.0;
 const FOV_MIN: f32 = 10.0;
@@ -55,22 +55,42 @@ struct FreeCameraState {
     // Cursor visibility to restore once this tool is toggled off, in case it wasn't
     // showing to begin with (e.g. relative mouse mode already hides it in gameplay).
     cursor_was_showing: Option<bool>,
+    // (game_ui_was_active, velocity_marker_was_active) - same idiom as
+    // App::paused_hud_visibility (see play::ui::open_pause_menu's own doc comment):
+    // remembers exactly which of these were showing before this tool hid them, so
+    // toggling back off restores that instead of forcing both on unconditionally
+    // (a no-op outside the "playing" scene, where neither key exists).
+    hud_was_active: Option<(bool, bool)>,
 }
 
-static STATE: Mutex<FreeCameraState> = Mutex::new(FreeCameraState { enabled: false, previous_camera: None, cursor_was_showing: None });
+static STATE: Mutex<FreeCameraState> = Mutex::new(FreeCameraState { enabled: false, previous_camera: None, cursor_was_showing: None, hud_was_active: None });
+
+/// Whether the free-fly tool currently owns the active camera - callers that also
+/// drive a scene's own camera every frame (e.g. play::scene::GameLogic::camera_control)
+/// need to skip their own per-frame camera mutation while this is true, otherwise both
+/// would fight over the same active camera's transform (this tool switches to and
+/// drives its own dedicated camera, but doesn't stop whatever else is still writing to
+/// "the active camera" each frame - that has to check this itself).
+pub fn is_enabled() -> bool {
+    STATE.lock().unwrap().enabled
+}
 
 /// Dev-only free-fly camera tool for building/testing this game - toggled with the
 /// "toggle_camera_debug" action (F4), opt-in per scene by calling this once per frame
-/// from that scene's own update (see main_menu.rs). Doesn't touch whatever camera the
-/// scene already has active: it generates its own dedicated camera and switches to it
-/// while enabled (seeded from the current view, so the switch itself is invisible),
-/// then smoothly blends control back to whatever was active before once toggled back
-/// off (see CameraHandler::transition_to/HANDOFF_TRANSITION_SECS) instead of an
-/// instant cut - the scene's real camera is never mutated. While active: mouse look + WASD/Space/Left
-/// Ctrl fly the camera (hold Left Shift to sprint), scroll adjusts fov, and a HUD
-/// shows its live position/yaw/pitch/fov. The system cursor is hidden while active
-/// and restored to its prior visibility on toggle-off. A one-line hint showing the
-/// toggle button is always on screen, regardless of enabled state.
+/// from that scene's own update (see main_menu.rs and play::scene::GameLogic::update -
+/// the latter also has to check `is_enabled()` in its own `camera_control` to stop
+/// fighting this tool over the active camera, see that fn's own doc comment). Doesn't
+/// touch whatever camera the scene already has active: it generates its own dedicated
+/// camera and switches to it while enabled (seeded from the current view, so the
+/// switch itself is invisible), then smoothly blends control back to whatever was
+/// active before once toggled back off (see CameraHandler::transition_to/
+/// HANDOFF_TRANSITION_SECS) instead of an instant cut - the scene's real camera is
+/// never mutated. While active: mouse look + WASD/Space/Left Ctrl fly the camera (hold
+/// Left Shift to sprint), scroll adjusts fov, a HUD shows its live position/yaw/pitch/
+/// fov, and the flight HUD (if present - see `hud_was_active`'s own doc comment) hides
+/// for the duration. The system cursor is hidden while active and restored to its
+/// prior visibility on toggle-off. A one-line hint showing the toggle button is always
+/// on screen, regardless of enabled state.
 pub fn update(app: &mut App) {
     let mut state = STATE.lock().unwrap();
 
@@ -89,9 +109,38 @@ pub fn update(app: &mut App) {
             let mouse = app.window_manager.context.mouse();
             state.cursor_was_showing = Some(mouse.is_cursor_showing());
             mouse.show_cursor(false);
+
+            // Hide the flight HUD while flying free (a no-op in scenes with no
+            // "game_ui"/"velocity_marker" key, e.g. main_menu) - this tool is meant
+            // for inspecting the world, not the plane's own instruments, and the
+            // HUD's screen-space elements (compass/speed/velocity marker) would
+            // otherwise keep tracking the plane from underneath an unrelated view.
+            // Remembers whichever were actually active (same reasoning as
+            // App::paused_hud_visibility) so toggling back off restores exactly
+            // that instead of forcing both back on - matters if this is toggled
+            // before the mission-intro's own HUD reveal, or while already paused.
+            let game_ui_active = app.ui.renderizable_elements.get("game_ui").is_some_and(|n| n.is_active);
+            let velocity_marker_active = app.ui.renderizable_elements.get("velocity_marker").is_some_and(|n| n.is_active);
+            state.hud_was_active = Some((game_ui_active, velocity_marker_active));
+            if let Some(node) = app.ui.renderizable_elements.get_mut("game_ui") {
+                node.set_active(false);
+            }
+            if let Some(node) = app.ui.renderizable_elements.get_mut("velocity_marker") {
+                node.set_active(false);
+            }
+            app.ui.has_changed = true;
         } else {
             if let Some(previous) = state.previous_camera.take() {
                 app.camera.transition_to(&previous, HANDOFF_TRANSITION_SECS);
+            }
+            if let Some((game_ui_active, velocity_marker_active)) = state.hud_was_active.take() {
+                if let Some(node) = app.ui.renderizable_elements.get_mut("game_ui") {
+                    node.set_active(game_ui_active);
+                }
+                if let Some(node) = app.ui.renderizable_elements.get_mut("velocity_marker") {
+                    node.set_active(velocity_marker_active);
+                }
+                app.ui.has_changed = true;
             }
             if let Some(was_showing) = state.cursor_was_showing.take() {
                 app.window_manager.context.mouse().show_cursor(was_showing);

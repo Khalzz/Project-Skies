@@ -12,60 +12,10 @@ use crate::game::ui::{button, label, main_fade_gradient, with_left_accent};
 use super::rebind_modal;
 
 const SETTINGS_TABS: [&str; 3] = ["Video", "Controller", "Audio"];
-
-/// Settings' own background - a flat, semi-transparent dark tint rather than
-/// the main menu's left-to-transparent gradient (that gradient exists to keep
-/// "Project Skies" and the 3 buttons readable over the moving 3D scene behind
-/// them; Settings has enough of its own content that a flat backdrop reads
-/// better than a gradient repeating behind a whole sidebar+content layout).
-/// See `show_panel`, which lerps the shared "Backdrop" node between this and
-/// `main_fade_gradient()` as the player navigates between panels.
-///
-/// `text_shader.wgsl`'s blur branch mixes the blurred scene with this color
-/// weighted by this color's own alpha (`mix(backdrop, in.color.rgb,
-/// in.color.a)`, output fully opaque so nothing else shows through - see that
-/// branch's own comment) - real CSS `backdrop-blur` + `bg-black/N` semantics,
-/// so this alpha is the only knob for "how dark/opaque vs. how much blurred
-/// scene shows through". High enough that even a bright blurred sky reads as
-/// dark - the 3D scene behind Settings isn't itself dimmed, so a lower alpha
-/// here (this used to be 150) let a bright blurred sky wash the panel out
-/// toward gray/white despite being mostly tint by that same math.
 const SETTINGS_BACKDROP: UiColor = UiColor::Rgba(0, 0, 0, 250);
-
-/// How much the persistent "Backdrop" node blurs whatever's behind it (the 3D
-/// scene) while Settings is open - see `show_panel`, which fades this in/out
-/// alongside `SETTINGS_BACKDROP` on the same node/transition, same reasoning
-/// as `main_fade_gradient()`'s own doc comment for why it's one shared node.
-/// 0.0 the rest of the time (Main Menu wants the scene crisp behind it).
-///
-/// Kept at exactly `BlurRender::MAX_BLUR_RADIUS` (64.0, "fully blurred" -
-/// matches Tailwind's `backdrop-blur-3xl`), not higher: `background_color`
-/// and this both lerp from the same per-frame `t` in `ResolvedStyle::lerp`,
-/// but text_shader.wgsl's blur crossfade saturates at `background_blur /
-/// MAX_BLUR_RADIUS` - a target *larger* than that (this was briefly 200)
-/// means the lerped value visually maxes out the blur well before it
-/// numerically reaches its own target, so blur reads as "snapping in early,
-/// then holding static" while background_color keeps smoothly fading for the
-/// rest of the transition - two visibly separate stages instead of one
-/// smooth blend, even though both fields are animating in perfect lockstep
-/// the whole time. Setting the target equal to the saturation point is what
-/// makes blur's *visible* progress track background_color's the whole way,
-/// so they finish together.
 const SETTINGS_BLUR: f32 = 64.0;
 
-/// The single persistent full-screen background both "Main Menu" and
-/// "Settings" render on top of (see `build`, which registers it in
-/// `app.ui.always_on_bottom` so it's guaranteed to render behind them
-/// regardless of `renderizable_elements`' HashMap iteration order - see
-/// `Ui::always_on_bottom`'s own doc comment). A `.set_transition(...)` on a
-/// single shared node, updated in place by `show_panel`, is what makes the
-/// background *animate* between the main menu's gradient and Settings' solid
-/// color as you navigate - each panel keeping its own copy (the original
-/// design) can't do that, since an inactive node's own transition state is
-/// frozen rather than ticking (see `UiNode::node_content_preparation`'s
-/// `is_active` early return), so switching panels would just cut instantly
-/// from one panel's background to the other's rather than blending between them.
-fn backdrop() -> UiNode {
+pub(crate) fn backdrop() -> UiNode {
     UiNode::container()
         .set_size(SizeValue::Percent(100.0), SizeValue::Percent(100.0))
         .set_position(PositionValue::Start(0.0), PositionValue::Start(0.0))
@@ -113,12 +63,11 @@ fn show_settings_tab(app: &mut App, id: &str) {
     }
 }
 
-/// A `with_left_accent` button sized/padded for a sidebar row - taller than
-/// `button()`'s own default padding gives (2px top/bottom read as visually thin
-/// stacked one after another down a sidebar) so each row is a comfortable
-/// height and click target, without going as far as feeling padded/bloated.
-fn sidebar_button(app: &mut App, text: &str, on_click: impl Fn(&mut App) + 'static) -> UiNode {
-    with_left_accent(button(app, text, on_click).set_size(SizeValue::Grow, SizeValue::Fit).set_padding((14.0, 6.0)))
+/// A `with_left_accent` button sized for a sidebar row - `button()`'s own
+/// default padding, same height as the main menu's own top-level Play/
+/// Settings/Quit buttons (see `build`), not overridden to something taller.
+pub(crate) fn sidebar_button(app: &mut App, text: &str, on_click: impl Fn(&mut App) + 'static) -> UiNode {
+    with_left_accent(button(app, text, on_click).set_size(SizeValue::Grow, SizeValue::Fit))
 }
 
 /// An invisible spacer that claims *all* the leftover main-axis space in its
@@ -137,7 +86,18 @@ pub fn grow_spacer() -> UiNode {
 /// sidebar of `with_left_accent`-styled buttons (persistent accent on the
 /// selected tab, hover preview on the others) instead of a tab strip with
 /// borders on every side, and a transparent content area to its right.
-fn settings_ui(app: &mut App) -> UiNode {
+///
+/// `on_back` is what the sidebar's own "Back" button does - the main menu's
+/// own call site passes `|app| show_panel(app, "Main Menu")`, but this fn has
+/// no dependency on that panel existing (see `play::ui`'s pause-menu reuse of
+/// this same fn, which passes its own equivalent instead) - only the tab
+/// switching (`show_settings_tab`, hardcoded to this node's own
+/// "Settings/Content/{tab}"/"Settings/Sidebar/{tab}" children) assumes this
+/// tree is always registered under the literal id "Settings", which is safe
+/// across scenes since only one scene's UI tree is ever alive at a time (see
+/// `SceneManager`'s reset semantics, which clear `app.ui` before a scene
+/// rebuilds its own).
+pub(crate) fn settings_ui(app: &mut App, on_back: impl Fn(&mut App) + 'static) -> UiNode {
     UiNode::container()
         .set_background_color(UiColor::TRANSPARENT)
         .set_size(SizeValue::Grow, SizeValue::Grow)
@@ -155,7 +115,7 @@ fn settings_ui(app: &mut App) -> UiNode {
                 .set_child("Video", sidebar_button(app, "Video", |app| show_settings_tab(app, "Video")))
                 .set_child("Audio", sidebar_button(app, "Audio", |app| show_settings_tab(app, "Audio")))
                 .set_child("BackSpacer", grow_spacer())
-                .set_child("Back", sidebar_button(app, "Back", |app| show_panel(app, "Main Menu")))
+                .set_child("Back", sidebar_button(app, "Back", on_back))
         )
         .set_child("Content",
             UiNode::container()
@@ -515,7 +475,7 @@ pub fn build(app: &mut App) {
     Layer::new(app)
         .set_child("Backdrop", backdrop())
         .set_child("Main Menu", main_menu)
-        .set_child("Settings", settings_ui(app))
+        .set_child("Settings", settings_ui(app, |app| show_panel(app, "Main Menu")))
         .set_child("Play Select", play_select_ui(app))
         .set_child("RebindModal", rebind_modal::build(app))
         .build(app);

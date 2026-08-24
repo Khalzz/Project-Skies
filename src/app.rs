@@ -73,6 +73,25 @@ pub struct App {
     pub render_physics: RenderPhysics,
     // Opt-in: None by default, assign before calling run() to show a splash screen.
     pub splash_screen: Option<SplashScreenConfig>,
+    // Set/cleared by play::ui::open_pause_menu/close_pause_menu - a UI button's
+    // on_click only ever gets `&mut App` (see UiNode::on_click), not the
+    // physics command channel (that only exists inside GameLogic::update's own
+    // FrameContext), so a button can't send PhysicsCommand::TogglePause
+    // directly. This flag is the handoff: GameLogic::update polls it every
+    // frame and reacts to its rising/falling edge (same idiom as
+    // `was_cinematic_active`) to actually pause/resume physics and gate
+    // `Plane::update`. Meaningless outside the "playing" scene, same as
+    // `show_depth_map`/other single-scene debug flags already living here.
+    pub is_paused: bool,
+    // (game_ui_was_active, velocity_marker_was_active) - set by
+    // play::ui::open_pause_menu, consumed by close_pause_menu. The flight HUD
+    // is force-hidden while paused (it'd otherwise still show through/around
+    // PauseBackdrop's gradient), but *which* of these were actually visible
+    // depends on where in the scene's own timeline pausing happened (e.g.
+    // during the mission-intro, before the HUD's own reveal, both are still
+    // false) - remembering the real value here is what lets closing the menu
+    // restore exactly that instead of just forcing both back on.
+    pub paused_hud_visibility: Option<(bool, bool)>,
 }
 
 impl App {
@@ -163,12 +182,20 @@ impl App {
             audio: Audio::new(),
             render_physics,
             splash_screen: None,
+            is_paused: false,
+            paused_hud_visibility: None,
         })
     }
 
     pub fn resize(&mut self) {
-        let width = self.window_manager.current_display.w as u32;
-        let height = self.window_manager.current_display.h as u32;
+        self.window_manager.refresh_size();
+        // Real backing pixels (see WindowManager::pixel_size) - these three all
+        // size actual GPU render targets/aspect ratio, which have to match the
+        // surface's real resolution, not the window's points size. UI layout/
+        // hit-testing elsewhere stays on window_manager.size (points) - see
+        // that field's own doc comment.
+        let width = self.window_manager.pixel_size.width;
+        let height = self.window_manager.pixel_size.height;
 
         self.renderer.resize(width, height);
         self.camera.resize(width, height);
@@ -191,7 +218,7 @@ impl App {
 
         self.renderer.queue.submit(std::iter::once(encoder.finish()));
         output.present();
-        
+
         Ok(())
     }
 
@@ -252,6 +279,13 @@ impl App {
         // today, so nothing can occlude them in turn.
         let blocks_input = on_top_nodes.iter().any(|(_, n)| n.is_active);
 
+        // Points -> real backing pixels (see WindowManager::pixel_size's own doc
+        // comment) - node_content_preparation needs this to place glyphon
+        // TextAreas correctly, since glyphon's own coordinate space is always
+        // real pixels regardless of what space everything else here (UiTransform,
+        // mouse position) is in. See Label::text_area's own doc comment.
+        let dpi_scale = self.window_manager.pixel_size.width as f32 / self.window_manager.size.width as f32;
+
         // Debug bounds overlay (F2) - has to run before node_content_preparation
         // below, not after: that call's returned TextAreas keep *ui_node mutably
         // borrowed for as long as they're alive (all the way to text_areas being
@@ -265,13 +299,13 @@ impl App {
         macro_rules! prepare_node {
             ($ui_node:expr, $hit_testable:expr, $text_areas:expr) => {
                 if self.ui.debug_bounds {
-                    $ui_node.debug_bounds_preparation(&self.window_manager.size, &mut self.ui.ui_rendering);
+                    $ui_node.debug_bounds_preparation(&self.window_manager.size, dpi_scale, &mut self.ui.ui_rendering);
                 }
                 // None - top-level nodes start unclipped; a scrollable
                 // container establishes its own clip for its descendants
                 // further down the recursion (see node_content_preparation's
                 // Container branch/clip_rect's own doc comment).
-                let (textareas_to_merge, _vertices_to_add, _indices_to_add) = $ui_node.node_content_preparation(&self.window_manager.size, &mut self.ui.ui_rendering, &mut self.ui.text.font_system, self.time.delta_time, $hit_testable, None);
+                let (textareas_to_merge, _vertices_to_add, _indices_to_add) = $ui_node.node_content_preparation(&self.window_manager.size, dpi_scale, &mut self.ui.ui_rendering, &mut self.ui.text.font_system, self.time.delta_time, $hit_testable, None);
                 $text_areas.extend(textareas_to_merge);
             };
         }
@@ -593,10 +627,25 @@ impl App {
                 }
 
                 // Apply physics data to transforms first with smoothing
-                for (_key, renderizable) in &mut self.renderizable_instances {
-                    if let Some(physics_data) = physics_data.get(&_key.to_string()) {
-                        renderizable.instance.transform.position = physics_data.translation;
-                        renderizable.instance.transform.rotation = nalgebra::Unit::new_normalize(physics_data.rotation);
+                // Skipped while paused - PhysicsCommand::TogglePause (sent the
+                // instant the pause menu opens, see GameLogic::update) doesn't
+                // take effect on the physics thread the same instant it's
+                // sent - that thread runs independently and may still be a
+                // step or two ahead in flight when this fires. Without this
+                // gate, whatever it sends back in that gap keeps landing on
+                // the plane's render transform for a few more frames after
+                // the camera's already frozen (see camera_control's own early
+                // return once app.is_paused), reading as the plane visibly
+                // coasting forward a little after everything else has
+                // stopped. Skipping this loop entirely just holds the render
+                // transform at wherever it already was the instant pausing
+                // began, matching the camera exactly.
+                if !self.is_paused {
+                    for (_key, renderizable) in &mut self.renderizable_instances {
+                        if let Some(physics_data) = physics_data.get(&_key.to_string()) {
+                            renderizable.instance.transform.position = physics_data.translation;
+                            renderizable.instance.transform.rotation = nalgebra::Unit::new_normalize(physics_data.rotation);
+                        }
                     }
                 }
 
@@ -726,7 +775,7 @@ impl App {
 
             match self.render() {
                 Ok(_) => {},
-                Err(wgpu::SurfaceError::Outdated) => { 
+                Err(wgpu::SurfaceError::Outdated) => {
                     self.resize()
                 }
                 Err(wgpu::SurfaceError::Lost) => {

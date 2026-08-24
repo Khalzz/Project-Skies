@@ -5,33 +5,20 @@ use nalgebra::{vector, Point3, Quaternion, UnitQuaternion, Vector3};
 use rand::{rngs::ThreadRng, Rng};
 use rapier3d::prelude::RigidBody;
 use sdl2::{controller::GameController};
-use crate::{app::{App, AppState}, engine::audio::subtitles::Subtitle, engine::input::input, engine::physics::physics_handler::{MetadataType, PhysicsCommand, PhysicsData, PhysicsTick, RenderMessage}, engine::primitive::manual_vertex::ManualVertex, engine::rendering::{camera::CameraHandler, ui::ui::Ui}, engine::scene_manager::scene::{FrameContext, Scene}, transform::Transform, engine::ui::{color::UiColor, ui_node::{UiNode, UiNodeContent}, ui_transform::{Anchor, Orientation, PositionValue, SizeValue, UiTransform}}, engine::utils::lerps::{lerp, lerp_quaternion}};
+use crate::{app::{App, AppState}, engine::audio::subtitles::Subtitle, engine::input::input, engine::physics::physics_handler::{MetadataType, PhysicsCommand, PhysicsData, PhysicsTick, RenderMessage}, engine::primitive::manual_vertex::ManualVertex, engine::rendering::{camera::CameraHandler, ui::ui::Ui}, engine::scene_manager::scene::{FrameContext, Scene}, transform::Transform, engine::ui::{color::UiColor, ui_node::{UiNode, UiNodeContent}, ui_transform::{Anchor, Orientation, PositionValue, SizeValue, UiTransform}}, engine::utils::lerps::{lerp, lerp_point3, lerp_quaternion, smoothstep}};
 use super::{event_handling::EventSystem, plane::{physics_logic::PlanePhysicsLogic, plane::Plane}};
 use std::sync::mpsc::Sender;
 use crate::game::play::plane::plane::PlaneControls;
 use crate::game::selected_level::SELECTED_LEVEL;
 use crate::game::ui::label;
+use crate::game::play::ui as play_ui;
 use crate::resources::PreparedSceneAssets;
 use crate::engine::tooling::debug_console;
-use crate::debug_text;
+use crate::game::tooling::free_camera;
 
-/// Which top-level `game_ui.ron` nodes make up the normal flight HUD (see
-/// `assets/ui/game_ui.ron`) - hidden here at scene start, reactivated + faded
-/// back in by the `Active`/`Alpha` tracks in `level_planning.ron` (see
-/// `docs/animation_tracks.md`) once the mission-intro card is done. Not every
-/// key `ui_control` reaches for exists in that RON
-/// file today ("altitude"/"altitude_alert"/"stall_alert" are stale references to
-/// nodes that were never added there - `Ui::get_ui_node` just no-ops on a missing
-/// key) - this list only needs the ones that actually do.
-///
-/// Deliberately does NOT include "subtitles" - dialogue outranks the mission-intro
-/// card, so a line queued right at scene start should still be readable over it
-/// rather than getting suppressed until the intro finishes. Its own alpha is
-/// already fully owned by `Subtitle::update` (it rests at alpha 0 in
-/// assets/ui/game_ui.ron, only shown when there's actually a line queued), so
-/// simply never touching it here - not hiding it, not fading it back in - is
-/// enough to leave it live through every phase of the intro.
-const HUD_KEYS: [&str; 4] = ["data_box", "compass", "speed", "velocity_marker"];
+// Note: "altitude"/"altitude_alert"/"stall_alert" below are stale references
+// to nodes that were never added to the flight HUD (see play::ui) -
+// `Ui::get_ui_node` just no-ops on a missing key.
 
 // The normal flight follow-cam's own FOV - matches CameraHandler::new's default
 // for "main". Asserted every frame by CameraState::Normal (see camera_control)
@@ -73,6 +60,34 @@ pub struct CameraData {
     pub free_current_rotation: UnitQuaternion<f32>,
     pub free_target_fov: f32,
     pub free_current_fov: f32,
+    // Set the instant a CameraTrack::Shot's window ends (see GameLogic::update's
+    // cinematic falling-edge block), consumed and cleared by camera_control's own
+    // final-apply step - see that field's own doc comment for why this lives here
+    // instead of using CameraHandler::transition_to.
+    cinematic_return_blend: Option<CinematicReturnBlend>,
+}
+
+// A Shot track writes straight into "main" every frame it's active (see
+// animation_tracks.rs's own doc comment on why - "assert every field every frame"),
+// and the instant its window ends it simply stops running, leaving whatever
+// camera_control's own CameraState computes for *this* frame to land with no
+// transition at all - a hard cut. CameraHandler::transition_to doesn't fit here:
+// it blends toward a *named* camera's live value, but camera_control only ever
+// writes through `active_mut()` (never by name), so the moment a transition starts,
+// `select_camera` would swap "main" out from under it and it'd stop being written to
+// entirely until the blend finishes - a stall-then-snap, not an improvement. Blending
+// locally instead, in the one place that's already the sole per-frame writer of
+// "main"'s pose, sidesteps that: the "from" pose is a value snapshot (position +
+// look-at point reconstructed from yaw/pitch via calc_forward_direction, since Camera
+// itself has no look-at-point field), the "to" pose is whatever camera_control's
+// current CameraState just computed *this* frame - always live, since it's read on
+// the same frame it's produced.
+struct CinematicReturnBlend {
+    elapsed: f32,
+    duration: f32,
+    from_position: Point3<f32>,
+    from_look_at: Point3<f32>,
+    from_fov: f32,
 }
 
 pub struct BlinkingAlert {
@@ -99,6 +114,17 @@ pub struct PlaneSystems {
     pub base_rotations: BaseRotations,
     pub flap_ratio: f32,
     pub previous_velocity: Option<Vector3<f32>>,
+    // Real time since `previous_velocity` last actually changed - physics runs
+    // its own fixed 120Hz step (see physics_handler.rs's FIXED_TIMESTEP) on a
+    // separate thread, decoupled from render frame rate, so `data.linvel` (see
+    // plane_movement's G-meter calc) only changes once every ~8.3ms regardless
+    // of how often this runs. At a render rate faster than that, most frames
+    // see the exact same velocity and skip the calc; the one frame that does
+    // see a change has to divide by however long it's actually been since the
+    // last change, not that single frame's own (much smaller) delta_time - the
+    // frame-rate-dependent G-force inflation this fixes came from dividing a
+    // real, physics-tick-sized Δv by a tiny render-frame-sized Δt instead.
+    velocity_sample_elapsed: f32,
 }
 
 pub struct GameLogic { // here we define the data we use on our script
@@ -115,6 +141,17 @@ pub struct GameLogic { // here we define the data we use on our script
     // Last frame's CameraTrack::LookAt-active state - lets `update` detect the
     // exact rising/falling edge to pause/resume physics on, see its own comment.
     was_cinematic_active: bool,
+    // Last frame's `app.is_paused` - same rising/falling-edge idiom as
+    // `was_cinematic_active`, for the pause menu (see `App::is_paused`'s own
+    // doc comment for why this can't just react synchronously inside the
+    // pause menu's own UI button callbacks).
+    was_paused: bool,
+    // Seconds ESC has been held continuously during an `EventSystem::
+    // input_lock_end` window - see `update`'s own "hold ESC to skip" handling.
+    // Reset to 0.0 the instant ESC isn't held or the lock ends, so a skip
+    // always needs a single unbroken hold, not an accumulated total across
+    // several taps.
+    esc_hold_time: f32,
 }
 
 impl GameLogic {
@@ -134,28 +171,59 @@ impl GameLogic {
         // visible.
         app.camera.select_camera("main");
 
-        app.ui.load_ui("./assets/ui/game_ui.ron", app.renderer.config.width, app.renderer.config.height, &app.renderer.device, &app.renderer.queue);
+        // Defensive reset - see App::is_paused's own doc comment. Should
+        // already be false by the time a scene starts (both pause-menu exit
+        // paths clear it before triggering the reset that lands here), but a
+        // scene that isn't "playing" (e.g. the main menu) never touches this
+        // flag at all, so it'd otherwise carry over stale from wherever it
+        // was last left.
+        app.is_paused = false;
 
-        // Mission-intro card: hide the normal flight HUD immediately (see
-        // HUD_KEYS - the `Active`/`Alpha` ui_tracks in level_planning.ron bring
-        // it back once the card's done), build a full-screen black backdrop plus
+        // Flight HUD - built inactive (see play::ui::build_game_ui's own doc
+        // comment); the `Active` ui_tracks in level_planning.ron bring it back
+        // once the mission-intro card below is done.
+        let screen_width = app.window_manager.size.width as f32;
+        let screen_height = app.window_manager.size.height as f32;
+
+        // add_to_ui inserts straight into renderizable_elements, unlike a
+        // Layer::build-constructed node - nothing else ever resolves a node's
+        // pending Percent/Pixels size or Start/Center/End position against the
+        // real screen size, so without this each of these three would silently
+        // stay at whatever 0-sized/0-positioned default UiTransform::new gives
+        // a brand new node (see the identical comment on `backdrop` below).
+        let mut game_ui = play_ui::build_game_ui(app);
+        game_ui.resolve(screen_width, screen_height);
+        app.ui.add_to_ui("game_ui".to_owned(), game_ui);
+        let mut velocity_marker = play_ui::build_velocity_marker(app);
+        velocity_marker.resolve(screen_width, screen_height);
+        app.ui.add_to_ui("velocity_marker".to_owned(), velocity_marker);
+        let mut subtitles = play_ui::build_subtitles(app);
+        subtitles.resolve(screen_width, screen_height);
+        app.ui.add_to_ui("subtitles".to_owned(), subtitles);
+        let mut skip_prompt = play_ui::build_skip_prompt(app);
+        skip_prompt.resolve(screen_width, screen_height);
+        app.ui.add_to_ui("skip_prompt".to_owned(), skip_prompt);
+        let mut debug_panel = play_ui::build_debug_panel(app);
+        debug_panel.resolve(screen_width, screen_height);
+        app.ui.add_to_ui("debug_panel".to_owned(), debug_panel);
+
+        // Pause menu ("Escape") - see play::ui::build_pause_menu's own doc
+        // comment. Registers its own layer (uses Layer::build, not the manual
+        // resolve()+add_to_ui above, since it needs several independently-
+        // addressable top-level nodes at once).
+        play_ui::build_pause_menu(app);
+
+        // Mission-intro card: build a full-screen black backdrop plus
         // the (invisible-at-rest) title/location/date stack from whatever
         // main_menu::ui::show_level last staged in SELECTED_LEVEL (falling
         // back to placeholder text if the scene was somehow opened without
         // going through Play Select first) - both fade in/out together, driven
         // by the same ui_tracks (see docs/animation_tracks.md).
-        for key in HUD_KEYS {
-            if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, key) {
-                node.set_active(false);
-            }
-        }
         let selected = SELECTED_LEVEL.lock().unwrap().clone();
         let (mission_title, location, mission_date) = match selected {
             Some(level) => (level.mission_title, level.location, level.mission_date),
             None => ("Unknown Mission".to_owned(), String::new(), String::new()),
         };
-        let screen_width = app.renderer.config.width as f32;
-        let screen_height = app.renderer.config.height as f32;
 
         let mut backdrop = UiNode::container()
             .set_size(SizeValue::Percent(100.0), SizeValue::Percent(100.0))
@@ -177,10 +245,11 @@ impl GameLogic {
         app.ui.always_on_top.push("mission_intro_backdrop".to_owned());
         app.ui.always_on_top.push("mission_intro".to_owned());
         // "subtitles" goes on top of both (pushed last) - dialogue outranks the
-        // mission-intro card (see HUD_KEYS's own doc comment on why it's never
-        // hidden/faded by the intro sequence at all), so without this it'd stay
-        // correctly *active* through the intro but still render underneath the
-        // opaque black backdrop, effectively invisible anyway.
+        // mission-intro card (see play::ui::build_subtitles's own doc comment
+        // on why it's never hidden/faded by the intro sequence at all), so
+        // without this it'd stay correctly *active* through the intro but
+        // still render underneath the opaque black backdrop, effectively
+        // invisible anyway.
         app.ui.always_on_top.push("subtitles".to_owned());
 
         let mission_intro_line = |app: &mut App, text: &str, size: f32, color: UiColor| {
@@ -315,6 +384,7 @@ impl GameLogic {
             free_current_rotation: UnitQuaternion::identity(),
             free_target_fov: 60.0,
             free_current_fov: 60.0,
+            cinematic_return_blend: None,
         };
 
         let fellow = Bandit {
@@ -344,6 +414,7 @@ impl GameLogic {
             base_rotations: BaseRotations { left_aleron: None, right_aleron: None },
             flap_ratio: 0.0,
             previous_velocity: None,
+            velocity_sample_elapsed: 0.0,
             flight_data: FlightData { altimeter: 0.0, speedometer: 0.0, g_meter: 1.0 }
         };
 
@@ -379,11 +450,135 @@ impl GameLogic {
             game_time: 0.0,
             plane: Plane::new(),
             was_cinematic_active: false,
+            was_paused: false,
+            esc_hold_time: 0.0,
         }
     }
 
+    // How long ESC has to be held during an EventSystem::input_lock_end
+    // window before it counts as a skip - see `update`'s own handling.
+    const SKIP_HOLD_SECONDS: f32 = 1.2;
+
     // this is called every frame
     pub fn update(&mut self, app: &mut App, plane_control_tx: Option<&Sender<PlaneControls>>, physics_command_tx: Option<&Sender<PhysicsCommand>>, physics_data: &HashMap<String, RenderMessage>) {
+        // Free-fly debug camera (F4, see game::tooling::free_camera's own doc
+        // comment) - runs unconditionally, before the pause check below, so
+        // toggling it and pressing Escape to pause both keep working regardless
+        // of the other's state (pause menu stays reachable while flying free;
+        // the tool keeps flying if toggled on while already paused).
+        free_camera::update(app);
+
+        // F3 debug view - shows/hides in lockstep with the console toggle,
+        // same "set_active every frame, no separate dirty-tracking" idiom
+        // skip_prompt below already uses (its own text is updated inside
+        // ui_control, right alongside compass/speed/etc. - not from a
+        // function of its own).
+        if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "debug_panel") {
+            node.set_active(debug_console::is_console_visible());
+        }
+
+        // Whether player input is locked out right now (see EventSystem::
+        // input_lock_end's own doc comment) - checked against this frame's
+        // not-yet-incremented game_time, one frame stale at worst, which
+        // doesn't matter for a coarse window check like this.
+        let input_lock_end = self.event_system.as_ref().and_then(|es| es.input_lock_end(self.game_time));
+        if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "skip_prompt") {
+            node.set_active(input_lock_end.is_some());
+        }
+
+        if let Some(lock_end_ms) = input_lock_end {
+            // Only a "hold ESC to skip" affordance works during a locked
+            // sequence - not the pause menu itself (see EventSystem::
+            // input_lock_end's own doc comment on why input locking is its
+            // own concept rather than reusing is_cinematic_camera_active).
+            if input::is_action_pressed("toggle_pause_menu") {
+                self.esc_hold_time += app.time.delta_time;
+                if self.esc_hold_time >= Self::SKIP_HOLD_SECONDS {
+                    // Jump to just *before* the lock ends, not past/at it -
+                    // this frame's own apply_tracks call (further down) still
+                    // samples inside the window one last time, landing every
+                    // scripted object/camera at its authored final position,
+                    // rather than leaving whatever was on screen mid-sequence
+                    // as the abrupt "final" frame. The window's own falling
+                    // edge (e.g. the cinematic pause/resume handling below)
+                    // then fires naturally next frame, exactly as if the
+                    // sequence had simply finished on its own.
+                    self.game_time = lock_end_ms.saturating_sub(1) as f64 / 1000.0;
+                    self.esc_hold_time = 0.0;
+                }
+            } else {
+                self.esc_hold_time = 0.0;
+            }
+        } else {
+            self.esc_hold_time = 0.0;
+
+            // Pause menu ("Escape") - see App::is_paused's own doc comment for
+            // why this flag lives on App rather than here, and play::ui::
+            // open_pause_menu/close_pause_menu for what actually toggles it.
+            // Has to run before the early-return below, since it's what
+            // actually clears app.is_paused again on resume.
+            if input::is_action_just_pressed("toggle_pause_menu") {
+                if app.is_paused {
+                    play_ui::close_pause_menu(app);
+                } else {
+                    play_ui::open_pause_menu(app);
+                }
+            }
+        }
+
+        // Rising/falling edge, same idiom as the cinematic pause/resume below -
+        // no SetTransform teleport needed here (unlike the cinematic case,
+        // nothing else is scripting the plane's position while paused, so
+        // physics's own resting state is exactly where it should resume from).
+        // Also has to run before the early-return, since it's what actually
+        // (un)pauses physics.
+        let just_paused = app.is_paused && !self.was_paused;
+        if let Some(physics_command_tx) = physics_command_tx {
+            if just_paused {
+                let _ = physics_command_tx.send(PhysicsCommand::TogglePause);
+            } else if !app.is_paused && self.was_paused {
+                let _ = physics_command_tx.send(PhysicsCommand::TogglePause);
+            }
+        }
+        self.was_paused = app.is_paused;
+
+        if app.is_paused {
+            // App::run applies this frame's fresh physics data to render
+            // transforms *before* calling this fn - so on the exact frame
+            // pausing begins, the plane's position has already caught up to
+            // the latest physics tick by the time we get here, but
+            // camera_control (below) hasn't run yet for this frame. Skipping
+            // it outright (like every following frame, once already paused)
+            // would leave the camera's last-written position one frame
+            // stale relative to that just-applied plane position - reading
+            // as the plane hopping slightly out ahead of the camera right as
+            // it pauses. Running it this one extra time syncs the camera to
+            // the exact same fresh state before anything actually freezes.
+            if just_paused {
+                self.camera_control(app, app.time.delta_time);
+            }
+
+            // Freeze the entire gameplay simulation - game_time (and by
+            // extension every animation track sampled off it), flight/
+            // afterburner animation, camera follow-cam and the "change_camera"
+            // switch, HUD text - none of it should keep advancing behind the
+            // pause menu. The menu's own buttons are handled independently of
+            // this fn (see App::fire_ui_click_handlers), so returning early
+            // here doesn't block Resume/Restart/Settings from working.
+            //
+            // UI vertex buffers *and* hover/click hit-testing only run when
+            // the UI is marked dirty (see UiNode::on_click's own doc comment)
+            // - the HUD never needed this (nothing in it is hoverable/
+            // clickable), but the pause menu's buttons are, so without this
+            // it'd render whatever was on screen the instant it opened
+            // (usually nothing yet, since it was still inactive that frame)
+            // and never register a hover or a click again. Same idiom
+            // main_menu::scene::GameLogic::update already uses unconditionally
+            // every frame, scoped here to just while paused instead.
+            app.ui.has_changed = true;
+            return;
+        }
+
         self.game_time += app.time.delta_time as f64;
 
         if input::is_action_just_pressed("test") {
@@ -402,6 +597,8 @@ impl GameLogic {
             None => false,
         };
 
+        let cinematic_just_ended = !cinematic_active && self.was_cinematic_active;
+
         // Rising/falling edge of the cinematic window - pause physics for its
         // duration (so the rigidbody's own simulated position doesn't drift away
         // from wherever the scripted Object3DTrack is putting the plane, which
@@ -412,7 +609,7 @@ impl GameLogic {
         if let Some(physics_command_tx) = physics_command_tx {
             if cinematic_active && !self.was_cinematic_active {
                 let _ = physics_command_tx.send(PhysicsCommand::TogglePause);
-            } else if !cinematic_active && self.was_cinematic_active {
+            } else if cinematic_just_ended {
                 if let Some(player) = app.renderizable_instances.get("player") {
                     let transform = player.instance.transform;
                     let _ = physics_command_tx.send(PhysicsCommand::SetTransform {
@@ -428,10 +625,27 @@ impl GameLogic {
                 let _ = physics_command_tx.send(PhysicsCommand::TogglePause);
             }
         }
+
+        // Same falling edge, for the camera - see CinematicReturnBlend's own doc
+        // comment for why this snapshot (rather than CameraHandler::transition_to)
+        // is what actually fixes the hard cut. Has to happen here, before
+        // camera_control runs later this frame - "main" still holds whatever the
+        // Shot track last wrote to it *last* frame at this point.
+        if cinematic_just_ended {
+            let cam = app.camera.active();
+            self.camera_data.cinematic_return_blend = Some(CinematicReturnBlend {
+                elapsed: 0.0,
+                duration: 0.6,
+                from_position: cam.camera.position,
+                from_look_at: cam.camera.position + cam.camera.calc_forward_direction() * 100.0,
+                from_fov: cam.projection.fovy,
+            });
+        }
+
         self.was_cinematic_active = cinematic_active;
 
         // Debug console output (press F2 to show/hide)
-        if !cinematic_active {
+        if !cinematic_active && input_lock_end.is_none() {
             self.plane.update(app.time.delta_time);
         }
         if let Some(plane_control_tx) = plane_control_tx {
@@ -454,16 +668,6 @@ impl GameLogic {
             event_system.apply_tracks(self.game_time, app);
         }
 
-        // TEMP DEBUG (press F2 to view) - remove once the LookAt cinematic is confirmed working.
-        if cinematic_active {
-            if let Some(cam) = app.camera.get("main") {
-                debug_text!("[cine] cam pos: {:.1?} yaw: {:.1} pitch: {:.1}", cam.camera.position, cam.camera.yaw.to_degrees(), cam.camera.pitch.to_degrees());
-            }
-            if let Some(player) = app.renderizable_instances.get("player") {
-                debug_text!("[cine] player pos: {:.1?}", player.instance.transform.position);
-            }
-            debug_text!("[cine] active camera name: {}", app.camera.active_name());
-        }
     }
 
     fn plane_movement (&mut self, app: &mut App, delta_time: f32, physics_data: &HashMap<String, RenderMessage>) {
@@ -474,10 +678,17 @@ impl GameLogic {
         if let Some(data) = physics_data_renderizable {
             self.plane_systems.flight_data.speedometer = data.linvel.magnitude() * 1.94384;
 
-            // G-meter: project felt acceleration onto the plane's local up axis
+            // G-meter: project felt acceleration onto the plane's local up axis.
+            // Physics ticks at a fixed 120Hz on its own thread (see
+            // PlaneSystems::velocity_sample_elapsed's own doc comment) - data.linvel
+            // only actually changes once every ~8.3ms, so at a render rate faster
+            // than that this accumulates real elapsed time across however many
+            // frames see no change, rather than using just the one frame's own
+            // (much smaller) delta_time once a change finally shows up.
+            self.plane_systems.velocity_sample_elapsed += delta_time;
             match &self.plane_systems.previous_velocity {
                 Some(prev_vel) if *prev_vel != data.linvel => {
-                    let acceleration = (data.linvel - prev_vel) / delta_time;
+                    let acceleration = (data.linvel - prev_vel) / self.plane_systems.velocity_sample_elapsed;
                     // Felt acceleration = total acceleration minus gravity (pilot doesn't feel gravity)
                     let felt_acceleration = acceleration - self.gravity;
                     // Project onto the plane's local up axis for the G reading
@@ -485,9 +696,11 @@ impl GameLogic {
                     let target_g = felt_acceleration.dot(&plane_up) / 9.81;
                     self.plane_systems.flight_data.g_meter = lerp(self.plane_systems.flight_data.g_meter, target_g, delta_time * 10.0);
                     self.plane_systems.previous_velocity = Some(data.linvel);
+                    self.plane_systems.velocity_sample_elapsed = 0.0;
                 }
                 None => {
                     self.plane_systems.previous_velocity = Some(data.linvel);
+                    self.plane_systems.velocity_sample_elapsed = 0.0;
                 }
                 _ => {}
             }
@@ -693,6 +906,14 @@ impl GameLogic {
     }
 
     fn camera_control(&mut self, app: &mut App, delta_time: f32) {
+        // The free-fly debug tool (see game::tooling::free_camera) drives its own
+        // dedicated camera every frame it's enabled - this fn would otherwise still
+        // overwrite whatever `app.camera.active_mut()` currently is (unconditionally,
+        // based on `self.camera_data.camera_state`) right on top of that, fighting
+        // over the same active camera's transform every single frame.
+        if free_camera::is_enabled() {
+            return;
+        }
         if let Some(player) = app.renderizable_instances.get_mut("player") {
             // Calculate target camera position and look-at point
             let (target_position, target_look_at, target_up) = match self.camera_data.camera_state {
@@ -862,17 +1083,49 @@ impl GameLogic {
                 target_position
             };
 
-            // Apply camera position directly (no interpolation to match object movement)
+            // Apply camera position directly (no interpolation to match object
+            // movement) - except right after a CameraTrack::Shot ends, where
+            // cinematic_return_blend (see its own doc comment) eases from the
+            // Shot's last pose into whatever's computed above instead of cutting.
+            let target_position: Point3<f32> = final_position.into();
+            let target_look_at: Point3<f32> = target_look_at.into();
+            let target_fov = app.camera.active().projection.fovy;
+
+            let (blended_position, blended_look_at, blended_fov) = match &mut self.camera_data.cinematic_return_blend {
+                Some(blend) => {
+                    blend.elapsed += delta_time;
+                    let t = smoothstep((blend.elapsed / blend.duration).clamp(0.0, 1.0));
+                    let blended = (
+                        lerp_point3(blend.from_position, target_position, t),
+                        lerp_point3(blend.from_look_at, target_look_at, t),
+                        lerp(blend.from_fov, target_fov, t),
+                    );
+                    if blend.elapsed >= blend.duration {
+                        self.camera_data.cinematic_return_blend = None;
+                    }
+                    blended
+                }
+                None => (target_position, target_look_at, target_fov),
+            };
+
             let active = app.camera.active_mut();
-            active.camera.position = final_position.into();
-            active.camera.look_at(target_look_at.into());
+            active.camera.position = blended_position;
+            active.camera.look_at(blended_look_at);
             active.camera.up = target_up;
+            active.projection.fovy = blended_fov;
         }
         // self.calculate_lockable(app);
         if input::is_action_just_pressed("change_camera") {
             self.next_camera(&mut app.camera);
         }
-        if input::is_action_just_pressed("toggle_camera_debug") {
+        // Own key ("toggle_camera_offset_debug"/F5), separate from "toggle_camera_debug"
+        // (F4) - that one now belongs entirely to the free-fly tool (see
+        // free_camera::update, called from GameLogic::update), which creates and
+        // drives its own dedicated camera every frame it's enabled; this nudge tool
+        // instead offsets whichever named camera is *already* active (see
+        // final_position above), so the two can't share a key without fighting over
+        // the same active camera's transform every frame.
+        if input::is_action_just_pressed("toggle_camera_offset_debug") {
             self.camera_data.debug_mode_active = !self.camera_data.debug_mode_active;
             println!("Camera debug mode: {}", if self.camera_data.debug_mode_active { "ON" } else { "OFF" });
         }
@@ -931,19 +1184,19 @@ impl GameLogic {
         if ui_elapsed >= app.throttling.ui_update_interval {
             let ui_delta_time = ui_elapsed.as_secs_f32();
 
-            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "data_box/framerate").and_then(|n| n.as_label_mut()) {
+            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/data_box/framerate").and_then(|n| n.as_label_mut()) {
                 label.set_text(&mut app.ui.text.font_system, &format!("FPS: {}", app.time.get_fps()), true);
             }
 
-            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "data_box/g").and_then(|n| n.as_label_mut()) {
+            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/data_box/g").and_then(|n| n.as_label_mut()) {
                 label.set_text(&mut app.ui.text.font_system, &format!("G: {:.0}", self.plane_systems.flight_data.g_meter), true);
             }
 
-            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "data_box/timer").and_then(|n| n.as_label_mut()) {
+            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/data_box/timer").and_then(|n| n.as_label_mut()) {
                 label.set_text(&mut app.ui.text.font_system, &Self::format_duration(self.game_time), true);
             }
 
-            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "data_box/power").and_then(|n| n.as_label_mut()) {
+            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/data_box/power").and_then(|n| n.as_label_mut()) {
                 label.set_text(&mut app.ui.text.font_system, &format!("Power: {}%", (self.plane.controls.throttle * 100.0).round()), true);
             }
 
@@ -951,7 +1204,20 @@ impl GameLogic {
                 label.set_text(&mut app.ui.text.font_system, &format!("ALT: {}", self.plane_systems.flight_data.altimeter), true);
             }
 
-            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "speed").and_then(|n| n.as_label_mut()) {
+            // F3 debug view - two separate single-line labels (see
+            // play::ui::build_debug_panel's own doc comment on why not one
+            // multi-line label), each updated the same way as every other
+            // label in this block.
+            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "debug_panel/stats_box/fps").and_then(|n| n.as_label_mut()) {
+                label.set_text(&mut app.ui.text.font_system, &format!("{:.0} FPS", app.time.get_fps()), true);
+            }
+            if let Some(pos) = app.renderizable_instances.get("player").map(|i| i.instance.transform.position) {
+                if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "debug_panel/stats_box/position").and_then(|n| n.as_label_mut()) {
+                    label.set_text(&mut app.ui.text.font_system, &format!("Player position: ({:.1}, {:.1}, {:.1})", pos.x, pos.y, pos.z), true);
+                }
+            }
+
+            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/speed").and_then(|n| n.as_label_mut()) {
                 label.set_text(&mut app.ui.text.font_system, &format!("SPD: {:.0}", self.plane_systems.flight_data.speedometer), true);
             }
 
@@ -969,7 +1235,7 @@ impl GameLogic {
                 rotation.round().to_string() + "°"
             };
 
-            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "compass").and_then(|n| n.as_label_mut()) {
+            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/compass").and_then(|n| n.as_label_mut()) {
                 label.set_text(&mut app.ui.text.font_system, &text_compass, true);
             }
 
@@ -979,7 +1245,7 @@ impl GameLogic {
                     if let Some(player) = app.renderizable_instances.get("player") {
                         let pos = player.instance.transform.position;
                         let vel_point = Point3::from(pos + velocity.normalize() * 100.0);
-                        if let Some(screen_pos) = app.camera.world_to_screen(vel_point, app.renderer.config.width, app.renderer.config.height) {
+                        if let Some(screen_pos) = app.camera.world_to_screen(vel_point, app.window_manager.size.width, app.window_manager.size.height) {
                             if let Some(marker) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "velocity_marker") {
                                 marker.transform.x = screen_pos.x as f32 - marker.transform.width / 2.0;
                                 marker.transform.y = screen_pos.y as f32 - marker.transform.height / 2.0;

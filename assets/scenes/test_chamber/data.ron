@@ -48,7 +48,7 @@
                         fov: 70.0,
                     ),
                     "cinematic": (
-                        position: (-7.626, 1.076, -10.628),
+                        position: (0.0, 1000.0, 900.0),
                         fov: 60.0,
                     ),
                     "frontal": (

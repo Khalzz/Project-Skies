@@ -51,7 +51,7 @@ impl Subtitle {
 
     pub fn add_text(&mut self, text: &str, duration_ms: u64, app: &mut App) {
         self.duration = duration_ms as f32 / 1000.0;
-        let screen_width = app.renderer.config.width as f32;
+        let screen_width = app.window_manager.size.width as f32;
 
         let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "subtitles") else { return };
         let UiNodeContent::Text(label) = &mut node.content else { return };

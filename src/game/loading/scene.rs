@@ -26,8 +26,8 @@ pub struct LoadingScreenScene {
 
 impl LoadingScreenScene {
     pub fn new(app: &mut App) -> Self {
-        let screen_width = app.renderer.config.width as f32;
-        let screen_height = app.renderer.config.height as f32;
+        let screen_width = app.window_manager.size.width as f32;
+        let screen_height = app.window_manager.size.height as f32;
 
         let mut backdrop = UiNode::container()
             .set_size(SizeValue::Percent(100.0), SizeValue::Percent(100.0))

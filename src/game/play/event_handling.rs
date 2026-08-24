@@ -27,6 +27,24 @@ pub struct Event {
     activated: bool
 }
 
+/// A `[start_time, end_time)` window (ms, same convention as every other
+/// track's own start/end) during which the player has no input at all -
+/// flight controls, and specifically the pause menu itself (see
+/// `GameLogic::update`'s own use of `EventSystem::is_input_locked`) - only a
+/// "hold ESC to skip" affordance still works. Deliberately its own thing
+/// rather than reusing `is_cinematic_camera_active` (a `CameraTrack::Shot`'s
+/// own window): a scripted sequence built purely from `object_3d_tracks` (no
+/// camera work at all) still wants input locked out for its duration, and
+/// conversely a `Shot` doesn't *have* to lock input just because it's driving
+/// the camera - these are two independently-authorable concepts that happen
+/// to often overlap.
+#[derive(Debug, Deserialize)]
+pub struct InputLock {
+    #[serde(default)]
+    pub start_time: u64,
+    pub end_time: u64,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct EventSystem {
     pub event_list: HashMap<u64, Event>,
@@ -40,6 +58,8 @@ pub struct EventSystem {
     pub ui_tracks: Vec<UiTrack>,
     #[serde(default)]
     pub camera_tracks: Vec<CameraTrack>,
+    #[serde(default)]
+    pub input_locks: Vec<InputLock>,
 }
 
 impl EventSystem {
@@ -85,7 +105,20 @@ impl EventSystem {
     /// as a separate hardcoded value in Rust.
     pub fn is_cinematic_camera_active(&self, seconds: f64) -> bool {
         let game_time_ms = Duration::from_secs_f64(seconds).as_millis() as u64;
-        animation_tracks::any_look_at_active(&self.camera_tracks, game_time_ms)
+        animation_tracks::any_cinematic_active(&self.camera_tracks, game_time_ms)
+    }
+
+    /// The end time (ms) of whichever `input_locks` window currently contains
+    /// `seconds`, if any - `None` means input isn't locked right now. Returns
+    /// the *latest* end among any that overlap, in the unusual case more than
+    /// one does, so a "hold ESC to skip" (see `GameLogic::update`) always
+    /// jumps past all of them at once rather than into a gap between two.
+    pub fn input_lock_end(&self, seconds: f64) -> Option<u64> {
+        let game_time_ms = Duration::from_secs_f64(seconds).as_millis() as u64;
+        self.input_locks.iter()
+            .filter(|lock| game_time_ms >= lock.start_time && game_time_ms < lock.end_time)
+            .map(|lock| lock.end_time)
+            .max()
     }
 
 
