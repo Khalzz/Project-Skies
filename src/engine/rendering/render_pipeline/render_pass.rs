@@ -40,6 +40,18 @@ impl App {
     // this indirection is invisible for every scene not using background_blur.
     fn render_opaque_pass(&mut self, encoder: &mut wgpu::CommandEncoder) {
         let view = &self.renderer.blur.scene_color.view;
+        // No real camera to render from (see CameraHandler::has_active_camera)
+        // - skip every model/skybox draw below, but still just clear to
+        // self.clear_color rather than hardcoding black here: that field is
+        // already set correctly for every phase this can happen in (the
+        // scene-reset default, run_splash_screen's own configured background,
+        // whatever a scene set it to) - hardcoding black would silently
+        // override any of those instead of leaving them alone.
+        // App::sync_no_camera_message puts the actual "Add a camera to the
+        // scene" text up via the separate UI pass, which still runs normally
+        // on top of whatever this clears to (and suppresses itself during
+        // splash/loading - see its own comment).
+        let has_camera = self.camera.has_active_camera();
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Opaque Render Pass"),
             color_attachments: &[color_attachment(view, wgpu::LoadOp::Clear(self.clear_color))],
@@ -48,6 +60,10 @@ impl App {
             occlusion_query_set: None,
             timestamp_writes: None,
         });
+
+        if !has_camera {
+            return;
+        }
 
         if let Some(skybox) = &self.skybox {
             skybox.render(&mut render_pass, &self.camera.bind_group);
@@ -65,6 +81,12 @@ impl App {
 
     // Same scene_color target as render_opaque_pass above, and for the same reason.
     fn render_transparent_pass(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        // render_opaque_pass already cleared to black and drew nothing - see
+        // its own comment on has_active_camera - nothing for this pass to add.
+        if !self.camera.has_active_camera() {
+            return;
+        }
+
         let view = &self.renderer.blur.scene_color.view;
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Transparent Render Pass"),
@@ -160,7 +182,7 @@ impl App {
     // Debug lines come from the physics thread in absolute world coordinates,
     // so make them camera-relative here to match camera.view_proj.
     fn render_physics_debug_lines<'rp>(&mut self, render_pass: &mut wgpu::RenderPass<'rp>) {
-        let camera_position = self.camera.active().camera.position;
+        let camera_position = self.camera.active().camera.position();
         let vertices: Vec<ManualVertex> = self.render_physics.renderizable_lines.iter()
             .flat_map(|line| line.to_vec())
             .map(|mut vertex| {

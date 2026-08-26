@@ -13,19 +13,25 @@ use crate::engine::rendering::enviroment::skybox_renderer::SkyboxRender;
 use crate::engine::rendering::enviroment::environment;
 use crate::engine::rendering::instance_management::{InstanceData, InstanceRaw, ModelDataInstance};
 use crate::engine::rendering::render_pipeline::depth_renderer::DepthRender;
-use crate::engine::rendering::camera::CameraHandler;
+use crate::engine::rendering::camera::handler::CameraHandler;
 use crate::engine::rendering::models::textures::Texture;
 use crate::engine::game_nodes::timing::Timing;
 use crate::engine::rendering::enviroment::light::Light;
 use crate::engine::rendering::models::model::{self, Mesh, Model, Vertex};
 use crate::engine::rendering::renderer::Renderer;
+use crate::engine::scene_manager::node::Node;
+use crate::engine::scene_manager::properties::Model as NodeModelProperty;
+use crate::engine::scene_manager::render_bridge;
 use crate::engine::scene_manager::scene::{FrameContext, PendingSceneLoad, SceneManager};
+use crate::engine::scene_manager::scene_nodes::SceneNodes;
 use crate::engine::splash_screen::SplashScreenConfig;
 use crate::engine::input::input;
 use crate::engine::rendering::ui::physics_rendering::RenderPhysics;
 use crate::engine::rendering::ui::rendering_utils;
 use crate::engine::rendering::ui::ui::Ui;
+use crate::engine::ui::color::UiColor;
 use crate::engine::ui::ui_node::UiNode;
+use crate::engine::ui::ui_transform::PositionValue;
 use crate::game::loading::scene::{LoadingScreenScene, FADE_OUT_SECS, PANEL_KEY};
 use crate::resources;
 use crate::engine::window::window::{WindowManager, WindowSettings};
@@ -64,8 +70,23 @@ pub struct App {
     pub _haptic_subsystem: HapticSubsystem,
     // pub renderizable_instances: HashMap<String, HashMap<String, InstanceData>>,
     pub renderizable_instances: HashMap<String, InstanceData>,
+    // Code-first entity system (Node + Behavior, see engine::scene_manager) -
+    // deliberately separate from renderizable_instances/data.ron's GameObject
+    // pipeline above rather than a migration of it; see that module's own
+    // design comments for why.
+    pub scene_nodes: SceneNodes,
     pub throttling: Throttling,
     pub game_models: HashMap<String, ModelDataInstance>,
+    // Loaded (see resources::register_model) but not yet instanced - a model
+    // moves out of here into game_models the first time something actually
+    // references it (see render_bridge::register_static_model), since a
+    // ModelDataInstance's buffer can't exist meaningfully with zero instances
+    // (wgpu rejects a zero-size buffer).
+    pub loaded_models: HashMap<String, Model>,
+    // Named images (see resources::register_texture) - no equivalent split to
+    // loaded_models/game_models needed, a texture has no per-instance GPU
+    // buffer to size/rebuild the way a model's does.
+    pub textures: HashMap<String, Texture>,
     pub light: Light,
     pub time: Timing,
     pub scene_openned: Option<String>,
@@ -175,7 +196,10 @@ impl App {
             renderizable_instances,
             throttling: Throttling { last_ui_update: Instant::now(), ui_update_interval: Duration::from_secs_f32(1.0/120.0) },
             _haptic_subsystem: haptic_subsystem,
+            scene_nodes: SceneNodes::new(),
             game_models,
+            loaded_models: HashMap::new(),
+            textures: HashMap::new(),
             light,
             time,
             scene_openned: None,
@@ -185,6 +209,33 @@ impl App {
             is_paused: false,
             paused_hud_visibility: None,
         })
+    }
+
+    /// Spawns `node` into `self.scene_nodes` and, if it carries a `Model`
+    /// property, immediately registers it with the renderer too (see
+    /// `engine::scene_manager::render_bridge::register_static_model`) - the
+    /// property itself is what triggers instantiation, not a second call the
+    /// spawner has to remember to make separately. `Node`/`SceneNodes` stay
+    /// unaware of rendering either way - this just composes the two at the
+    /// one place that actually has `&mut App` available.
+    pub fn spawn_node(&mut self, node: Node) -> Result<(), String> {
+        let id = node.id.clone();
+        let has_model = node.get_property::<NodeModelProperty>().is_some();
+
+        // scene_nodes.spawn now needs &mut App too (for behaviors' on_spawn),
+        // so it can't be called as self.scene_nodes.spawn(node, self) directly
+        // - self.scene_nodes would already be borrowed. Same take-then-restore
+        // App::run already uses for scene_manager.active_scene.
+        let mut scene_nodes = std::mem::take(&mut self.scene_nodes);
+        let spawn_result = scene_nodes.spawn(node, self);
+        self.scene_nodes = scene_nodes;
+        spawn_result?;
+
+        if has_model {
+            render_bridge::register_static_model(self, &id)?;
+        }
+
+        Ok(())
     }
 
     pub fn resize(&mut self) {
@@ -203,6 +254,7 @@ impl App {
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+        self.sync_no_camera_message();
         self.prepare_ui_content();
         self.fire_ui_click_handlers();
 
@@ -220,6 +272,49 @@ impl App {
         output.present();
 
         Ok(())
+    }
+
+    // Reserved UI key for the message below - never something a scene should
+    // add/remove itself.
+    const NO_CAMERA_MESSAGE_KEY: &str = "__no_camera_message";
+
+    // Ensures/removes the "Add a camera to the scene" label to match
+    // self.camera.has_active_camera() each frame - render_pass.rs's own
+    // render_opaque_pass already clears to black and skips every draw in that
+    // case (see its own comment); this is the other half, the actual visible
+    // text, via the ordinary UI pass, which runs unconditionally on top
+    // regardless of what the 3D passes did.
+    fn sync_no_camera_message(&mut self) {
+        // Suppressed while: a real camera exists; a heavy scene's background
+        // load hasn't finished yet (LoadingScreenScene is legitimately
+        // camera-less the whole time - see game::loading::scene); or no scene
+        // has ever been constructed yet at all - run_splash_screen calls
+        // render() in its own loop before the first scene reset ever runs,
+        // same "nothing to blame a scene for" reasoning as the loading case.
+        if self.camera.has_active_camera() || self.scene_manager.loading.is_some() || self.scene_manager.active_scene.is_none() {
+            if self.ui.renderizable_elements.remove(Self::NO_CAMERA_MESSAGE_KEY).is_some() {
+                self.ui.has_changed = true;
+            }
+            return;
+        }
+
+        if self.ui.renderizable_elements.contains_key(Self::NO_CAMERA_MESSAGE_KEY) {
+            return;
+        }
+
+        let screen_width = self.window_manager.size.width as f32;
+        let screen_height = self.window_manager.size.height as f32;
+        let mut label = UiNode::label(&mut self.ui.text.font_system, "Add a camera to the scene", Some(500.0), Some(40.0))
+            .set_position(PositionValue::Center(0.0), PositionValue::Center(0.0))
+            .set_text_color(UiColor::Rgb(255, 255, 255))
+            // set_position alone only centers the label's own box on screen -
+            // text inside it defaults to left-aligned (see ui_node.rs's
+            // effective_style.align.unwrap_or(Align::Left)), which reads as
+            // visibly off-center since the box (500px) is wider than the text.
+            .set_align(glyphon::cosmic_text::Align::Center);
+        label.resolve(screen_width, screen_height);
+        self.ui.add_to_ui(Self::NO_CAMERA_MESSAGE_KEY.to_owned(), label);
+        self.ui.has_changed = true;
     }
 
     // Rebuilds UI vertex/index/text buffers from the current node tree - only when
@@ -455,6 +550,16 @@ impl App {
                 self.ui.always_on_bottom.clear();
                 self.ui.has_changed = true;
 
+                // Same reasoning again for the code-first entity system and
+                // any cameras a scene registered - a Node/Behavior (e.g.
+                // sandbox's Camera) or a named camera from a previous scene
+                // shouldn't keep running/lingering after switching away from
+                // it. clear_scene_cameras keeps the one default camera around
+                // and re-selects it, so there's always a valid active camera
+                // even for a scene that never creates its own.
+                self.scene_nodes.clear();
+                self.camera.clear_scene_cameras();
+
                 // Physics doesn't carry over between scenes either - stop whatever was
                 // running now. The new scene's own physics (if any) starts once it's
                 // actually constructed: immediately below for a cheap scene, or once
@@ -472,6 +577,10 @@ impl App {
                     // This is the only place a cheap scene's real constructor ever runs,
                     // and only for the one actually becoming active.
                     let scene = factory(&mut self);
+
+                    if !self.camera.has_active_camera() {
+                        eprintln!("scene '{active}' didn't create a camera - showing the fallback \"Add a camera to the scene\" screen");
+                    }
 
                     // Re-baseline the frame clock right after a (synchronous, possibly
                     // multi-second - model/texture loading, all blocking) scene
@@ -515,7 +624,7 @@ impl App {
                     let queue = self.renderer.queue.clone();
                     let camera_bind_group_layout = self.camera.bind_group_layout.clone();
                     let config = self.renderer.config.clone();
-                    let camera_position = self.camera.active().camera.position.coords;
+                    let camera_position = self.camera.active().camera.position().coords;
                     let existing_models: std::collections::HashSet<String> = self.game_models.keys().cloned().collect();
                     let level_path = spec.level_path.clone();
                     let environment = spec.environment.clone();
@@ -666,6 +775,18 @@ impl App {
                     eprintln!("No active scene to update");
                 }
 
+                // Code-first entity system (see engine::scene_manager::scene_nodes)
+                // - runs once per rendered frame regardless of which scene is
+                // active. fixed_update here is an approximation of a true fixed
+                // tick (see Behavior::fixed_update's own doc comment for why),
+                // not literally driven by the physics thread's 120Hz accumulator.
+                // Taken out of its slot first, same reasoning as active_scene above.
+                let delta_time = self.time.delta_time;
+                let mut scene_nodes = std::mem::take(&mut self.scene_nodes);
+                scene_nodes.update(&mut self, delta_time);
+                scene_nodes.fixed_update(&mut self, delta_time);
+                self.scene_nodes = scene_nodes;
+
                 // Advance LoadingScreenScene's fade-out once its background load has
                 // actually finished (PendingSceneLoad::ready, set above) - deliberately
                 // placed *after* the scene tick above: LoadingScreenScene::update just
@@ -700,6 +821,10 @@ impl App {
 
                             let scene = (pending.finish)(&mut self, prepared);
 
+                            if !self.camera.has_active_camera() {
+                                eprintln!("scene didn't create a camera - showing the fallback \"Add a camera to the scene\" screen");
+                            }
+
                             // Same rebaseline + physics-spawn steps the sync path runs
                             // right after its own constructor returns - see that
                             // comment further up.
@@ -719,7 +844,7 @@ impl App {
                 }
 
                 // Update instance buffers efficiently - group by model type
-                let camera_position = self.camera.active().camera.position.coords;
+                let camera_position = self.camera.active().camera.position().coords;
                 let mut model_instances: HashMap<String, Vec<InstanceRaw>> = HashMap::new();
 
                 for (_key, renderizable) in &self.renderizable_instances {

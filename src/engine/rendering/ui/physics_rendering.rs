@@ -1,5 +1,5 @@
 use wgpu::{util::DeviceExt, BindGroup, BindGroupLayout, Buffer, Device, PipelineLayout, RenderPipeline, SurfaceConfiguration};
-use crate::{engine::primitive::manual_vertex::ManualVertex, engine::rendering::{camera::CameraHandler, ui::rendering_utils}};
+use crate::{engine::primitive::manual_vertex::ManualVertex, engine::rendering::{camera::handler::CameraHandler, ui::rendering_utils}};
 
 
 pub struct RenderPhysics {

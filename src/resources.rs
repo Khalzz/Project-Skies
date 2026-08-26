@@ -488,6 +488,19 @@ pub fn prepare_environment(device: &Device, queue: &Queue, camera_bind_group_lay
     }
 }
 
+/// Synchronous environment setup for scenes registered via `create_scene`
+/// (no level to load alongside it, so no reason to defer to a background
+/// thread the way `create_loaded_scene`/`PreparedSceneAssets::apply` do) -
+/// `prepare_environment` plus applying its result to `app.skybox`/
+/// `app.clear_color` in one call, instead of every such scene's own `new`
+/// repeating the `camera_bind_group_layout` clone + apply steps by hand.
+pub fn apply_environment(app: &mut App, environment: Environment) {
+    let camera_bind_group_layout = app.camera.bind_group_layout.clone();
+    let prepared = prepare_environment(&app.renderer.device, &app.renderer.queue, &camera_bind_group_layout, &app.renderer.config, environment);
+    app.skybox = prepared.skybox;
+    app.clear_color = prepared.clear_color;
+}
+
 /// Everything a heavy scene's `finish(app, assets)` needs to merge into `App` before
 /// running the rest of what used to be its `new()` - the combined output of
 /// `prepare_level_assets` + `prepare_environment`, built entirely off the main thread.
@@ -549,4 +562,52 @@ pub fn load_instances(path: String) -> Option<Vec<GameObject>> {
         _ => {}
     }
     return None
+}
+
+// Named resource registration - register once, up front (e.g. right after
+// App::new in main.rs, before any scene opens), then reference the chosen
+// name from wherever a resource's actually needed instead of repeating its
+// file path. Not tied to any particular scene - a name registered here is
+// available to every scene equally.
+
+/// Registers a model's gltf once under a chosen `name`, decoupling the short
+/// name referenced throughout game code (a Node's `Model { model_ref: name }`
+/// - see `engine::scene_manager::render_bridge::register_static_model`, and
+/// `App::spawn_node` for how a spawned `Model` property triggers that
+/// automatically) from the actual asset path, which only needs to be written
+/// once, right here.
+///
+/// Stores into `app.loaded_models`, not `app.game_models` directly - a model
+/// only gets a real `ModelDataInstance` (which owns a GPU instance buffer)
+/// once something actually instances it; see `loaded_models`'s own doc
+/// comment on `App` for why an empty one can't just be created here instead.
+pub fn register_model(app: &mut App, name: &str, path: &str) -> Result<(), String> {
+    if app.loaded_models.contains_key(name) || app.game_models.contains_key(name) {
+        return Err(format!("a model named '{name}' is already loaded"));
+    }
+
+    let bind_group_layout = Mesh::create_bind_group_layout(&app.renderer.device);
+    let loaded_model = load_model_gltf(path, &app.renderer.device, &app.renderer.queue, &bind_group_layout)
+        .map_err(|e| format!("failed to load model '{name}' from '{path}': {e}"))?;
+
+    app.loaded_models.insert(name.to_owned(), loaded_model);
+    Ok(())
+}
+
+/// Registers an image once under a chosen `name` - the same pattern as
+/// `register_model`, just simpler: a texture has no equivalent of a model's
+/// shared per-instance GPU buffer to size/rebuild, so there's no "loaded but
+/// not yet instanced" split needed - it goes straight into `app.textures`
+/// and is immediately ready to use wherever `name` is referenced (a
+/// material, a UI image, ...).
+pub fn register_texture(app: &mut App, name: &str, path: &str) -> Result<(), String> {
+    if app.textures.contains_key(name) {
+        return Err(format!("a texture named '{name}' is already loaded"));
+    }
+
+    let texture = load_texture(path, &app.renderer.device, &app.renderer.queue)
+        .map_err(|e| format!("failed to load texture '{name}' from '{path}': {e}"))?;
+
+    app.textures.insert(name.to_owned(), texture);
+    Ok(())
 }

@@ -5,7 +5,7 @@ use nalgebra::{vector, Point3, Quaternion, UnitQuaternion, Vector3};
 use rand::{rngs::ThreadRng, Rng};
 use rapier3d::prelude::RigidBody;
 use sdl2::{controller::GameController};
-use crate::{app::{App, AppState}, engine::audio::subtitles::Subtitle, engine::input::input, engine::physics::physics_handler::{MetadataType, PhysicsCommand, PhysicsData, PhysicsTick, RenderMessage}, engine::primitive::manual_vertex::ManualVertex, engine::rendering::{camera::CameraHandler, ui::ui::Ui}, engine::scene_manager::scene::{FrameContext, Scene}, transform::Transform, engine::ui::{color::UiColor, ui_node::{UiNode, UiNodeContent}, ui_transform::{Anchor, Orientation, PositionValue, SizeValue, UiTransform}}, engine::utils::lerps::{lerp, lerp_point3, lerp_quaternion, smoothstep}};
+use crate::{app::{App, AppState}, engine::audio::subtitles::Subtitle, engine::input::input, engine::physics::physics_handler::{MetadataType, PhysicsCommand, PhysicsData, PhysicsTick, RenderMessage}, engine::primitive::manual_vertex::ManualVertex, engine::rendering::{camera::{camera::yaw_pitch_rotation, handler::CameraHandler}, ui::ui::Ui}, engine::scene_manager::scene::{FrameContext, Scene}, transform::Transform, engine::ui::{color::UiColor, ui_node::{UiNode, UiNodeContent}, ui_transform::{Anchor, Orientation, PositionValue, SizeValue, UiTransform}}, engine::utils::lerps::{lerp, lerp_point3, lerp_quaternion, smoothstep}};
 use super::{event_handling::EventSystem, plane::{physics_logic::PlanePhysicsLogic, plane::Plane}};
 use std::sync::mpsc::Sender;
 use crate::game::play::plane::plane::PlaneControls;
@@ -14,7 +14,6 @@ use crate::game::ui::label;
 use crate::game::play::ui as play_ui;
 use crate::resources::PreparedSceneAssets;
 use crate::engine::tooling::debug_console;
-use crate::game::tooling::free_camera;
 
 // Note: "altitude"/"altitude_alert"/"stall_alert" below are stale references
 // to nodes that were never added to the flight HUD (see play::ui) -
@@ -163,12 +162,20 @@ impl GameLogic {
     pub fn finish(app: &mut App, assets: PreparedSceneAssets) -> Self {
         assets.apply(app);
 
+        // "main" is created here explicitly now - CameraHandler::clear_scene_cameras
+        // (see App::run's reset handling) drops every camera on every scene
+        // switch, no default survives implicitly any more. Seeded with the
+        // same values the engine used to hardcode as its own default; only
+        // matters for the first frame or so, camera_control immediately takes
+        // over driving this from the plane's transform every frame after.
+        //
         // The main menu switches the active camera to its own "main_menu" one
         // (see main_menu::scene::MENU_CAMERA_NAME) and nothing ever switches it
-        // back - without this, gameplay (camera_control and every CameraTrack
-        // targeting "main") keeps writing into the "main" CameraInstance while
-        // "main_menu" stays the one actually rendered, so none of it is ever
-        // visible.
+        // back - without the select_camera below, gameplay (camera_control and
+        // every CameraTrack targeting "main") keeps writing into the "main"
+        // CameraInstance while "main_menu" stays the one actually rendered, so
+        // none of it is ever visible.
+        app.camera.create_camera("main", Transform::new(Vector3::new(0.0, 0.0, 0.0), yaw_pitch_rotation(-90.0, -20.0), Vector3::new(1.0, 1.0, 1.0)), 45.0);
         app.camera.select_camera("main");
 
         // Defensive reset - see App::is_paused's own doc comment. Should
@@ -461,13 +468,6 @@ impl GameLogic {
 
     // this is called every frame
     pub fn update(&mut self, app: &mut App, plane_control_tx: Option<&Sender<PlaneControls>>, physics_command_tx: Option<&Sender<PhysicsCommand>>, physics_data: &HashMap<String, RenderMessage>) {
-        // Free-fly debug camera (F4, see game::tooling::free_camera's own doc
-        // comment) - runs unconditionally, before the pause check below, so
-        // toggling it and pressing Escape to pause both keep working regardless
-        // of the other's state (pause menu stays reachable while flying free;
-        // the tool keeps flying if toggled on while already paused).
-        free_camera::update(app);
-
         // F3 debug view - shows/hides in lockstep with the console toggle,
         // same "set_active every frame, no separate dirty-tracking" idiom
         // skip_prompt below already uses (its own text is updated inside
@@ -636,8 +636,8 @@ impl GameLogic {
             self.camera_data.cinematic_return_blend = Some(CinematicReturnBlend {
                 elapsed: 0.0,
                 duration: 0.6,
-                from_position: cam.camera.position,
-                from_look_at: cam.camera.position + cam.camera.calc_forward_direction() * 100.0,
+                from_position: cam.camera.position(),
+                from_look_at: cam.camera.position() + cam.camera.calc_forward_direction() * 100.0,
                 from_fov: cam.projection.fovy,
             });
         }
@@ -906,14 +906,6 @@ impl GameLogic {
     }
 
     fn camera_control(&mut self, app: &mut App, delta_time: f32) {
-        // The free-fly debug tool (see game::tooling::free_camera) drives its own
-        // dedicated camera every frame it's enabled - this fn would otherwise still
-        // overwrite whatever `app.camera.active_mut()` currently is (unconditionally,
-        // based on `self.camera_data.camera_state`) right on top of that, fighting
-        // over the same active camera's transform every single frame.
-        if free_camera::is_enabled() {
-            return;
-        }
         if let Some(player) = app.renderizable_instances.get_mut("player") {
             // Calculate target camera position and look-at point
             let (target_position, target_look_at, target_up) = match self.camera_data.camera_state {
@@ -1109,7 +1101,7 @@ impl GameLogic {
             };
 
             let active = app.camera.active_mut();
-            active.camera.position = blended_position;
+            active.camera.set_position(blended_position);
             active.camera.look_at(blended_look_at);
             active.camera.up = target_up;
             active.projection.fovy = blended_fov;
@@ -1118,13 +1110,8 @@ impl GameLogic {
         if input::is_action_just_pressed("change_camera") {
             self.next_camera(&mut app.camera);
         }
-        // Own key ("toggle_camera_offset_debug"/F5), separate from "toggle_camera_debug"
-        // (F4) - that one now belongs entirely to the free-fly tool (see
-        // free_camera::update, called from GameLogic::update), which creates and
-        // drives its own dedicated camera every frame it's enabled; this nudge tool
-        // instead offsets whichever named camera is *already* active (see
-        // final_position above), so the two can't share a key without fighting over
-        // the same active camera's transform every frame.
+        // F5 - offsets whichever named camera is already active (see
+        // final_position above).
         if input::is_action_just_pressed("toggle_camera_offset_debug") {
             self.camera_data.debug_mode_active = !self.camera_data.debug_mode_active;
             println!("Camera debug mode: {}", if self.camera_data.debug_mode_active { "ON" } else { "OFF" });
@@ -1221,7 +1208,7 @@ impl GameLogic {
                 label.set_text(&mut app.ui.text.font_system, &format!("SPD: {:.0}", self.plane_systems.flight_data.speedometer), true);
             }
 
-            let rotation = Self::map_to_range(app.camera.active().camera.yaw.into(), -PI as f64, PI  as f64, 0.0, 360.0).round();
+            let rotation = Self::map_to_range(app.camera.active().camera.yaw().into(), -PI as f64, PI  as f64, 0.0, 360.0).round();
             
             let text_compass = if rotation >= 355.0 || rotation <= 5.0 {
                 "N".to_owned()

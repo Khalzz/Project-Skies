@@ -1,6 +1,6 @@
 use wgpu::{util::DeviceExt, BindGroup, BindGroupLayout, Buffer, Device, RenderPipeline, SurfaceConfiguration};
 
-use crate::engine::rendering::{camera::CameraHandler, models::{model::{self, Vertex}, textures::Texture}, ui::rendering_utils};
+use crate::engine::rendering::{camera::handler::CameraHandler, models::{model::{self, Vertex}, textures::Texture}, ui::rendering_utils};
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]

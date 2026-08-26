@@ -249,10 +249,8 @@ pub fn build_pause_menu(app: &mut App) {
     app.ui.always_on_top.push("Settings".to_owned());
 }
 
-/// F3 debug view - a readout of fps and player position (the active camera's
-/// own world position has its own dedicated view instead - see
-/// game::tooling::free_camera, toggled with F4). Built inactive; nothing here
-/// is driven by a ui_track - this isn't part of the authored scene timeline,
+/// F3 debug view - a readout of fps and player position. Built inactive;
+/// nothing here is driven by a ui_track - this isn't part of the authored scene timeline,
 /// it's a dev tool toggled by the same "toggle_console" action as
 /// `debug_text!`'s own console.
 ///

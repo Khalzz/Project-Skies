@@ -220,8 +220,8 @@ fn start_capture(app: &mut App) {
 }
 
 /// Polls for a newly captured binding while the modal's open - call every
-/// frame regardless (see `main_menu::scene::update`), mirroring free_camera::
-/// update's own "cheap early-return when inactive" shape. Only actually polls
+/// frame regardless (see `main_menu::scene::update`), a cheap early-return
+/// when inactive. Only actually polls
 /// `input::captured_binding()` while `capturing` is true (see `start_capture`)
 /// - before the player's clicked "Bind" there's nothing to catch, and once a
 /// binding's been staged, capture already stopped listening on its own (see

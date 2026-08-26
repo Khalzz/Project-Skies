@@ -6,7 +6,7 @@ use std::panic;
 use nalgebra::Point3;
 
 use crate::engine::rendering::ui::physics_rendering::RenderPhysics;
-use crate::engine::rendering::camera::CameraHandler;
+use crate::engine::rendering::camera::handler::CameraHandler;
 use crate::engine::physics::physics_handler::{Physics, RenderMessage, PhysicsCommand, PhysicsTick};
 use crate::engine::physics::physics_resources::load_physics_from_level;
 use crate::game::play::plane::plane::PlaneControls;

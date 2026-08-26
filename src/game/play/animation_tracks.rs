@@ -458,7 +458,7 @@ impl CameraTrack {
                 let Some(local) = local_time(game_time_ms, *start_time) else { return };
                 let Some(value) = sample(keyframes, local, lerp_vec3) else { return };
                 if let Some(instance) = app.camera.get_mut(target) {
-                    instance.camera.position = Point3::new(value.x, value.y, value.z);
+                    instance.camera.set_position(Point3::new(value.x, value.y, value.z));
                 }
             }
             CameraTrack::Fov { target, start_time, keyframes } => {
@@ -506,12 +506,11 @@ impl CameraTrack {
                 };
 
                 if let Some(instance) = app.camera.get_mut(target) {
-                    instance.camera.position = resolved_position;
+                    instance.camera.set_position(resolved_position);
                     if let Some(look_pos) = resolved_look_at {
                         instance.camera.look_at(Point3::from(look_pos));
                     } else if let Some(YawPitch { yaw, pitch }) = rotation {
-                        instance.camera.yaw = yaw.to_radians();
-                        instance.camera.pitch = pitch.to_radians();
+                        instance.camera.set_yaw_pitch(yaw.to_radians(), pitch.to_radians());
                     }
                     if !fov.is_empty() {
                         if let Some(value) = sample(fov, local, lerp) {
