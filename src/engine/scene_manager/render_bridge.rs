@@ -4,6 +4,7 @@ use crate::engine::rendering::instance_management::{InstanceData, ModelDataInsta
 use crate::resources;
 
 use super::properties::{Model, Transform3D};
+use super::scene::Scene;
 
 /// Bridges a spawned `Node`'s `Transform3D`+`Model` properties into the
 /// existing renderer, which only walks `App::renderizable_instances`/
@@ -32,8 +33,8 @@ use super::properties::{Model, Transform3D};
 /// One real gap, not handled here: removing a node doesn't shrink/rebuild the
 /// buffer back down - only growth (a node newly referencing a model) is
 /// covered, matching how far this system's been built out so far.
-pub fn register_static_model(app: &mut App, id: &str) -> Result<(), String> {
-    let node = app.scene_nodes.get(id).ok_or_else(|| format!("no node named '{id}' to register"))?;
+pub fn register_static_model(scene: &mut Scene, app: &mut App, id: &str) -> Result<(), String> {
+    let node = scene.content.nodes.get(id).ok_or_else(|| format!("no node named '{id}' to register"))?;
     let transform = *node.get_property::<Transform3D>().ok_or_else(|| format!("node '{id}' has no Transform3D property"))?;
     let model_ref = node.get_property::<Model>().ok_or_else(|| format!("node '{id}' has no Model property"))?.model_ref.clone();
 
@@ -59,7 +60,7 @@ pub fn register_static_model(app: &mut App, id: &str) -> Result<(), String> {
             .ok_or_else(|| format!("model '{model_ref}' isn't loaded - call resources::register_model first"))?,
     };
 
-    app.renderizable_instances.insert(id.to_owned(), InstanceData {
+    scene.content.renderizable_instances.insert(id.to_owned(), InstanceData {
         renderizable_transform: game_object.transform,
         instance: game_object,
         model_ref: model_ref.clone(),
@@ -67,12 +68,12 @@ pub fn register_static_model(app: &mut App, id: &str) -> Result<(), String> {
 
     // Rebuild the shared instance buffer from every renderizable instance
     // that now references this model - includes the node just inserted above.
-    let instances: Vec<&GameObject> = app.renderizable_instances.values()
+    let instances: Vec<&GameObject> = scene.content.renderizable_instances.values()
         .filter(|instance| instance.model_ref == model_ref)
         .map(|instance| &instance.instance)
         .collect();
     let instance_count = instances.len() as u32;
-    let camera_position = app.camera.active().camera.position().coords;
+    let camera_position = scene.cameras.active().camera.position().coords;
     let instance_buffer = resources::create_instance_buffer(&instances, &app.renderer.device, camera_position);
 
     app.game_models.insert(model_ref, ModelDataInstance {

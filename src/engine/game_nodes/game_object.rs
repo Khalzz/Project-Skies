@@ -28,6 +28,21 @@ pub enum ColliderType {
     Cylinder { half_height: f32, radius: f32 },
     HeightField { heights: Vec<Vec<f32>>, scale_x: f32, scale_y: f32 },
     HalfSpace { normal: Vector3<f32> },
+    // What a node actually declares when it wants its collision shape lifted
+    // straight from a mesh's own triangles instead of a hand-authored
+    // primitive - just a reference, the same way `Model { model_ref }` is a
+    // name rather than the model's own loaded data. Resolved into a real
+    // `Trimesh` (below) by `engine::scene_manager::physics_bridge` at spawn
+    // time, scaled by the node's own `Transform3D::scale` - the physics
+    // thread never sees this variant, it only ever gets the resolved one.
+    TrimeshFromModel { model_path: String },
+    // The resolved form of `TrimeshFromModel` - what the physics thread
+    // actually builds a collider from (see `load_physics_from_definitions`).
+    // Meant for static bodies only (Rapier's own trimesh shape isn't
+    // reliable for anything dynamic sliding/rolling across sharp internal
+    // edges) - a good fit for irregular, concave static terrain (mountains,
+    // ...) that no primitive shape approximates well.
+    Trimesh { vertices: Vec<Vector3<f32>>, indices: Vec<[u32; 3]> },
 }
 
 #[derive(Debug, Deserialize, Clone)]

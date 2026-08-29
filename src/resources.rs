@@ -1,11 +1,12 @@
 use std::{collections::HashMap, collections::HashSet, path::Path};
 use gltf::{image,  Gltf};
-use nalgebra::{vector, Quaternion, Unit, Vector3};
+use nalgebra::{vector, Quaternion, Unit, UnitQuaternion, Vector3};
 use rapier3d::prelude::{ColliderBuilder, RigidBodyBuilder};
 use ron::from_str;
 use wgpu::{util::DeviceExt, BindGroupLayout, Buffer, Device, Queue, SurfaceConfiguration};
 
 use crate::{app::App, engine::game_nodes::{game_object::GameObject, scene::Scene}, engine::rendering::{enviroment::environment::Environment, enviroment::skybox_renderer::SkyboxRender, instance_management::{InstanceData, InstanceRaw, ModelDataInstance}, models::model::{self, Mesh, Model, ModelVertex}, models::textures::Texture}, transform::Transform};
+use crate::engine::scene_manager::scene::Scene as ManagedScene;
 
 pub fn load_binary(file_name: &str) -> anyhow::Result<Vec<u8>> {
     let path = std::path::Path::new(env!("OUT_DIR"))
@@ -246,6 +247,96 @@ pub fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgpu::Que
     })
 }
 
+/// Extracts a mesh's raw triangle geometry (world-space vertex positions +
+/// triangle indices, no GPU upload, no materials) from a `.gltf`/`.glb` file -
+/// for building a `game_object::ColliderType::Trimesh` from a model's own
+/// shape instead of a hand-authored primitive (see that variant's own doc
+/// comment). Reads the file independently of `load_model_gltf`'s own
+/// GPU-facing load rather than reusing its result - a `Mesh` only keeps
+/// `wgpu::Buffer`s once loaded (see that struct's own fields), nothing
+/// CPU-readable survives to reuse here, so rendering + physics both wanting
+/// the same model means a small amount of duplicate file I/O, paid once at
+/// scene-construction time.
+pub fn load_trimesh_geometry(file_name: &str) -> anyhow::Result<(Vec<Vector3<f32>>, Vec<[u32; 3]>)> {
+    let gltf_data = load_binary(file_name)?;
+    let gltf = Gltf::from_slice(&gltf_data).unwrap();
+
+    let mut buffer_data = Vec::new();
+    for buffer in gltf.buffers() {
+        match buffer.source() {
+            gltf::buffer::Source::Bin => {
+                if let Some(blob) = gltf.blob.as_deref() {
+                    buffer_data.push(blob.to_vec());
+                }
+            }
+            gltf::buffer::Source::Uri(uri) => {
+                let file_dir = Path::new(file_name).parent().unwrap_or(Path::new(""));
+                let full_path = file_dir.join(uri);
+                let bin = load_binary(full_path.to_str().unwrap())?;
+                buffer_data.push(bin);
+            }
+        }
+    }
+
+    let mut vertices: Vec<Vector3<f32>> = Vec::new();
+    let mut indices: Vec<[u32; 3]> = Vec::new();
+
+    for scene in gltf.scenes() {
+        for node in scene.nodes() {
+            collect_trimesh_geometry(node, &buffer_data, None, &mut vertices, &mut indices);
+        }
+    }
+
+    Ok((vertices, indices))
+}
+
+// Recurses the same way traverse_node does (child transforms compose with
+// their parent's), but only ever touches positions/indices - no GPU device,
+// no materials, since this is only ever building collision geometry, not
+// anything rendered.
+fn collect_trimesh_geometry(
+    node: gltf::Node<'_>,
+    buffer_data: &[Vec<u8>],
+    parent_transform: Option<(Vector3<f32>, UnitQuaternion<f32>)>,
+    vertices: &mut Vec<Vector3<f32>>,
+    indices: &mut Vec<[u32; 3]>,
+) {
+    let (translation, rotation, _scale) = node.transform().decomposed();
+    let local_translation = Vector3::from(translation);
+    let local_rotation = UnitQuaternion::from_quaternion(Quaternion::from(rotation));
+
+    let (world_translation, world_rotation) = match parent_transform {
+        Some((parent_translation, parent_rotation)) => (
+            parent_translation + parent_rotation * local_translation,
+            parent_rotation * local_rotation,
+        ),
+        None => (local_translation, local_rotation),
+    };
+
+    if let Some(mesh) = node.mesh() {
+        for primitive in mesh.primitives() {
+            let reader = primitive.reader(|buffer| Some(&buffer_data[buffer.index()]));
+
+            let base_index = vertices.len() as u32;
+            if let Some(positions) = reader.read_positions() {
+                for position in positions {
+                    vertices.push(world_translation + world_rotation * Vector3::from(position));
+                }
+            }
+            if let Some(indices_raw) = reader.read_indices() {
+                let flat: Vec<u32> = indices_raw.into_u32().collect();
+                for triangle in flat.chunks_exact(3) {
+                    indices.push([base_index + triangle[0], base_index + triangle[1], base_index + triangle[2]]);
+                }
+            }
+        }
+    }
+
+    for child in node.children() {
+        collect_trimesh_geometry(child, buffer_data, Some((world_translation, world_rotation)), vertices, indices);
+    }
+}
+
 fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::Device, queue: &wgpu::Queue, transform_bind_group_layout: &wgpu::BindGroupLayout, mesh_lists: &mut HashMap<String, HashMap<String, Mesh>>, file_name: &str, parent_transform: Option<([f32; 3], [f32; 4], [f32; 3])>, default_material_index: usize) -> anyhow::Result<()> {
         let mesh = node.mesh().expect("Got mesh");
         let primitives = mesh.primitives();
@@ -371,27 +462,29 @@ fn add_or_init_mesh_list(mesh_lists: &mut HashMap<String, HashMap<String, Mesh>>
     }
 }
 
-/// Output of `prepare_level_assets` - GPU resources already built (models loaded,
-/// buffers uploaded), just not merged into `App` yet. Call `PreparedSceneAssets::apply`
-/// on the main thread to do that merge; nothing here needs `&mut App` to produce.
-pub struct PreparedLevel {
-    /// Freshly gltf-loaded models, keyed by model_ref - only for models that weren't
-    /// already in `existing_models` when this was prepared.
-    pub new_models: HashMap<String, ModelDataInstance>,
-    /// For models that WERE already resident: the freshly-built instance buffer + count
-    /// to swap onto the existing `ModelDataInstance` entry.
-    pub instance_buffer_updates: HashMap<String, (Buffer, u32)>,
-    pub renderizable_instances: HashMap<String, InstanceData>,
-}
-
 /// Pure (no `&mut App`) version of the old `load_level` - safe to call from a
 /// background thread given cloned `Device`/`Queue` handles (both cheap, Arc-backed,
 /// and `Clone` in wgpu). `existing_models` is a snapshot of `app.game_models.keys()`
 /// taken before this call, so already-loaded models are reused instead of reloaded,
 /// same "load a model's GLTF once, keep it cached across scenes" behavior the
-/// original had - see `PreparedSceneAssets::apply` for the merge step that actually
-/// reads/writes `app.game_models`.
-pub fn prepare_level_assets(device: &Device, queue: &Queue, camera_position: Vector3<f32>, existing_models: &HashSet<String>, mut level_path: String) -> PreparedLevel {
+/// original had. Currently unused - kept alongside `load_instances`/
+/// `physics_resources::load_physics_from_level` as available (data.ron-based)
+/// infrastructure now that every registered scene spawns nodes directly instead
+/// (see `SceneManager::create_loaded_scene`'s own doc comment for the code-first
+/// equivalent of the background-load split this used to provide).
+#[allow(dead_code)]
+struct PreparedLevel {
+    /// Freshly gltf-loaded models, keyed by model_ref - only for models that weren't
+    /// already in `existing_models` when this was prepared.
+    new_models: HashMap<String, ModelDataInstance>,
+    /// For models that WERE already resident: the freshly-built instance buffer + count
+    /// to swap onto the existing `ModelDataInstance` entry.
+    instance_buffer_updates: HashMap<String, (Buffer, u32)>,
+    renderizable_instances: HashMap<String, InstanceData>,
+}
+
+#[allow(dead_code)]
+fn prepare_level_assets(device: &Device, queue: &Queue, camera_position: Vector3<f32>, existing_models: &HashSet<String>, mut level_path: String) -> PreparedLevel {
     level_path += "/data.ron";
 
     let mut new_models: HashMap<String, ModelDataInstance> = HashMap::new();
@@ -491,45 +584,14 @@ pub fn prepare_environment(device: &Device, queue: &Queue, camera_bind_group_lay
 /// Synchronous environment setup for scenes registered via `create_scene`
 /// (no level to load alongside it, so no reason to defer to a background
 /// thread the way `create_loaded_scene`/`PreparedSceneAssets::apply` do) -
-/// `prepare_environment` plus applying its result to `app.skybox`/
-/// `app.clear_color` in one call, instead of every such scene's own `new`
-/// repeating the `camera_bind_group_layout` clone + apply steps by hand.
-pub fn apply_environment(app: &mut App, environment: Environment) {
-    let camera_bind_group_layout = app.camera.bind_group_layout.clone();
+/// `prepare_environment` plus applying its result to `scene.environment` in
+/// one call, instead of every such scene's own `new` repeating the
+/// `camera_bind_group_layout` clone + apply steps by hand.
+pub fn apply_environment(scene: &mut ManagedScene, app: &mut App, environment: Environment) {
+    let camera_bind_group_layout = app.camera_resources.bind_group_layout.clone();
     let prepared = prepare_environment(&app.renderer.device, &app.renderer.queue, &camera_bind_group_layout, &app.renderer.config, environment);
-    app.skybox = prepared.skybox;
-    app.clear_color = prepared.clear_color;
-}
-
-/// Everything a heavy scene's `finish(app, assets)` needs to merge into `App` before
-/// running the rest of what used to be its `new()` - the combined output of
-/// `prepare_level_assets` + `prepare_environment`, built entirely off the main thread.
-pub struct PreparedSceneAssets {
-    pub level_path: String,
-    pub level: PreparedLevel,
-    pub environment: PreparedEnvironment,
-}
-
-impl PreparedSceneAssets {
-    /// The fast, main-thread merge step - mirrors what `load_level`/`apply_environment`
-    /// used to do directly. Call this first thing in a heavy scene's `finish`.
-    pub fn apply(self, app: &mut App) {
-        app.scene_openned = Some(self.level_path);
-
-        for (name, model) in self.level.new_models {
-            app.game_models.insert(name, model);
-        }
-        for (name, (buffer, count)) in self.level.instance_buffer_updates {
-            if let Some(model) = app.game_models.get_mut(&name) {
-                model.instance_buffer = buffer;
-                model.instance_count = count;
-            }
-        }
-        app.renderizable_instances = self.level.renderizable_instances;
-
-        app.skybox = self.environment.skybox;
-        app.clear_color = self.environment.clear_color;
-    }
+    scene.environment.skybox = prepared.skybox;
+    scene.environment.clear_color = prepared.clear_color;
 }
 
 pub fn create_instance_buffer(instances: &Vec<&GameObject>, device: &Device, camera_position: Vector3<f32>) -> Buffer {

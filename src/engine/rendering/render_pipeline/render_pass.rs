@@ -26,7 +26,8 @@ impl App {
     // Distinct model refs currently in use, optionally skipping one instance key
     // (e.g. "sun", which has no drawable model of its own).
     fn distinct_model_refs(&self, exclude_key: Option<&str>) -> HashSet<String> {
-        self.renderizable_instances.iter()
+        let Some(content) = self.scene_manager.content() else { return HashSet::new() };
+        content.renderizable_instances.iter()
             .filter(|(key, _)| exclude_key != Some(key.as_str()))
             .map(|(_, renderizable)| renderizable.model_ref.clone())
             .collect()
@@ -40,21 +41,23 @@ impl App {
     // this indirection is invisible for every scene not using background_blur.
     fn render_opaque_pass(&mut self, encoder: &mut wgpu::CommandEncoder) {
         let view = &self.renderer.blur.scene_color.view;
-        // No real camera to render from (see CameraHandler::has_active_camera)
+        // No real camera to render from (see SceneCameras::has_active_camera)
         // - skip every model/skybox draw below, but still just clear to
-        // self.clear_color rather than hardcoding black here: that field is
-        // already set correctly for every phase this can happen in (the
-        // scene-reset default, run_splash_screen's own configured background,
-        // whatever a scene set it to) - hardcoding black would silently
-        // override any of those instead of leaving them alone.
+        // clear_color rather than hardcoding black here: that value is
+        // already correct for every phase this can happen in (the active
+        // scene's own SceneEnvironment, or - only before any scene has ever
+        // reset - run_splash_screen's own configured background, see
+        // self.clear_color's own doc comment) - hardcoding black would
+        // silently override any of those instead of leaving them alone.
         // App::sync_no_camera_message puts the actual "Add a camera to the
         // scene" text up via the separate UI pass, which still runs normally
         // on top of whatever this clears to (and suppresses itself during
         // splash/loading - see its own comment).
-        let has_camera = self.camera.has_active_camera();
+        let has_camera = self.scene_manager.cameras().is_some_and(|c| c.has_active_camera());
+        let clear_color = self.scene_manager.environment().map_or(self.clear_color, |e| e.clear_color);
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Opaque Render Pass"),
-            color_attachments: &[color_attachment(view, wgpu::LoadOp::Clear(self.clear_color))],
+            color_attachments: &[color_attachment(view, wgpu::LoadOp::Clear(clear_color))],
             // Reversed-Z: clear to 0.0 ("infinitely far") instead of 1.0.
             depth_stencil_attachment: depth_attachment(&self.renderer.depth_render.texture.view, wgpu::LoadOp::Clear(0.0)),
             occlusion_query_set: None,
@@ -65,8 +68,9 @@ impl App {
             return;
         }
 
-        if let Some(skybox) = &self.skybox {
-            skybox.render(&mut render_pass, &self.camera.bind_group);
+        let skybox = self.scene_manager.environment().and_then(|e| e.skybox.as_ref()).or(self.skybox.as_ref());
+        if let Some(skybox) = skybox {
+            skybox.render(&mut render_pass, &self.camera_resources.bind_group);
         }
 
         render_pass.set_pipeline(&self.render_pipeline);
@@ -74,7 +78,7 @@ impl App {
         for model_ref in self.distinct_model_refs(Some("sun")) {
             if let Some(model_data) = self.game_models.get(&model_ref) {
                 render_pass.set_vertex_buffer(1, model_data.instance_buffer.slice(..));
-                render_pass.draw_model_instanced_from_list(&model_data.model, 0..model_data.instance_count as u32, &self.camera.bind_group, &self.light.rendering_data.bind_group, &"opaque".to_string());
+                render_pass.draw_model_instanced_from_list(&model_data.model, 0..model_data.instance_count as u32, &self.camera_resources.bind_group, &self.light.rendering_data.bind_group, &"opaque".to_string());
             }
         }
     }
@@ -83,7 +87,7 @@ impl App {
     fn render_transparent_pass(&mut self, encoder: &mut wgpu::CommandEncoder) {
         // render_opaque_pass already cleared to black and drew nothing - see
         // its own comment on has_active_camera - nothing for this pass to add.
-        if !self.camera.has_active_camera() {
+        if !self.scene_manager.cameras().is_some_and(|c| c.has_active_camera()) {
             return;
         }
 
@@ -101,7 +105,7 @@ impl App {
         for model_ref in self.distinct_model_refs(None) {
             if let Some(model_data) = self.game_models.get(&model_ref) {
                 render_pass.set_vertex_buffer(1, model_data.instance_buffer.slice(..));
-                render_pass.draw_model_instanced_from_list(&model_data.model, 0..model_data.instance_count as u32, &self.camera.bind_group, &self.light.rendering_data.bind_group, &"transparent".to_string());
+                render_pass.draw_model_instanced_from_list(&model_data.model, 0..model_data.instance_count as u32, &self.camera_resources.bind_group, &self.light.rendering_data.bind_group, &"transparent".to_string());
             }
         }
     }
@@ -123,7 +127,7 @@ impl App {
 
         render_pass.set_pipeline(&self.render_physics.render_pipeline);
         render_pass.set_bind_group(0, &self.render_physics.bind_group, &[]);
-        render_pass.set_bind_group(1, &self.camera.bind_group, &[]);
+        render_pass.set_bind_group(1, &self.camera_resources.bind_group, &[]);
 
         if !self.show_depth_map && self.render_physics.visible {
             self.render_physics_debug_lines(&mut render_pass);
@@ -182,7 +186,7 @@ impl App {
     // Debug lines come from the physics thread in absolute world coordinates,
     // so make them camera-relative here to match camera.view_proj.
     fn render_physics_debug_lines<'rp>(&mut self, render_pass: &mut wgpu::RenderPass<'rp>) {
-        let camera_position = self.camera.active().camera.position();
+        let camera_position = self.scene_manager.cameras().map(|c| c.active().camera.position()).unwrap_or_else(nalgebra::Point3::origin);
         let vertices: Vec<ManualVertex> = self.render_physics.renderizable_lines.iter()
             .flat_map(|line| line.to_vec())
             .map(|mut vertex| {

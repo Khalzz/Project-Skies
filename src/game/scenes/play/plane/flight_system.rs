@@ -1,6 +1,6 @@
 use nalgebra::{Vector3, clamp};
 use rapier3d::prelude::RigidBody;
-use crate::game::play::plane::utils;
+use crate::game::scenes::play::plane::utils;
 
 pub struct AoA {
     pub aoa_pitch: f32,

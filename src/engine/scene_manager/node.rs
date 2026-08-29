@@ -2,6 +2,7 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 
 use crate::app::App;
+use crate::engine::rendering::camera::handler::SceneCameras;
 
 use super::behavior::Behavior;
 
@@ -51,33 +52,47 @@ impl Node {
         self
     }
 
+    /// Finds this node's attached behavior of concrete type `B`, if any -
+    /// same idea as `get_property`/`get_property_mut`, just over `behaviors`
+    /// instead of `properties` (see `Behavior::as_any`/`as_any_mut`'s own doc
+    /// comment for why this exists: a `SceneBehaviour` can reach into a
+    /// specific node's behavior this way, for data a `Behavior` itself has no
+    /// way to reach on its own).
+    pub fn get_behavior<B: Behavior + 'static>(&self) -> Option<&B> {
+        self.behaviors.iter().find_map(|behavior| behavior.as_any().downcast_ref::<B>())
+    }
+
+    pub fn get_behavior_mut<B: Behavior + 'static>(&mut self) -> Option<&mut B> {
+        self.behaviors.iter_mut().find_map(|behavior| behavior.as_any_mut().downcast_mut::<B>())
+    }
+
     /// Runs `on_spawn` on every attached behavior. Called once by
     /// `SceneNodes::spawn`, right after the node is actually in the scene -
     /// not part of construction, since a behavior's `on_spawn` may want to see
     /// properties a later `add_property` call added after it was attached.
-    pub(crate) fn run_on_spawn(&mut self, app: &mut App) {
+    pub(crate) fn run_on_spawn(&mut self, cameras: &mut SceneCameras, app: &mut App) {
         // Behaviors are taken out of self before calling into them - a
         // behavior stored inside self.behaviors can't also receive &mut self,
         // that would alias. Same pattern in run_update/run_fixed_update below.
         let mut behaviors = std::mem::take(&mut self.behaviors);
         for behavior in behaviors.iter_mut() {
-            behavior.on_spawn(self, app);
+            behavior.on_spawn(self, cameras, app);
         }
         self.behaviors = behaviors;
     }
 
-    pub(crate) fn run_update(&mut self, app: &mut App, dt: f32) {
+    pub(crate) fn run_update(&mut self, cameras: &mut SceneCameras, app: &mut App, dt: f32) {
         let mut behaviors = std::mem::take(&mut self.behaviors);
         for behavior in behaviors.iter_mut() {
-            behavior.update(self, app, dt);
+            behavior.update(self, cameras, app, dt);
         }
         self.behaviors = behaviors;
     }
 
-    pub(crate) fn run_fixed_update(&mut self, app: &mut App, dt: f32) {
+    pub(crate) fn run_fixed_update(&mut self, cameras: &mut SceneCameras, app: &mut App, dt: f32) {
         let mut behaviors = std::mem::take(&mut self.behaviors);
         for behavior in behaviors.iter_mut() {
-            behavior.fixed_update(self, app, dt);
+            behavior.fixed_update(self, cameras, app, dt);
         }
         self.behaviors = behaviors;
     }

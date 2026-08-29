@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 use std::sync::mpsc::Sender;
 
-use crate::game::play::plane::physics::wheels::wheel::{Wheel, WheelData};
-use crate::game::play::plane::physics::wheels::wheel_manager::WheelManager;
-use crate::game::play::plane::physics::wings::wing_manager::WingManager;
-use crate::game::play::plane::plane::{PlaneControls};
+use crate::game::scenes::play::plane::physics::wheels::wheel::{Wheel, WheelData};
+use crate::game::scenes::play::plane::physics::wheels::wheel_manager::WheelManager;
+use crate::game::scenes::play::plane::physics::wings::wing_manager::WingManager;
+use crate::game::scenes::play::plane::plane::{PlaneControls};
 use crate::engine::physics::physics::DebugPhysicsMessageType;
 use crate::engine::physics::physics_handler::{ColliderDebugData, MetadataType, PhysicsData, PhysicsTick, SuspensionDebugData, WingDebugData};
 use rapier3d::prelude::{ColliderSet, QueryPipeline, RigidBodySet};
-use crate::game::play::plane::flight_system::FlightSystem;
+use crate::game::scenes::play::plane::flight_system::FlightSystem;
 
 pub struct PlanePhysicsLogic {
     pub wheel_manager: WheelManager,

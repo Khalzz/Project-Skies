@@ -1,7 +1,7 @@
 use nalgebra::vector;
 use rapier3d::{dynamics::{RigidBody}};
 
-use crate::{game::play::plane::{physics::wings::{airfoil::AirFoil, wing::Wing}, plane::PlaneControls}};
+use crate::{game::scenes::play::plane::{physics::wings::{airfoil::AirFoil, wing::Wing}, plane::PlaneControls}};
 
 pub struct WingManager {
   pub wings: Vec<Wing>,
@@ -26,11 +26,11 @@ impl WingManager {
   pub fn update(&mut self, plane_controls: &PlaneControls, rigidbody: &mut RigidBody) {
     for wing in &mut self.wings {
       wing.control_input = match wing.label.as_str() {
-          "Left wing"           => (-plane_controls.aileron + plane_controls.trim_roll).clamp(-1.0, 1.0),
-          "Right wing"          => (plane_controls.aileron + plane_controls.trim_roll).clamp(-1.0, 1.0),
-          "Left elevator wing"  => (plane_controls.elevator + plane_controls.trim_pitch).clamp(-1.0, 1.0),
-          "Right elevator wing" => (plane_controls.elevator + plane_controls.trim_pitch).clamp(-1.0, 1.0),
-          "Rudder wing"         => (plane_controls.rudder + plane_controls.trim_yaw).clamp(-1.0, 1.0),
+          "Left wing"           => (-plane_controls.aileron + plane_controls.trim.roll).clamp(-1.0, 1.0),
+          "Right wing"          => (plane_controls.aileron + plane_controls.trim.roll).clamp(-1.0, 1.0),
+          "Left elevator wing"  => (plane_controls.elevator + plane_controls.trim.pitch).clamp(-1.0, 1.0),
+          "Right elevator wing" => (plane_controls.elevator + plane_controls.trim.pitch).clamp(-1.0, 1.0),
+          "Rudder wing"         => (plane_controls.rudder + plane_controls.trim.yaw).clamp(-1.0, 1.0),
           _ => 0.0,
       };
 

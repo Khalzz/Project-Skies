@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use app::App;
-use game::{main_menu, play, sandbox};
+use game::scenes::{main_menu, play, sandbox};
 
 use crate::engine::rendering::enviroment::environment::{Environment, SkyboxFaces};
 use crate::engine::splash_screen::SplashScreenConfig;
@@ -47,19 +47,20 @@ async fn main() -> Result<(), String> {
             if let Err(e) = resources::register_model(&mut app, "Water", "Water/water.gltf") {
                 eprintln!("{e}");
             }
+            if let Err(e) = resources::register_model(&mut app, "F14", "F14/f14.gltf") {
+                eprintln!("{e}");
+            }
+            if let Err(e) = resources::register_model(&mut app, "Ground", "ground/ground.glb") {
+                eprintln!("{e}");
+            }
 
-            app.scene_manager.create_loaded_scene("playing", "./assets/scenes/test_chamber", default_skybox(), play::scene::GameLogic::finish);
-            // Used to be create_loaded_scene (its own data.ron) - now spawns its
-            // three objects directly via the code-first entity system (see
-            // main_menu::scene::GameLogic::new), so there's no level to
-            // background-load any more and this can be the cheap synchronous
-            // path, same as sandbox.
-            app.scene_manager.create_scene("main_menu", |app| main_menu::scene::GameLogic::new(app, default_skybox()));
-            // Empty scene for trying out the code-first entity system (see
-            // engine::scene_manager::{node, behavior, scene_nodes}) - spawn
-            // into app.scene_nodes from here. Set as the initial scene below
-            // for testing; swap back to "main_menu" when done.
-            app.scene_manager.create_scene("sandbox", |app| sandbox::scene::GameLogic::new(app, default_skybox()));
+            app.scene_manager.create_loaded_scene(
+                "playing",
+                |device, queue, layout, config| play::scene::GameLogic::prepare(device, queue, layout, config, default_skybox()),
+                play::scene::GameLogic::finish,
+            );
+            app.scene_manager.create_scene("main_menu", |scene, app| main_menu::scene::GameLogic::new(scene, app, default_skybox()));
+            app.scene_manager.create_scene("sandbox", |scene, app| sandbox::scene::GameLogic::new(scene, app, default_skybox()));
 
             app.scene_manager.open_scene("main_menu");
 

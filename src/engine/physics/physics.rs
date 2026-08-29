@@ -6,10 +6,10 @@ use std::panic;
 use nalgebra::Point3;
 
 use crate::engine::rendering::ui::physics_rendering::RenderPhysics;
-use crate::engine::rendering::camera::handler::CameraHandler;
+use crate::engine::rendering::camera::handler::CameraResources;
 use crate::engine::physics::physics_handler::{Physics, RenderMessage, PhysicsCommand, PhysicsTick};
-use crate::engine::physics::physics_resources::load_physics_from_level;
-use crate::game::play::plane::plane::PlaneControls;
+use crate::engine::physics::physics_resources::{load_physics_from_definitions, PhysicsObjectDef};
+use crate::game::scenes::play::plane::plane::PlaneControls;
 use crate::engine::primitive::manual_vertex::ManualVertex;
 
 #[derive(Clone)]
@@ -27,7 +27,7 @@ pub struct PhysicsDataTransmission {
 
 // Always starts the physics thread - callers only call this when a scene's
 // Scene::physics() actually returned Some(...); see App::run.
-pub fn physics_handling(device: &Device, config: &SurfaceConfiguration, camera: &CameraHandler, level_path: String, physics_tick: Box<dyn PhysicsTick + Send>) -> PhysicsDataTransmission {
+pub fn physics_handling(device: &Device, config: &SurfaceConfiguration, camera: &CameraResources, physics_bodies: Vec<PhysicsObjectDef>, physics_tick: Box<dyn PhysicsTick + Send>) -> PhysicsDataTransmission {
     // Data channels
     let (physics_data_tx, physics_data_rx) = channel::<HashMap<String, RenderMessage>>();
     let (request_data_tx, request_data_rx) = channel::<PhysicsCommand>();
@@ -54,7 +54,7 @@ pub fn physics_handling(device: &Device, config: &SurfaceConfiguration, camera: 
         }));
 
         let mut physics = Physics::new();
-        load_physics_from_level(level_path, &mut physics.collider_set, &mut physics.rigidbody_set, &mut physics.physics_elements);
+        load_physics_from_definitions(&physics_bodies, &mut physics.collider_set, &mut physics.rigidbody_set, &mut physics.physics_elements);
         physics.physics_thread(physics_data_tx, request_data_rx, plane_control_rx, debug_physics_tx, physics_tick);
     });
 

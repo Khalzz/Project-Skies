@@ -5,8 +5,8 @@ use rapier3d::prelude::{ColliderHandle, RigidBodyHandle};
 use std::sync::mpsc::{Sender, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
-use crate::game::play::plane::plane::{Plane, PlaneControls};
-use crate::game::play::plane::physics::wheels::wheel::WheelData;
+use crate::game::scenes::play::plane::plane::{Plane, PlaneControls};
+use crate::game::scenes::play::plane::physics::wheels::wheel::WheelData;
 use serde::{Deserialize, Serialize};
 use crate::engine::physics::physics::DebugPhysicsMessageType;
 

@@ -16,7 +16,7 @@ use crate::engine::ui::color::UiColor;
 use crate::engine::ui::layer::Layer;
 use crate::engine::ui::ui_node::UiNode;
 use crate::engine::ui::ui_transform::{Orientation, PositionValue, SizeValue};
-use crate::game::main_menu::ui as main_menu_ui;
+use crate::game::scenes::main_menu::ui as main_menu_ui;
 use crate::game::ui::{button, label, with_left_accent};
 
 // Small green HUD readout - the shape data_box's own children and compass/

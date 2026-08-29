@@ -146,7 +146,7 @@ pub(crate) fn settings_ui(app: &mut App, on_back: impl Fn(&mut App) + 'static) -
 /// (a curated subset of settings/input.ron's full action list: debug/UI-internal
 /// actions aren't meant to be player-rebindable, so they're left out of this file
 /// entirely rather than filtered here).
-const CONTROLLER_ACTIONS_RON: &str = include_str!("../../../settings/controller.ron");
+const CONTROLLER_ACTIONS_RON: &str = include_str!("../../../../settings/controller.ron");
 
 /// One section per action, stacked in a single column - see
 /// `controller_settings_section`.
@@ -315,7 +315,7 @@ struct LevelInfo {
     mission_date: String,
 }
 
-const LEVELS_RON: &str = include_str!("../../../assets/levels.ron");
+const LEVELS_RON: &str = include_str!("../../../../assets/levels.ron");
 
 fn levels() -> Vec<LevelInfo> {
     ron::from_str(LEVELS_RON).expect("Failed to parse assets/levels.ron")

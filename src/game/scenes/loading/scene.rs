@@ -1,6 +1,6 @@
 use crate::app::App;
 use crate::engine::rendering::ui::ui::Ui;
-use crate::engine::scene_manager::scene::{FrameContext, Scene};
+use crate::engine::scene_manager::scene::{FrameContext, Scene, SceneBehaviour};
 use crate::engine::ui::color::UiColor;
 use crate::engine::ui::ui_node::UiNode;
 use crate::engine::ui::ui_transform::{PositionValue, SizeValue};
@@ -52,8 +52,8 @@ impl LoadingScreenScene {
     }
 }
 
-impl Scene for LoadingScreenScene {
-    fn update(&mut self, app: &mut App, _ctx: &mut FrameContext) {
+impl SceneBehaviour for LoadingScreenScene {
+    fn update(&mut self, _scene: &mut Scene, app: &mut App, _ctx: &mut FrameContext) {
         self.elapsed += app.time.delta_time;
 
         // Indeterminate progress (no real byte/step counter is wired up) - a slow

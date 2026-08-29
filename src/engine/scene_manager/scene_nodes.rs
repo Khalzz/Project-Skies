@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::app::App;
+use crate::engine::rendering::camera::handler::SceneCameras;
 
 use super::behavior::Behavior;
 use super::node::Node;
@@ -35,14 +36,14 @@ impl SceneNodes {
     /// duplicate id is almost always an authoring bug (every lookup here
     /// treats id as the unique address for that node), so this is loud about
     /// it instead of letting one node quietly clobber another.
-    pub fn spawn(&mut self, mut node: Node, app: &mut App) -> Result<(), String> {
+    pub fn spawn(&mut self, mut node: Node, cameras: &mut SceneCameras, app: &mut App) -> Result<(), String> {
         if self.nodes.contains_key(&node.id) {
             let message = format!("scene already has a node named '{}' - refusing to overwrite it", node.id);
             eprintln!("{message}");
             return Err(message);
         }
 
-        node.run_on_spawn(app);
+        node.run_on_spawn(cameras, app);
         self.nodes.insert(node.id.clone(), node);
         Ok(())
     }
@@ -50,8 +51,8 @@ impl SceneNodes {
     /// Convenience for the common case: build a fresh `Node` and attach one
     /// behavior to it in a single call - `scene.spawn_with_behavior("player",
     /// Player::new(start_position), app)`.
-    pub fn spawn_with_behavior<B: Behavior + 'static>(&mut self, id: impl Into<String>, behavior: B, app: &mut App) -> Result<(), String> {
-        self.spawn(Node::new(id).add_behavior(behavior), app)
+    pub fn spawn_with_behavior<B: Behavior + 'static>(&mut self, id: impl Into<String>, behavior: B, cameras: &mut SceneCameras, app: &mut App) -> Result<(), String> {
+        self.spawn(Node::new(id).add_behavior(behavior), cameras, app)
     }
 
     pub fn get(&self, id: &str) -> Option<&Node> {
@@ -71,7 +72,7 @@ impl SceneNodes {
     /// keep getting `update`/`fixed_update` calls after switching to a scene
     /// that never spawned it. No `on_despawn` hook exists on `Behavior` yet,
     /// so anything a behavior did outside its own node on spawn (`Camera`
-    /// registering itself with `app.camera`, hiding the cursor) isn't
+    /// registering itself with `cameras`, hiding the cursor) isn't
     /// automatically undone here - only the node/behavior itself goes away.
     pub fn clear(&mut self) {
         self.nodes.clear();
@@ -83,18 +84,18 @@ impl SceneNodes {
 
     /// Runs every node's attached behaviors' `update` - called once per
     /// rendered frame from `App::run`.
-    pub fn update(&mut self, app: &mut App, dt: f32) {
+    pub fn update(&mut self, cameras: &mut SceneCameras, app: &mut App, dt: f32) {
         for node in self.nodes.values_mut() {
-            node.run_update(app, dt);
+            node.run_update(cameras, app, dt);
         }
     }
 
     /// Runs every node's attached behaviors' `fixed_update` - see
     /// `Behavior::fixed_update`'s own doc comment for why this is an
     /// approximation of a true fixed tick, not the real physics-thread rate.
-    pub fn fixed_update(&mut self, app: &mut App, dt: f32) {
+    pub fn fixed_update(&mut self, cameras: &mut SceneCameras, app: &mut App, dt: f32) {
         for node in self.nodes.values_mut() {
-            node.run_fixed_update(app, dt);
+            node.run_fixed_update(cameras, app, dt);
         }
     }
 }

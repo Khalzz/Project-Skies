@@ -4,6 +4,7 @@ use nalgebra::Vector3;
 
 use crate::app::App;
 use crate::engine::input::input;
+use crate::engine::rendering::camera::handler::SceneCameras;
 use crate::engine::scene_manager::behavior::Behavior;
 use crate::engine::scene_manager::node::Node;
 use crate::transform::Transform;
@@ -72,9 +73,9 @@ impl Behavior for Camera {
     // mutating whatever "active" already happened to be. The cursor is only
     // hidden for a free camera - a static one (e.g. main_menu's) still needs
     // the cursor visible to click UI.
-    fn on_spawn(&mut self, _node: &mut Node, app: &mut App) {
-        app.camera.create_camera(&self.camera_name, self.origin_transform, self.fov.max);
-        app.camera.select_camera(&self.camera_name);
+    fn on_spawn(&mut self, _node: &mut Node, cameras: &mut SceneCameras, app: &mut App) {
+        cameras.create_camera(&self.camera_name, self.origin_transform, self.fov.max);
+        cameras.select_camera(&self.camera_name);
         if self.free {
             app.window_manager.context.mouse().show_cursor(false);
         }
@@ -83,14 +84,14 @@ impl Behavior for Camera {
     // A plain, always-on fly-around camera (mouse look + WASD/Space/Left
     // Ctrl, Left Shift to sprint, scroll for fov) when free - a no-op
     // otherwise, so a static Camera just sits at its spawned pose forever.
-    fn update(&mut self, _node: &mut Node, app: &mut App, dt: f32) {
+    fn update(&mut self, _node: &mut Node, cameras: &mut SceneCameras, _app: &mut App, dt: f32) {
         if !self.free {
             return;
         }
 
         let sens = input::mouse_sensitivity();
         let scroll = input::mouse_scroll_y();
-        let active = app.camera.active_mut();
+        let active = cameras.active_mut();
 
         let mut yaw = active.camera.yaw() + (input::mouse_rel_x() as f32 * sens.0 * self.look_sensitivity_scale).to_radians();
         let pitch = (active.camera.pitch() - (input::mouse_rel_y() as f32 * sens.1 * self.look_sensitivity_scale).to_radians())
@@ -126,7 +127,7 @@ impl Behavior for Camera {
         }
     }
 
-    fn fixed_update(&mut self, _node: &mut Node, _app: &mut App, _dt: f32) {
+    fn fixed_update(&mut self, _node: &mut Node, _cameras: &mut SceneCameras, _app: &mut App, _dt: f32) {
 
     }
 }

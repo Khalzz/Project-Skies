@@ -45,7 +45,7 @@ const PRESS_THRESHOLD: f32 = 0.5;
 ///    - action_strength(action) -> the raw 0.0..=1.0 value, for analog reads (throttle, stick deflection)
 ///    - get_axis(negative, positive) -> action_strength(positive) - action_strength(negative)
 ///    - begin_capture() / captured_binding() / cancel_capture() -> for a rebinding
-///      menu (see game::main_menu::rebind_modal): after begin_capture(), the next
+///      menu (see game::scenes::main_menu::rebind_modal): after begin_capture(), the next
 ///      key/button pressed or axis pushed past its deadzone is captured instead of
 ///      dispatched normally, and handed back via captured_binding() (polled once
 ///      per frame until it returns Some); cancel_capture() aborts without one.

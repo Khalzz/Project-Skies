@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use nalgebra::vector;
 use rapier3d::{dynamics::{RigidBody, RigidBodySet}, geometry::ColliderSet, pipeline::QueryPipeline};
 
-use crate::{engine::physics::physics_handler::{PhysicsData, SuspensionDebugData}, game::play::plane::physics::wheels::wheel::WheelData};
+use crate::{engine::physics::physics_handler::{PhysicsData, SuspensionDebugData}, game::scenes::play::plane::physics::wheels::wheel::WheelData};
 
 use super::wheel::Wheel;
 

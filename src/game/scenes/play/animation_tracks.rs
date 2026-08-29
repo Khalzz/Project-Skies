@@ -13,6 +13,7 @@ use serde::Deserialize;
 
 use crate::app::App;
 use crate::engine::rendering::ui::ui::Ui;
+use crate::engine::scene_manager::scene::Scene;
 use crate::engine::ui::color::{lerp_rgba, Fill, UiColor};
 use crate::engine::ui::ui_node::Style;
 use crate::engine::utils::lerps::lerp;
@@ -212,7 +213,7 @@ fn sample<T: Copy>(keyframes: &[Keyframe<T>], local_time_ms: i64, lerp_fn: impl 
 }
 
 /// Animates a 3D `GameObject`'s transform (see `assets/scenes/*/data.ron`),
-/// looked up by its scene `id` in `app.renderizable_instances` - the same map
+/// looked up by its scene `id` in `scene.content.renderizable_instances` - the same map
 /// physics writes into every frame (see `App::run`), so a track targeting a
 /// physics-driven object will fight it every frame rather than composing with
 /// it - unless physics is paused for that object for the track's duration (see
@@ -244,7 +245,7 @@ impl Object3DTrack {
         }
     }
 
-    fn apply(&self, game_time_ms: u64, app: &mut App) {
+    fn apply(&self, game_time_ms: u64, scene: &mut Scene, _app: &mut App) {
         match self {
             Object3DTrack::Position { target, start_time, end_time, keyframes } => {
                 if end_time.is_some_and(|end| game_time_ms >= end) {
@@ -252,7 +253,7 @@ impl Object3DTrack {
                 }
                 let Some(local) = local_time(game_time_ms, *start_time) else { return };
                 let Some(value) = sample(keyframes, local, lerp_vec3) else { return };
-                if let Some(instance) = app.renderizable_instances.get_mut(target) {
+                if let Some(instance) = scene.content.renderizable_instances.get_mut(target) {
                     instance.instance.transform.position = Vector3::new(value.x, value.y, value.z);
                 }
             }
@@ -262,7 +263,7 @@ impl Object3DTrack {
                 }
                 let Some(local) = local_time(game_time_ms, *start_time) else { return };
                 let Some(value) = sample(keyframes, local, lerp_vec3) else { return };
-                if let Some(instance) = app.renderizable_instances.get_mut(target) {
+                if let Some(instance) = scene.content.renderizable_instances.get_mut(target) {
                     instance.instance.transform.rotation =
                         UnitQuaternion::from_euler_angles(value.x.to_radians(), value.y.to_radians(), value.z.to_radians());
                 }
@@ -273,7 +274,7 @@ impl Object3DTrack {
                 }
                 let Some(local) = local_time(game_time_ms, *start_time) else { return };
                 let Some(value) = sample(keyframes, local, lerp_vec3) else { return };
-                if let Some(instance) = app.renderizable_instances.get_mut(target) {
+                if let Some(instance) = scene.content.renderizable_instances.get_mut(target) {
                     instance.instance.transform.scale = Vector3::new(value.x, value.y, value.z);
                 }
             }
@@ -452,19 +453,19 @@ impl CameraTrack {
         }
     }
 
-    fn apply(&self, game_time_ms: u64, app: &mut App) {
+    fn apply(&self, game_time_ms: u64, scene: &mut Scene, _app: &mut App) {
         match self {
             CameraTrack::Position { target, start_time, keyframes } => {
                 let Some(local) = local_time(game_time_ms, *start_time) else { return };
                 let Some(value) = sample(keyframes, local, lerp_vec3) else { return };
-                if let Some(instance) = app.camera.get_mut(target) {
+                if let Some(instance) = scene.cameras.get_mut(target) {
                     instance.camera.set_position(Point3::new(value.x, value.y, value.z));
                 }
             }
             CameraTrack::Fov { target, start_time, keyframes } => {
                 let Some(local) = local_time(game_time_ms, *start_time) else { return };
                 let Some(value) = sample(keyframes, local, lerp) else { return };
-                if let Some(instance) = app.camera.get_mut(target) {
+                if let Some(instance) = scene.cameras.get_mut(target) {
                     instance.projection.fovy = value;
                 }
             }
@@ -480,7 +481,7 @@ impl CameraTrack {
                     let shake = position_shake.map_or(Vector3::zeros(), |s| s.sample(local));
                     Point3::from(Vector3::new(p.x, p.y, p.z) + shake)
                 } else if let Some(follow_id) = follow_at {
-                    let Some(instance) = app.renderizable_instances.get(follow_id) else { return };
+                    let Some(instance) = scene.content.renderizable_instances.get(follow_id) else { return };
                     let follow_rotation = instance.instance.transform.rotation;
                     let offset_world = follow_rotation * Vector3::new(follow_offset.x, follow_offset.y, follow_offset.z);
                     let shake = position_shake.map_or(Vector3::zeros(), |s| follow_rotation * s.sample(local));
@@ -495,7 +496,7 @@ impl CameraTrack {
                 // half-resolved position/orientation, same as the old LookAt's
                 // own early-return on a missing look_at target.
                 let resolved_look_at = match look_at {
-                    Some(look_at_id) => match app.renderizable_instances.get(look_at_id) {
+                    Some(look_at_id) => match scene.content.renderizable_instances.get(look_at_id) {
                         Some(instance) => {
                             let wander = look_at_wander.map_or(Vector3::zeros(), |w| w.sample(local));
                             Some(instance.instance.transform.position + wander)
@@ -505,7 +506,7 @@ impl CameraTrack {
                     None => None,
                 };
 
-                if let Some(instance) = app.camera.get_mut(target) {
+                if let Some(instance) = scene.cameras.get_mut(target) {
                     instance.camera.set_position(resolved_position);
                     if let Some(look_pos) = resolved_look_at {
                         instance.camera.look_at(Point3::from(look_pos));
@@ -544,8 +545,8 @@ pub(crate) fn any_cinematic_active(camera: &[CameraTrack], game_time_ms: u64) ->
     camera.iter().any(|track| track.is_cinematic_active(game_time_ms))
 }
 
-pub(crate) fn apply_all(object_3d: &[Object3DTrack], ui: &[UiTrack], camera: &[CameraTrack], game_time_ms: u64, app: &mut App) {
-    for track in object_3d { track.apply(game_time_ms, app); }
+pub(crate) fn apply_all(object_3d: &[Object3DTrack], ui: &[UiTrack], camera: &[CameraTrack], game_time_ms: u64, scene: &mut Scene, app: &mut App) {
+    for track in object_3d { track.apply(game_time_ms, scene, app); }
     for track in ui { track.apply(game_time_ms, app); }
-    for track in camera { track.apply(game_time_ms, app); }
+    for track in camera { track.apply(game_time_ms, scene, app); }
 }

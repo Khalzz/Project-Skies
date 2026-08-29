@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use nalgebra::{Matrix4, Point3, Quaternion, Vector3};
 use sdl2::rect::Point;
 use wgpu::{util::DeviceExt, BindGroup, BindGroupLayout, BindGroupLayoutDescriptor, Buffer, Device, Queue};
+use crate::engine::rendering::instance_management::InstanceData;
 use crate::engine::utils::lerps::{lerp, lerp_point3, smoothstep};
 use crate::transform::Transform;
 
@@ -9,15 +10,14 @@ use super::camera::Camera;
 use super::projection::Projection;
 use super::uniform::{CameraUniform, NearFarUniform};
 
-// Stands in for "no real camera exists" - `clear_scene_cameras` selects this
-// instead of leaving `active` pointing at a genuine camera a previous scene
-// registered. There's no other engine-level default camera name any more -
-// "main" (play::scene.rs's own choice), "main_menu", "sandbox_free" etc. are
-// all just scene-chosen names now, nothing special about any of them at this
-// level. A real, if meaningless, `CameraInstance` still sits in `cameras`
-// under this name so `active()`'s `.expect()` never has anything to panic on
-// - only `has_active_camera()` (and the render loop, via that) treats this
-// specially.
+// Stands in for "no real camera exists" - `SceneCameras::new` selects this
+// instead of a scene starting with no active camera at all. There's no other
+// engine-level default camera name any more - "main" (play::scene.rs's own
+// choice), "main_menu", "sandbox_free" etc. are all just scene-chosen names
+// now, nothing special about any of them at this level. A real, if
+// meaningless, `CameraInstance` still sits in `cameras` under this name so
+// `active()`'s `.expect()` never has anything to panic on - only
+// `has_active_camera()` (and the render loop, via that) treats this specially.
 const NO_CAMERA_SENTINEL: &str = "__no_camera";
 // A dedicated hidden camera swapped in via select_camera - keeps a
 // transition's blended values out of both the source and destination
@@ -34,42 +34,55 @@ struct CameraTransition {
     duration: f32,
 }
 
+/// What a camera's `look_at` (see `CameraInstance::look_at`) aims at -
+/// resolved fresh every frame by `SceneCameras::update`, not just once when
+/// it's set, so a `Node` target keeps being tracked as it moves instead of
+/// freezing at wherever it was the instant `look_at` was configured.
+pub enum LookAtTarget {
+    Point(Point3<f32>),
+    // A renderizable instance's id (see `Scene::spawn_node`'s `Model`
+    // registration, or a `data.ron`-loaded object) - resolved via its live
+    // `transform.position` each frame, the same lookup
+    // `animation_tracks::CameraTrack::Shot`'s `follow_at`/`look_at` already
+    // do for the same reason.
+    Node(String),
+}
+
 /// A single named camera's own settings - position/orientation (`Camera`) and lens
 /// (`Projection`). Cheap to create since it owns no GPU resources of its own; only
-/// the active one (see `CameraHandler`) actually drives what gets rendered.
+/// the active one (see `SceneCameras`) actually drives what gets rendered.
 pub struct CameraInstance {
     pub camera: Camera,
     pub projection: Projection,
+    // None means "whatever on_spawn/update sets position/yaw/pitch to
+    // directly is the final word" - the common case. Some(target) means this
+    // camera's orientation is owned by `SceneCameras::update` instead: it
+    // overwrites yaw/pitch every frame to keep facing `target`, after
+    // whatever else (a Behavior, camera_control, ...) already ran that frame.
+    pub look_at: Option<LookAtTarget>,
 }
 
-/// Owns every camera the game has registered plus the one shared set of GPU
-/// resources (uniform/buffer/bind group) that actually feeds the renderer each
-/// frame - only the active camera's settings ever get uploaded (see
-/// `update_buffer`), the same way engines like Unity only ever render from one
-/// active camera at a time even though many can exist in a scene.
-///
-/// This is the "base" of the camera system - `Camera` (see `camera.rs`) only
-/// defines a camera's own settings and functions; this is what actually
-/// creates one, translating a `Transform` into that representation (see
-/// `create_camera`), tracks every registered camera by name, and drives what
-/// the renderer reads from each frame.
-pub struct CameraHandler {
-    cameras: HashMap<String, CameraInstance>,
-    active: String,
-    // Remembered so create_camera never needs width/height passed in - every
-    // camera's aspect ratio is always just "whatever the screen currently is".
+/// The persistent, app-level half of the camera system - the one shared set
+/// of GPU resources (uniform/buffer/bind group) that actually feeds the
+/// renderer each frame, created once and reused across every scene switch.
+/// Lives on `App` as `app.camera_resources`. Doesn't hold any camera data
+/// itself (no cameras, no "active" concept) - that's scene-scoped (see
+/// `SceneCameras`, on `Scene::cameras`); this just uploads whatever
+/// `CameraInstance` it's handed (`update_buffer`) and answers screen-space
+/// queries against whatever it last uploaded (`world_to_screen`).
+pub struct CameraResources {
+    // Remembered so SceneCameras::new/create_camera never need width/height
+    // passed in explicitly - every camera's aspect ratio is always just
+    // "whatever the screen currently is". Kept current by `resize`.
     width: u32,
     height: u32,
     pub uniform: CameraUniform,
     pub buffer: Buffer,
     pub bind_group_layout: BindGroupLayout,
     pub bind_group: BindGroup,
-    // Some(...) while transition_to(...) is blending - see its doc comment and
-    // update_transition, which advances/clears this every frame.
-    transition: Option<CameraTransition>,
 }
 
-impl CameraHandler {
+impl CameraResources {
     pub fn new(device: &Device, config: &wgpu::SurfaceConfiguration) -> Self {
         let near_far_uniform = NearFarUniform {
             near: 0.1,
@@ -107,23 +120,112 @@ impl CameraHandler {
             }],
         });
 
-        let mut handler = CameraHandler {
-            cameras: HashMap::new(),
-            active: NO_CAMERA_SENTINEL.to_owned(),
+        CameraResources {
             width: config.width,
             height: config.height,
             uniform,
             buffer,
             bind_group_layout,
             bind_group,
+        }
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    // Only remembers the new size for future SceneCameras::new/create_camera
+    // calls - resizing every already-registered camera's own aspect is
+    // scene-scoped now (see SceneCameras::resize), since the cameras
+    // themselves live there, not here.
+    pub fn resize(&mut self, width: u32, height: u32) {
+        self.width = width;
+        self.height = height;
+    }
+
+    // Recomputes the view_proj uniform from `active` and uploads it - called
+    // once per frame from App, replacing what used to be two lines inlined
+    // at every call site.
+    pub fn update_buffer(&mut self, queue: &Queue, active: &CameraInstance) {
+        self.uniform.update_view_proj(&active.camera, &active.projection);
+        queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&[self.uniform]));
+    }
+
+    pub fn world_to_screen(&self, active: &CameraInstance, pos_world: Point3<f32>, screen_width: u32, screen_height: u32) -> Option<Point> {
+        // view_proj now assumes the camera sits at the origin, so every
+        // position fed into it must first be made camera-relative.
+        let camera_to_point = pos_world - active.camera.position();
+        let forward = active.camera.calc_forward_direction();
+
+        if camera_to_point.dot(&forward) < 0.0 {
+            return None;
+        }
+
+        let view_proj = Matrix4::from(self.uniform.view_proj);
+        let pos_homogeneous = view_proj * Point3::from(camera_to_point).to_homogeneous();
+
+        if pos_homogeneous.w != 0.0 {
+            let ndc = pos_homogeneous.xyz() / pos_homogeneous.w;
+
+            if ndc.x.abs() <= 1.0 && ndc.y.abs() <= 1.0 && ndc.z >= 0.0 && ndc.z <= 1.0 {
+                let x = ((ndc.x + 1.0) * 0.5) * screen_width as f32;
+                let y = ((1.0 - (ndc.y + 1.0) * 0.5)) * screen_height as f32;
+
+                Some(Point::new(x as i32, y as i32))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+}
+
+/// The scene-scoped half of the camera system - every camera the currently
+/// active scene has registered, which one's active, and any in-progress
+/// blend between two of them. Lives on `Scene` as `scene.cameras`, so it's
+/// dropped and rebuilt fresh on every scene switch the same way
+/// `SceneContent` is - a camera a previous scene registered
+/// (`game::camera::camera::Camera` behaviors, a scene's own direct
+/// `Scene::create_camera` calls, ...) never lingers into the next one.
+///
+/// This is the "base" of the camera system - `Camera` (see `camera.rs`) only
+/// defines a camera's own settings and functions; this is what actually
+/// creates one, translating a `Transform` into that representation (see
+/// `create_camera`), tracks every registered camera by name, and drives what
+/// `CameraResources::update_buffer` reads each frame.
+pub struct SceneCameras {
+    cameras: HashMap<String, CameraInstance>,
+    active: String,
+    // Copied from CameraResources at construction (see `Scene::new`) - kept
+    // here too so create_camera never needs width/height passed in
+    // explicitly. Stays in sync with CameraResources via `resize`.
+    width: u32,
+    height: u32,
+    // Some(...) while transition_to(...) is blending - see its doc comment and
+    // update_transition, which advances/clears this every frame.
+    transition: Option<CameraTransition>,
+}
+
+impl SceneCameras {
+    pub fn new(width: u32, height: u32) -> Self {
+        let mut cameras = SceneCameras {
+            cameras: HashMap::new(),
+            active: NO_CAMERA_SENTINEL.to_owned(),
+            width,
+            height,
             transition: None,
         };
 
-        // Placeholder so active()'s .expect() has something to find before the
-        // first scene reset runs (see clear_scene_cameras) - never meant to be
-        // seen, the render loop skips drawing while this is active.
-        handler.create_camera(NO_CAMERA_SENTINEL, Transform::new(Vector3::new(0.0, 0.0, 0.0), Quaternion::identity(), Vector3::new(1.0, 1.0, 1.0)), 45.0);
-        handler
+        // Placeholder so active()'s .expect() has something to find before
+        // this scene creates its own first camera - never meant to be seen,
+        // the render loop skips drawing while this is active.
+        cameras.create_camera(NO_CAMERA_SENTINEL, Transform::new(Vector3::new(0.0, 0.0, 0.0), Quaternion::identity(), Vector3::new(1.0, 1.0, 1.0)), 45.0);
+        cameras
     }
 
     /// Registers (or replaces) a named camera from a `Transform` (the same
@@ -133,10 +235,10 @@ impl CameraHandler {
     /// `transform.scale` is ignored entirely (meaningless for a camera).
     /// `fovy` is the only lens setting exposed here since it's the one that
     /// actually varies per camera in practice - near/far default to the
-    /// handler's usual values but remain plain public fields on the returned
+    /// usual values but remain plain public fields on the returned
     /// instance's `.projection` if a caller ever needs to override them.
     /// Width/height are deliberately not parameters: aspect ratio always
-    /// comes from the handler's own tracked screen size, kept current by
+    /// comes from this scene's own tracked screen size, kept current by
     /// `resize`.
     ///
     /// If nothing else is currently active (see `NO_CAMERA_SENTINEL`), this
@@ -152,34 +254,16 @@ impl CameraHandler {
         if self.active == NO_CAMERA_SENTINEL {
             self.active = name.clone();
         }
-        self.cameras.insert(name.clone(), CameraInstance { camera, projection });
+        self.cameras.insert(name.clone(), CameraInstance { camera, projection, look_at: None });
         self.cameras.get_mut(&name).unwrap()
     }
 
     /// Whether a real, scene-created camera is currently active - `false`
-    /// right after `clear_scene_cameras` until something calls
-    /// `create_camera`. The render loop uses this to fall back to a black
-    /// screen instead of drawing from a meaningless placeholder.
+    /// until something calls `create_camera`. The render loop uses this to
+    /// fall back to a black screen instead of drawing from a meaningless
+    /// placeholder.
     pub fn has_active_camera(&self) -> bool {
         self.active != NO_CAMERA_SENTINEL
-    }
-
-    /// Removes every camera - a scene-reset step (see `App::run`), so
-    /// cameras a previous scene registered (`data.ron`'s named cameras,
-    /// `game::camera::camera::Camera` behaviors, ...) don't linger forever
-    /// across scene switches. `active` goes back to `NO_CAMERA_SENTINEL`
-    /// (see `has_active_camera`) rather than any particular camera surviving
-    /// the clear - every scene that wants a camera creates its own now, none
-    /// gets to inherit one implicitly. Also cancels any in-progress transition,
-    /// since it targets a camera pair that's about to stop existing anyway.
-    pub fn clear_scene_cameras(&mut self) {
-        self.cameras.clear();
-        self.active = NO_CAMERA_SENTINEL.to_owned();
-        self.cameras.insert(NO_CAMERA_SENTINEL.to_owned(), CameraInstance {
-            camera: Camera::new(Transform::new(Vector3::new(0.0, 0.0, 0.0), Quaternion::identity(), Vector3::new(1.0, 1.0, 1.0))),
-            projection: Projection::new(self.width, self.height, 45.0, 0.1, 100000.0),
-        });
-        self.transition = None;
     }
 
     /// Switches the active camera. Returns false (no-op) if `name` isn't
@@ -302,42 +386,37 @@ impl CameraHandler {
         }
     }
 
-    // Recomputes the view_proj uniform from the active camera and uploads it -
-    // called once per frame from App, replacing what used to be two lines
-    // inlined at every call site.
-    pub fn update_buffer(&mut self, queue: &Queue) {
-        let active = self.cameras.get(&self.active).expect("active camera must always exist");
-        self.uniform.update_view_proj(&active.camera, &active.projection);
-        queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&[self.uniform]));
+    /// Sets (or clears, via `None`) `name`'s `look_at` - see
+    /// `CameraInstance::look_at`'s own doc comment. Returns `false` (no-op),
+    /// same convention as `select_camera`, if `name` isn't registered.
+    pub fn set_look_at(&mut self, name: &str, target: Option<LookAtTarget>) -> bool {
+        if let Some(instance) = self.cameras.get_mut(name) {
+            instance.look_at = target;
+            true
+        } else {
+            false
+        }
     }
 
-    pub fn world_to_screen(&self, pos_world: Point3<f32>, screen_width: u32, screen_height: u32) -> Option<Point> {
-        // view_proj now assumes the camera sits at the origin, so every
-        // position fed into it must first be made camera-relative.
-        let active = self.active();
-        let camera_to_point = pos_world - active.camera.position();
-        let forward = active.camera.calc_forward_direction();
-
-        if camera_to_point.dot(&forward) < 0.0 {
-            return None;
-        }
-
-        let view_proj = Matrix4::from(self.uniform.view_proj);
-        let pos_homogeneous = view_proj * Point3::from(camera_to_point).to_homogeneous();
-
-        if pos_homogeneous.w != 0.0 {
-            let ndc = pos_homogeneous.xyz() / pos_homogeneous.w;
-
-            if ndc.x.abs() <= 1.0 && ndc.y.abs() <= 1.0 && ndc.z >= 0.0 && ndc.z <= 1.0 {
-                let x = ((ndc.x + 1.0) * 0.5) * screen_width as f32;
-                let y = ((1.0 - (ndc.y + 1.0) * 0.5)) * screen_height as f32;
-
-                Some(Point::new(x as i32, y as i32))
-            } else {
-                None
+    /// Re-aims every camera with a `look_at` configured at its current
+    /// target, every frame - called once per rendered frame from `App::run`,
+    /// after anything else (a `Behavior`, `camera_control`, ...) has already
+    /// had its turn moving cameras around this frame, so `look_at` always
+    /// gets the final word on orientation for the cameras that opted into
+    /// it. `renderizable_instances` is `Scene::content`'s own map - passed in
+    /// rather than reaching for it directly so this module stays independent
+    /// of `engine::scene_manager` (see this camera system's own design - it
+    /// isn't part of the node tree).
+    pub fn update(&mut self, renderizable_instances: &HashMap<String, InstanceData>) {
+        for instance in self.cameras.values_mut() {
+            let Some(target) = &instance.look_at else { continue };
+            let target_point = match target {
+                LookAtTarget::Point(point) => Some(*point),
+                LookAtTarget::Node(id) => renderizable_instances.get(id).map(|renderizable| Point3::from(renderizable.instance.transform.position)),
+            };
+            if let Some(target_point) = target_point {
+                instance.camera.look_at(target_point);
             }
-        } else {
-            None
         }
     }
 }

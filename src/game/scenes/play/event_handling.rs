@@ -4,6 +4,7 @@ use serde::Deserialize;
 use crate::engine::audio::audio::{self, Audio};
 use crate::app::App;
 use crate::engine::audio::subtitles::{Subtitle, SubtitleData};
+use crate::engine::scene_manager::scene::Scene;
 use super::animation_tracks::{self, CameraTrack, Object3DTrack, UiTrack};
 
 #[derive(Debug, Deserialize)]
@@ -94,9 +95,9 @@ impl EventSystem {
     /// Stateless (unlike `handle_events`' `activated` latch): every frame just
     /// recomputes "what should this target's value be right now," so scrubbing
     /// `seconds` backward (e.g. a paused/rewound scene) works with no extra logic.
-    pub fn apply_tracks(&self, seconds: f64, app: &mut App) {
+    pub fn apply_tracks(&self, seconds: f64, scene: &mut Scene, app: &mut App) {
         let game_time_ms = Duration::from_secs_f64(seconds).as_millis() as u64;
-        animation_tracks::apply_all(&self.object_3d_tracks, &self.ui_tracks, &self.camera_tracks, game_time_ms, app);
+        animation_tracks::apply_all(&self.object_3d_tracks, &self.ui_tracks, &self.camera_tracks, game_time_ms, scene, app);
     }
 
     /// Whether a `CameraTrack::LookAt` cinematic shot is currently driving the

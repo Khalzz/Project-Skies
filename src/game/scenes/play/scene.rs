@@ -1,18 +1,18 @@
 use std::{collections::HashMap, f32::consts::PI, hash::Hash, time::{Duration, Instant}};
 
 use glyphon::FontSystem;
-use nalgebra::{vector, Point3, Quaternion, UnitQuaternion, Vector3};
-use rand::{rngs::ThreadRng, Rng};
+use nalgebra::{vector, Point3, UnitQuaternion, Vector3};
 use rapier3d::prelude::RigidBody;
 use sdl2::{controller::GameController};
-use crate::{app::{App, AppState}, engine::audio::subtitles::Subtitle, engine::input::input, engine::physics::physics_handler::{MetadataType, PhysicsCommand, PhysicsData, PhysicsTick, RenderMessage}, engine::primitive::manual_vertex::ManualVertex, engine::rendering::{camera::{camera::yaw_pitch_rotation, handler::CameraHandler}, ui::ui::Ui}, engine::scene_manager::scene::{FrameContext, Scene}, transform::Transform, engine::ui::{color::UiColor, ui_node::{UiNode, UiNodeContent}, ui_transform::{Anchor, Orientation, PositionValue, SizeValue, UiTransform}}, engine::utils::lerps::{lerp, lerp_point3, lerp_quaternion, smoothstep}};
+use crate::{app::{App, AppState}, engine::audio::subtitles::Subtitle, engine::input::input, engine::physics::physics_handler::{MetadataType, PhysicsCommand, PhysicsData, PhysicsTick, RenderMessage}, engine::physics::physics_resources::PhysicsObjectDef, engine::primitive::manual_vertex::ManualVertex, engine::rendering::{camera::camera::yaw_pitch_rotation, enviroment::environment::Environment, ui::ui::Ui}, engine::scene_manager::{node::Node, properties::{Model, Transform3D}, scene::{FrameContext, Scene, SceneBehaviour}}, transform::Transform, engine::ui::{color::UiColor, ui_node::{UiNode, UiNodeContent}, ui_transform::{Anchor, Orientation, PositionValue, SizeValue, UiTransform}}, engine::utils::lerps::{lerp, lerp_point3, lerp_quaternion, smoothstep}};
+use crate::engine::game_nodes::game_object::{Camera as GameObjectCamera, Cameras, ColliderType, Lighting, Physics as PhysicsProperty, RigidBodyData};
 use super::{event_handling::EventSystem, plane::{physics_logic::PlanePhysicsLogic, plane::Plane}};
 use std::sync::mpsc::Sender;
-use crate::game::play::plane::plane::PlaneControls;
+use crate::game::scenes::play::plane::plane::PlaneControls;
 use crate::game::selected_level::SELECTED_LEVEL;
 use crate::game::ui::label;
-use crate::game::play::ui as play_ui;
-use crate::resources::PreparedSceneAssets;
+use crate::game::scenes::play::ui as play_ui;
+use crate::resources;
 use crate::engine::tooling::debug_console;
 
 // Note: "altitude"/"altitude_alert"/"stall_alert" below are stale references
@@ -34,11 +34,6 @@ pub enum CameraState {
     Cinematic,
     Frontal,
     Free,
-}
-
-pub struct Bandit {
-    tag: String,
-    locked: bool,
 }
 
 pub struct CameraData {
@@ -94,49 +89,14 @@ pub struct BlinkingAlert {
     time_alert: f32
 }
 
-pub struct BaseRotations {
-    left_aleron: Option<Quaternion<f32>>,
-    right_aleron: Option<Quaternion<f32>>,
-}
-
-pub struct FlightData {
-    pub altimeter: f32,
-    pub speedometer: f32,
-    pub g_meter: f32,
-}
-
-pub struct PlaneSystems {
-    bandits: Vec<Bandit>,
-    stall: bool,
-    pub flight_data: FlightData,
-    pub afterburner_value: f32,
-    pub base_rotations: BaseRotations,
-    pub flap_ratio: f32,
-    pub previous_velocity: Option<Vector3<f32>>,
-    // Real time since `previous_velocity` last actually changed - physics runs
-    // its own fixed 120Hz step (see physics_handler.rs's FIXED_TIMESTEP) on a
-    // separate thread, decoupled from render frame rate, so `data.linvel` (see
-    // plane_movement's G-meter calc) only changes once every ~8.3ms regardless
-    // of how often this runs. At a render rate faster than that, most frames
-    // see the exact same velocity and skip the calc; the one frame that does
-    // see a change has to divide by however long it's actually been since the
-    // last change, not that single frame's own (much smaller) delta_time - the
-    // frame-rate-dependent G-force inflation this fixes came from dividing a
-    // real, physics-tick-sized Δv by a tiny render-frame-sized Δt instead.
-    velocity_sample_elapsed: f32,
-}
-
 pub struct GameLogic { // here we define the data we use on our script
     pub camera_data: CameraData,
     pub blinking_alerts: HashMap<String, BlinkingAlert>,
-    pub plane_systems: PlaneSystems,
     pub gravity: Vector3<f32>,
     pub subtitle_data: Subtitle,
     pub start_time: Instant,
     pub event_system: Option<EventSystem>,
-    rng: ThreadRng,
     pub game_time: f64,
-    pub plane: Plane,
     // Last frame's CameraTrack::LookAt-active state - lets `update` detect the
     // exact rising/falling edge to pause/resume physics on, see its own comment.
     was_cinematic_active: bool,
@@ -153,14 +113,48 @@ pub struct GameLogic { // here we define the data we use on our script
     esc_hold_time: f32,
 }
 
+/// Everything about opening "playing" that's slow enough to cause a visible
+/// stall if done inline on the main thread - the skybox's cubemap textures,
+/// and re-parsing ground/ground.glb's raw geometry for its trimesh collider
+/// (`spawn_world` below only ever gets the already-resolved, still-unscaled
+/// result - see its own comment on why "ground" builds a `ColliderType::
+/// Trimesh` directly instead of a `TrimeshFromModel`, which would otherwise
+/// re-read the file itself, synchronously, at spawn time). Produced by
+/// `GameLogic::prepare` on a background thread, consumed by `GameLogic::finish`
+/// on the main thread - see `SceneManager::create_loaded_scene`.
+pub struct PreparedPlayAssets {
+    environment: resources::PreparedEnvironment,
+    ground_trimesh: (Vec<Vector3<f32>>, Vec<[u32; 3]>),
+}
+
 impl GameLogic {
-    // This is the fast, main-thread half of scene construction, called once the
-    // model/texture loading `assets` (kicked off in the background by App::run's
-    // reset handling - see SceneManager::create_loaded_scene) has finished. Mirrors
-    // the old Scene::init/new (now removed - a scene's constructor only runs on
-    // activation, see SceneManager::create_scene/create_loaded_scene).
-    pub fn finish(app: &mut App, assets: PreparedSceneAssets) -> Self {
-        assets.apply(app);
+    /// Background-thread half of construction - see `PreparedPlayAssets`'s own
+    /// doc comment for why these two specifically are the slow part, not
+    /// everything `finish` still does synchronously afterward (node spawning
+    /// itself is cheap - the models it references are already resident in
+    /// `app.game_models` by the time any scene opens, see main.rs's own
+    /// `resources::register_model` calls).
+    pub fn prepare(device: &wgpu::Device, queue: &wgpu::Queue, camera_bind_group_layout: &wgpu::BindGroupLayout, config: &wgpu::SurfaceConfiguration, environment: Environment) -> PreparedPlayAssets {
+        let environment = resources::prepare_environment(device, queue, camera_bind_group_layout, config, environment);
+        let ground_trimesh = resources::load_trimesh_geometry("ground/ground.glb").unwrap_or_else(|error| {
+            eprintln!("play: ground trimesh from 'ground/ground.glb' couldn't be loaded: {error}");
+            (vec![], vec![])
+        });
+        PreparedPlayAssets { environment, ground_trimesh }
+    }
+
+    // Main-thread half - everything else "playing" needs, now cheap since the
+    // slow disk/GPU work already happened in `prepare` above. spawn_world
+    // spawns test_chamber's old data.ron objects directly as nodes; physics
+    // bodies get picked up automatically by Scene::spawn_node (see
+    // engine::scene_manager::physics_bridge) purely because they carry a
+    // Physics property, same as a Model property triggers render registration.
+    pub fn finish(scene: &mut Scene, app: &mut App, prepared: PreparedPlayAssets) -> Self {
+        scene.environment.skybox = prepared.environment.skybox;
+        scene.environment.clear_color = prepared.environment.clear_color;
+        app.scene_openned = Some("./assets/scenes/test_chamber".to_owned());
+
+        Self::spawn_world(scene, app, prepared.ground_trimesh);
 
         // "main" is created here explicitly now - CameraHandler::clear_scene_cameras
         // (see App::run's reset handling) drops every camera on every scene
@@ -175,8 +169,8 @@ impl GameLogic {
         // every CameraTrack targeting "main") keeps writing into the "main"
         // CameraInstance while "main_menu" stays the one actually rendered, so
         // none of it is ever visible.
-        app.camera.create_camera("main", Transform::new(Vector3::new(0.0, 0.0, 0.0), yaw_pitch_rotation(-90.0, -20.0), Vector3::new(1.0, 1.0, 1.0)), 45.0);
-        app.camera.select_camera("main");
+        scene.create_camera("main", Transform::new(Vector3::new(0.0, 0.0, 0.0), yaw_pitch_rotation(-90.0, -20.0), Vector3::new(1.0, 1.0, 1.0)), 45.0);
+        scene.select_camera("main");
 
         // Defensive reset - see App::is_paused's own doc comment. Should
         // already be false by the time a scene starts (both pause-menu exit
@@ -394,39 +388,6 @@ impl GameLogic {
             cinematic_return_blend: None,
         };
 
-        let fellow = Bandit {
-            tag: "fellow_aviator".to_owned(),
-            locked: true,
-        };
-
-        let tower = Bandit {
-            tag: "tower".to_owned(),
-            locked: false,
-        };
-
-        let tower2 = Bandit {
-            tag: "tower2".to_owned(),
-            locked: false,
-        };
-
-        let crane = Bandit {
-            tag: "crane".to_owned(),
-            locked: false,
-        };
-
-        let plane_systems = PlaneSystems {
-            bandits: vec![tower, tower2, crane, fellow],
-            stall: false,
-            afterburner_value: 0.0,
-            base_rotations: BaseRotations { left_aleron: None, right_aleron: None },
-            flap_ratio: 0.0,
-            previous_velocity: None,
-            velocity_sample_elapsed: 0.0,
-            flight_data: FlightData { altimeter: 0.0, speedometer: 0.0, g_meter: 1.0 }
-        };
-
-        let rng = rand::thread_rng();
-
         let mut blinking_alerts: HashMap<String, BlinkingAlert> = HashMap::new();
         blinking_alerts.insert("altitude".to_owned(), BlinkingAlert { alert_state: false, time_alert: 0.0 });
         blinking_alerts.insert("stall".to_owned(), BlinkingAlert { alert_state: false, time_alert: 0.0 });
@@ -443,23 +404,156 @@ impl GameLogic {
 
         // This scene's environment (skybox vs flat color) is declared where it's
         // registered - see main.rs's create_loaded_scene("playing", ...) call -
-        // and already applied above via assets.apply(app).
+        // and already applied above from `prepared.environment`.
 
         Self {
             camera_data,
             blinking_alerts,
-            plane_systems,
-            rng,
             gravity,
             start_time: Instant::now(),
             event_system,
             subtitle_data,
             game_time: 0.0,
-            plane: Plane::new(),
             was_cinematic_active: false,
             was_paused: false,
             esc_hold_time: 0.0,
         }
+    }
+
+    // Everything test_chamber's old data.ron authored, spawned directly as
+    // nodes instead - same ids/transforms/models/physics/camera metadata,
+    // just code-first. "ground" carries no Physics property (matching
+    // data.ron exactly - the water plane's HalfSpace collider below is what
+    // actually provides the floor, "ground" is purely decorative).
+    //
+    // `ground_trimesh` is `GameLogic::prepare`'s already-loaded (but not yet
+    // scaled) ground/ground.glb geometry.
+    fn spawn_world(scene: &mut Scene, app: &mut App, ground_trimesh: (Vec<Vector3<f32>>, Vec<[u32; 3]>)) {
+        scene.spawn_node(app,
+            Node::new("sun")
+                .add_property(Transform3D {
+                    position: Vector3::new(1000.0, 1_000_000.0, 1000.0),
+                    rotation: UnitQuaternion::identity(),
+                    scale: Vector3::new(1.0, 1.0, 1.0),
+                })
+                .add_property(Model { model_ref: "F16".to_owned() })
+        ).expect("play should only spawn 'sun' once");
+        if let Some(sun) = scene.content.renderizable_instances.get_mut("sun") {
+            sun.instance.metadata.lighting = Some(Lighting { intensity: 1.0, color: Vector3::new(0.7, 0.7, 0.8) });
+        }
+
+        let ground_scale = Vector3::new(30_000.0, 30_000.0, 30_000.0);
+        scene.spawn_node(app,
+            Node::new("ground")
+                .add_property(Transform3D {
+                    position: Vector3::new(0.0, 0.0, 0.0),
+                    rotation: UnitQuaternion::identity(),
+                    scale: ground_scale,
+                })
+                .add_property(Model { model_ref: "Ground".to_owned() })
+                // Collision shape lifted straight from the model's own
+                // low-poly triangles - a good fit for irregular mountain
+                // terrain no primitive shape approximates well. Already
+                // loaded (GameLogic::prepare, on a background thread - see
+                // that struct's own doc comment) by the time spawn_world
+                // runs, just scaled here to match this node's own
+                // Transform3D.scale above (see ColliderType::TrimeshFromModel's
+                // own doc comment for the alternative - resolving straight from
+                // a bare model_path at spawn time - which is what a node
+                // wants when its geometry doesn't need to be background-loaded).
+                .add_property(PhysicsProperty {
+                    rigidbody: RigidBodyData {
+                        is_static: true,
+                        mass: 0.0,
+                        center_of_mass: Vector3::new(0.0, 0.0, 0.0),
+                        initial_velocity: Vector3::new(0.0, 0.0, 0.0),
+                    },
+                    colliders: vec![ColliderType::Trimesh {
+                        vertices: ground_trimesh.0.iter().map(|v| Vector3::new(v.x * ground_scale.x, v.y * ground_scale.y, v.z * ground_scale.z)).collect(),
+                        indices: ground_trimesh.1,
+                    }],
+                })
+        ).expect("play should only spawn 'ground' once");
+
+        scene.spawn_node(app,
+            Node::new("player")
+                .add_behavior(Plane::new())
+                .add_property(Transform3D {
+                    position: Vector3::new(0.0, 1000.0, 0.0),
+                    rotation: UnitQuaternion::identity(),
+                    scale: Vector3::new(14.0, 14.0, 14.0),
+                })
+                .add_property(Model { model_ref: "F16".to_owned() })
+                .add_property(PhysicsProperty {
+                    rigidbody: RigidBodyData {
+                        is_static: false,
+                        mass: 8900.0,
+                        center_of_mass: Vector3::new(0.0, 0.0, 0.5),
+                        initial_velocity: Vector3::new(0.0, 0.0, 200.4),
+                    },
+                    colliders: vec![
+                        ColliderType::Cuboid { half_extents: (1.4, 1.4, 9.8), position: (0.0, 0.0, 2.8) },
+                        ColliderType::Cuboid { half_extents: (4.2, 0.14, 2.8), position: (6.0, 0.42, 2.8) },
+                        ColliderType::Cuboid { half_extents: (4.2, 0.14, 2.8), position: (-6.0, 0.42, 2.8) },
+                    ],
+                })
+        ).expect("play should only spawn 'player' once");
+        if let Some(player) = scene.content.renderizable_instances.get_mut("player") {
+            let mut cameras: Cameras = HashMap::new();
+            cameras.insert("cockpit".to_owned(), GameObjectCamera { position: Vector3::new(0.0, 1.8, 13.5), fov: 70.0 });
+            cameras.insert("cinematic".to_owned(), GameObjectCamera { position: Vector3::new(0.0, 1000.0, 900.0), fov: 60.0 });
+            cameras.insert("frontal".to_owned(), GameObjectCamera { position: Vector3::new(0.0, 6.0, 35.0), fov: 40.0 });
+            player.instance.metadata.cameras = Some(cameras);
+        }
+
+        scene.spawn_node(app,
+            Node::new("fellow_aviator")
+                .add_property(Transform3D {
+                    position: Vector3::new(50.0, 50.0, 0.0),
+                    rotation: UnitQuaternion::identity(),
+                    scale: Vector3::new(19.0, 19.0, 19.0),
+                })
+                .add_property(Model { model_ref: "F14".to_owned() })
+                .add_property(PhysicsProperty {
+                    rigidbody: RigidBodyData {
+                        is_static: true,
+                        mass: 9000.0,
+                        center_of_mass: Vector3::new(0.0, 0.0, 0.0),
+                        initial_velocity: Vector3::new(0.0, 0.0, 0.0),
+                    },
+                    colliders: vec![
+                        ColliderType::Cuboid { half_extents: (1.0, 1.0, 1.0), position: (0.0, 0.0, 0.0) },
+                    ],
+                })
+        ).expect("play should only spawn 'fellow_aviator' once");
+        if let Some(fellow_aviator) = scene.content.renderizable_instances.get_mut("fellow_aviator") {
+            let mut cameras: Cameras = HashMap::new();
+            cameras.insert("cockpit".to_owned(), GameObjectCamera { position: Vector3::new(0.0, 2.3, 14.3), fov: 60.0 });
+            cameras.insert("cinematic".to_owned(), GameObjectCamera { position: Vector3::new(-10.0, 3.0, 0.0), fov: 60.0 });
+            cameras.insert("frontal".to_owned(), GameObjectCamera { position: Vector3::new(0.0, 6.0, 26.0), fov: 60.0 });
+            fellow_aviator.instance.metadata.cameras = Some(cameras);
+        }
+
+        scene.spawn_node(app,
+            Node::new("world")
+                .add_property(Transform3D {
+                    position: Vector3::new(0.0, 0.0, 0.0),
+                    rotation: UnitQuaternion::identity(),
+                    scale: Vector3::new(100_000.0, 1.0, 100_000.0),
+                })
+                .add_property(Model { model_ref: "Water".to_owned() })
+                .add_property(PhysicsProperty {
+                    rigidbody: RigidBodyData {
+                        is_static: true,
+                        mass: 0.0,
+                        center_of_mass: Vector3::new(0.0, 0.0, 0.0),
+                        initial_velocity: Vector3::new(0.0, 0.0, 0.0),
+                    },
+                    colliders: vec![
+                        ColliderType::HalfSpace { normal: Vector3::new(0.0, 1.0, 0.0) },
+                    ],
+                })
+        ).expect("play should only spawn 'world' once");
     }
 
     // How long ESC has to be held during an EventSystem::input_lock_end
@@ -467,7 +561,7 @@ impl GameLogic {
     const SKIP_HOLD_SECONDS: f32 = 1.2;
 
     // this is called every frame
-    pub fn update(&mut self, app: &mut App, plane_control_tx: Option<&Sender<PlaneControls>>, physics_command_tx: Option<&Sender<PhysicsCommand>>, physics_data: &HashMap<String, RenderMessage>) {
+    pub fn update(&mut self, scene: &mut Scene, app: &mut App, plane_control_tx: Option<&Sender<PlaneControls>>, physics_command_tx: Option<&Sender<PhysicsCommand>>, physics_data: &HashMap<String, RenderMessage>) {
         // F3 debug view - shows/hides in lockstep with the console toggle,
         // same "set_active every frame, no separate dirty-tracking" idiom
         // skip_prompt below already uses (its own text is updated inside
@@ -555,7 +649,7 @@ impl GameLogic {
             // it pauses. Running it this one extra time syncs the camera to
             // the exact same fresh state before anything actually freezes.
             if just_paused {
-                self.camera_control(app, app.time.delta_time);
+                self.camera_control(scene, app, app.time.delta_time);
             }
 
             // Freeze the entire gameplay simulation - game_time (and by
@@ -610,7 +704,7 @@ impl GameLogic {
             if cinematic_active && !self.was_cinematic_active {
                 let _ = physics_command_tx.send(PhysicsCommand::TogglePause);
             } else if cinematic_just_ended {
-                if let Some(player) = app.renderizable_instances.get("player") {
+                if let Some(player) = scene.content.renderizable_instances.get("player") {
                     let transform = player.instance.transform;
                     let _ = physics_command_tx.send(PhysicsCommand::SetTransform {
                         name: "player".to_owned(),
@@ -632,7 +726,7 @@ impl GameLogic {
         // camera_control runs later this frame - "main" still holds whatever the
         // Shot track last wrote to it *last* frame at this point.
         if cinematic_just_ended {
-            let cam = app.camera.active();
+            let cam = scene.cameras.active();
             self.camera_data.cinematic_return_blend = Some(CinematicReturnBlend {
                 elapsed: 0.0,
                 duration: 0.6,
@@ -644,179 +738,65 @@ impl GameLogic {
 
         self.was_cinematic_active = cinematic_active;
 
-        // Debug console output (press F2 to show/hide)
-        if !cinematic_active && input_lock_end.is_none() {
-            self.plane.update(app.time.delta_time);
-        }
-        if let Some(plane_control_tx) = plane_control_tx {
-            let _ = plane_control_tx.send(self.plane.controls.clone());
+        // "player"'s own control-surface/afterburner mesh animation runs
+        // automatically every frame via the generic Behavior tick (see
+        // Plane::update) - what's left here is exactly what a Behavior
+        // structurally can't reach on its own: whether input should be
+        // locked out this frame (Plane has no visibility into
+        // cinematic_active/input_lock_end), sending this frame's controls to
+        // the physics thread, and feeding this frame's physics results back
+        // in (speedometer/G-meter/wheel meshes - see
+        // Plane::apply_physics_feedback's own doc comment for why that has
+        // to happen from here rather than from Plane's own Behavior::update).
+        if let Some(node) = scene.content.nodes.get_mut("player") {
+            let scale = node.get_property::<Transform3D>().map(|transform| transform.scale).unwrap_or(Vector3::new(1.0, 1.0, 1.0));
+            let model_ref = node.get_property::<Model>().map(|model| model.model_ref.clone());
+
+            if let Some(plane) = node.get_behavior_mut::<Plane>() {
+                plane.input_locked = cinematic_active || input_lock_end.is_some();
+
+                if let Some(plane_control_tx) = plane_control_tx {
+                    let _ = plane_control_tx.send(plane.controls.clone());
+                }
+
+                if let (Some(model_ref), Some(physics_message)) = (&model_ref, physics_data.get("player")) {
+                    if let Some(model_instance) = app.game_models.get_mut(model_ref) {
+                        plane.apply_physics_feedback(&mut model_instance.model, physics_message, self.gravity, scale, &app.renderer.queue, app.time.delta_time);
+                    }
+                }
+            }
         }
 
-        self.plane_movement(app, app.time.delta_time, physics_data);
         if let Some(event_system) = &mut self.event_system {
             event_system.handle_events(self.game_time, app, &mut self.subtitle_data);
         }
         self.subtitle_data.update(app);
-        self.camera_control(app, app.time.delta_time);
-        self.ui_control(app);
+        self.camera_control(scene, app, app.time.delta_time);
+        self.ui_control(scene, app);
+        Self::render_physics_debug(scene, app, physics_data);
 
         // Applied last so a running animation track is the final word for this
         // frame - e.g. a Position/Fov track targeting the "main" camera visibly
         // overrides camera_control's flight follow-cam for as long as it runs
         // (see CameraTrack's own doc comment for the tradeoffs of that).
         if let Some(event_system) = &self.event_system {
-            event_system.apply_tracks(self.game_time, app);
+            event_system.apply_tracks(self.game_time, scene, app);
         }
 
     }
 
-    fn plane_movement (&mut self, app: &mut App, delta_time: f32, physics_data: &HashMap<String, RenderMessage>) {
-        let plane = app.renderizable_instances.get_mut("player").unwrap();
-        let physics_data_renderizable = physics_data.get("player");
-        let plane_model = app.game_models.get_mut(&plane.model_ref).unwrap();
-
-        if let Some(data) = physics_data_renderizable {
-            self.plane_systems.flight_data.speedometer = data.linvel.magnitude() * 1.94384;
-
-            // G-meter: project felt acceleration onto the plane's local up axis.
-            // Physics ticks at a fixed 120Hz on its own thread (see
-            // PlaneSystems::velocity_sample_elapsed's own doc comment) - data.linvel
-            // only actually changes once every ~8.3ms, so at a render rate faster
-            // than that this accumulates real elapsed time across however many
-            // frames see no change, rather than using just the one frame's own
-            // (much smaller) delta_time once a change finally shows up.
-            self.plane_systems.velocity_sample_elapsed += delta_time;
-            match &self.plane_systems.previous_velocity {
-                Some(prev_vel) if *prev_vel != data.linvel => {
-                    let acceleration = (data.linvel - prev_vel) / self.plane_systems.velocity_sample_elapsed;
-                    // Felt acceleration = total acceleration minus gravity (pilot doesn't feel gravity)
-                    let felt_acceleration = acceleration - self.gravity;
-                    // Project onto the plane's local up axis for the G reading
-                    let plane_up = UnitQuaternion::from_quaternion(data.rotation) * Vector3::y_axis();
-                    let target_g = felt_acceleration.dot(&plane_up) / 9.81;
-                    self.plane_systems.flight_data.g_meter = lerp(self.plane_systems.flight_data.g_meter, target_g, delta_time * 10.0);
-                    self.plane_systems.previous_velocity = Some(data.linvel);
-                    self.plane_systems.velocity_sample_elapsed = 0.0;
-                }
-                None => {
-                    self.plane_systems.previous_velocity = Some(data.linvel);
-                    self.plane_systems.velocity_sample_elapsed = 0.0;
-                }
-                _ => {}
-            }
-        }
-
-        // elevators
-        if let Some(meshes) = plane_model.model.mesh_lists.get_mut("opaque") {
-            match physics_data_renderizable {
-                Some(physics_data_renderizable) => {
-                    if let Some(wheels) = physics_data_renderizable.metadata.get("wheels") {
-                        match &wheels {
-                            MetadataType::Wheels(wheels) => {
-                                for (index, wheel) in wheels.iter() {
-                                    if let Some(wheel_mesh) = &mut meshes.get_mut(index.as_str()) {
-                                        let local_pos = &wheel.local_position;
-                                        wheel_mesh.transform.position = Vector3::new(local_pos.x / plane.instance.transform.scale.x, local_pos.y / plane.instance.transform.scale.y, local_pos.z / plane.instance.transform.scale.z);
-                                        wheel_mesh.update_transform(&app.renderer.queue);
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                },
-                None => {}
-            }
-
-            if let Some(elevator) = meshes.get_mut("left_elevator") {
-                let final_rotation = UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.15 * self.plane.controls.elevator);
-                let elevator_rotation = lerp_quaternion(elevator.transform.rotation,  *final_rotation, app.time.delta_time * 7.0);
-                let elevator_transform = Transform::new(elevator.transform.position, elevator_rotation, elevator.transform.scale);
-                elevator.change_transform(&app.renderer.queue, elevator_transform);
-            }
-    
-            if let Some(elevator) = meshes.get_mut("right_elevator") {
-                let final_rotation = UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.15 * self.plane.controls.elevator);
-                let elevator_rotation = lerp_quaternion(elevator.transform.rotation,  *final_rotation, app.time.delta_time * 7.0);
-                let elevator_transform = Transform::new(elevator.transform.position, elevator_rotation, elevator.transform.scale);
-                elevator.change_transform(&app.renderer.queue, elevator_transform);
-            }
-
-            // wings
-            /* 
-            let l_wing = app.game_models.get_mut(&plane.model_ref).unwrap().model.meshes.get_mut("left_wing").unwrap();
-            let l_wing_rotation = lerp_quaternion(l_wing.instance.transform.rotation,Quaternion::from_angle_y(Rad(angle)), delta_time);
-            let l_wing_transform = Transform::new(l_wing.instance.transform.position, l_wing_rotation, l_wing.instance.transform.scale);
-            l_wing.change_transform(&app.renderer.queue, l_wing_transform);
-
-            let r_wing = app.game_models.get_mut(&plane.model_ref).unwrap().model.meshes.get_mut("right_wing").unwrap();
-            let r_wing_rotation = lerp_quaternion(r_wing.instance.transform.rotation,Quaternion::from_angle_y(Rad(-angle)), delta_time);
-            let r_wing_transform = Transform::new(r_wing.instance.transform.position, r_wing_rotation, r_wing.instance.transform.scale);
-            r_wing.change_transform(&app.renderer.queue, r_wing_transform);
-            */
-
-            if let Some(aleron) = meshes.get_mut("left_aleron") {
-                match self.plane_systems.base_rotations.left_aleron {
-                    Some(base_rotation) => {
-                        let dependent = UnitQuaternion::from_quaternion(base_rotation.clone()) * UnitQuaternion::from_axis_angle(&Vector3::x_axis() ,0.5 * -self.plane.controls.aileron);
-                        let aleron_rotation = lerp_quaternion(aleron.transform.rotation,  *dependent, app.time.delta_time * 7.0);
-                        let aleron_transform = Transform::new(aleron.transform.position, aleron_rotation, aleron.transform.scale);
-                        aleron.change_transform(&app.renderer.queue, aleron_transform);
-                    },
-                    None => {
-                        self.plane_systems.base_rotations.left_aleron = Some(aleron.transform.rotation);
-                    },
-                }
-            }
-
-            if let Some(aleron) = meshes.get_mut("right_aleron") {
-                match self.plane_systems.base_rotations.right_aleron {
-                    Some(base_rotation) => {
-                        let dependent = UnitQuaternion::from_quaternion(base_rotation.clone()) * UnitQuaternion::from_axis_angle(&Vector3::x_axis(), 0.5 * self.plane.controls.aileron);
-                        let aleron_rotation = lerp_quaternion(aleron.transform.rotation,  *dependent, app.time.delta_time * 7.0);
-                        let aleron_transform = Transform::new(aleron.transform.position, aleron_rotation, aleron.transform.scale);
-                        aleron.change_transform(&app.renderer.queue, aleron_transform);
-                    },
-                    None => {
-                        // this is not correctly resetting once the plane is reseted
-                        self.plane_systems.base_rotations.right_aleron = Some(aleron.transform.rotation);
-                    },
-                }
-            }
-
-            // rudders
-            // only rudder or left rudder if it haves 2
-            if let Some(rudder) = meshes.get_mut("rudder_0") {
-                let rudder_rotation = lerp_quaternion(rudder.transform.rotation, *UnitQuaternion::from_axis_angle(&Vector3::x_axis(),-28.4493 * PI / 180.0) * *UnitQuaternion::from_axis_angle(&Vector3::y_axis(),0.5 * self.plane.controls.rudder), delta_time * 7.0);
-                let rudder_transform = Transform::new(rudder.transform.position, rudder_rotation, rudder.transform.scale);
-                rudder.change_transform(&app.renderer.queue, rudder_transform);
-            }
-
-            // right rudder if it haves 2
-            if let Some(rudder) = meshes.get_mut("rudder_1") {
-                let rudder_rotation = lerp_quaternion(rudder.transform.rotation, *UnitQuaternion::from_axis_angle(&Vector3::x_axis(),-28.4493 * PI / 180.0) * *UnitQuaternion::from_axis_angle(&Vector3::y_axis(),0.5 * self.plane.controls.rudder), delta_time * 7.0);
-                let rudder_transform = Transform::new(rudder.transform.position, rudder_rotation, rudder.transform.scale);
-                rudder.change_transform(&app.renderer.queue, rudder_transform);
-            }
-        }
-
-        if let Some(meshes) = plane_model.model.mesh_lists.get_mut("transparent") {
-            if let Some(afterburner) = meshes.get_mut("Afterburner") {
-                if self.plane.controls.throttle > 0.0 {
-                    self.plane_systems.afterburner_value =  lerp(self.plane_systems.afterburner_value, self.plane.controls.throttle + self.rng.gen_range(-0.5..0.5), app.time.delta_time * 20.0);
-                } else {
-                    self.plane_systems.afterburner_value = lerp(self.plane_systems.afterburner_value, 0.0, delta_time * 2.0)
-                }
-
-                afterburner.change_transform(&app.renderer.queue, Transform::new(afterburner.transform.position, afterburner.transform.rotation, Vector3::new(1.0, 1.0, self.plane_systems.afterburner_value)));
-            } 
-        }
-
-        // Render collider debug wireframes using the model's visual transform
+    // Debug-only wireframes for physics colliders - the player's own
+    // (dynamic, moving) ones read back from that frame's physics results,
+    // static bodies (ground, world, fellow_aviator, ...) straight from
+    // scene.content.physics_bodies (see the block below its own comment for
+    // why those two need different sources). Doesn't touch `self` at all -
+    // an associated fn rather than a method, since nothing here is GameLogic
+    // state, just a render step gated on app.render_physics.visible.
+    fn render_physics_debug(scene: &mut Scene, app: &mut App, physics_data: &HashMap<String, RenderMessage>) {
         if app.render_physics.visible {
-            if let Some(physics_data_renderizable) = physics_data_renderizable {
+            if let Some(physics_data_renderizable) = physics_data.get("player") {
                 if let Some(MetadataType::Colliders(colliders)) = physics_data_renderizable.metadata.get("colliders") {
-                    let plane = app.renderizable_instances.get("player").unwrap();
+                    let plane = scene.content.renderizable_instances.get("player").unwrap();
                     let pos = &plane.instance.transform.position;
                     let rot = &plane.instance.transform.rotation;
                     let color = [0.0, 1.0, 1.0];
@@ -852,7 +832,7 @@ impl GameLogic {
 
                 // Render wing debug lines (axes + lift force) using visual transform
                 if let Some(MetadataType::Wings(wings)) = physics_data_renderizable.metadata.get("wings") {
-                    let plane = app.renderizable_instances.get("player").unwrap();
+                    let plane = scene.content.renderizable_instances.get("player").unwrap();
                     let pos = &plane.instance.transform.position;
                     let rot = &plane.instance.transform.rotation;
                     let axis_len = 0.2;
@@ -888,7 +868,7 @@ impl GameLogic {
 
                 // Render suspension debug lines using visual transform
                 if let Some(MetadataType::Suspensions(suspensions)) = physics_data_renderizable.metadata.get("suspensions") {
-                    let plane = app.renderizable_instances.get("player").unwrap();
+                    let plane = scene.content.renderizable_instances.get("player").unwrap();
                     let pos = &plane.instance.transform.position;
                     let rot = &plane.instance.transform.rotation;
 
@@ -902,15 +882,62 @@ impl GameLogic {
                     }
                 }
             }
+
+            // Static bodies (ground, world, fellow_aviator, ...) never move,
+            // so their debug wireframe can be built straight from
+            // scene.content.physics_bodies (already-resolved collider data,
+            // see engine::scene_manager::physics_bridge) instead of round-
+            // tripping through the physics thread the way the player's own
+            // dynamic colliders above need to - there's no live rigidbody
+            // transform to catch up with when it's never going to move.
+            let color = [1.0, 0.6, 0.0];
+            for body in &scene.content.physics_bodies {
+                if !body.physics.rigidbody.is_static {
+                    continue;
+                }
+                for collider in &body.physics.colliders {
+                    match collider {
+                        ColliderType::Cuboid { half_extents, position } => {
+                            let center = body.position + Vector3::new(position.0, position.1, position.2);
+                            let he = Vector3::new(half_extents.0, half_extents.1, half_extents.2);
+                            let corners: Vec<Vector3<f32>> = [
+                                Vector3::new(-he.x, -he.y, -he.z), Vector3::new( he.x, -he.y, -he.z),
+                                Vector3::new( he.x,  he.y, -he.z), Vector3::new(-he.x,  he.y, -he.z),
+                                Vector3::new(-he.x, -he.y,  he.z), Vector3::new( he.x, -he.y,  he.z),
+                                Vector3::new( he.x,  he.y,  he.z), Vector3::new(-he.x,  he.y,  he.z),
+                            ].iter().map(|c| center + c).collect();
+                            let edges = [(0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)];
+                            for (a, b) in edges {
+                                app.render_physics.renderizable_lines.push([
+                                    ManualVertex { position: [corners[a].x, corners[a].y, corners[a].z], color },
+                                    ManualVertex { position: [corners[b].x, corners[b].y, corners[b].z], color },
+                                ]);
+                            }
+                        },
+                        ColliderType::Trimesh { vertices, indices } => {
+                            for triangle in indices {
+                                let p: Vec<Vector3<f32>> = triangle.iter().map(|&i| body.position + vertices[i as usize]).collect();
+                                for (a, b) in [(0, 1), (1, 2), (2, 0)] {
+                                    app.render_physics.renderizable_lines.push([
+                                        ManualVertex { position: [p[a].x, p[a].y, p[a].z], color },
+                                        ManualVertex { position: [p[b].x, p[b].y, p[b].z], color },
+                                    ]);
+                                }
+                            }
+                        },
+                        _ => {},
+                    }
+                }
+            }
         }
     }
 
-    fn camera_control(&mut self, app: &mut App, delta_time: f32) {
-        if let Some(player) = app.renderizable_instances.get_mut("player") {
+    fn camera_control(&mut self, scene: &mut Scene, _app: &mut App, delta_time: f32) {
+        if let Some(player) = scene.content.renderizable_instances.get_mut("player") {
             // Calculate target camera position and look-at point
             let (target_position, target_look_at, target_up) = match self.camera_data.camera_state {
                 CameraState::Normal => {
-                    let active = app.camera.active_mut();
+                    let active = scene.cameras.active_mut();
                     active.projection.znear = 0.1;
                     active.projection.fovy = NORMAL_CAMERA_FOV;
                     let target_pos = player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 8.0, -50.0));
@@ -927,7 +954,7 @@ impl GameLogic {
                     } else {
                         (player.instance.transform.rotation * Vector3::new(0.0, 0.2, 1.3), 70.0)
                     };
-                    app.camera.active_mut().projection.znear = 0.01;
+                    scene.cameras.active_mut().projection.znear = 0.01;
 
                     // Mouse wheel adjusts target FOV
                     let scroll = input::mouse_scroll_y();
@@ -936,7 +963,7 @@ impl GameLogic {
                     }
                     // Lerp current FOV toward target
                     self.camera_data.cockpit_current_fov = lerp(self.camera_data.cockpit_current_fov, self.camera_data.cockpit_target_fov, delta_time * 8.0);
-                    app.camera.active_mut().projection.fovy = self.camera_data.cockpit_current_fov;
+                    scene.cameras.active_mut().projection.fovy = self.camera_data.cockpit_current_fov;
 
                     let max_yaw: f32 = 170.0;
                     let max_pitch: f32 = 70.0;
@@ -983,7 +1010,7 @@ impl GameLogic {
                     } else {
                         (player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(-1.0, 3.0, -1.0)), 60.0)
                     };
-                    app.camera.active_mut().projection.fovy = fov;
+                    scene.cameras.active_mut().projection.fovy = fov;
                     let look_at = player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(30.0, 0.0, 100.0));
                     (target_pos, look_at, player.instance.transform.rotation * *Vector3::y_axis())
                 },
@@ -997,12 +1024,12 @@ impl GameLogic {
                     } else {
                         (player.instance.transform.position + (player.instance.transform.rotation * Vector3::new(0.0, 2.0, 3.0)), 60.0)
                     };
-                    app.camera.active_mut().projection.fovy = fov;
+                    scene.cameras.active_mut().projection.fovy = fov;
                     let look_at = player.instance.transform.position;
                     (target_pos, look_at, player.instance.transform.rotation * *Vector3::y_axis())
                 },
                 CameraState::Free => {
-                    app.camera.active_mut().projection.znear = 0.1;
+                    scene.cameras.active_mut().projection.znear = 0.1;
 
                     // Mouse wheel adjusts target FOV
                     let scroll = input::mouse_scroll_y();
@@ -1010,7 +1037,7 @@ impl GameLogic {
                         self.camera_data.free_target_fov = (self.camera_data.free_target_fov - scroll * 5.0).clamp(20.0, 120.0);
                     }
                     self.camera_data.free_current_fov = lerp(self.camera_data.free_current_fov, self.camera_data.free_target_fov, delta_time * 8.0);
-                    app.camera.active_mut().projection.fovy = self.camera_data.free_current_fov;
+                    scene.cameras.active_mut().projection.fovy = self.camera_data.free_current_fov;
 
                     let sens = input::mouse_sensitivity();
                     self.camera_data.free_yaw = self.camera_data.free_yaw - input::mouse_rel_x() as f32 * sens.0;
@@ -1081,7 +1108,7 @@ impl GameLogic {
             // Shot's last pose into whatever's computed above instead of cutting.
             let target_position: Point3<f32> = final_position.into();
             let target_look_at: Point3<f32> = target_look_at.into();
-            let target_fov = app.camera.active().projection.fovy;
+            let target_fov = scene.cameras.active().projection.fovy;
 
             let (blended_position, blended_look_at, blended_fov) = match &mut self.camera_data.cinematic_return_blend {
                 Some(blend) => {
@@ -1100,7 +1127,7 @@ impl GameLogic {
                 None => (target_position, target_look_at, target_fov),
             };
 
-            let active = app.camera.active_mut();
+            let active = scene.cameras.active_mut();
             active.camera.set_position(blended_position);
             active.camera.look_at(blended_look_at);
             active.camera.up = target_up;
@@ -1108,7 +1135,7 @@ impl GameLogic {
         }
         // self.calculate_lockable(app);
         if input::is_action_just_pressed("change_camera") {
-            self.next_camera(&mut app.camera);
+            self.next_camera();
         }
         // F5 - offsets whichever named camera is already active (see
         // final_position above).
@@ -1142,7 +1169,7 @@ impl GameLogic {
         format!("{:02}:{:02}:{:02}:{:03}", hours, minutes, seconds, milliseconds)
     }
 
-    fn ui_control(&mut self, app: &mut App) {
+    fn ui_control(&mut self, scene: &mut Scene, app: &mut App) {
         // How much real time actually passed since the last throttled tick - NOT
         // app.time.delta_time (the current frame's own delta). At framerates above
         // the throttle's own rate (ui_update_interval, ~120Hz), most frames fail the
@@ -1171,12 +1198,22 @@ impl GameLogic {
         if ui_elapsed >= app.throttling.ui_update_interval {
             let ui_delta_time = ui_elapsed.as_secs_f32();
 
+            // A Behavior isn't reachable from here as `&mut Scene` - only
+            // `SceneBehaviour` methods get that - so this reads the "player"
+            // node's Plane once up front (plain Copy values, so nothing
+            // borrowed from `scene` needs to stay alive afterward) instead of
+            // fetching it again at every label below.
+            let (throttle, g_meter, altimeter, speedometer, previous_velocity, stall) = scene.content.nodes.get("player")
+                .and_then(|node| node.get_behavior::<Plane>())
+                .map(|plane| (plane.controls.throttle, plane.flight_data.g_meter, plane.flight_data.altimeter, plane.flight_data.speedometer, plane.previous_velocity, plane.stall))
+                .unwrap_or((0.0, 0.0, 0.0, 0.0, None, false));
+
             if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/data_box/framerate").and_then(|n| n.as_label_mut()) {
                 label.set_text(&mut app.ui.text.font_system, &format!("FPS: {}", app.time.get_fps()), true);
             }
 
             if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/data_box/g").and_then(|n| n.as_label_mut()) {
-                label.set_text(&mut app.ui.text.font_system, &format!("G: {:.0}", self.plane_systems.flight_data.g_meter), true);
+                label.set_text(&mut app.ui.text.font_system, &format!("G: {:.0}", g_meter), true);
             }
 
             if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/data_box/timer").and_then(|n| n.as_label_mut()) {
@@ -1184,11 +1221,11 @@ impl GameLogic {
             }
 
             if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/data_box/power").and_then(|n| n.as_label_mut()) {
-                label.set_text(&mut app.ui.text.font_system, &format!("Power: {}%", (self.plane.controls.throttle * 100.0).round()), true);
+                label.set_text(&mut app.ui.text.font_system, &format!("Power: {}%", (throttle * 100.0).round()), true);
             }
 
             if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "altitude").and_then(|n| n.as_label_mut()) {
-                label.set_text(&mut app.ui.text.font_system, &format!("ALT: {}", self.plane_systems.flight_data.altimeter), true);
+                label.set_text(&mut app.ui.text.font_system, &format!("ALT: {}", altimeter), true);
             }
 
             // F3 debug view - two separate single-line labels (see
@@ -1198,17 +1235,17 @@ impl GameLogic {
             if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "debug_panel/stats_box/fps").and_then(|n| n.as_label_mut()) {
                 label.set_text(&mut app.ui.text.font_system, &format!("{:.0} FPS", app.time.get_fps()), true);
             }
-            if let Some(pos) = app.renderizable_instances.get("player").map(|i| i.instance.transform.position) {
+            if let Some(pos) = scene.content.renderizable_instances.get("player").map(|i| i.instance.transform.position) {
                 if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "debug_panel/stats_box/position").and_then(|n| n.as_label_mut()) {
                     label.set_text(&mut app.ui.text.font_system, &format!("Player position: ({:.1}, {:.1}, {:.1})", pos.x, pos.y, pos.z), true);
                 }
             }
 
             if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/speed").and_then(|n| n.as_label_mut()) {
-                label.set_text(&mut app.ui.text.font_system, &format!("SPD: {:.0}", self.plane_systems.flight_data.speedometer), true);
+                label.set_text(&mut app.ui.text.font_system, &format!("SPD: {:.0}", speedometer), true);
             }
 
-            let rotation = Self::map_to_range(app.camera.active().camera.yaw().into(), -PI as f64, PI  as f64, 0.0, 360.0).round();
+            let rotation = Self::map_to_range(scene.cameras.active().camera.yaw().into(), -PI as f64, PI  as f64, 0.0, 360.0).round();
             
             let text_compass = if rotation >= 355.0 || rotation <= 5.0 {
                 "N".to_owned()
@@ -1227,12 +1264,12 @@ impl GameLogic {
             }
 
             // Update velocity vector marker position
-            if let Some(velocity) = &self.plane_systems.previous_velocity {
+            if let Some(velocity) = &previous_velocity {
                 if velocity.magnitude() > 0.1 {
-                    if let Some(player) = app.renderizable_instances.get("player") {
+                    if let Some(player) = scene.content.renderizable_instances.get("player") {
                         let pos = player.instance.transform.position;
                         let vel_point = Point3::from(pos + velocity.normalize() * 100.0);
-                        if let Some(screen_pos) = app.camera.world_to_screen(vel_point, app.window_manager.size.width, app.window_manager.size.height) {
+                        if let Some(screen_pos) = app.camera_resources.world_to_screen(scene.cameras.active(), vel_point, app.window_manager.size.width, app.window_manager.size.height) {
                             if let Some(marker) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "velocity_marker") {
                                 marker.transform.x = screen_pos.x as f32 - marker.transform.width / 2.0;
                                 marker.transform.y = screen_pos.y as f32 - marker.transform.height / 2.0;
@@ -1253,11 +1290,11 @@ impl GameLogic {
             }
 
             if let Some(altitude_alert) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "altitude_alert") {
-                self.blinking_alert("altitude".to_owned(), altitude_alert, self.plane_systems.flight_data.altimeter < 1000.0, ui_delta_time);
+                self.blinking_alert("altitude".to_owned(), altitude_alert, altimeter < 1000.0, ui_delta_time);
             }
 
             if let Some(stall_alert) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "stall_alert") {
-                self.blinking_alert("stall".to_owned(), stall_alert, self.plane_systems.stall, ui_delta_time);
+                self.blinking_alert("stall".to_owned(), stall_alert, stall, ui_delta_time);
             }
 
             app.ui.has_changed = true; // Mark UI as changed so it gets processed
@@ -1300,7 +1337,7 @@ impl GameLogic {
         (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min
     }
 
-    fn next_camera(&mut self, camera: &mut CameraHandler) {
+    fn next_camera(&mut self) {
         match self.camera_data.camera_state {
             CameraState::Normal => {
                 self.camera_data.camera_state = CameraState::Free;
@@ -1313,15 +1350,16 @@ impl GameLogic {
     }
 }
 
-impl Scene for GameLogic {
-    fn update(&mut self, app: &mut App, ctx: &mut FrameContext) {
-        self.update(app, ctx.plane_control_tx, ctx.physics_command_tx, ctx.physics_data);
+impl SceneBehaviour for GameLogic {
+    fn update(&mut self, scene: &mut Scene, app: &mut App, ctx: &mut FrameContext) {
+        self.update(scene, app, ctx.plane_control_tx, ctx.physics_command_tx, ctx.physics_data);
     }
 
-    fn fixed_update(&self, app: &App) -> Option<(String, Box<dyn PhysicsTick + Send>)> {
-        // reset() (via load_level) already set this to whatever level it just
-        // loaded - reuse it instead of keeping a second, separately-typed copy.
-        let level_path = app.scene_openned.clone()?;
-        Some((level_path, Box::new(PlanePhysicsLogic::new())))
+    fn fixed_update(&self, scene: &Scene, app: &App) -> Option<(Vec<PhysicsObjectDef>, Box<dyn PhysicsTick + Send>)> {
+        let _ = app;
+        // Nodes spawned in `new` (see `spawn_world`) already collected one
+        // PhysicsObjectDef per Physics-carrying node onto scene.content -
+        // just hand that straight to the physics thread.
+        Some((scene.content.physics_bodies.clone(), Box::new(PlanePhysicsLogic::new())))
     }
 }
