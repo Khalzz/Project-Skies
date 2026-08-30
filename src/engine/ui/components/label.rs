@@ -141,14 +141,25 @@ impl Label {
     /// `indices_slice` are plain slices, not fixed-size arrays - a node's own
     /// background/border quad isn't always exactly 4 vertices/6 indices any more,
     /// see `UiNode::compute_quad`.
-    pub fn ui_node_data_creation(&self, _size: &Size, vertices: &mut Vec<VertexUi>, vertices_slice: &[VertexUi], indices: &mut Vec<u16>, indices_slice: &[u16], parent_rect: &Rect, color: Color, clip_rect: Option<&Rect>) -> (TextArea, u16, u32) {
+    pub fn ui_node_data_creation(&self, _size: &Size, dpi_scale: f32, vertices: &mut Vec<VertexUi>, vertices_slice: &[VertexUi], indices: &mut Vec<u16>, indices_slice: &[u16], parent_rect: &Rect, color: Color, clip_rect: Option<&Rect>) -> (TextArea, u16, u32) {
         vertices.extend_from_slice(vertices_slice);
         indices.extend_from_slice(indices_slice);
 
-        (self.text_area(parent_rect, color, clip_rect), vertices_slice.len() as u16, indices_slice.len() as u32)
+        (self.text_area(parent_rect, dpi_scale, color, clip_rect), vertices_slice.len() as u16, indices_slice.len() as u32)
     }
 
-    pub fn text_area(&self, parent_rect: &Rect, color: Color, clip_rect: Option<&Rect>) -> TextArea {
+    // `dpi_scale` (pixel_size / points size, see WindowManager) - everything
+    // else in this codebase (UiTransform/Rect, mouse position, this label's own
+    // parent_rect) is in points, but glyphon's Resolution/TextArea coordinate
+    // space is real backing pixels (see glyphon::Resolution's own doc comment:
+    // "the width/height of the screen in pixels") - left/top/bounds have to be
+    // converted to that space here, and `scale` set to the same factor so
+    // glyphs actually rasterize at the display's real pixel density instead of
+    // just being scaled-up points-resolution glyphs (blurry on a Retina
+    // display). Without this, text renders squeezed into whatever fraction of
+    // the real screen points-space is of pixel-space (e.g. a quarter of the
+    // screen, top-left, at a typical 2x HiDPI scale).
+    pub fn text_area(&self, parent_rect: &Rect, dpi_scale: f32, color: Color, clip_rect: Option<&Rect>) -> TextArea {
         let text_width = self.get_text_width();
         let TextWidth { width, buffer_width } = text_width;
 
@@ -160,10 +171,10 @@ impl Label {
 
         TextArea {
             buffer: &self.buffer,
-            left: parent_rect.left - text_overlap,
-            top: self.vertical_positioning_in_rect(parent_rect),
-            scale: 1.0,
-            bounds: self.bounds(parent_rect, clip_rect),
+            left: (parent_rect.left - text_overlap) * dpi_scale,
+            top: self.vertical_positioning_in_rect(parent_rect) * dpi_scale,
+            scale: dpi_scale,
+            bounds: self.bounds(parent_rect, clip_rect, dpi_scale),
             default_color: color,
             custom_glyphs: &[],
         }
@@ -184,16 +195,16 @@ impl Label {
     // rect - glyphon already clips every glyph to TextBounds on its own, so a
     // scrolled-out label's text needs no shader-side work, unlike the
     // background/border quads (see text_shader.wgsl's clip discard).
-    fn bounds(&self, rect: &Rect, clip_rect: Option<&Rect>) -> TextBounds {
+    fn bounds(&self, rect: &Rect, clip_rect: Option<&Rect>, dpi_scale: f32) -> TextBounds {
         let left = rect.left.max(clip_rect.map_or(f32::MIN, |c| c.left));
         let top = rect.top.max(clip_rect.map_or(f32::MIN, |c| c.top));
         let right = rect.right.min(clip_rect.map_or(f32::MAX, |c| c.right));
         let bottom = rect.bottom.min(clip_rect.map_or(f32::MAX, |c| c.bottom));
         TextBounds {
-            left: left as i32,
-            top: top as i32,
-            right: right as i32,
-            bottom: bottom as i32,
+            left: (left * dpi_scale) as i32,
+            top: (top * dpi_scale) as i32,
+            right: (right * dpi_scale) as i32,
+            bottom: (bottom * dpi_scale) as i32,
         }
     }
 

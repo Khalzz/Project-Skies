@@ -1,4 +1,5 @@
 EventSystem (
+    /*
     event_list: {
         1000: Event (
             event_type: PlayAudio(
@@ -7,5 +8,138 @@ EventSystem (
                 )
             ),
         )
-    }
+    },
+    */
+
+    // Locks out player input (flight controls and the pause menu itself -
+    // see EventSystem::input_lock_end's own doc comment) for the mission-
+    // intro's cinematic - matches when the flight HUD's own Active track
+    // hands control back (9000ms). Only a "hold ESC to skip" still works
+    // during this window.
+    input_locks: [
+        (start_time: 0, end_time: 10000),
+    ],
+    object_3d_tracks: [
+        Position(
+            target: "fellow_aviator",
+            start_time: 2000,
+            keyframes: [
+                (time: 0,    value: (x: 50.0,  y: 50.0, z: 0.0)),
+                (time: 4000, value: (x: 150.0, y: 50.0, z: 0.0)),
+            ],
+        ),
+        Position(
+            target: "player",
+            start_time: 0,
+            end_time: Some(10000),
+            keyframes: [
+                (time: 0,    value: (x: 0.0, y: 1000.0, z: -1500.0)),
+                (time: 10000, value: (x: 0.0, y: 1000.0, z: 900.0)),
+            ],
+        ),
+    ],
+    ui_tracks: [
+        Alpha(
+            target: "mission_intro/title",
+            keyframes: [
+                (time: 0,    value: 0.0),
+                (time: 800,  value: 0.0),
+                (time: 1600, value: 1.0),
+                (time: 3600, value: 1.0),
+                (time: 4400, value: 0.0),
+            ],
+        ),
+        Alpha(
+            target: "mission_intro/location",
+            keyframes: [
+                (time: 0,    value: 0.0),
+                (time: 800,  value: 0.0),
+                (time: 1600, value: 1.0),
+                (time: 3600, value: 1.0),
+                (time: 4400, value: 0.0),
+            ],
+        ),
+        Alpha(
+            target: "mission_intro/date",
+            keyframes: [
+                (time: 0,    value: 0.0),
+                (time: 800,  value: 0.0),
+                (time: 1600, value: 1.0),
+                (time: 3600, value: 1.0),
+                (time: 4400, value: 0.0),
+            ],
+        ),
+        Color(
+            target: "mission_intro_backdrop",
+            keyframes: [
+                (time: 0,    value: (r: 0, g: 0, b: 0, a: 255)),
+                (time: 3600, value: (r: 0, g: 0, b: 0, a: 255)),
+                (time: 4400, value: (r: 0, g: 0, b: 0, a: 0)),
+            ],
+        ),
+        Active(target: "mission_intro", start_time: 4400, keyframes: [ (time: 0, value: false) ]),
+        Active(target: "mission_intro_backdrop", start_time: 4400, keyframes: [ (time: 0, value: false) ]),
+
+        Active(target: "game_ui", start_time: 9000, keyframes: [ (time: 0, value: true) ]),
+        Active(target: "velocity_marker", start_time: 9000, keyframes: [ (time: 0, value: true) ]),
+
+        Alpha(target: "game_ui/data_box/timer", start_time: 9000, keyframes: [ (time: 0, value: 0.0), (time: 600, value: 1.0) ]),
+        Alpha(target: "game_ui/data_box/framerate", start_time: 9000, keyframes: [ (time: 0, value: 0.0), (time: 600, value: 1.0) ]),
+        Alpha(target: "game_ui/data_box/g", start_time: 9000, keyframes: [ (time: 0, value: 0.0), (time: 600, value: 1.0) ]),
+        Alpha(target: "game_ui/data_box/power", start_time: 9000, keyframes: [ (time: 0, value: 0.0), (time: 600, value: 1.0) ]),
+        Alpha(target: "game_ui/compass", start_time: 9000, keyframes: [ (time: 0, value: 0.0), (time: 600, value: 1.0) ]),
+        Alpha(target: "game_ui/speed", start_time: 9000, keyframes: [ (time: 0, value: 0.0), (time: 600, value: 1.0) ]),
+        Alpha(target: "velocity_marker", start_time: 9000, keyframes: [ (time: 0, value: 0.0), (time: 600, value: 1.0) ]),
+
+        Color(
+            target: "game_ui/data_box",
+            start_time: 9000,
+            keyframes: [
+                (time: 0,   value: (r: 0, g: 0, b: 0, a: 0)),
+                (time: 600, value: (r: 0, g: 0, b: 0, a: 128)),
+            ],
+        ),
+    ],
+
+    camera_tracks: [
+        Shot(
+            target: "main",
+            look_at: Some("player"),
+            follow_at: Some("player"),
+            follow_offset: (x: 0.0, y: 4.0, z: 27.0),
+            // Handheld feel = both together, not either alone (see
+            // position_shake's own doc comment) - a small, fast jitter on the
+            // camera itself, plus a slower, slightly larger drift on where
+            // it's aiming. Tune to taste - amplitude in world units, speed is
+            // "how jumpy" not a literal cycles/second.
+            position_shake: Some((
+                amplitude: (x: 0.15, y: 0.1, z: 0.1),
+                speed: 1.5,
+            )),
+            look_at_wander: Some((
+                amplitude: (x: 0.5, y: 0.5, z: 0.0),
+                speed: 1.2,
+            )),
+            fov: [ (time: 0, value: 90.0) ],
+            start_time: 3000,
+            end_time: 7500,
+        ),
+        Shot(
+            target: "main",
+            look_at: Some("player"),
+            follow_at: Some("player"),
+            follow_offset: (x: -7.626, y: 1.076, z: -10.628),
+            position_shake: Some((
+                amplitude: (x: 0.15, y: 0.1, z: 0.1),
+                speed: 1.5,
+            )),
+            look_at_wander: Some((
+                amplitude: (x: 0.5, y: 0.5, z: 0.0),
+                speed: 1.2,
+            )),
+            fov: [ (time: 0, value: 90.0) ],
+            start_time: 7500,
+            end_time: 10000,
+        ),
+    ],
 )

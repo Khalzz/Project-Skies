@@ -17,10 +17,21 @@
       "Bash(brew list *)",
       "Bash(brew --prefix sdl2)",
       "Read(//opt/homebrew/**)",
-      "Bash(mkdir -p /Users/khalz/Desktop/project-skies/.cargo)"
+      "Bash(mkdir -p /Users/khalz/Desktop/project-skies/.cargo)",
+      "Bash(cargo check *)",
+      "Bash(echo \"errors: $?\")",
+      "Bash(cargo test *)",
+      "Bash(rg -n \"camera.position|active\\\\\\(\\\\\\)|active_mut\\\\\\(\\\\\\)|to_raw\" /Users/khalz/Desktop/project-skies/src/engine --include=*.rs -g '!camera.rs')",
+      "Bash(rg -n \"camera.position|active_mut\\\\\\(\\\\\\)|active\\\\\\(\\\\\\)|fn to_raw\" /Users/khalz/Desktop/project-skies/src/engine -tr)",
+      "Bash(cat > *)",
+      "Bash(rg -rn \"toggle_console|toggle_debug\" /Users/khalz/Desktop/project-skies/assets)",
+      "Bash(rg -n \"toggle_console|toggle_debug|\\\\\"test\\\\\"\" /Users/khalz/Desktop/project-skies/assets/**/*.ron)",
+      "Bash(rg -rln \"toggle_console|toggle_debug|toggle_ui_debug\" /Users/khalz/Desktop/project-skies)",
+      "Bash(grep -v \"\\\\.rs$\")"
     ],
     "additionalDirectories": [
-      "/Users/khalz/Desktop/project-skies"
+      "/Users/khalz/Desktop/project-skies",
+      "/tmp"
     ]
   }
 }

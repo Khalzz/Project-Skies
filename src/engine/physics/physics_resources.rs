@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use nalgebra::{vector, Unit, Vector3};
+use nalgebra::{vector, Point3, Unit, Vector3};
 use rapier3d::prelude::*;
 
 use crate::engine::physics::physics_handler::PhysicsData;
@@ -69,6 +69,86 @@ fn compute_principal_inertia(mass: f32, center_of_mass: Vector3<f32>, colliders:
     }
 
     inertia
+}
+
+/// A node's `Physics` property (see `engine::scene_manager::physics_bridge`)
+/// plus the position it was spawned at - the plain, `Send`-safe data the
+/// physics thread actually needs, extracted once at spawn time the same way
+/// `render_bridge::register_static_model` extracts `Transform3D`+`Model` into
+/// a plain `GameObject` for rendering. The physics thread never touches a
+/// `Node`/`Scene` directly (`Node`'s `Box<dyn Any>` properties aren't `Send`)
+/// - this is what crosses that boundary instead, collected on
+/// `SceneContent::physics_bodies` as nodes are spawned and handed to
+/// `load_physics_from_definitions` once the scene's `fixed_update` starts the
+/// physics thread (see `App::run`).
+#[derive(Clone)]
+pub struct PhysicsObjectDef {
+    pub id: String,
+    pub position: Vector3<f32>,
+    pub physics: game_object::Physics,
+}
+
+/// Seeds `collider_set`/`rigidbody_set` from code-first `PhysicsObjectDef`s
+/// (see that type's own doc comment) instead of parsing a `data.ron` level
+/// file - the in-memory equivalent of `load_physics_from_level`, minus the
+/// model-name grouping that fn's own file-parsing pass needed (irrelevant
+/// here, every def already carries exactly what one physics body needs) and
+/// minus the `None`-valued `physics_handlers` entries that fn inserted for
+/// every non-physics object (nothing downstream needs those - see
+/// `Physics::physics_thread`'s own `None => {}` skip).
+pub fn load_physics_from_definitions(defs: &[PhysicsObjectDef], collider_set: &mut ColliderSet, rigidbody_set: &mut RigidBodySet, physics_handlers: &mut HashMap<String, Option<PhysicsData>>) {
+    for def in defs {
+        let mut rigid_body = if def.physics.rigidbody.is_static {
+            RigidBodyBuilder::fixed()
+                .additional_mass(def.physics.rigidbody.mass)
+                .translation(vector![def.position.x, def.position.y, def.position.z])
+                .build()
+        } else {
+            let principal_inertia = compute_principal_inertia(
+                def.physics.rigidbody.mass,
+                def.physics.rigidbody.center_of_mass,
+                &def.physics.colliders,
+            );
+
+            RigidBodyBuilder::dynamic()
+                .additional_mass_properties(rapier3d::prelude::MassProperties::new(def.physics.rigidbody.center_of_mass.into(), def.physics.rigidbody.mass, principal_inertia))
+                .translation(def.position)
+                .angular_damping(2.0)
+                .build()
+        };
+
+        rigid_body.set_linvel(def.physics.rigidbody.initial_velocity, true);
+        let rigidbody_handle = rigidbody_set.insert(rigid_body);
+
+        let mut collider_handles: Vec<ColliderHandle> = Vec::new();
+        for collider_data in &def.physics.colliders {
+            let collider = match collider_data {
+                game_object::ColliderType::Cuboid { half_extents, position } => {
+                    ColliderBuilder::cuboid(half_extents.0, half_extents.1, half_extents.2)
+                        .translation(vector![position.0, position.1, position.2])
+                        .build()
+                },
+                game_object::ColliderType::HalfSpace { normal } => {
+                    ColliderBuilder::halfspace(Unit::new_normalize(*normal)).build()
+                },
+                game_object::ColliderType::Trimesh { vertices, indices } => {
+                    let points: Vec<Point3<f32>> = vertices.iter().map(|v| Point3::from(*v)).collect();
+                    match ColliderBuilder::trimesh(points, indices.clone()) {
+                        Ok(builder) => builder.build(),
+                        Err(error) => {
+                            eprintln!("trimesh collider for '{}' couldn't be built: {error}", def.id);
+                            continue;
+                        }
+                    }
+                },
+                _ => continue,
+            };
+            let handle = collider_set.insert_with_parent(collider, rigidbody_handle, rigidbody_set);
+            collider_handles.push(handle);
+        }
+
+        physics_handlers.insert(def.id.clone(), Some(PhysicsData { rigidbody_handle, collider_handles, metadata: HashMap::new() }));
+    }
 }
 
 pub fn load_physics_from_level(mut level_path: String, collider_set: &mut ColliderSet, rigidbody_set: &mut RigidBodySet, physics_handlers: &mut HashMap<String, Option<PhysicsData>>) {

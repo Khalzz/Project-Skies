@@ -1,11 +1,12 @@
 use std::{collections::HashMap, collections::HashSet, path::Path};
 use gltf::{image,  Gltf};
-use nalgebra::{vector, Quaternion, Unit, Vector3};
+use nalgebra::{vector, Quaternion, Unit, UnitQuaternion, Vector3};
 use rapier3d::prelude::{ColliderBuilder, RigidBodyBuilder};
 use ron::from_str;
 use wgpu::{util::DeviceExt, BindGroupLayout, Buffer, Device, Queue, SurfaceConfiguration};
 
 use crate::{app::App, engine::game_nodes::{game_object::GameObject, scene::Scene}, engine::rendering::{enviroment::environment::Environment, enviroment::skybox_renderer::SkyboxRender, instance_management::{InstanceData, InstanceRaw, ModelDataInstance}, models::model::{self, Mesh, Model, ModelVertex}, models::textures::Texture}, transform::Transform};
+use crate::engine::scene_manager::scene::Scene as ManagedScene;
 
 pub fn load_binary(file_name: &str) -> anyhow::Result<Vec<u8>> {
     let path = std::path::Path::new(env!("OUT_DIR"))
@@ -246,6 +247,96 @@ pub fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgpu::Que
     })
 }
 
+/// Extracts a mesh's raw triangle geometry (world-space vertex positions +
+/// triangle indices, no GPU upload, no materials) from a `.gltf`/`.glb` file -
+/// for building a `game_object::ColliderType::Trimesh` from a model's own
+/// shape instead of a hand-authored primitive (see that variant's own doc
+/// comment). Reads the file independently of `load_model_gltf`'s own
+/// GPU-facing load rather than reusing its result - a `Mesh` only keeps
+/// `wgpu::Buffer`s once loaded (see that struct's own fields), nothing
+/// CPU-readable survives to reuse here, so rendering + physics both wanting
+/// the same model means a small amount of duplicate file I/O, paid once at
+/// scene-construction time.
+pub fn load_trimesh_geometry(file_name: &str) -> anyhow::Result<(Vec<Vector3<f32>>, Vec<[u32; 3]>)> {
+    let gltf_data = load_binary(file_name)?;
+    let gltf = Gltf::from_slice(&gltf_data).unwrap();
+
+    let mut buffer_data = Vec::new();
+    for buffer in gltf.buffers() {
+        match buffer.source() {
+            gltf::buffer::Source::Bin => {
+                if let Some(blob) = gltf.blob.as_deref() {
+                    buffer_data.push(blob.to_vec());
+                }
+            }
+            gltf::buffer::Source::Uri(uri) => {
+                let file_dir = Path::new(file_name).parent().unwrap_or(Path::new(""));
+                let full_path = file_dir.join(uri);
+                let bin = load_binary(full_path.to_str().unwrap())?;
+                buffer_data.push(bin);
+            }
+        }
+    }
+
+    let mut vertices: Vec<Vector3<f32>> = Vec::new();
+    let mut indices: Vec<[u32; 3]> = Vec::new();
+
+    for scene in gltf.scenes() {
+        for node in scene.nodes() {
+            collect_trimesh_geometry(node, &buffer_data, None, &mut vertices, &mut indices);
+        }
+    }
+
+    Ok((vertices, indices))
+}
+
+// Recurses the same way traverse_node does (child transforms compose with
+// their parent's), but only ever touches positions/indices - no GPU device,
+// no materials, since this is only ever building collision geometry, not
+// anything rendered.
+fn collect_trimesh_geometry(
+    node: gltf::Node<'_>,
+    buffer_data: &[Vec<u8>],
+    parent_transform: Option<(Vector3<f32>, UnitQuaternion<f32>)>,
+    vertices: &mut Vec<Vector3<f32>>,
+    indices: &mut Vec<[u32; 3]>,
+) {
+    let (translation, rotation, _scale) = node.transform().decomposed();
+    let local_translation = Vector3::from(translation);
+    let local_rotation = UnitQuaternion::from_quaternion(Quaternion::from(rotation));
+
+    let (world_translation, world_rotation) = match parent_transform {
+        Some((parent_translation, parent_rotation)) => (
+            parent_translation + parent_rotation * local_translation,
+            parent_rotation * local_rotation,
+        ),
+        None => (local_translation, local_rotation),
+    };
+
+    if let Some(mesh) = node.mesh() {
+        for primitive in mesh.primitives() {
+            let reader = primitive.reader(|buffer| Some(&buffer_data[buffer.index()]));
+
+            let base_index = vertices.len() as u32;
+            if let Some(positions) = reader.read_positions() {
+                for position in positions {
+                    vertices.push(world_translation + world_rotation * Vector3::from(position));
+                }
+            }
+            if let Some(indices_raw) = reader.read_indices() {
+                let flat: Vec<u32> = indices_raw.into_u32().collect();
+                for triangle in flat.chunks_exact(3) {
+                    indices.push([base_index + triangle[0], base_index + triangle[1], base_index + triangle[2]]);
+                }
+            }
+        }
+    }
+
+    for child in node.children() {
+        collect_trimesh_geometry(child, buffer_data, Some((world_translation, world_rotation)), vertices, indices);
+    }
+}
+
 fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::Device, queue: &wgpu::Queue, transform_bind_group_layout: &wgpu::BindGroupLayout, mesh_lists: &mut HashMap<String, HashMap<String, Mesh>>, file_name: &str, parent_transform: Option<([f32; 3], [f32; 4], [f32; 3])>, default_material_index: usize) -> anyhow::Result<()> {
         let mesh = node.mesh().expect("Got mesh");
         let primitives = mesh.primitives();
@@ -371,27 +462,29 @@ fn add_or_init_mesh_list(mesh_lists: &mut HashMap<String, HashMap<String, Mesh>>
     }
 }
 
-/// Output of `prepare_level_assets` - GPU resources already built (models loaded,
-/// buffers uploaded), just not merged into `App` yet. Call `PreparedSceneAssets::apply`
-/// on the main thread to do that merge; nothing here needs `&mut App` to produce.
-pub struct PreparedLevel {
-    /// Freshly gltf-loaded models, keyed by model_ref - only for models that weren't
-    /// already in `existing_models` when this was prepared.
-    pub new_models: HashMap<String, ModelDataInstance>,
-    /// For models that WERE already resident: the freshly-built instance buffer + count
-    /// to swap onto the existing `ModelDataInstance` entry.
-    pub instance_buffer_updates: HashMap<String, (Buffer, u32)>,
-    pub renderizable_instances: HashMap<String, InstanceData>,
-}
-
 /// Pure (no `&mut App`) version of the old `load_level` - safe to call from a
 /// background thread given cloned `Device`/`Queue` handles (both cheap, Arc-backed,
 /// and `Clone` in wgpu). `existing_models` is a snapshot of `app.game_models.keys()`
 /// taken before this call, so already-loaded models are reused instead of reloaded,
 /// same "load a model's GLTF once, keep it cached across scenes" behavior the
-/// original had - see `PreparedSceneAssets::apply` for the merge step that actually
-/// reads/writes `app.game_models`.
-pub fn prepare_level_assets(device: &Device, queue: &Queue, camera_position: Vector3<f32>, existing_models: &HashSet<String>, mut level_path: String) -> PreparedLevel {
+/// original had. Currently unused - kept alongside `load_instances`/
+/// `physics_resources::load_physics_from_level` as available (data.ron-based)
+/// infrastructure now that every registered scene spawns nodes directly instead
+/// (see `SceneManager::create_loaded_scene`'s own doc comment for the code-first
+/// equivalent of the background-load split this used to provide).
+#[allow(dead_code)]
+struct PreparedLevel {
+    /// Freshly gltf-loaded models, keyed by model_ref - only for models that weren't
+    /// already in `existing_models` when this was prepared.
+    new_models: HashMap<String, ModelDataInstance>,
+    /// For models that WERE already resident: the freshly-built instance buffer + count
+    /// to swap onto the existing `ModelDataInstance` entry.
+    instance_buffer_updates: HashMap<String, (Buffer, u32)>,
+    renderizable_instances: HashMap<String, InstanceData>,
+}
+
+#[allow(dead_code)]
+fn prepare_level_assets(device: &Device, queue: &Queue, camera_position: Vector3<f32>, existing_models: &HashSet<String>, mut level_path: String) -> PreparedLevel {
     level_path += "/data.ron";
 
     let mut new_models: HashMap<String, ModelDataInstance> = HashMap::new();
@@ -488,35 +581,17 @@ pub fn prepare_environment(device: &Device, queue: &Queue, camera_bind_group_lay
     }
 }
 
-/// Everything a heavy scene's `finish(app, assets)` needs to merge into `App` before
-/// running the rest of what used to be its `new()` - the combined output of
-/// `prepare_level_assets` + `prepare_environment`, built entirely off the main thread.
-pub struct PreparedSceneAssets {
-    pub level_path: String,
-    pub level: PreparedLevel,
-    pub environment: PreparedEnvironment,
-}
-
-impl PreparedSceneAssets {
-    /// The fast, main-thread merge step - mirrors what `load_level`/`apply_environment`
-    /// used to do directly. Call this first thing in a heavy scene's `finish`.
-    pub fn apply(self, app: &mut App) {
-        app.scene_openned = Some(self.level_path);
-
-        for (name, model) in self.level.new_models {
-            app.game_models.insert(name, model);
-        }
-        for (name, (buffer, count)) in self.level.instance_buffer_updates {
-            if let Some(model) = app.game_models.get_mut(&name) {
-                model.instance_buffer = buffer;
-                model.instance_count = count;
-            }
-        }
-        app.renderizable_instances = self.level.renderizable_instances;
-
-        app.skybox = self.environment.skybox;
-        app.clear_color = self.environment.clear_color;
-    }
+/// Synchronous environment setup for scenes registered via `create_scene`
+/// (no level to load alongside it, so no reason to defer to a background
+/// thread the way `create_loaded_scene`/`PreparedSceneAssets::apply` do) -
+/// `prepare_environment` plus applying its result to `scene.environment` in
+/// one call, instead of every such scene's own `new` repeating the
+/// `camera_bind_group_layout` clone + apply steps by hand.
+pub fn apply_environment(scene: &mut ManagedScene, app: &mut App, environment: Environment) {
+    let camera_bind_group_layout = app.camera_resources.bind_group_layout.clone();
+    let prepared = prepare_environment(&app.renderer.device, &app.renderer.queue, &camera_bind_group_layout, &app.renderer.config, environment);
+    scene.environment.skybox = prepared.skybox;
+    scene.environment.clear_color = prepared.clear_color;
 }
 
 pub fn create_instance_buffer(instances: &Vec<&GameObject>, device: &Device, camera_position: Vector3<f32>) -> Buffer {
@@ -549,4 +624,238 @@ pub fn load_instances(path: String) -> Option<Vec<GameObject>> {
         _ => {}
     }
     return None
+}
+
+// Named resource registration - register once, up front (e.g. right after
+// App::new in main.rs, before any scene opens), then reference the chosen
+// name from wherever a resource's actually needed instead of repeating its
+// file path. Not tied to any particular scene - a name registered here is
+// available to every scene equally.
+
+/// Registers a model's gltf once under a chosen `name`, decoupling the short
+/// name referenced throughout game code (a Node's `Model { model_ref: name }`
+/// - see `engine::scene_manager::render_bridge::register_static_model`, and
+/// `App::spawn_node` for how a spawned `Model` property triggers that
+/// automatically) from the actual asset path, which only needs to be written
+/// once, right here.
+///
+/// Stores into `app.loaded_models`, not `app.game_models` directly - a model
+/// only gets a real `ModelDataInstance` (which owns a GPU instance buffer)
+/// once something actually instances it; see `loaded_models`'s own doc
+/// comment on `App` for why an empty one can't just be created here instead.
+pub fn register_model(app: &mut App, name: &str, path: &str) -> Result<(), String> {
+    if app.loaded_models.contains_key(name) || app.game_models.contains_key(name) {
+        return Err(format!("a model named '{name}' is already loaded"));
+    }
+
+    let bind_group_layout = Mesh::create_bind_group_layout(&app.renderer.device);
+    let loaded_model = load_model_gltf(path, &app.renderer.device, &app.renderer.queue, &bind_group_layout)
+        .map_err(|e| format!("failed to load model '{name}' from '{path}': {e}"))?;
+
+    app.loaded_models.insert(name.to_owned(), loaded_model);
+    Ok(())
+}
+
+/// A procedurally-generated shape for `register_primitive_model` - the
+/// code-first alternative to authoring a model in Blender and loading it via
+/// `register_model`, for a quick test mesh (a subdivided plane to try a water
+/// shader's vertex displacement against, without round-tripping through a
+/// .glb file every time the subdivision count changes).
+pub enum PrimitiveShape {
+    /// A unit cube (-0.5..0.5 on each axis) - scale it via a node's own
+    /// `Transform3D::scale`, same as every other model.
+    Cube,
+    /// A unit square (-0.5..0.5 on X/Z, Y=0, normal +Y) - `subdivisions` is
+    /// how many extra cuts per side beyond the base single quad (0 = one
+    /// quad/4 vertices, 1 = a 2x2 grid/9 vertices, ...), so a shader driving
+    /// per-vertex displacement (waves, ...) has geometry to actually move.
+    Plane { subdivisions: u32 },
+}
+
+/// Builds a `Cube`'s raw geometry - 4 vertices per face (24 total) rather
+/// than 8 shared ones, since each face needs its own flat normal/UV, which a
+/// shared-corner vertex can't hold. Winding is CCW as viewed from outside
+/// each face, matching the engine's `FrontFace::Ccw` + back-face culling
+/// convention (see e.g. `light.rs`'s pipeline).
+fn build_cube_mesh() -> (Vec<ModelVertex>, Vec<u32>) {
+    // (normal, corners) per face - corners already in CCW-from-outside order.
+    let faces: [([f32; 3], [[f32; 3]; 4]); 6] = [
+        ([0.0, 0.0, 1.0], [[-0.5, -0.5, 0.5], [0.5, -0.5, 0.5], [0.5, 0.5, 0.5], [-0.5, 0.5, 0.5]]),
+        ([0.0, 0.0, -1.0], [[0.5, -0.5, -0.5], [-0.5, -0.5, -0.5], [-0.5, 0.5, -0.5], [0.5, 0.5, -0.5]]),
+        ([1.0, 0.0, 0.0], [[0.5, -0.5, 0.5], [0.5, -0.5, -0.5], [0.5, 0.5, -0.5], [0.5, 0.5, 0.5]]),
+        ([-1.0, 0.0, 0.0], [[-0.5, -0.5, -0.5], [-0.5, -0.5, 0.5], [-0.5, 0.5, 0.5], [-0.5, 0.5, -0.5]]),
+        ([0.0, 1.0, 0.0], [[-0.5, 0.5, 0.5], [0.5, 0.5, 0.5], [0.5, 0.5, -0.5], [-0.5, 0.5, -0.5]]),
+        ([0.0, -1.0, 0.0], [[-0.5, -0.5, -0.5], [0.5, -0.5, -0.5], [0.5, -0.5, 0.5], [-0.5, -0.5, 0.5]]),
+    ];
+    let uvs = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
+
+    let mut vertices = Vec::with_capacity(24);
+    let mut indices = Vec::with_capacity(36);
+    for (normal, corners) in faces {
+        let base = vertices.len() as u32;
+        for (corner, uv) in corners.iter().zip(uvs.iter()) {
+            vertices.push(ModelVertex { position: *corner, tex_coords: *uv, normal });
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    (vertices, indices)
+}
+
+/// Builds a `Plane { subdivisions }`'s raw geometry - a `(subdivisions + 2)`-
+/// per-side grid of shared vertices (a flat plane has no per-face normal/UV
+/// seams to worry about, unlike `build_cube_mesh`), UVs spanning 0..1 across
+/// the whole grid. Winding is CCW as viewed from +Y, matching `normal`.
+fn build_plane_mesh(subdivisions: u32) -> (Vec<ModelVertex>, Vec<u32>) {
+    let segments = subdivisions + 1;
+    let verts_per_side = segments + 1;
+
+    let mut vertices = Vec::with_capacity((verts_per_side * verts_per_side) as usize);
+    for row in 0..verts_per_side {
+        for col in 0..verts_per_side {
+            let u = col as f32 / segments as f32;
+            let v = row as f32 / segments as f32;
+            vertices.push(ModelVertex { position: [u - 0.5, 0.0, v - 0.5], tex_coords: [u, v], normal: [0.0, 1.0, 0.0] });
+        }
+    }
+
+    let mut indices = Vec::with_capacity((segments * segments * 6) as usize);
+    for row in 0..segments {
+        for col in 0..segments {
+            let top_left = row * verts_per_side + col;
+            let top_right = top_left + 1;
+            let bottom_left = top_left + verts_per_side;
+            let bottom_right = bottom_left + 1;
+            indices.extend_from_slice(&[top_left, bottom_left, bottom_right, top_left, bottom_right, top_right]);
+        }
+    }
+    (vertices, indices)
+}
+
+/// Registers a procedurally-generated `PrimitiveShape` once under a chosen
+/// `name` - the same registration point/pattern as `register_model`
+/// (`app.loaded_models`, referenced later via a node's `Model { model_ref:
+/// name }`), just building the mesh's vertex/index data in code instead of
+/// parsing it out of a .glb file. Uses a single flat-white material (see
+/// `load_model_gltf`'s own default-material fallback for the same texture) -
+/// swap it out per-instance with a real shader/material system once one
+/// exists; for now this is meant for trying geometry (a water shader's
+/// vertex displacement, ...) against, not for a shippable-looking primitive.
+pub fn register_primitive_model(app: &mut App, name: &str, shape: PrimitiveShape) -> Result<(), String> {
+    if app.loaded_models.contains_key(name) || app.game_models.contains_key(name) {
+        return Err(format!("a model named '{name}' is already loaded"));
+    }
+
+    let device = &app.renderer.device;
+    let queue = &app.renderer.queue;
+
+    let (vertices, indices) = match shape {
+        PrimitiveShape::Cube => build_cube_mesh(),
+        PrimitiveShape::Plane { subdivisions } => build_plane_mesh(subdivisions),
+    };
+
+    let texture_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    multisampled: false,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+        label: Some("primitive_texture_bind_group_layout"),
+    });
+
+    let default_texture = Texture::from_image(
+        &::image::DynamicImage::ImageRgba8(::image::RgbaImage::from_pixel(1, 1, ::image::Rgba([255, 255, 255, 255]))),
+        device,
+        queue,
+        Some("primitive_default_texture"),
+    ).map_err(|e| format!("failed to build a default texture for primitive '{name}': {e}"))?;
+
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        layout: &texture_bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&default_texture.view) },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&default_texture.sampler) },
+        ],
+        label: Some("primitive_material_bind_group"),
+    });
+
+    let materials = vec![model::Material { name: "Default Material".to_owned(), diffuse_texture: default_texture, bind_group }];
+
+    let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(&format!("{name} primitive vertex buffer")),
+        contents: bytemuck::cast_slice(&vertices),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+    let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(&format!("{name} primitive index buffer")),
+        contents: bytemuck::cast_slice(&indices),
+        usage: wgpu::BufferUsages::INDEX,
+    });
+
+    // Identity - a primitive's actual placement/size comes from its node's
+    // own Transform3D, same as every mesh loaded via load_model_gltf.
+    let transform = Transform::new(Vector3::zeros(), Quaternion::identity(), Vector3::new(1.0, 1.0, 1.0));
+    let transform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("primitive transform buffer"),
+        contents: bytemuck::cast_slice(&[transform.to_matrix_bufferable()]),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+    let transform_bind_group_layout = Mesh::create_bind_group_layout(device);
+    let transform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("primitive transform bind group"),
+        layout: &transform_bind_group_layout,
+        entries: &[wgpu::BindGroupEntry { binding: 0, resource: transform_buffer.as_entire_binding() }],
+    });
+
+    let mesh = model::Mesh {
+        name: name.to_owned(),
+        vertex_buffer,
+        index_buffer,
+        num_elements: indices.len() as u32,
+        material: 0,
+        transform_buffer,
+        transform_bind_group,
+        transform,
+        base_transform: transform,
+        parent_transform: None,
+        alpha_mode: gltf::material::AlphaMode::Opaque,
+    };
+
+    let mut opaque = HashMap::new();
+    opaque.insert(name.to_owned(), mesh);
+    let mut mesh_lists = HashMap::new();
+    mesh_lists.insert("opaque".to_owned(), opaque);
+
+    app.loaded_models.insert(name.to_owned(), model::Model { mesh_lists, materials });
+    Ok(())
+}
+
+/// Registers an image once under a chosen `name` - the same pattern as
+/// `register_model`, just simpler: a texture has no equivalent of a model's
+/// shared per-instance GPU buffer to size/rebuild, so there's no "loaded but
+/// not yet instanced" split needed - it goes straight into `app.textures`
+/// and is immediately ready to use wherever `name` is referenced (a
+/// material, a UI image, ...).
+pub fn register_texture(app: &mut App, name: &str, path: &str) -> Result<(), String> {
+    if app.textures.contains_key(name) {
+        return Err(format!("a texture named '{name}' is already loaded"));
+    }
+
+    let texture = load_texture(path, &app.renderer.device, &app.renderer.queue)
+        .map_err(|e| format!("failed to load texture '{name}' from '{path}': {e}"))?;
+
+    app.textures.insert(name.to_owned(), texture);
+    Ok(())
 }

@@ -23,4 +23,7 @@
     "fix_view",
     "up_wheel",
     "down_wheel",
+    "toggle_landing_gear",
+    "landing_gear_up",
+    "landing_gear_down",
 ]

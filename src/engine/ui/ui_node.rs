@@ -476,7 +476,7 @@ impl UiNode {
     /// there's no support for a scrollable container nested inside another
     /// scrollable container narrowing this further via intersection, since
     /// nothing in this codebase does that yet.
-    pub fn node_content_preparation(&mut self, size: &Size, ui: &mut UiRendering, font_system: &mut FontSystem, delta_time: f32, hit_testable: bool, clip_rect: Option<&Rect>) -> (Vec<TextArea>, u16, u32) {
+    pub fn node_content_preparation(&mut self, size: &Size, dpi_scale: f32, ui: &mut UiRendering, font_system: &mut FontSystem, delta_time: f32, hit_testable: bool, clip_rect: Option<&Rect>) -> (Vec<TextArea>, u16, u32) {
         // Inactive nodes render nothing and can't be hovered/clicked - their
         // *parent's* layout loop is what skips giving them any space (this alone
         // wouldn't stop them occupying a stacking slot), see the Container branch
@@ -583,14 +583,14 @@ impl UiNode {
             UiNodeContent::Text(label) => {
                 // Background/border quad still fills the whole (already padding-grown,
                 // see apply_padding) box - only the text itself renders inset within it.
-                let (vertices_slice, indice_slice) = Self::compute_quad(&self.transform, &effective_visibility, size, ui.num_vertices, Self::clip_rect_array(clip_rect));
+                let (vertices_slice, indice_slice) = Self::compute_quad(&self.transform, &effective_visibility, size, dpi_scale, ui.num_vertices, Self::clip_rect_array(clip_rect));
                 let inner_rect = Self::inner_rect(&self.transform, &self.padding);
                 label.buffer.set_size(font_system, Some(inner_rect.right - inner_rect.left), Some(inner_rect.bottom - inner_rect.top));
                 // align isn't part of ResolvedStyle/current - not meaningfully
                 // interpolable, so it always uses this frame's target directly.
                 label.apply_style(font_system, current.font_size, effective_style.align.unwrap_or(Align::Left));
 
-                let (text_area, added_vertices, added_indices) = label.ui_node_data_creation(size, &mut ui.vertices, &vertices_slice, &mut ui.indices, &indice_slice, &inner_rect, current.text_color(), clip_rect);
+                let (text_area, added_vertices, added_indices) = label.ui_node_data_creation(size, dpi_scale, &mut ui.vertices, &vertices_slice, &mut ui.indices, &indice_slice, &inner_rect, current.text_color(), clip_rect);
                 text_areas.push(text_area);
                 ui.num_vertices += added_vertices;
                 ui.num_indices += added_indices;
@@ -664,7 +664,7 @@ impl UiNode {
                 // Render container background - clipped by whatever ancestor clip
                 // this node itself received (not the clip it's about to establish
                 // for its own children below - this is its own box, not theirs).
-                let (vertices_slice, indice_slice) = Self::compute_quad(&self.transform, &effective_visibility, size, ui.num_vertices, Self::clip_rect_array(clip_rect));
+                let (vertices_slice, indice_slice) = Self::compute_quad(&self.transform, &effective_visibility, size, dpi_scale, ui.num_vertices, Self::clip_rect_array(clip_rect));
                 let (cv, ci) = container.ui_node_data_creation(size, &mut ui.vertices, &vertices_slice, &mut ui.indices, &indice_slice);
                 ui.num_vertices += cv;
                 ui.num_indices += ci;
@@ -893,7 +893,7 @@ impl UiNode {
                         child.transform.apply_transformation();
                     }
 
-                    let (child_text_areas, _cv, _ci) = child.node_content_preparation(size, ui, font_system, delta_time, hit_testable, child_clip_rect);
+                    let (child_text_areas, _cv, _ci) = child.node_content_preparation(size, dpi_scale, ui, font_system, delta_time, hit_testable, child_clip_rect);
                     text_areas.extend(child_text_areas);
                 }
 
@@ -916,7 +916,7 @@ impl UiNode {
 
                     let track_transform = UiTransform::new(bar_left, content_top, content_h, BAR_WIDTH, 0.0, false);
                     let track_visibility = Visibility::new(Fill::Solid(UiColor::Rgba(255, 255, 255, 15)), Fill::Solid(UiColor::TRANSPARENT), BAR_WIDTH / 2.0, 0.0, BorderEdges::ALL, 0.0);
-                    let (track_v, track_i) = Self::compute_quad(&track_transform, &track_visibility, size, ui.num_vertices, Self::NO_CLIP);
+                    let (track_v, track_i) = Self::compute_quad(&track_transform, &track_visibility, size, dpi_scale, ui.num_vertices, Self::NO_CLIP);
                     ui.num_vertices += track_v.len() as u16;
                     ui.num_indices += track_i.len() as u32;
                     ui.vertices.extend(track_v);
@@ -929,7 +929,7 @@ impl UiNode {
                     let thumb_top = content_top + (content_h - thumb_height) * (scroll_offset / max_scroll);
                     let thumb_transform = UiTransform::new(bar_left, thumb_top, thumb_height, BAR_WIDTH, 0.0, false);
                     let thumb_visibility = Visibility::new(Fill::Solid(UiColor::Rgba(255, 255, 255, 90)), Fill::Solid(UiColor::TRANSPARENT), BAR_WIDTH / 2.0, 0.0, BorderEdges::ALL, 0.0);
-                    let (thumb_v, thumb_i) = Self::compute_quad(&thumb_transform, &thumb_visibility, size, ui.num_vertices, Self::NO_CLIP);
+                    let (thumb_v, thumb_i) = Self::compute_quad(&thumb_transform, &thumb_visibility, size, dpi_scale, ui.num_vertices, Self::NO_CLIP);
                     ui.num_vertices += thumb_v.len() as u16;
                     ui.num_indices += thumb_i.len() as u32;
                     ui.vertices.extend(thumb_v);
@@ -979,7 +979,7 @@ impl UiNode {
     /// Call after `node_content_preparation` has already run this frame (needs
     /// `self.transform.rect` to be current) - see `App::prepare_ui_content`, gated
     /// behind `Ui::debug_bounds` (toggled by "toggle_ui_debug", F2).
-    pub fn debug_bounds_preparation(&self, size: &Size, ui: &mut UiRendering) {
+    pub fn debug_bounds_preparation(&self, size: &Size, dpi_scale: f32, ui: &mut UiRendering) {
         if !self.is_active {
             return;
         }
@@ -988,7 +988,7 @@ impl UiNode {
         // a debug overlay (F2) showing exactly where every node's real rect is,
         // including whatever's currently scrolled out of view, is more useful for
         // debugging than a clipped one would be.
-        let (vertices_slice, indice_slice) = Self::compute_quad(&self.transform, &outline, size, ui.num_vertices, Self::NO_CLIP);
+        let (vertices_slice, indice_slice) = Self::compute_quad(&self.transform, &outline, size, dpi_scale, ui.num_vertices, Self::NO_CLIP);
 
         ui.num_vertices += vertices_slice.len() as u16;
         ui.num_indices += indice_slice.len() as u32;
@@ -997,7 +997,7 @@ impl UiNode {
 
         if let UiNodeContent::Container(container) = &self.content {
             for (_, child) in &container.children {
-                child.debug_bounds_preparation(size, ui);
+                child.debug_bounds_preparation(size, dpi_scale, ui);
             }
         }
     }
@@ -1085,24 +1085,42 @@ impl UiNode {
         }
     }
 
-    fn compute_quad(transform: &UiTransform, visibility: &Visibility, screen_size: &Size, base: u16, clip: [f32; 4]) -> (Vec<VertexUi>, Vec<u16>) {
+    fn compute_quad(transform: &UiTransform, visibility: &Visibility, screen_size: &Size, dpi_scale: f32, base: u16, clip: [f32; 4]) -> (Vec<VertexUi>, Vec<u16>) {
         let ndc_x = |x: f32| (x / (screen_size.width as f32 / 2.0)) - 1.0;
         let ndc_y = |y: f32| 1.0 - (y / (screen_size.height as f32 / 2.0));
 
+        // Unlike ndc_x/y above (self-contained NDC, resolution-independent), the
+        // `rect` VertexUi carries gets compared fragment-by-fragment in
+        // text_shader.wgsl against `@builtin(position)`, which WGPU always gives
+        // in real backing pixels, never points - so `rect` (and `clip`, same
+        // packing) has to already be in that space too, same reasoning as
+        // Label::text_area's own dpi_scale doc comment. Left unscaled, every
+        // fragment shader distance test on it (sd_rounded_box, border bands, the
+        // clip discard) sees a box roughly dpi_scale times smaller than the
+        // actual on-screen quad, discarding almost everything outside its
+        // top-left corner - the exact "cut into quarters, stuck top-left" bug.
         let rect = [
-            transform.rect.top,
-            transform.rect.left,
-            transform.rect.bottom,
-            transform.rect.right,
+            transform.rect.top * dpi_scale,
+            transform.rect.left * dpi_scale,
+            transform.rect.bottom * dpi_scale,
+            transform.rect.right * dpi_scale,
         ];
+        let clip = clip.map(|v| v * dpi_scale);
 
         let border_edges = visibility.border_edges.to_bits();
+        // Same reasoning as `rect`/`clip` above - text_shader.wgsl's SDF (dist)
+        // and per-edge border bands compare directly against `@builtin(position)`
+        // (real pixels), so corner_radius/border_width (authored in points, same
+        // as everything else) have to be converted to that space too, or a
+        // "2px border" renders at half its intended on-screen thickness.
+        let corner_radius = visibility.corner_radius * dpi_scale;
+        let border_width = visibility.border_width * dpi_scale;
         let quad = |left: f32, top: f32, right: f32, bottom: f32, bg: [[f32; 4]; 4], bd: [[f32; 4]; 4], base: u16| -> (Vec<VertexUi>, Vec<u16>) {
             let vertices = vec![
-                VertexUi { position: vector![ndc_x(left), ndc_y(top), 0.0].into(), color: bg[0], rect, border_color: bd[0], corner_radius: visibility.corner_radius, border_width: visibility.border_width, background_blur: visibility.background_blur, border_edges, clip_rect: clip },
-                VertexUi { position: vector![ndc_x(left), ndc_y(bottom), 0.0].into(), color: bg[1], rect, border_color: bd[1], corner_radius: visibility.corner_radius, border_width: visibility.border_width, background_blur: visibility.background_blur, border_edges, clip_rect: clip },
-                VertexUi { position: vector![ndc_x(right), ndc_y(bottom), 0.0].into(), color: bg[2], rect, border_color: bd[2], corner_radius: visibility.corner_radius, border_width: visibility.border_width, background_blur: visibility.background_blur, border_edges, clip_rect: clip },
-                VertexUi { position: vector![ndc_x(right), ndc_y(top), 0.0].into(), color: bg[3], rect, border_color: bd[3], corner_radius: visibility.corner_radius, border_width: visibility.border_width, background_blur: visibility.background_blur, border_edges, clip_rect: clip },
+                VertexUi { position: vector![ndc_x(left), ndc_y(top), 0.0].into(), color: bg[0], rect, border_color: bd[0], corner_radius, border_width, background_blur: visibility.background_blur, border_edges, clip_rect: clip },
+                VertexUi { position: vector![ndc_x(left), ndc_y(bottom), 0.0].into(), color: bg[1], rect, border_color: bd[1], corner_radius, border_width, background_blur: visibility.background_blur, border_edges, clip_rect: clip },
+                VertexUi { position: vector![ndc_x(right), ndc_y(bottom), 0.0].into(), color: bg[2], rect, border_color: bd[2], corner_radius, border_width, background_blur: visibility.background_blur, border_edges, clip_rect: clip },
+                VertexUi { position: vector![ndc_x(right), ndc_y(top), 0.0].into(), color: bg[3], rect, border_color: bd[3], corner_radius, border_width, background_blur: visibility.background_blur, border_edges, clip_rect: clip },
             ];
             let indices = vec![base, 1 + base, 2 + base, base, 2 + base, 3 + base];
             (vertices, indices)

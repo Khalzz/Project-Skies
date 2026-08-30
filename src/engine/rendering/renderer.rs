@@ -62,12 +62,26 @@ impl Renderer {
     let config = wgpu::SurfaceConfiguration {
         usage: TextureUsages::RENDER_ATTACHMENT,
         format: surface_format[0],
-        width: window_manager.size.width,
-        height: window_manager.size.height,
-        // Vsync'd (locked to the display's refresh rate) instead of presenting
-        // uncapped - avoids the GPU spinning at max speed while idling on a menu
-        // that has nothing worth rendering thousands of FPS for.
-        present_mode: wgpu::PresentMode::Fifo,
+        // Real backing pixels, not window_manager.size's points - on a HiDPI/
+        // Retina display those differ (see WindowManager::pixel_size's own doc
+        // comment), and the GPU surface needs the real pixel count to actually
+        // render at native display resolution instead of being upscaled.
+        width: window_manager.pixel_size.width,
+        height: window_manager.pixel_size.height,
+        // TEMPORARY, for cross-machine perf testing - normally Fifo (vsync'd to
+        // the display's refresh rate, avoids the GPU spinning at max speed idling
+        // on a menu with nothing worth rendering thousands of FPS for). Uncapped
+        // here instead so the in-game FPS counter reflects genuine throughput
+        // instead of being clipped at the display's refresh rate - Fifo was
+        // exactly why a 60Hz-capped Mac and an apparently-unthrottled PC weren't
+        // comparable. Immediate tears; Mailbox doesn't (still uncapped, just
+        // drops instead of showing a torn frame) - prefer that if available.
+        // Revert to Fifo once this round of testing is done.
+        present_mode: if surface_caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+            wgpu::PresentMode::Mailbox
+        } else {
+            wgpu::PresentMode::Immediate
+        },
         // Explicitly Opaque rather than surface_caps.alpha_modes[0] (whatever the
         // driver happens to report first) - this window is a fullscreen game, it
         // should never be alpha-composited against the desktop behind it. Every
@@ -87,7 +101,17 @@ impl Renderer {
             surface_caps.alpha_modes[0]
         },
         view_formats: vec![],
-        desired_maximum_frame_latency: 1,
+        // 1 (the previous value) meant the CPU couldn't start a new frame
+        // until the GPU had actually finished presenting the last one -
+        // get_current_texture() (see App::render's "render.gpu_acquire"
+        // profiler span) was blocking on that every frame, and measured
+        // ~2.5ms/frame of it. 3 (Metal's own typical drawable pool size) lets
+        // the CPU queue further ahead instead of stalling there - confirmed via
+        // the profiler: gpu_acquire roughly halved and overall fps rose ~43%
+        // with no other change. The cost is a few extra ms of input latency
+        // (more frames queued ahead of the GPU) - imperceptible for this game,
+        // a standard tradeoff most games make for the throughput.
+        desired_maximum_frame_latency: 3,
     };
 
     surface.configure(&device, &config);
