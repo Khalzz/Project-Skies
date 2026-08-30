@@ -315,6 +315,12 @@ impl Plane {
     /// than widening every `Behavior`'s signature for this one consumer.
     pub fn apply_physics_feedback(&mut self, model: &mut LoadedModel, physics_message: &RenderMessage, gravity: Vector3<f32>, instance_scale: Vector3<f32>, queue: &wgpu::Queue, delta_time: f32) {
         self.flight_data.speedometer = physics_message.linvel.magnitude() * 1.94384;
+        // Raw world Y - this game's own "sea level" is Y=0 (see e.g.
+        // play::scene::spawn_world's "world"/water node), so this doubles as
+        // height above water without needing the wave-surface's own current
+        // height subtracted out; a HUD altimeter reads the nominal/rest sea
+        // level, not the instantaneous wave crest/trough under the plane.
+        self.flight_data.altimeter = physics_message.translation.y;
 
         self.velocity_sample_elapsed += delta_time;
         match &self.previous_velocity {

@@ -96,10 +96,17 @@ impl Texture {
             dimension: wgpu::TextureDimension::D2,
             format: Self::DEPTH_FORMAT, // we store the image as sRGB
 
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            // COPY_SRC/COPY_DST beyond the original RENDER_ATTACHMENT |
+            // TEXTURE_BINDING - lets a texture built with this same fn serve
+            // as either side of a copy_texture_to_texture (see DepthRender's
+            // own foam_depth_copy field: a per-frame snapshot of the real
+            // depth texture, taken so the water shader can sample "what's
+            // behind me" without reading the same texture it's still being
+            // depth-tested/written against in the same pass).
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
             view_formats: &[Self::DEPTH_FORMAT],
         };
-        
+
         let texture = device.create_texture(&desc);
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());

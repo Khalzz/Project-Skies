@@ -656,6 +656,192 @@ pub fn register_model(app: &mut App, name: &str, path: &str) -> Result<(), Strin
     Ok(())
 }
 
+/// A procedurally-generated shape for `register_primitive_model` - the
+/// code-first alternative to authoring a model in Blender and loading it via
+/// `register_model`, for a quick test mesh (a subdivided plane to try a water
+/// shader's vertex displacement against, without round-tripping through a
+/// .glb file every time the subdivision count changes).
+pub enum PrimitiveShape {
+    /// A unit cube (-0.5..0.5 on each axis) - scale it via a node's own
+    /// `Transform3D::scale`, same as every other model.
+    Cube,
+    /// A unit square (-0.5..0.5 on X/Z, Y=0, normal +Y) - `subdivisions` is
+    /// how many extra cuts per side beyond the base single quad (0 = one
+    /// quad/4 vertices, 1 = a 2x2 grid/9 vertices, ...), so a shader driving
+    /// per-vertex displacement (waves, ...) has geometry to actually move.
+    Plane { subdivisions: u32 },
+}
+
+/// Builds a `Cube`'s raw geometry - 4 vertices per face (24 total) rather
+/// than 8 shared ones, since each face needs its own flat normal/UV, which a
+/// shared-corner vertex can't hold. Winding is CCW as viewed from outside
+/// each face, matching the engine's `FrontFace::Ccw` + back-face culling
+/// convention (see e.g. `light.rs`'s pipeline).
+fn build_cube_mesh() -> (Vec<ModelVertex>, Vec<u32>) {
+    // (normal, corners) per face - corners already in CCW-from-outside order.
+    let faces: [([f32; 3], [[f32; 3]; 4]); 6] = [
+        ([0.0, 0.0, 1.0], [[-0.5, -0.5, 0.5], [0.5, -0.5, 0.5], [0.5, 0.5, 0.5], [-0.5, 0.5, 0.5]]),
+        ([0.0, 0.0, -1.0], [[0.5, -0.5, -0.5], [-0.5, -0.5, -0.5], [-0.5, 0.5, -0.5], [0.5, 0.5, -0.5]]),
+        ([1.0, 0.0, 0.0], [[0.5, -0.5, 0.5], [0.5, -0.5, -0.5], [0.5, 0.5, -0.5], [0.5, 0.5, 0.5]]),
+        ([-1.0, 0.0, 0.0], [[-0.5, -0.5, -0.5], [-0.5, -0.5, 0.5], [-0.5, 0.5, 0.5], [-0.5, 0.5, -0.5]]),
+        ([0.0, 1.0, 0.0], [[-0.5, 0.5, 0.5], [0.5, 0.5, 0.5], [0.5, 0.5, -0.5], [-0.5, 0.5, -0.5]]),
+        ([0.0, -1.0, 0.0], [[-0.5, -0.5, -0.5], [0.5, -0.5, -0.5], [0.5, -0.5, 0.5], [-0.5, -0.5, 0.5]]),
+    ];
+    let uvs = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
+
+    let mut vertices = Vec::with_capacity(24);
+    let mut indices = Vec::with_capacity(36);
+    for (normal, corners) in faces {
+        let base = vertices.len() as u32;
+        for (corner, uv) in corners.iter().zip(uvs.iter()) {
+            vertices.push(ModelVertex { position: *corner, tex_coords: *uv, normal });
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    (vertices, indices)
+}
+
+/// Builds a `Plane { subdivisions }`'s raw geometry - a `(subdivisions + 2)`-
+/// per-side grid of shared vertices (a flat plane has no per-face normal/UV
+/// seams to worry about, unlike `build_cube_mesh`), UVs spanning 0..1 across
+/// the whole grid. Winding is CCW as viewed from +Y, matching `normal`.
+fn build_plane_mesh(subdivisions: u32) -> (Vec<ModelVertex>, Vec<u32>) {
+    let segments = subdivisions + 1;
+    let verts_per_side = segments + 1;
+
+    let mut vertices = Vec::with_capacity((verts_per_side * verts_per_side) as usize);
+    for row in 0..verts_per_side {
+        for col in 0..verts_per_side {
+            let u = col as f32 / segments as f32;
+            let v = row as f32 / segments as f32;
+            vertices.push(ModelVertex { position: [u - 0.5, 0.0, v - 0.5], tex_coords: [u, v], normal: [0.0, 1.0, 0.0] });
+        }
+    }
+
+    let mut indices = Vec::with_capacity((segments * segments * 6) as usize);
+    for row in 0..segments {
+        for col in 0..segments {
+            let top_left = row * verts_per_side + col;
+            let top_right = top_left + 1;
+            let bottom_left = top_left + verts_per_side;
+            let bottom_right = bottom_left + 1;
+            indices.extend_from_slice(&[top_left, bottom_left, bottom_right, top_left, bottom_right, top_right]);
+        }
+    }
+    (vertices, indices)
+}
+
+/// Registers a procedurally-generated `PrimitiveShape` once under a chosen
+/// `name` - the same registration point/pattern as `register_model`
+/// (`app.loaded_models`, referenced later via a node's `Model { model_ref:
+/// name }`), just building the mesh's vertex/index data in code instead of
+/// parsing it out of a .glb file. Uses a single flat-white material (see
+/// `load_model_gltf`'s own default-material fallback for the same texture) -
+/// swap it out per-instance with a real shader/material system once one
+/// exists; for now this is meant for trying geometry (a water shader's
+/// vertex displacement, ...) against, not for a shippable-looking primitive.
+pub fn register_primitive_model(app: &mut App, name: &str, shape: PrimitiveShape) -> Result<(), String> {
+    if app.loaded_models.contains_key(name) || app.game_models.contains_key(name) {
+        return Err(format!("a model named '{name}' is already loaded"));
+    }
+
+    let device = &app.renderer.device;
+    let queue = &app.renderer.queue;
+
+    let (vertices, indices) = match shape {
+        PrimitiveShape::Cube => build_cube_mesh(),
+        PrimitiveShape::Plane { subdivisions } => build_plane_mesh(subdivisions),
+    };
+
+    let texture_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    multisampled: false,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+        label: Some("primitive_texture_bind_group_layout"),
+    });
+
+    let default_texture = Texture::from_image(
+        &::image::DynamicImage::ImageRgba8(::image::RgbaImage::from_pixel(1, 1, ::image::Rgba([255, 255, 255, 255]))),
+        device,
+        queue,
+        Some("primitive_default_texture"),
+    ).map_err(|e| format!("failed to build a default texture for primitive '{name}': {e}"))?;
+
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        layout: &texture_bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&default_texture.view) },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&default_texture.sampler) },
+        ],
+        label: Some("primitive_material_bind_group"),
+    });
+
+    let materials = vec![model::Material { name: "Default Material".to_owned(), diffuse_texture: default_texture, bind_group }];
+
+    let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(&format!("{name} primitive vertex buffer")),
+        contents: bytemuck::cast_slice(&vertices),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+    let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(&format!("{name} primitive index buffer")),
+        contents: bytemuck::cast_slice(&indices),
+        usage: wgpu::BufferUsages::INDEX,
+    });
+
+    // Identity - a primitive's actual placement/size comes from its node's
+    // own Transform3D, same as every mesh loaded via load_model_gltf.
+    let transform = Transform::new(Vector3::zeros(), Quaternion::identity(), Vector3::new(1.0, 1.0, 1.0));
+    let transform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("primitive transform buffer"),
+        contents: bytemuck::cast_slice(&[transform.to_matrix_bufferable()]),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+    let transform_bind_group_layout = Mesh::create_bind_group_layout(device);
+    let transform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("primitive transform bind group"),
+        layout: &transform_bind_group_layout,
+        entries: &[wgpu::BindGroupEntry { binding: 0, resource: transform_buffer.as_entire_binding() }],
+    });
+
+    let mesh = model::Mesh {
+        name: name.to_owned(),
+        vertex_buffer,
+        index_buffer,
+        num_elements: indices.len() as u32,
+        material: 0,
+        transform_buffer,
+        transform_bind_group,
+        transform,
+        base_transform: transform,
+        parent_transform: None,
+        alpha_mode: gltf::material::AlphaMode::Opaque,
+    };
+
+    let mut opaque = HashMap::new();
+    opaque.insert(name.to_owned(), mesh);
+    let mut mesh_lists = HashMap::new();
+    mesh_lists.insert("opaque".to_owned(), opaque);
+
+    app.loaded_models.insert(name.to_owned(), model::Model { mesh_lists, materials });
+    Ok(())
+}
+
 /// Registers an image once under a chosen `name` - the same pattern as
 /// `register_model`, just simpler: a texture has no equivalent of a model's
 /// shared per-instance GPU buffer to size/rebuild, so there's no "loaded but

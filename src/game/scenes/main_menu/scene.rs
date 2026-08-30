@@ -2,8 +2,6 @@ use nalgebra::{Point3, UnitQuaternion, Vector3};
 
 use crate::app::App;
 use crate::engine::game_nodes::game_object::Lighting;
-use crate::engine::input::input;
-use crate::engine::rendering::camera::handler::LookAtTarget;
 use crate::engine::rendering::enviroment::environment::Environment;
 use crate::engine::scene_manager::node::Node;
 use crate::engine::scene_manager::properties::{Model, Transform3D};
@@ -77,11 +75,11 @@ impl GameLogic {
         scene.spawn_node(app,
             Node::new("world")
                 .add_property(Transform3D {
-                    position: Vector3::new(0.0, 0.0, 0.0),
+                    position: Vector3::new(0.0, -10.0, 0.0),
                     rotation: UnitQuaternion::identity(),
                     scale: Vector3::new(100_000.0, 1.0, 100_000.0),
                 })
-                .add_property(Model { model_ref: "Water".to_owned() })
+                .add_property(Model { model_ref: "WaterPlane".to_owned() })
         ).expect("main_menu should only spawn 'world' once");
     }
 

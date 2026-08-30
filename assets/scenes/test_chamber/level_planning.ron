@@ -1,4 +1,5 @@
 EventSystem (
+    /*
     event_list: {
         1000: Event (
             event_type: PlayAudio(
@@ -8,6 +9,8 @@ EventSystem (
             ),
         )
     },
+    */
+
     // Locks out player input (flight controls and the pause menu itself -
     // see EventSystem::input_lock_end's own doc comment) for the mission-
     // intro's cinematic - matches when the flight HUD's own Active track

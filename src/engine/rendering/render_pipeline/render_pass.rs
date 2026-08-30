@@ -76,9 +76,76 @@ impl App {
         render_pass.set_pipeline(&self.render_pipeline);
 
         for model_ref in self.distinct_model_refs(Some("sun")) {
+            // Water-shaded models draw in their own later pass instead (see
+            // render_water_pass) - they need a snapshot of this pass's own
+            // depth output to sample from, so they can't be part of this
+            // pass themselves.
+            if self.water_shaded_models.contains(&model_ref) {
+                continue;
+            }
             if let Some(model_data) = self.game_models.get(&model_ref) {
                 render_pass.set_vertex_buffer(1, model_data.instance_buffer.slice(..));
                 render_pass.draw_model_instanced_from_list(&model_data.model, 0..model_data.instance_count as u32, &self.camera_resources.bind_group, &self.light.rendering_data.bind_group, &"opaque".to_string());
+            }
+        }
+    }
+
+    // Runs after render_opaque_pass (needs its depth output already snapshotted,
+    // see DepthRender::snapshot_for_water) and before render_transparent_pass -
+    // its own render pass rather than folded into render_opaque_pass's loop,
+    // since a water-shaded model needs to sample a copy of the depth buffer
+    // render_opaque_pass just finished writing, and wgpu doesn't allow reading a
+    // texture that's also this same pass's own depth-stencil attachment (same
+    // "can't read what you're writing" constraint BlurRender's scene_color
+    // already works around for color). Draws with raw wgpu calls instead of the
+    // shared draw_model_instanced_from_list/draw_mesh_instanced helpers other
+    // models use, since those unconditionally bind each mesh's own *material* at
+    // group 0 - here group 0 is the depth snapshot instead (see
+    // WaterRenderData's own doc comment), constant for the whole pass rather
+    // than rebound per mesh.
+    fn render_water_pass(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        if self.water_shaded_models.is_empty() {
+            return;
+        }
+        if !self.scene_manager.cameras().is_some_and(|c| c.has_active_camera()) {
+            return;
+        }
+
+        // Has to happen before begin_render_pass (copy_texture_to_texture isn't
+        // valid mid-pass) and before this pass writes any depth of its own.
+        self.renderer.depth_render.snapshot_for_water(encoder);
+
+        let view = &self.renderer.blur.scene_color.view;
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Water Render Pass"),
+            color_attachments: &[color_attachment(view, wgpu::LoadOp::Load)],
+            depth_stencil_attachment: depth_attachment(&self.renderer.depth_render.texture.view, wgpu::LoadOp::Load),
+            occlusion_query_set: None,
+            timestamp_writes: None,
+        });
+
+        render_pass.set_pipeline(&self.water.render_pipeline);
+        render_pass.set_bind_group(0, self.water.bind_group(), &[]);
+        render_pass.set_bind_group(1, &self.camera_resources.bind_group, &[]);
+        render_pass.set_bind_group(3, &self.light.rendering_data.bind_group, &[]);
+
+        for model_ref in self.distinct_model_refs(Some("sun")) {
+            if !self.water_shaded_models.contains(&model_ref) {
+                continue;
+            }
+            // See App::water_debug_hidden_models's own doc comment.
+            if self.water_debug_view && self.water_debug_hidden_models.contains(&model_ref) {
+                continue;
+            }
+            let Some(model_data) = self.game_models.get(&model_ref) else { continue };
+            let Some(meshes) = model_data.model.mesh_lists.get("opaque") else { continue };
+
+            render_pass.set_vertex_buffer(1, model_data.instance_buffer.slice(..));
+            for mesh in meshes.values() {
+                render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                render_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.set_bind_group(2, &mesh.transform_bind_group, &[]);
+                render_pass.draw_indexed(0..mesh.num_elements, 0, 0..model_data.instance_count as u32);
             }
         }
     }
@@ -238,6 +305,7 @@ impl App {
 
     pub(crate) fn render_scene_passes(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
         self.render_opaque_pass(encoder);
+        self.render_water_pass(encoder);
         self.render_transparent_pass(encoder);
         // Blits scene_color onto the real swapchain view, so the scene still looks
         // normal everywhere - see BlurRender::render. Has to run after the 3D

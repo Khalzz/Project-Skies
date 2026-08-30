@@ -48,6 +48,7 @@ pub struct InputLock {
 
 #[derive(Debug, Deserialize)]
 pub struct EventSystem {
+    #[serde(default)]
     pub event_list: HashMap<u64, Event>,
     // Keyframed parameter animation - see animation_tracks.rs. Kept as separate
     // lists (rather than folded into `event_list`) since a track is continuous

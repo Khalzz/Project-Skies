@@ -32,6 +32,13 @@ pub struct NearFarUniform {
 
 pub struct DepthRender {
     pub texture: Texture,
+    // A per-frame snapshot of `texture`, taken right after the opaque pass
+    // finishes (see App::render_scene_passes/render_pass.rs's own
+    // render_water_pass) - the water shader samples this to find out what's
+    // behind/around it (for shore-intersection foam) without reading the
+    // same texture object it's still being depth-tested/written against in
+    // its own pass, which wgpu doesn't allow within a single render pass.
+    pub foam_depth_copy: Texture,
     pub bind_group_layout: BindGroupLayout,
     pub bind_group: BindGroup,
     pub render_pipeline: RenderPipeline,
@@ -44,6 +51,7 @@ pub struct DepthRender {
 impl DepthRender {
     pub fn new(device: &Device, config: &SurfaceConfiguration) -> Self {
         let texture = Texture::create_depth_texture_non_comparison_sampler(&device, &config, "depth_texture");
+        let foam_depth_copy = Texture::create_depth_texture_non_comparison_sampler(&device, &config, "foam_depth_copy");
 
         let near_far_uniform = NearFarUniform {
             near: 0.1,
@@ -176,10 +184,11 @@ impl DepthRender {
             cache: None,
         });
 
-        Self { 
-            texture, 
-            bind_group_layout, 
-            bind_group, 
+        Self {
+            texture,
+            foam_depth_copy,
+            bind_group_layout,
+            bind_group,
             render_pipeline,
             vertex_buffer,
             index_buffer,
@@ -193,6 +202,11 @@ impl DepthRender {
             device,
             config,
             "depth_texture",
+        );
+        self.foam_depth_copy = Texture::create_depth_texture_non_comparison_sampler(
+            device,
+            config,
+            "foam_depth_copy",
         );
         self.bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &self.bind_group_layout,
@@ -212,6 +226,20 @@ impl DepthRender {
             ],
             label: Some("depth_pass.bind_group"),
         });
+    }
+
+    // Copies `texture`'s current contents into `foam_depth_copy` - has to run
+    // between render passes (copy_texture_to_texture isn't valid mid-pass),
+    // specifically after the opaque pass has finished (so it captures solid
+    // geometry's depth) and before the water pass begins (so the water
+    // shader is reading a snapshot from *before* water itself contributed
+    // any depth, not a stale one from last frame).
+    pub fn snapshot_for_water(&self, encoder: &mut wgpu::CommandEncoder) {
+        encoder.copy_texture_to_texture(
+            self.texture.texture.as_image_copy(),
+            self.foam_depth_copy.texture.as_image_copy(),
+            self.texture.texture.size(),
+        );
     }
 
     pub fn render(&self, view: &wgpu::TextureView, encoder: &mut wgpu::CommandEncoder) {

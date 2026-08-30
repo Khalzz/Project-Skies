@@ -1,5 +1,5 @@
 use std::time::{Duration, Instant};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 
 use wgpu::{BindGroupLayout, BindGroupLayoutDescriptor, Device, DeviceDescriptor, Features, InstanceDescriptor, Limits, Queue, Surface, SurfaceConfiguration, TextureUsages};
@@ -13,6 +13,7 @@ use crate::engine::rendering::enviroment::skybox_renderer::SkyboxRender;
 use crate::engine::rendering::enviroment::environment;
 use crate::engine::rendering::instance_management::{InstanceData, InstanceRaw, ModelDataInstance};
 use crate::engine::rendering::render_pipeline::depth_renderer::DepthRender;
+use crate::engine::rendering::render_pipeline::water_renderer::WaterRenderData;
 use crate::engine::rendering::camera::handler::CameraResources;
 use crate::engine::rendering::models::textures::Texture;
 use crate::engine::game_nodes::timing::Timing;
@@ -54,6 +55,28 @@ pub struct App {
     // is assigned by the caller (see main.rs) before App::run is called.
     pub scene_manager: SceneManager,
     pub render_pipeline: wgpu::RenderPipeline,
+    // A second pipeline (water.wgsl) used only for model_refs listed in
+    // water_shaded_models - see render_pass.rs's own per-model pipeline
+    // selection and WaterRenderData's own doc comment.
+    pub water: WaterRenderData,
+    pub water_shaded_models: HashSet<String>,
+    // Debug view (F6, see settings/input.ron) - when true, render_water_pass
+    // skips drawing any model_ref listed in water_debug_hidden_models below.
+    // Everything else (terrain, player, the rest of water_shaded_models)
+    // keeps drawing normally - this hides specific water surfaces you want
+    // out of the way while tuning, not an isolate-to-water-only view.
+    pub water_debug_view: bool,
+    // model_refs to skip in render_water_pass while water_debug_view is on -
+    // see main.rs's own registration of "WaterPlaneFar" for why that's the
+    // one populated here today.
+    pub water_debug_hidden_models: HashSet<String>,
+    // Wrapped (not a raw running total) so precision doesn't degrade over a
+    // long play session - the wave functions in water.wgsl are periodic, so
+    // wrapping is invisible to them. Advanced once per frame alongside the
+    // "lighting update" block in App::run, which is also what actually
+    // uploads it (as light.uniform.time - see LightUniform's own doc
+    // comment for why it rides along on that buffer).
+    water_elapsed: f32,
     pub ui: Ui,
     pub camera_resources: CameraResources,
     // Pre-scene fallback only now - a real scene's own skybox/clear color
@@ -160,6 +183,8 @@ impl App {
             )
         };
 
+        let water = WaterRenderData::new(&renderer.device, &renderer.config, &camera_resources, &light, &renderer.depth_render.foam_depth_copy.view, &renderer.depth_render.foam_depth_copy.sampler);
+
         let game_models = HashMap::new();
 
         // No environment loaded yet - each scene declares its own via
@@ -178,6 +203,11 @@ impl App {
             renderer,
             scene_manager: SceneManager::new(),
             render_pipeline,
+            water,
+            water_shaded_models: HashSet::new(),
+            water_debug_view: false,
+            water_debug_hidden_models: HashSet::new(),
+            water_elapsed: 0.0,
             ui,
             camera_resources,
             skybox,
@@ -200,6 +230,16 @@ impl App {
         })
     }
 
+    // Read-only outside app.rs's own per-frame update - see water_elapsed's
+    // own doc comment. Lets a scene (e.g. play::scene::GameLogic's water
+    // wave-height mirror, used to place things at the water's own current
+    // rendered surface height) read the exact same "seconds of animation
+    // time" value water.wgsl's light.time carries, without exposing write
+    // access to it.
+    pub fn water_time(&self) -> f32 {
+        self.water_elapsed
+    }
+
     pub fn resize(&mut self) {
         self.window_manager.refresh_size();
         // Real backing pixels (see WindowManager::pixel_size) - these three all
@@ -216,6 +256,11 @@ impl App {
             cameras.resize(width, height);
         }
         self.ui.resize_blur_binding(&self.renderer.device, &self.renderer.queue, &self.renderer.blur.scene_color, &self.renderer.blur.blurred, width, height);
+        // self.renderer.resize above already rebuilt depth_render.foam_depth_copy
+        // at the new size (DepthRender::resize) - the water shader's own bind
+        // group has to be rebuilt to match, a bind group is tied to the specific
+        // texture view it was created against.
+        self.water.rebuild_depth_bind_group(&self.renderer.device, &self.renderer.depth_render.foam_depth_copy.view, &self.renderer.depth_render.foam_depth_copy.sampler);
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -848,6 +893,12 @@ impl App {
                         None => {},
                     }
                 }
+
+                // See water_elapsed's own doc comment for why this wraps
+                // instead of accumulating forever.
+                self.water_elapsed = (self.water_elapsed + self.time.delta_time) % 10_000.0;
+                self.light.uniform.time = self.water_elapsed;
+                self.light.uniform.camera_position = camera_position.into();
 
                 self.renderer.queue.write_buffer(&self.light.rendering_data.buffer, 0, bytemuck::cast_slice(&[self.light.uniform]));
                 // lighting update

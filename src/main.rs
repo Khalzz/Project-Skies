@@ -53,6 +53,42 @@ async fn main() -> Result<(), String> {
             if let Err(e) = resources::register_model(&mut app, "Ground", "ground/ground.glb") {
                 eprintln!("{e}");
             }
+            // Procedural test mesh for trying a water shader's vertex
+            // displacement against - subdivided so there's actually geometry
+            // for a shader to move, unlike the flat Water model above. Spawn
+            // a node with Model { model_ref: "WaterPlane" } to try it.
+            if let Err(e) = resources::register_primitive_model(&mut app, "WaterPlane", resources::PrimitiveShape::Plane { subdivisions: 1000 }) {
+                eprintln!("{e}");
+            }
+            // Draw "WaterPlane" with the animated water shader instead of the
+            // default one - see App::water_shaded_models's own doc comment.
+            app.water_shaded_models.insert("WaterPlane".to_owned());
+            // Separate, far-lower-detail model for play::scene::spawn_world's
+            // "world_far" node - it's forced near-flat (see its own Y-scale
+            // trick, read back in water.wgsl's vs_main as y_scale), so it
+            // doesn't need "WaterPlane"'s dense subdivision count; kept as a
+            // distinct model_ref (not just a second instance of "WaterPlane")
+            // specifically so the F6 debug view (below) can hide it alone
+            // without hiding "WaterPlane"'s own near/detailed instance too.
+            if let Err(e) = resources::register_primitive_model(&mut app, "WaterPlaneFar", resources::PrimitiveShape::Plane { subdivisions: 32 }) {
+                eprintln!("{e}");
+            }
+            app.water_shaded_models.insert("WaterPlaneFar".to_owned());
+            // F6 (see settings/input.ron's toggle_water_debug_view) hides
+            // just this model_ref rather than isolating to water-only - lets
+            // you inspect "world"'s own near/detailed water plane against the
+            // rest of the scene without "world_far"'s much-larger, forced-
+            // calm surface in the way.
+            app.water_debug_hidden_models.insert("WaterPlaneFar".to_owned());
+            // Stand-in for a real splash/spray model - see
+            // play::scene::GameLogic::update_water_splash's own doc comment
+            // for why the water shader itself can't show this (the mesh is
+            // far too coarse at this scale for a small, localized effect).
+            // Swap for a real model later by registering it under this same
+            // "WaterSplash" name - nothing else needs to change.
+            if let Err(e) = resources::register_primitive_model(&mut app, "WaterSplash", resources::PrimitiveShape::Cube) {
+                eprintln!("{e}");
+            }
 
             app.scene_manager.create_loaded_scene(
                 "playing",

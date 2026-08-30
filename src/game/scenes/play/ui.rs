@@ -58,6 +58,12 @@ pub fn build_game_ui(app: &mut App) -> UiNode {
         .set_position(PositionValue::Center(0.0), PositionValue::Start(10.0));
     let speed = hud_label(app, "SPD", 100.0, 35.0)
         .set_position(PositionValue::Center(0.0), PositionValue::Start(50.0));
+    // "altitude" - matches the key ui_control's own Ui::get_ui_node lookup
+    // already expects (see scene.rs's own stale-reference comment at the top
+    // of that file) - that formatting/update logic was already there, this
+    // node just never existed for it to actually find.
+    let altitude = hud_label(app, "ALT", 100.0, 35.0)
+        .set_position(PositionValue::Center(0.0), PositionValue::Start(90.0));
 
     UiNode::container()
         .set_size(SizeValue::Percent(100.0), SizeValue::Percent(100.0))
@@ -66,6 +72,7 @@ pub fn build_game_ui(app: &mut App) -> UiNode {
         .set_child("data_box", data_box)
         .set_child("compass", compass)
         .set_child("speed", speed)
+        .set_child("altitude", altitude)
         .active(false)
 }
 
@@ -142,6 +149,10 @@ fn show_pause_panel(app: &mut App, id: &str) {
 /// button could call this too.
 pub fn open_pause_menu(app: &mut App) {
     app.is_paused = true;
+    // Frees the cursor so the pause buttons are actually clickable -
+    // relative mode (see play::scene::GameLogic::finish, which turns it
+    // back on for flight) captures/hides it for mouse-look otherwise.
+    app.window_manager.context.mouse().set_relative_mouse_mode(false);
     if let Some(backdrop) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "PauseBackdrop") {
         backdrop.set_active(true);
     }
@@ -173,6 +184,11 @@ pub fn open_pause_menu(app: &mut App) {
 /// explain why, see `App::is_paused`'s own doc comment).
 pub fn close_pause_menu(app: &mut App) {
     app.is_paused = false;
+    // Restores mouse-look. Harmless even for Restart/Back-to-menu (both
+    // call this right before SceneManager::open_scene) - whichever scene
+    // that switches to sets its own correct mode in its own constructor the
+    // very next frame anyway.
+    app.window_manager.context.mouse().set_relative_mouse_mode(true);
     if let Some(backdrop) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "PauseBackdrop") {
         backdrop.set_active(false);
     }
@@ -247,6 +263,78 @@ pub fn build_pause_menu(app: &mut App) {
     app.ui.always_on_top.push("PauseBackdrop".to_owned());
     app.ui.always_on_top.push("Pause".to_owned());
     app.ui.always_on_top.push("Settings".to_owned());
+}
+
+/// Shows the death screen - see `play::scene::GameLogic::check_water_death`'s
+/// own doc comment for what actually triggers this. Sets DeathBackdrop/
+/// DeathPanel active immediately, no fade-in (the black screen should read as
+/// "quite instantly", per the request this came out of) - unlike the pause
+/// menu's own gradient backdrop, which is meant to be a translucent overlay,
+/// not a hard cut.
+pub fn open_death_screen(app: &mut App) {
+    // Frees the cursor so Restart/Back to Main Menu are actually clickable -
+    // same reasoning as open_pause_menu's own doc comment.
+    app.window_manager.context.mouse().set_relative_mouse_mode(false);
+    if let Some(backdrop) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "DeathBackdrop") {
+        backdrop.set_active(true);
+    }
+    if let Some(panel) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "DeathPanel") {
+        panel.set_active(true);
+    }
+}
+
+/// Closes the death screen - only ever called right before Restart/Back-to-
+/// menu tears the whole scene down anyway via `SceneManager::open_scene`
+/// (same reasoning as `close_pause_menu`'s own doc comment - keeps state
+/// clean before the reset, not because there's any "resume" affordance from
+/// death).
+fn close_death_screen(app: &mut App) {
+    // Harmless even though this is always followed by SceneManager::
+    // open_scene - see close_pause_menu's own doc comment on the same call.
+    app.window_manager.context.mouse().set_relative_mouse_mode(true);
+    if let Some(backdrop) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "DeathBackdrop") {
+        backdrop.set_active(false);
+    }
+    if let Some(panel) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "DeathPanel") {
+        panel.set_active(false);
+    }
+}
+
+/// Registers the death screen's own layer ("DeathBackdrop"/"DeathPanel", both
+/// built inactive) - call once from `GameLogic::finish`, same as
+/// `build_pause_menu`. A plain solid-black backdrop rather than the pause
+/// menu's own gradient one (`main_menu_ui::backdrop()`) - this is meant to
+/// read as "the screen went black", not a translucent overlay you can still
+/// see gameplay through.
+pub fn build_death_screen(app: &mut App) {
+    let backdrop = UiNode::container()
+        .set_size(SizeValue::Percent(100.0), SizeValue::Percent(100.0))
+        .set_background_color(UiColor::Rgba(0, 0, 0, 255))
+        .active(false);
+
+    let panel = UiNode::container()
+        .set_orientation(Orientation::Vertical)
+        .set_size(SizeValue::Pixels(360.0), SizeValue::Fit)
+        .set_position(PositionValue::Center(0.0), PositionValue::Center(0.0))
+        .set_background_color(UiColor::TRANSPARENT)
+        .set_child("title", label(app, "YOU DIED").set_font_size(&mut app.ui.text.font_system, 50.0))
+        .set_child("Restart", with_left_accent(button(app, "Restart", |app: &mut App| {
+            close_death_screen(app);
+            app.scene_manager.open_scene("playing");
+        }).set_size(SizeValue::Grow, SizeValue::Fit)))
+        .set_child("MainMenu", with_left_accent(button(app, "Back to Main Menu", |app: &mut App| {
+            close_death_screen(app);
+            app.scene_manager.open_scene("main_menu");
+        }).set_size(SizeValue::Grow, SizeValue::Fit)))
+        .active(false);
+
+    Layer::new(app)
+        .set_child("DeathBackdrop", backdrop)
+        .set_child("DeathPanel", panel)
+        .build(app);
+
+    app.ui.always_on_top.push("DeathBackdrop".to_owned());
+    app.ui.always_on_top.push("DeathPanel".to_owned());
 }
 
 /// F3 debug view - a readout of fps and player position. Built inactive;
