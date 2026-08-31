@@ -254,21 +254,6 @@ impl GameLogic {
             fellow_aviator.instance.metadata.cameras = Some(cameras);
         }
 
-        // Small, dense water plane recentered under the camera every frame
-        // (see update_water_plane) for real near-camera wave resolution -
-        // paired with "world_far" below for calm coverage past its edge.
-        // Shrunk twice (8000 -> 2000 -> 1000), now grown back up once
-        // (-> 2000) - the wavelength floor from cell size (see below) had
-        // gotten tight enough that water.wgsl's six wave terms were forced
-        // into a narrow frequency cluster to all clear it, which itself read
-        // as repetitive; growing "world" back out buys room to widen that
-        // spread again without giving any term back up to the mesh's own
-        // resolution limit. "WaterPlane" is a fixed 1000 subdivisions (see
-        // main.rs's own registration), so mesh cell size is scale/1000; at
-        // 2000 that's ~2 world units/cell - still comfortably under
-        // water.wgsl's shortest current wavelength (see its FREQUENCY_*
-        // comment), so subdivisions didn't need to go up too. See water.wgsl's
-        // FALLOFF_START/END/RADIUS/HEIGHT_CUTOFF - all sized to match this.
         scene.spawn_node(app,
             Node::new("world")
                 .add_property(Transform3D {
@@ -671,10 +656,10 @@ impl GameLogic {
             // node's Plane once up front (plain Copy values, so nothing
             // borrowed from `scene` needs to stay alive afterward) instead of
             // fetching it again at every label below.
-            let (throttle, g_meter, altimeter, speedometer, previous_velocity, stall) = scene.content.nodes.get("player")
+            let (throttle, g_meter, altimeter, speedometer, previous_velocity, stall, aoa_x, aoa_y, aoa, roll_rate, pitch_rate, yaw_rate) = scene.content.nodes.get("player")
                 .and_then(|node| node.get_behavior::<Plane>())
-                .map(|plane| (plane.controls.throttle, plane.flight_data.g_meter, plane.flight_data.altimeter, plane.flight_data.speedometer, plane.previous_velocity, plane.stall))
-                .unwrap_or((0.0, 0.0, 0.0, 0.0, None, false));
+                .map(|plane| (plane.controls.throttle, plane.flight_data.g_meter, plane.flight_data.altimeter, plane.flight_data.speedometer, plane.previous_velocity, plane.stall, plane.flight_data.aoa_x, plane.flight_data.aoa_y, plane.flight_data.aoa, plane.flight_data.roll_rate, plane.flight_data.pitch_rate, plane.flight_data.yaw_rate))
+                .unwrap_or((0.0, 0.0, 0.0, 0.0, None, false, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0));
 
             if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/data_box/framerate").and_then(|n| n.as_label_mut()) {
                 label.set_text(&mut app.ui.text.font_system, &format!("FPS: {}", app.time.get_fps()), true);
@@ -690,6 +675,30 @@ impl GameLogic {
 
             if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/data_box/power").and_then(|n| n.as_label_mut()) {
                 label.set_text(&mut app.ui.text.font_system, &format!("Power: {}%", (throttle * 100.0).round()), true);
+            }
+
+            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/data_box/aoa_x").and_then(|n| n.as_label_mut()) {
+                label.set_text(&mut app.ui.text.font_system, &format!("AoA X: {:.1}°", aoa_x), true);
+            }
+
+            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/data_box/aoa_y").and_then(|n| n.as_label_mut()) {
+                label.set_text(&mut app.ui.text.font_system, &format!("AoA Y: {:.1}°", aoa_y), true);
+            }
+
+            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/data_box/aoa").and_then(|n| n.as_label_mut()) {
+                label.set_text(&mut app.ui.text.font_system, &format!("AoA: {:.1}°", aoa), true);
+            }
+
+            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/data_box/roll_rate").and_then(|n| n.as_label_mut()) {
+                label.set_text(&mut app.ui.text.font_system, &format!("Roll: {:.1}°/s", roll_rate), true);
+            }
+
+            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/data_box/pitch_rate").and_then(|n| n.as_label_mut()) {
+                label.set_text(&mut app.ui.text.font_system, &format!("Pitch: {:.1}°/s", pitch_rate), true);
+            }
+
+            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/data_box/yaw_rate").and_then(|n| n.as_label_mut()) {
+                label.set_text(&mut app.ui.text.font_system, &format!("Yaw: {:.1}°/s", yaw_rate), true);
             }
 
             if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/altitude").and_then(|n| n.as_label_mut()) {

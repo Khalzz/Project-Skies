@@ -42,6 +42,10 @@ pub struct RenderMessage {
     pub translation: Vector3<f32>,
     pub rotation: Quaternion<f32>,
     pub linvel: Vector3<f32>,
+    // World-space angular velocity (rad/s) - rapier's own RigidBody::angvel,
+    // straight through with no conversion. See Plane::apply_physics_feedback
+    // for the body-frame rotation that turns this into pitch/yaw/roll rate.
+    pub angvel: Vector3<f32>,
     pub metadata: HashMap<String, MetadataType>
 }
 
@@ -244,7 +248,7 @@ impl Physics {
                             let metadata = physics_data.metadata.clone();
                             let rb = self.rigidbody_set.get(physics_data.rigidbody_handle).unwrap();
 
-                            new_render_messages.insert(key.clone(), RenderMessage { translation: *rb.translation(), rotation: rb.rotation().into_inner(), linvel: *rb.linvel(), metadata: metadata });
+                            new_render_messages.insert(key.clone(), RenderMessage { translation: *rb.translation(), rotation: rb.rotation().into_inner(), linvel: *rb.linvel(), angvel: *rb.angvel(), metadata: metadata });
                         },
                         None => {},
                     }

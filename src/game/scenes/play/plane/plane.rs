@@ -237,6 +237,30 @@ pub struct FlightData {
     pub altimeter: f32,
     pub speedometer: f32,
     pub g_meter: f32,
+    // Angle of attack, decomposed into the plane's own body axes (see
+    // apply_physics_feedback for the exact rotation.inverse() * linvel
+    // derivation) - forward is local +Z, up is local +Y, right is local +X
+    // (same convention `plane_up`/water_splash's own "forward" already use).
+    // aoa_y is the classic vertical AoA (relative wind above/below the nose,
+    // positive = nose pitched above the flight path); aoa_x is the
+    // horizontal/sideslip equivalent (relative wind left/right of the nose).
+    // aoa is the resultant total angle between the nose and the velocity
+    // vector regardless of direction (always >= 0), not just aoa_x/aoa_y
+    // added together.
+    pub aoa_x: f32,
+    pub aoa_y: f32,
+    pub aoa: f32,
+    // Turn rates (deg/s), same body-axis derivation and convention as
+    // aoa_x/aoa_y above (rotation.inverse() * angvel instead of * linvel) -
+    // roll_rate is rotation about the forward axis (elevator has no effect
+    // on this), pitch_rate about the right/left axis (elevator's own axis),
+    // yaw_rate about the up axis (rudder's own axis). Unlike aoa_*, these
+    // aren't gated on airspeed - angular velocity is a direct physical
+    // reading, not a ratio that blows up near zero the way atan2/acos of a
+    // near-zero vector does.
+    pub roll_rate: f32,
+    pub pitch_rate: f32,
+    pub yaw_rate: f32,
 }
 
 /// The player plane, as a `Node` `Behavior` attached to the `"player"` node
@@ -284,7 +308,7 @@ impl Plane {
             control_surfaces: Self::default_control_surfaces(),
             landing_gear: LandingGear::new(true),
             afterburner: Afterburner::new(),
-            flight_data: FlightData { altimeter: 0.0, speedometer: 0.0, g_meter: 1.0 },
+            flight_data: FlightData { altimeter: 0.0, speedometer: 0.0, g_meter: 1.0, aoa_x: 0.0, aoa_y: 0.0, aoa: 0.0, roll_rate: 0.0, pitch_rate: 0.0, yaw_rate: 0.0 },
             previous_velocity: None,
             velocity_sample_elapsed: 0.0,
             stall: false,
@@ -321,6 +345,28 @@ impl Plane {
         // height subtracted out; a HUD altimeter reads the nominal/rest sea
         // level, not the instantaneous wave crest/trough under the plane.
         self.flight_data.altimeter = physics_message.translation.y;
+
+        // Body-frame velocity - rotation.inverse() undoes the plane's own
+        // orientation, same idea as `plane_up` below but for the velocity
+        // vector instead of the up axis. Guarded on airspeed since atan2/acos
+        // of a near-zero vector is meaningless, jittery noise (e.g. sitting
+        // still on the runway) rather than a real angle - just holds the
+        // last computed value below that speed instead of flickering.
+        let rotation = UnitQuaternion::from_quaternion(physics_message.rotation);
+        let body_velocity = rotation.inverse() * physics_message.linvel;
+        if body_velocity.magnitude() > 0.5 {
+            self.flight_data.aoa_y = (-body_velocity.y).atan2(body_velocity.z).to_degrees();
+            self.flight_data.aoa_x = body_velocity.x.atan2(body_velocity.z).to_degrees();
+            self.flight_data.aoa = (body_velocity.z / body_velocity.magnitude()).clamp(-1.0, 1.0).acos().to_degrees();
+        }
+
+        // Turn rates - see FlightData::roll_rate's own comment for the
+        // axis/units convention. No airspeed guard needed here (unlike
+        // aoa_* above) - angular velocity is a direct reading, not a ratio.
+        let body_angvel = rotation.inverse() * physics_message.angvel;
+        self.flight_data.roll_rate = body_angvel.z.to_degrees();
+        self.flight_data.pitch_rate = body_angvel.x.to_degrees();
+        self.flight_data.yaw_rate = body_angvel.y.to_degrees();
 
         self.velocity_sample_elapsed += delta_time;
         match &self.previous_velocity {

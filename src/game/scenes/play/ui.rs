@@ -52,7 +52,20 @@ pub fn build_game_ui(app: &mut App) -> UiNode {
         .set_child("timer", hud_label(app, "00:00:00:00", 250.0, 35.0))
         .set_child("framerate", hud_label(app, "100fps", 250.0, 35.0))
         .set_child("g", hud_label(app, "1g", 250.0, 35.0))
-        .set_child("power", hud_label(app, "0%", 250.0, 35.0));
+        .set_child("power", hud_label(app, "0%", 250.0, 35.0))
+        // Angle of attack, decomposed into the plane's own body axes - see
+        // Plane::FlightData's own doc comment for what x/y/total each mean.
+        // Placed right after "power" so they stack immediately below it in
+        // data_box's flow.
+        .set_child("aoa_x", hud_label(app, "AoA X: 0°", 250.0, 35.0))
+        .set_child("aoa_y", hud_label(app, "AoA Y: 0°", 250.0, 35.0))
+        .set_child("aoa", hud_label(app, "AoA: 0°", 250.0, 35.0))
+        // Turn rates - see Plane::FlightData::roll_rate's own doc comment
+        // for the axis convention (roll = elevator has no effect, pitch =
+        // elevator's own axis, yaw = rudder's own axis).
+        .set_child("roll_rate", hud_label(app, "Roll: 0°/s", 250.0, 35.0))
+        .set_child("pitch_rate", hud_label(app, "Pitch: 0°/s", 250.0, 35.0))
+        .set_child("yaw_rate", hud_label(app, "Yaw: 0°/s", 250.0, 35.0));
 
     let compass = hud_label(app, "90°", 100.0, 35.0)
         .set_position(PositionValue::Center(0.0), PositionValue::Start(10.0));
