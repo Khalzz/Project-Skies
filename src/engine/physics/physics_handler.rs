@@ -18,8 +18,15 @@ pub struct ColliderDebugData {
 
 #[derive(Debug, Clone)]
 pub struct WingDebugData {
+    pub label: String,
     pub pressure_center: Vector3<f32>,
     pub last_lift_force: Vector3<f32>,
+    // The wing's own actual, post-simulation control_input for this tick -
+    // see Plane::apply_physics_feedback's own comment on why this exists
+    // (testing what a fly-by-wire elevator solve is really doing, as
+    // opposed to the raw player input the control-surface mesh normally
+    // animates off).
+    pub control_input: f32,
 }
 
 #[derive(Debug, Clone)]

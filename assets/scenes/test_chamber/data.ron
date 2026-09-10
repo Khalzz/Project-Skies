@@ -4,7 +4,7 @@
     children: [
         (
             id: "sun",
-            model: "F16/f16.gltf",
+            model: "F16/f16.glb",
             transform: (
                 position: ( 1000.0, 1000000.0, 1000.0 ),
                 rotation: ( 0.0, 0.0, 0.0 ),
@@ -34,7 +34,7 @@
         ),
         (
             id: "player",
-            model: "F16/f16.gltf",
+            model: "F16/f16.glb",
             transform: (
                 position: (0.0, 1000.0, 0.0),
                 rotation: (0.0, 0.0, 0.0),
@@ -61,7 +61,7 @@
                         is_static: false,
                         mass: 8900,
                         center_of_mass: (0.0, 0.0, 0.5),
-                        initial_velocity: (0.0, 0.0, 200.4),
+                        initial_velocity: (0.0, 0.0, 0.0),
                     ),
                     colliders: [
                         Cuboid (

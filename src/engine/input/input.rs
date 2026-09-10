@@ -95,10 +95,17 @@ impl InputSubsystem {
         }
     }
 
-    pub fn update(&mut self, event_pump: &mut sdl2::EventPump, _delta_time: f32, debug: bool) {
+    // Returns true if an Event::Quit (window close button, Cmd+Q, etc.) was
+    // seen this poll - App::run's own loop is what actually decides what to
+    // do with that (break its loop gracefully, sending a physics shutdown
+    // command first - see that loop's own comment on why this used to be a
+    // raw std::process::exit(0) here instead, and why that was wrong).
+    pub fn update(&mut self, event_pump: &mut sdl2::EventPump, _delta_time: f32, debug: bool) -> bool {
         self.mouse.reset_rel_x();
         self.mouse.reset_rel_y();
         self.mouse.reset_scroll_y();
+
+        let mut quit_requested = false;
 
         for event in event_pump.poll_iter() {
             if self.capturing {
@@ -161,7 +168,7 @@ impl InputSubsystem {
                     self.controllers.remove(&which);
                 }
                 Event::Quit { .. } => {
-                    std::process::exit(0);
+                    quit_requested = true;
                 }
                 _ => {}
             }
@@ -170,6 +177,8 @@ impl InputSubsystem {
         for action in self.actions.values_mut() {
             action.refresh(&self.raw, PRESS_THRESHOLD);
         }
+
+        quit_requested
     }
 
     fn event_to_binding(event: &Event) -> Option<Binding> {
@@ -313,8 +322,10 @@ pub fn init(settings: &str, controller_subsystem: GameControllerSubsystem) {
 }
 
 /// Polls SDL2 events and refreshes action/mouse state - call once per frame.
-pub fn update(event_pump: &mut sdl2::EventPump, delta_time: f32, debug: bool) {
-    with_input_mut(|input| input.update(event_pump, delta_time, debug));
+/// Returns true if the OS/window manager requested a close this poll - see
+/// InputSubsystem::update's own doc comment.
+pub fn update(event_pump: &mut sdl2::EventPump, delta_time: f32, debug: bool) -> bool {
+    with_input_mut(|input| input.update(event_pump, delta_time, debug))
 }
 
 pub fn is_action_pressed(action: &str) -> bool {
@@ -358,6 +369,13 @@ pub fn mouse_y() -> i32 {
 
 pub fn mouse_scroll_y() -> f32 {
     with_input(|input| input.mouse.get_scroll_y())
+}
+
+// Raw left-button-down state, distinct from any bound action - for feeding
+// egui::RawInput (see engine::rendering::egui_overlay), which needs the
+// literal button state rather than a game action.
+pub fn mouse_left_button_down() -> bool {
+    with_input(|input| input.raw.mouse_buttons_down.contains(&sdl2::mouse::MouseButton::Left))
 }
 
 pub fn mouse_sensitivity() -> (f32, f32) {

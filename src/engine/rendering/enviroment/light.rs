@@ -120,6 +120,8 @@ impl Light {
                 Some(Texture::DEPTH_FORMAT),
                 &[model::ModelVertex::desc()],
                 shader,
+                Some(wgpu::Face::Back),
+                true,
             )
         };
 

@@ -6,6 +6,10 @@ use crate::engine::physics::physics_handler::PhysicsData;
 #[derive(Debug, Clone)]
 pub struct WheelData {
     pub local_position: Vector3<f32>,
+    /// This wheel's suspension ray hit ground this tick (within
+    /// `max_suspension_length`). Read by the landing-gear state machine to
+    /// force the gear back down if it's mid-retraction over the runway.
+    pub grounded: bool,
 }
 
 pub struct Wheel {
@@ -21,7 +25,10 @@ impl Wheel {
         Self { mesh_name, offset, max_suspension_length, stiffness, damping }
     }
 
-    pub fn update_wheel(&mut self, physics_data: &PhysicsData, collider_set: &ColliderSet, rigidbody_set: &mut RigidBodySet, query_pipeline: &QueryPipeline) -> Option<(Vector3<f32>, Vector3<f32>, Vector3<f32>)> {
+    /// Returns `(suspension_force, ray_origin, wheel_position, grounded)`.
+    /// `grounded` is false (and the force zero) when the ray hit nothing
+    /// within `max_suspension_length`.
+    pub fn update_wheel(&mut self, physics_data: &PhysicsData, collider_set: &ColliderSet, rigidbody_set: &mut RigidBodySet, query_pipeline: &QueryPipeline) -> Option<(Vector3<f32>, Vector3<f32>, Vector3<f32>, bool)> {
         if let Some(rigidbody) = rigidbody_set.get(physics_data.rigidbody_handle) {
             // Origin of the raycast
             let rotation = rigidbody.rotation();
@@ -65,10 +72,10 @@ impl Wheel {
                 let wheel_position = ray.point_at(time_of_impact);
 
                 // render_basic_line(renderizable_lines, suspension_origin, [0.5, 1.0, 0.5], wheel_position.coords, [0.5, 1.0, 0.5]);
-                return Some((suspension_force, suspension_origin, wheel_position.coords));
+                return Some((suspension_force, suspension_origin, wheel_position.coords, true));
             } else {
                 // render_basic_line(renderizable_lines, suspension_origin, [0.5, 1.0, 0.5], max_wheel_position, [0.5, 1.0, 0.5]);
-                return Some((Vector3::zeros(), suspension_origin, max_wheel_position));
+                return Some((Vector3::zeros(), suspension_origin, max_wheel_position, false));
             };
         }
 

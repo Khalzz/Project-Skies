@@ -34,6 +34,7 @@ pub struct GameLogic {
 pub struct PreparedPlayAssets {
     environment: resources::PreparedEnvironment,
     ground_trimesh: (Vec<Vector3<f32>>, Vec<[u32; 3]>),
+    runway_trimesh: (Vec<Vector3<f32>>, Vec<[u32; 3]>),
 }
 
 impl GameLogic {
@@ -43,7 +44,11 @@ impl GameLogic {
             eprintln!("play: ground trimesh from 'ground/ground.glb' couldn't be loaded: {error}");
             (vec![], vec![])
         });
-        PreparedPlayAssets { environment, ground_trimesh }
+        let runway_trimesh = resources::load_trimesh_geometry("Runway/Runway.glb").unwrap_or_else(|error| {
+            eprintln!("play: runway trimesh from 'Runway/Runway.glb' couldn't be loaded: {error}");
+            (vec![], vec![])
+        });
+        PreparedPlayAssets { environment, ground_trimesh, runway_trimesh }
     }
 
     pub fn finish(scene: &mut Scene, app: &mut App, prepared: PreparedPlayAssets) -> Self {
@@ -51,7 +56,7 @@ impl GameLogic {
         scene.environment.clear_color = prepared.environment.clear_color;
         app.scene_openned = Some("./assets/scenes/test_chamber".to_owned());
 
-        Self::spawn_world(scene, app, prepared.ground_trimesh);
+        Self::spawn_world(scene, app, prepared.ground_trimesh, prepared.runway_trimesh);
 
         app.window_manager.context.mouse().set_relative_mouse_mode(true);
 
@@ -149,7 +154,7 @@ impl GameLogic {
         }
     }
 
-    fn spawn_world(scene: &mut Scene, app: &mut App, ground_trimesh: (Vec<Vector3<f32>>, Vec<[u32; 3]>)) {
+    fn spawn_world(scene: &mut Scene, app: &mut App, ground_trimesh: (Vec<Vector3<f32>>, Vec<[u32; 3]>), runway_trimesh: (Vec<Vector3<f32>>, Vec<[u32; 3]>)) {
         scene.spawn_node(app,
             Node::new("sun")
                 .add_property(Transform3D {
@@ -163,11 +168,16 @@ impl GameLogic {
             sun.instance.metadata.lighting = Some(Lighting { intensity: 1.0, color: Vector3::new(0.7, 0.7, 0.8) });
         }
 
+        // Pushed off the origin (was 0,0,0) to make room for the runway
+        // island, which now sits at 0,0,0 - see the "runway" node below. Both
+        // the mesh and its trimesh collider move with this Transform3D's
+        // position, so nothing else needs adjusting.
+        let ground_position = Vector3::new(0.0, 0.0, 50_000.0);
         let ground_scale = Vector3::new(30_000.0, 30_000.0, 30_000.0);
         scene.spawn_node(app,
             Node::new("ground")
                 .add_property(Transform3D {
-                    position: Vector3::new(0.0, 0.0, 0.0),
+                    position: ground_position,
                     rotation: UnitQuaternion::identity(),
                     scale: ground_scale,
                 })
@@ -186,11 +196,39 @@ impl GameLogic {
                 })
         ).expect("play should only spawn 'ground' once");
 
+        // Runway island at the origin (the old "ground" island moved out to
+        // ground_position above to make room). Trimesh collider built from the
+        // model's own geometry - same pattern as "ground" - with the vertices
+        // pre-scaled by the node's scale, since the collider is authored in
+        // world units.
+        let runway_scale = Vector3::new(60.0, 60.0, 60.0);
+        scene.spawn_node(app,
+            Node::new("runway")
+                .add_property(Transform3D {
+                    position: Vector3::new(0.0, 100.0, 0.0),
+                    rotation: UnitQuaternion::identity(),
+                    scale: runway_scale,
+                })
+                .add_property(Model { model_ref: "Runway".to_owned() })
+                .add_property(PhysicsProperty {
+                    rigidbody: RigidBodyData {
+                        is_static: true,
+                        mass: 0.0,
+                        center_of_mass: Vector3::new(0.0, 0.0, 0.0),
+                        initial_velocity: Vector3::new(0.0, 0.0, 0.0),
+                    },
+                    colliders: vec![ColliderType::Trimesh {
+                        vertices: runway_trimesh.0.iter().map(|v| Vector3::new(v.x * runway_scale.x, v.y * runway_scale.y, v.z * runway_scale.z)).collect(),
+                        indices: runway_trimesh.1,
+                    }],
+                })
+        ).expect("play should only spawn 'runway' once");
+
         scene.spawn_node(app,
             Node::new("player")
                 .add_behavior(Plane::new())
                 .add_property(Transform3D {
-                    position: Vector3::new(0.0, 1000.0, 0.0),
+                    position: Vector3::new(0.0, 100.0, -3400.0),
                     rotation: UnitQuaternion::identity(),
                     scale: Vector3::new(14.0, 14.0, 14.0),
                 })
@@ -200,7 +238,7 @@ impl GameLogic {
                         is_static: false,
                         mass: 8900.0,
                         center_of_mass: Vector3::new(0.0, 0.0, 0.5),
-                        initial_velocity: Vector3::new(0.0, 0.0, 200.4),
+                        initial_velocity: Vector3::new(0.0, 0.0, 0.0),
                     },
                     colliders: vec![
                         ColliderType::Cuboid { half_extents: (1.4, 1.4, 9.8), position: (0.0, 0.0, 2.8) },
@@ -211,7 +249,7 @@ impl GameLogic {
         ).expect("play should only spawn 'player' once");
         if let Some(player) = scene.content.renderizable_instances.get_mut("player") {
             let mut cameras: Cameras = HashMap::new();
-            cameras.insert("cockpit".to_owned(), GameObjectCamera { position: Vector3::new(0.0, 1.8, 13.5), fov: 70.0 });
+            cameras.insert("cockpit".to_owned(), GameObjectCamera { position: Vector3::new(0.0, 2.158, 13.324), fov: 70.0 });
             cameras.insert("cinematic".to_owned(), GameObjectCamera { position: Vector3::new(0.0, 1000.0, 900.0), fov: 60.0 });
             cameras.insert("frontal".to_owned(), GameObjectCamera { position: Vector3::new(0.0, 6.0, 35.0), fov: 40.0 });
             player.instance.metadata.cameras = Some(cameras);
@@ -279,7 +317,7 @@ impl GameLogic {
                 .add_property(Transform3D {
                     position: Vector3::new(0.0, -4.0, 0.0),
                     rotation: UnitQuaternion::identity(),
-                    scale: Vector3::new(100_000.0, 0.03, 100_000.0),
+                    scale: Vector3::new(3_000_000.0, 0.03, 3_000_000.0),
                 })
                 .add_property(Model { model_ref: "WaterPlaneFar".to_owned() })
         ).expect("play should only spawn 'world_far' once");
@@ -405,6 +443,11 @@ impl GameLogic {
     // not its lowest point), not a difficulty/leniency knob.
     const WATER_DEATH_MARGIN: f32 = 5.0;
 
+    // Cap on App::aero_debug_trail (see that field's own doc comment) -
+    // oldest sample drops once this is exceeded, so it reads as a "recent
+    // history" trail rather than growing forever while the overlay is on.
+    const AERO_DEBUG_TRAIL_CAPACITY: usize = 500;
+
     // this is called every frame
     pub fn update(&mut self, scene: &mut Scene, app: &mut App, plane_control_tx: Option<&Sender<PlaneControls>>, physics_command_tx: Option<&Sender<PhysicsCommand>>, physics_data: &HashMap<String, RenderMessage>) {
         // See play::camera::camera::Camera::set_target's own doc comment -
@@ -440,6 +483,13 @@ impl GameLogic {
         // in the way.
         if input::is_action_just_pressed("toggle_water_debug_view") {
             app.water_debug_view = !app.water_debug_view;
+        }
+
+        // F7 - toggles the live in-window aero debug overlay (see
+        // App::show_aero_debug_overlay's own doc comment).
+        if input::is_action_just_pressed("toggle_aero_debug_recording") {
+            app.show_aero_debug_overlay = !app.show_aero_debug_overlay;
+            println!("Aero debug overlay: {}", if app.show_aero_debug_overlay { "ON" } else { "OFF" });
         }
 
         // Whether player input is locked out right now (see EventSystem::
@@ -584,7 +634,7 @@ impl GameLogic {
                         // Matches data.ron's own player initial_velocity - a
                         // reasonable cruise speed to resume normal flight at
                         // regardless of exactly what the cinematic's own path was.
-                        linvel: Vector3::new(0.0, 0.0, 200.4),
+                        linvel: Vector3::new(0.0, 0.0, 0.0),
                     });
                 }
                 let _ = physics_command_tx.send(PhysicsCommand::TogglePause);
@@ -613,6 +663,31 @@ impl GameLogic {
                 if let (Some(model_ref), Some(physics_message)) = (&model_ref, physics_data.get("player")) {
                     if let Some(model_instance) = app.game_models.get_mut(model_ref) {
                         plane.apply_physics_feedback(&mut model_instance.model, physics_message, self.gravity, scale, &app.renderer.queue, app.time.delta_time);
+                    }
+
+                    // See App::aero_debug_trail's own doc comment - the
+                    // ACTUAL measured roll rate (Plane::flight_data's own,
+                    // already computed by apply_physics_feedback just above)
+                    // rather than the theoretical roll_authority_gain
+                    // fraction - that's what render_pass.rs's own chart
+                    // plots the curve in now too, both in deg/s, so trail
+                    // and curve are directly comparable.
+                    if app.show_aero_debug_overlay {
+                        let speed_ms = physics_message.linvel.magnitude();
+                        let aoa_y = plane.flight_data.aoa_y;
+                        app.aero_debug_trail.push_back((speed_ms * 1.94384, aoa_y, plane.flight_data.roll_rate));
+                        if app.aero_debug_trail.len() > Self::AERO_DEBUG_TRAIL_CAPACITY {
+                            app.aero_debug_trail.pop_front();
+                        }
+
+                        // See App::wing_lift_trail's own doc comment.
+                        let main_wing_lift_y = plane.wing_lift_forces.get("Left wing").map(|f| f.y).unwrap_or(0.0);
+                        let elevator_wing_lift_y = plane.wing_lift_forces.get("Right elevator wing").map(|f| f.y).unwrap_or(0.0);
+                        let next_index = app.wing_lift_trail.back().map(|(i, _, _)| i + 1.0).unwrap_or(0.0);
+                        app.wing_lift_trail.push_back((next_index, main_wing_lift_y, elevator_wing_lift_y));
+                        if app.wing_lift_trail.len() > Self::AERO_DEBUG_TRAIL_CAPACITY {
+                            app.wing_lift_trail.pop_front();
+                        }
                     }
                 }
             }
@@ -656,10 +731,10 @@ impl GameLogic {
             // node's Plane once up front (plain Copy values, so nothing
             // borrowed from `scene` needs to stay alive afterward) instead of
             // fetching it again at every label below.
-            let (throttle, g_meter, altimeter, speedometer, previous_velocity, stall, aoa_x, aoa_y, aoa, roll_rate, pitch_rate, yaw_rate) = scene.content.nodes.get("player")
+            let (throttle, g_meter, altimeter, speedometer, previous_velocity, stall) = scene.content.nodes.get("player")
                 .and_then(|node| node.get_behavior::<Plane>())
-                .map(|plane| (plane.controls.throttle, plane.flight_data.g_meter, plane.flight_data.altimeter, plane.flight_data.speedometer, plane.previous_velocity, plane.stall, plane.flight_data.aoa_x, plane.flight_data.aoa_y, plane.flight_data.aoa, plane.flight_data.roll_rate, plane.flight_data.pitch_rate, plane.flight_data.yaw_rate))
-                .unwrap_or((0.0, 0.0, 0.0, 0.0, None, false, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0));
+                .map(|plane| (plane.controls.throttle, plane.flight_data.g_meter, plane.flight_data.altimeter, plane.flight_data.speedometer, plane.previous_velocity, plane.stall))
+                .unwrap_or((0.0, 0.0, 0.0, 0.0, None, false));
 
             if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/data_box/framerate").and_then(|n| n.as_label_mut()) {
                 label.set_text(&mut app.ui.text.font_system, &format!("FPS: {}", app.time.get_fps()), true);
@@ -675,30 +750,6 @@ impl GameLogic {
 
             if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/data_box/power").and_then(|n| n.as_label_mut()) {
                 label.set_text(&mut app.ui.text.font_system, &format!("Power: {}%", (throttle * 100.0).round()), true);
-            }
-
-            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/data_box/aoa_x").and_then(|n| n.as_label_mut()) {
-                label.set_text(&mut app.ui.text.font_system, &format!("AoA X: {:.1}°", aoa_x), true);
-            }
-
-            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/data_box/aoa_y").and_then(|n| n.as_label_mut()) {
-                label.set_text(&mut app.ui.text.font_system, &format!("AoA Y: {:.1}°", aoa_y), true);
-            }
-
-            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/data_box/aoa").and_then(|n| n.as_label_mut()) {
-                label.set_text(&mut app.ui.text.font_system, &format!("AoA: {:.1}°", aoa), true);
-            }
-
-            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/data_box/roll_rate").and_then(|n| n.as_label_mut()) {
-                label.set_text(&mut app.ui.text.font_system, &format!("Roll: {:.1}°/s", roll_rate), true);
-            }
-
-            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/data_box/pitch_rate").and_then(|n| n.as_label_mut()) {
-                label.set_text(&mut app.ui.text.font_system, &format!("Pitch: {:.1}°/s", pitch_rate), true);
-            }
-
-            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/data_box/yaw_rate").and_then(|n| n.as_label_mut()) {
-                label.set_text(&mut app.ui.text.font_system, &format!("Yaw: {:.1}°/s", yaw_rate), true);
             }
 
             if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/altitude").and_then(|n| n.as_label_mut()) {

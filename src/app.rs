@@ -55,6 +55,18 @@ pub struct App {
     // is assigned by the caller (see main.rs) before App::run is called.
     pub scene_manager: SceneManager,
     pub render_pipeline: wgpu::RenderPipeline,
+    // Model pipeline variants (see App::new):
+    //  _double_sided          - backface culling off (opaque pass), for meshes
+    //                           whose Mesh::double_sided is set (declared per
+    //                           model at registration, see resources::DoubleSided)
+    //  _transparent           - depth test but no depth write, so transparent
+    //                           faces don't occlude each other
+    //  _transparent_front_cull- front-culling variant of the above, for the
+    //                           first (far-side) pass of a double-sided
+    //                           transparent mesh
+    pub render_pipeline_double_sided: wgpu::RenderPipeline,
+    pub render_pipeline_transparent: wgpu::RenderPipeline,
+    pub render_pipeline_transparent_front_cull: wgpu::RenderPipeline,
     // A second pipeline (water.wgsl) used only for model_refs listed in
     // water_shaded_models - see render_pass.rs's own per-model pipeline
     // selection and WaterRenderData's own doc comment.
@@ -70,6 +82,46 @@ pub struct App {
     // see main.rs's own registration of "WaterPlaneFar" for why that's the
     // one populated here today.
     pub water_debug_hidden_models: HashSet<String>,
+    // F7 (see settings/input.ron) - toggles a live in-window debug overlay
+    // (see egui_overlay field below, and render_pass.rs's own
+    // render_aero_debug_overlay_pass) showing rolling_rate's theoretical
+    // max-roll-rate curve (deg/s) plus a rolling trail of the player's own
+    // actual measured (airspeed, aoa_y, roll_rate) samples, so the two can
+    // be compared visually while actually flying.
+    pub show_aero_debug_overlay: bool,
+    // Rolling window of recent (airspeed_kt, aoa_y_deg, roll_rate_deg_s)
+    // samples - see show_aero_debug_overlay above. roll_rate_deg_s is
+    // Plane::flight_data's own actual measured rate, not a re-derived
+    // theoretical value - directly comparable against the chart's curve,
+    // both in deg/s. Bounded (see AERO_DEBUG_TRAIL_CAPACITY), pushed from
+    // play::scene::GameLogic::update only while the overlay is on, so this
+    // stays empty and untouched otherwise.
+    pub aero_debug_trail: std::collections::VecDeque<(f32, f32, f32)>,
+    // Rolling window of recent (sample_index, main_wing_lift_y_newtons,
+    // elevator_wing_lift_y_newtons) samples - same show_aero_debug_overlay
+    // gate/cap as aero_debug_trail above, pushed alongside it from
+    // play::scene::GameLogic::update. main/elevator lift are read from
+    // Plane::wing_lift_forces ("Left wing"/"Right elevator wing" - Left/
+    // Right are symmetric in level flight so one side each is enough to see
+    // what's going on). sample_index rather than real elapsed time - this
+    // is a recent-window live view, not meant to correlate against a
+    // physical x-axis the way aero_debug_trail's speed axis is.
+    pub wing_lift_trail: std::collections::VecDeque<(f32, f32, f32)>,
+    // Generic egui-in-wgpu plumbing (see that module's own doc comment for
+    // why this exists instead of a separate native window) - reused by
+    // anything wanting a live debug overlay drawn into the game's own
+    // window, not just the aero one specifically, though that's the only
+    // consumer so far.
+    pub egui_overlay: crate::engine::rendering::egui_overlay::EguiOverlay,
+    // Set true to request a graceful shutdown from code that only has
+    // `&mut App` (e.g. a UI button's click handler - see main_menu::ui's own
+    // "Quit" button), not the `run()` loop's own local `app_state`. run()'s
+    // own loop checks this every iteration alongside app_state.is_running -
+    // this exists specifically so quitting always goes through that same
+    // loop-break-then-return path (physics shutdown sent, SDL2/wgpu
+    // resources dropped, `App::run` actually RETURNS to its caller) instead
+    // of a raw std::process::exit(0), which used to skip all of that.
+    pub should_quit: bool,
     // Wrapped (not a raw running total) so precision doesn't degrade over a
     // long play session - the wave functions in water.wgsl are periodic, so
     // wrapping is invisible to them. Advanced once per frame alongside the
@@ -166,22 +218,39 @@ impl App {
             push_constant_ranges: &[],
         });
         
-        // SHADERING PROCESS 
-        let render_pipeline = {
-            let shader = wgpu::ShaderModuleDescriptor {
-                label: Some("Normal Shader"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("engine/shaders/depth.wgsl").into()),
-            };
-            
+        // SHADERING PROCESS
+        // Four variants of the same model pipeline (one shader + layout):
+        //   cull mode      : Back (default) | None (double-sided meshes)
+        //   depth write    : on (opaque pass) | off (transparent pass, so
+        //                    transparent faces test depth but don't occlude
+        //                    each other)
+        // draw_model_instanced_from_list picks cull per mesh from
+        // Mesh::double_sided; render_pass picks the depth-write pair per pass.
+        let make_model_pipeline = |cull_mode, depth_write| {
             rendering_utils::create_render_pipeline(
                 &renderer.device,
                 &render_pipeline_layout,
                 renderer.config.format,
                 Some(Texture::DEPTH_FORMAT),
                 &[model::ModelVertex::desc(), InstanceRaw::desc()],
-                shader,
+                wgpu::ShaderModuleDescriptor {
+                    label: Some("Normal Shader"),
+                    source: wgpu::ShaderSource::Wgsl(include_str!("engine/shaders/depth.wgsl").into()),
+                },
+                cull_mode,
+                depth_write,
             )
         };
+        let render_pipeline = make_model_pipeline(Some(wgpu::Face::Back), true);
+        let render_pipeline_double_sided = make_model_pipeline(None, true);
+        let render_pipeline_transparent = make_model_pipeline(Some(wgpu::Face::Back), false);
+        // A double-sided TRANSPARENT mesh is drawn twice: back faces (far
+        // side) with this front-culling pipeline, then front faces (near
+        // side) with `render_pipeline_transparent`. That's automatically
+        // far-to-near for a roughly convex shell (the afterburner cone, a
+        // canopy), so the near wall blends over the far wall correctly with
+        // no per-triangle sorting.
+        let render_pipeline_transparent_front_cull = make_model_pipeline(Some(wgpu::Face::Front), false);
 
         let water = WaterRenderData::new(&renderer.device, &renderer.config, &camera_resources, &light, &renderer.depth_render.foam_depth_copy.view, &renderer.depth_render.foam_depth_copy.sampler);
 
@@ -195,6 +264,8 @@ impl App {
         // physics rendering
         let render_physics = RenderPhysics::new(&renderer.device, &renderer.config, &camera_resources);
 
+        let egui_overlay = crate::engine::rendering::egui_overlay::EguiOverlay::new(&renderer.device, renderer.config.format);
+
         // Physics data
         let time = Timing::new();
 
@@ -203,10 +274,18 @@ impl App {
             renderer,
             scene_manager: SceneManager::new(),
             render_pipeline,
+            render_pipeline_double_sided,
+            render_pipeline_transparent,
+            render_pipeline_transparent_front_cull,
             water,
             water_shaded_models: HashSet::new(),
             water_debug_view: false,
             water_debug_hidden_models: HashSet::new(),
+            show_aero_debug_overlay: false,
+            aero_debug_trail: std::collections::VecDeque::new(),
+            wing_lift_trail: std::collections::VecDeque::new(),
+            egui_overlay,
+            should_quit: false,
             water_elapsed: 0.0,
             ui,
             camera_resources,
@@ -529,9 +608,15 @@ impl App {
         loop {
             // Relevant subsystems update
             self.time.update();
-            input::update(&mut event_pump, self.time.delta_time, false);
+            // true if the OS/window manager requested a close (SDL2's own
+            // Event::Quit - clicking the window's close button, Cmd+Q, etc.)
+            // this poll - see input::update's own doc comment.
+            let quit_requested = input::update(&mut event_pump, self.time.delta_time, false);
+            if quit_requested {
+                app_state.is_running = false;
+            }
 
-            if !app_state.is_running {
+            if !app_state.is_running || self.should_quit {
                 // Send shutdown command to physics thread, if one is running
                 if let Some(physics) = &physics_data_channel {
                     let _ = physics.request_data_tx.send(PhysicsCommand::Shutdown);

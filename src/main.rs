@@ -41,16 +41,24 @@ async fn main() -> Result<(), String> {
             // why this happens up front rather than the first time a Node
             // references it) - not tied to any particular scene.
 
-            if let Err(e) = resources::register_model(&mut app, "F16", "F16/f16.gltf") {
+            // Backface culling is ON for every mesh by default. The third arg
+            // opts meshes out of it (two-sided): `DoubleSided::None` /
+            // `::All` / `::Meshes(&["node_name", ...])`. Mesh names are glTF
+            // node names ("Foo#prim1" for a multi-primitive mesh's extras).
+            use resources::DoubleSided;
+            if let Err(e) = resources::register_model(&mut app, "F16", "F16/f16.glb", DoubleSided::Meshes(&["Afterburner"])) {
                 eprintln!("{e}");
             }
-            if let Err(e) = resources::register_model(&mut app, "Water", "Water/water.gltf") {
+            if let Err(e) = resources::register_model(&mut app, "Water", "Water/water.gltf", DoubleSided::None) {
                 eprintln!("{e}");
             }
-            if let Err(e) = resources::register_model(&mut app, "F14", "F14/f14.gltf") {
+            if let Err(e) = resources::register_model(&mut app, "F14", "F14/f14.gltf", DoubleSided::None) {
                 eprintln!("{e}");
             }
-            if let Err(e) = resources::register_model(&mut app, "Ground", "ground/ground.glb") {
+            if let Err(e) = resources::register_model(&mut app, "Ground", "ground/ground.glb", DoubleSided::None) {
+                eprintln!("{e}");
+            }
+            if let Err(e) = resources::register_model(&mut app, "Runway", "Runway/Runway.glb", DoubleSided::All) {
                 eprintln!("{e}");
             }
             // Procedural test mesh for trying a water shader's vertex
@@ -70,7 +78,12 @@ async fn main() -> Result<(), String> {
             // distinct model_ref (not just a second instance of "WaterPlane")
             // specifically so the F6 debug view (below) can hide it alone
             // without hiding "WaterPlane"'s own near/detailed instance too.
-            if let Err(e) = resources::register_primitive_model(&mut app, "WaterPlaneFar", resources::PrimitiveShape::Plane { subdivisions: 32 }) {
+            // Just a flat backdrop - its waves are forced to ~zero amplitude
+            // (the Y-scale trick, read back as y_scale in water.wgsl), and its
+            // colour/fog are per-fragment, so it needs no real geometry. A
+            // near-quad keeps it effectively free no matter how large it's
+            // scaled in the scene.
+            if let Err(e) = resources::register_primitive_model(&mut app, "WaterPlaneFar", resources::PrimitiveShape::Plane { subdivisions: 2 }) {
                 eprintln!("{e}");
             }
             app.water_shaded_models.insert("WaterPlaneFar".to_owned());
@@ -92,7 +105,10 @@ async fn main() -> Result<(), String> {
 
             app.scene_manager.create_loaded_scene(
                 "playing",
-                |device, queue, layout, config| play::scene::GameLogic::prepare(device, queue, layout, config, default_skybox()),
+                // Play uses the procedural clear-day sea sky (see sky.wgsl)
+                // instead of the cubemap - default_skybox() is still used by
+                // main_menu / sandbox below.
+                |device, queue, layout, config| play::scene::GameLogic::prepare(device, queue, layout, config, Environment::ProceduralSky),
                 play::scene::GameLogic::finish,
             );
             app.scene_manager.create_scene("main_menu", |scene, app| main_menu::scene::GameLogic::new(scene, app, default_skybox()));

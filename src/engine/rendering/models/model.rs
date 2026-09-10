@@ -68,7 +68,11 @@ pub struct Mesh {
     pub transform: Transform,
     pub base_transform: Transform,
     pub parent_transform: Option<Transform>,
-    pub alpha_mode: AlphaMode
+    pub alpha_mode: AlphaMode,
+    /// Draw this mesh with backface culling OFF. Set at load from
+    /// `resources::DoubleSided` (declared per model at registration). The
+    /// glTF `doubleSided` material flag is deliberately NOT used.
+    pub double_sided: bool,
 }
 
 /// # Model
@@ -125,9 +129,6 @@ impl Mesh {
 }
 
 pub trait DrawModel<'a> {
-    // Draw a single mesh of the model
-    fn draw_mesh(&mut self, mesh: &'a Mesh, material: &'a Material, camera_bind_group: &'a wgpu::BindGroup, light_bind_group: &'a wgpu::BindGroup);
-    
     // Draw multiple instances of a single mesh
     fn draw_mesh_instanced(
         &mut self,
@@ -138,17 +139,31 @@ pub trait DrawModel<'a> {
         light_bind_group: &'a wgpu::BindGroup
     );
 
-    // Draw all meshes of the model
-    fn draw_model(&mut self, model: &'a Model, camera_bind_group: &'a wgpu::BindGroup, light_bind_group: &'a wgpu::BindGroup);
-
-    // Draw multiple instances of the entire model
+    // Draw multiple instances of the entire model. Sets the pipeline itself,
+    // per mesh - the caller must NOT set one.
+    //
+    //  - `cull_back`  : single-sided meshes (and the near-side pass of a
+    //                   double-sided one).
+    //  - `no_cull`    : `Some` for the opaque pass - a double-sided mesh is
+    //                   drawn once with no culling. `None` for the transparent
+    //                   pass.
+    //  - `cull_front` : `Some` for the transparent pass - a double-sided mesh
+    //                   is drawn twice, back faces (far side) with this then
+    //                   front faces (near side) with `cull_back`, so the near
+    //                   wall blends over the far wall for a convex shell.
+    //
+    // Which meshes are double-sided comes from `Mesh::double_sided` (set at
+    // load from `resources::DoubleSided`).
     fn draw_model_instanced_from_list(
         &mut self,
         model: &'a Model,
         instances: Range<u32>,
         camera_bind_group: &'a wgpu::BindGroup,
         light_bind_group: &'a wgpu::BindGroup,
-        list_name: &String
+        list_name: &String,
+        cull_back: &'a wgpu::RenderPipeline,
+        no_cull: Option<&'a wgpu::RenderPipeline>,
+        cull_front: Option<&'a wgpu::RenderPipeline>,
     );
 }
 
@@ -156,10 +171,6 @@ impl<'a, 'b> DrawModel<'b> for wgpu::RenderPass<'a>
 where
     'b: 'a,
 {
-    fn draw_mesh(&mut self, mesh: &'b Mesh, material: &'b Material, camera_bind_group: &'b wgpu::BindGroup, light_bind_group: &'a wgpu::BindGroup) {
-        self.draw_mesh_instanced(mesh, material, 0..1, camera_bind_group, &light_bind_group);
-    }
-
     fn draw_mesh_instanced(&mut self, mesh: &'b Mesh, material: &'b Material, instances: Range<u32>, camera_bind_group: &'b wgpu::BindGroup, light_bind_group: &'a wgpu::BindGroup) {
         self.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
         self.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -170,16 +181,45 @@ where
         self.draw_indexed(0..mesh.num_elements, 0, instances);
     }
 
-    fn draw_model(&mut self, model: &'b Model, camera_bind_group: &'b wgpu::BindGroup, light_bind_group: &'a wgpu::BindGroup) {
-        self.draw_model_instanced_from_list(model, 0..1, camera_bind_group, &light_bind_group, &"opaque".to_owned());
-    }
-
-    fn draw_model_instanced_from_list(&mut self, model: &'b Model, instances: Range<u32>, camera_bind_group: &'b wgpu::BindGroup, light_bind_group: &'a wgpu::BindGroup, list_name: &String) {
-        if let Some(meshes) = model.mesh_lists.get(list_name) {
-            for (_key, mesh) in meshes {
-                let material = &model.materials[mesh.material];
-                self.draw_mesh_instanced(mesh, material, instances.clone(), camera_bind_group, light_bind_group);
+    // The `active` tracker is a loop-carried "which pipeline is bound" that
+    // skips redundant set_pipeline calls; its store on the final iteration is
+    // unavoidably dead.
+    #[allow(unused_assignments)]
+    fn draw_model_instanced_from_list(
+        &mut self,
+        model: &'b Model,
+        instances: Range<u32>,
+        camera_bind_group: &'b wgpu::BindGroup,
+        light_bind_group: &'a wgpu::BindGroup,
+        list_name: &String,
+        cull_back: &'b wgpu::RenderPipeline,
+        no_cull: Option<&'b wgpu::RenderPipeline>,
+        cull_front: Option<&'b wgpu::RenderPipeline>,
+    ) {
+        let Some(meshes) = model.mesh_lists.get(list_name) else { return };
+        // 0 = cull_back, 1 = no_cull, 2 = cull_front. `None` = nothing set yet
+        // (the caller doesn't set a pipeline), so the first draw always sets one.
+        let mut active: Option<u8> = None;
+        for (_key, mesh) in meshes {
+            let material = &model.materials[mesh.material];
+            if mesh.double_sided {
+                if let Some(front) = cull_front {
+                    // Two-pass: far side (back faces) then near side (front faces).
+                    self.set_pipeline(front);
+                    self.draw_mesh_instanced(mesh, material, instances.clone(), camera_bind_group, light_bind_group);
+                    self.set_pipeline(cull_back);
+                    active = Some(0);
+                    self.draw_mesh_instanced(mesh, material, instances.clone(), camera_bind_group, light_bind_group);
+                    continue;
+                }
+                if let Some(nc) = no_cull {
+                    if active != Some(1) { self.set_pipeline(nc); active = Some(1); }
+                    self.draw_mesh_instanced(mesh, material, instances.clone(), camera_bind_group, light_bind_group);
+                    continue;
+                }
             }
+            if active != Some(0) { self.set_pipeline(cull_back); active = Some(0); }
+            self.draw_mesh_instanced(mesh, material, instances.clone(), camera_bind_group, light_bind_group);
         }
     }
 }

@@ -8,6 +8,15 @@ use wgpu::{util::DeviceExt, BindGroupLayout, Buffer, Device, Queue, SurfaceConfi
 use crate::{app::App, engine::game_nodes::{game_object::GameObject, scene::Scene}, engine::rendering::{enviroment::environment::Environment, enviroment::skybox_renderer::SkyboxRender, instance_management::{InstanceData, InstanceRaw, ModelDataInstance}, models::model::{self, Mesh, Model, ModelVertex}, models::textures::Texture}, transform::Transform};
 use crate::engine::scene_manager::scene::Scene as ManagedScene;
 
+/// Flip to `true` to dump every model's materials/textures/primitives to
+/// stdout as it loads (see `model_log!` uses in `load_model_gltf` /
+/// `traverse_node`).
+const DEBUG_MODEL_LOAD: bool = false;
+
+macro_rules! model_log {
+    ($($arg:tt)*) => { if DEBUG_MODEL_LOAD { println!($($arg)*); } };
+}
+
 pub fn load_binary(file_name: &str) -> anyhow::Result<Vec<u8>> {
     let path = std::path::Path::new(env!("OUT_DIR"))
     .join("res")
@@ -40,7 +49,7 @@ pub fn load_texture_cube(file_names: [&str; 6], device: &wgpu::Device, queue: &w
     Texture::from_cube_bytes(face_slices, device, queue, "skybox_cube_texture")
 }
 
-pub fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgpu::Queue, transform_bind_group_layout: &wgpu::BindGroupLayout) -> anyhow::Result<Model> {
+pub fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgpu::Queue, transform_bind_group_layout: &wgpu::BindGroupLayout, double_sided: DoubleSided) -> anyhow::Result<Model> {
     // Gltf::from_slice auto-detects the format from the header, so this handles
     // both text .gltf (JSON) and binary .glb files.
     let gltf_data = load_binary(file_name)?;
@@ -87,8 +96,16 @@ pub fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgpu::Que
                 label: Some("texture_bind_group_layout"),
             });
     
+    model_log!(
+        "[model {}] {} material(s), {} mesh(es), {} node(s)",
+        file_name,
+        gltf.materials().count(),
+        gltf.meshes().count(),
+        gltf.nodes().count(),
+    );
+
     let mut materials = Vec::new();
-    for material in gltf.materials() {
+    for (mat_index, material) in gltf.materials().enumerate() {
         let pbr = material.pbr_metallic_roughness();
 
         let texture_source = pbr
@@ -99,6 +116,10 @@ pub fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgpu::Que
             // No base color texture assigned (e.g. a flat-color/procedural material) -
             // fall back to a solid-color texture built from the material's base_color_factor.
             let [r, g, b, a] = pbr.base_color_factor();
+            model_log!(
+                "[model {}]   material {} \"{}\": no base-color texture -> solid color rgba({:.2}, {:.2}, {:.2}, {:.2})",
+                file_name, mat_index, material.name().unwrap_or("<unnamed>"), r, g, b, a,
+            );
             let solid_texture = Texture::from_image(
                 &::image::DynamicImage::ImageRgba8(::image::RgbaImage::from_pixel(
                     1,
@@ -141,6 +162,11 @@ pub fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgpu::Que
 
         match texture_source {
             gltf::image::Source::View { view, .. } => {
+                    model_log!(
+                        "[model {}]   material {} \"{}\": embedded base-color texture ({} bytes in buffer {})",
+                        file_name, mat_index, material.name().unwrap_or("<unnamed>"),
+                        view.length(), view.buffer().index(),
+                    );
                     let buffer = &buffer_data[view.buffer().index()];
                     let start = view.offset();
                     let end = start + view.length();
@@ -170,7 +196,7 @@ pub fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgpu::Que
                     materials.push(model::Material {
                         name: material.name().unwrap_or("Default Material").to_string(),
                         diffuse_texture,
-                        bind_group
+                        bind_group,
                     });
                 }
             image::Source::Uri { uri, mime_type: _ } => {
@@ -178,6 +204,11 @@ pub fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgpu::Que
 
                 // Join the GLTF directory with the URI to get the correct path.
                 let full_path = file_dir.join(uri);
+                model_log!(
+                    "[model {}]   material {} \"{}\": external base-color texture \"{}\"",
+                    file_name, mat_index, material.name().unwrap_or("<unnamed>"),
+                    full_path.display(),
+                );
                 let diffuse_texture = load_texture(full_path.to_str().unwrap(), device, queue)?;
 
                 let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -198,7 +229,7 @@ pub fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgpu::Que
                 materials.push(model::Material {
                     name: material.name().unwrap_or("Default Material").to_string(),
                     diffuse_texture,
-                    bind_group
+                    bind_group,
                 });
             },
         };
@@ -237,7 +268,7 @@ pub fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgpu::Que
 
     for scene in gltf.scenes() {
         for node in scene.nodes() {
-            traverse_node(node, &buffer_data, device, queue, transform_bind_group_layout, &mut mesh_lists, file_name, None, default_material_index)?;
+            traverse_node(node, &buffer_data, device, queue, transform_bind_group_layout, &mut mesh_lists, file_name, None, default_material_index, double_sided)?;
         }
     }
 
@@ -297,20 +328,29 @@ pub fn load_trimesh_geometry(file_name: &str) -> anyhow::Result<(Vec<Vector3<f32
 fn collect_trimesh_geometry(
     node: gltf::Node<'_>,
     buffer_data: &[Vec<u8>],
-    parent_transform: Option<(Vector3<f32>, UnitQuaternion<f32>)>,
+    parent_transform: Option<(Vector3<f32>, UnitQuaternion<f32>, Vector3<f32>)>,
     vertices: &mut Vec<Vector3<f32>>,
     indices: &mut Vec<[u32; 3]>,
 ) {
-    let (translation, rotation, _scale) = node.transform().decomposed();
+    let (translation, rotation, scale) = node.transform().decomposed();
     let local_translation = Vector3::from(translation);
     let local_rotation = UnitQuaternion::from_quaternion(Quaternion::from(rotation));
+    let local_scale = Vector3::from(scale);
 
-    let (world_translation, world_rotation) = match parent_transform {
-        Some((parent_translation, parent_rotation)) => (
-            parent_translation + parent_rotation * local_translation,
+    // Compose parent * local (scale then rotate then translate at each level).
+    // Non-uniform scale through a rotated hierarchy isn't perfectly
+    // representable this way, but it's exact for the common single-level case
+    // (a root mesh node with its own scale, e.g. Runway.glb's "Island") and a
+    // good approximation otherwise - and it matches what the collider needs to
+    // line up with the rendered mesh, which had the same scale-dropping bug
+    // (see traverse_node).
+    let (world_translation, world_rotation, world_scale) = match parent_transform {
+        Some((parent_translation, parent_rotation, parent_scale)) => (
+            parent_translation + parent_rotation * parent_scale.component_mul(&local_translation),
             parent_rotation * local_rotation,
+            parent_scale.component_mul(&local_scale),
         ),
-        None => (local_translation, local_rotation),
+        None => (local_translation, local_rotation, local_scale),
     };
 
     if let Some(mesh) = node.mesh() {
@@ -320,7 +360,7 @@ fn collect_trimesh_geometry(
             let base_index = vertices.len() as u32;
             if let Some(positions) = reader.read_positions() {
                 for position in positions {
-                    vertices.push(world_translation + world_rotation * Vector3::from(position));
+                    vertices.push(world_translation + world_rotation * world_scale.component_mul(&Vector3::from(position)));
                 }
             }
             if let Some(indices_raw) = reader.read_indices() {
@@ -333,12 +373,19 @@ fn collect_trimesh_geometry(
     }
 
     for child in node.children() {
-        collect_trimesh_geometry(child, buffer_data, Some((world_translation, world_rotation)), vertices, indices);
+        collect_trimesh_geometry(child, buffer_data, Some((world_translation, world_rotation, world_scale)), vertices, indices);
     }
 }
 
-fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::Device, queue: &wgpu::Queue, transform_bind_group_layout: &wgpu::BindGroupLayout, mesh_lists: &mut HashMap<String, HashMap<String, Mesh>>, file_name: &str, parent_transform: Option<([f32; 3], [f32; 4], [f32; 3])>, default_material_index: usize) -> anyhow::Result<()> {
-        let mesh = node.mesh().expect("Got mesh");
+fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::Device, queue: &wgpu::Queue, transform_bind_group_layout: &wgpu::BindGroupLayout, mesh_lists: &mut HashMap<String, HashMap<String, Mesh>>, file_name: &str, parent_transform: Option<([f32; 3], [f32; 4], [f32; 3])>, default_material_index: usize, double_sided: DoubleSided) -> anyhow::Result<()> {
+        // Nodes without a mesh (Blender Empties, armatures, pure parent/group
+        // nodes) are valid glTF - just recurse past them into their children.
+        let Some(mesh) = node.mesh() else {
+            for child in node.children() {
+                traverse_node(child, buffer_data, device, queue, transform_bind_group_layout, mesh_lists, file_name, Some(node.transform().decomposed()), default_material_index, double_sided)?;
+            }
+            return Ok(());
+        };
         let primitives = mesh.primitives();
         primitives.for_each(|primitive| {
             let reader = primitive.reader(|buffer| Some(&buffer_data[buffer.index()]));
@@ -390,15 +437,21 @@ fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::D
             match parent_transform {
                 Some(parent_data) => {
                     let (parent_translation, parent_rotation, parent_scale) = parent_data;
-                    let (translation, rotation, _scale) = node.transform().decomposed();
+                    let (translation, rotation, scale) = node.transform().decomposed();
 
                     let position = Vector3::from(parent_translation) + Vector3::from(translation);
                     let rotation = Quaternion::from(parent_rotation) * Quaternion::from(rotation);
-                    transform = Transform::new(position, rotation, Vector3::new(1.0, 1.0, 1.0));
+                    // Keep this node's own scale - parent scale is carried
+                    // separately in `parent_values` below. Forcing (1,1,1) here
+                    // silently dropped any per-node scale a glTF exporter left
+                    // on a mesh node (Blender routinely does, e.g. Runway.glb's
+                    // "Island" node), rendering it ~1/scale too small.
+                    transform = Transform::new(position, rotation, Vector3::from(scale));
                     parent_values = Some(Transform::new(parent_translation.into(), parent_rotation.into(), parent_scale.into()));
                 },
                 None => {
-                    transform = Transform::new(node.transform().decomposed().0.into(), node.transform().decomposed().1.into(), Vector3::new(1.0, 1.0, 1.0));
+                    let (translation, rotation, scale) = node.transform().decomposed();
+                    transform = Transform::new(translation.into(), rotation.into(), Vector3::from(scale));
                 },
             }
 
@@ -420,6 +473,21 @@ fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::D
                 ],
             });
 
+            // A mesh split across several materials in the DCC tool exports as
+            // ONE node -> ONE mesh -> multiple primitives. The mesh map is
+            // keyed by node name, so without this the primitives all land on
+            // the same key and clobber each other (only the last material
+            // would render). First primitive keeps the plain node name (so
+            // the `wheel-f` / `left_elevator` / ... name lookups elsewhere
+            // still resolve); extras get a "#primN" suffix. Single-primitive
+            // meshes - the common case - are completely unchanged.
+            let node_name = node.name().map(str::to_owned).unwrap_or_else(|| format!("node{}", node.index()));
+            let key = if primitive.index() == 0 {
+                node_name.clone()
+            } else {
+                format!("{}#prim{}", node_name, primitive.index())
+            };
+
             let mesh = model::Mesh {
                 name: file_name.to_string(),
                 vertex_buffer,
@@ -432,17 +500,64 @@ fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::D
                 base_transform: transform,
                 parent_transform: parent_values,
                 alpha_mode: primitive.material().alpha_mode(),
+                // Node name matches all of a node's primitives; the "#primN"
+                // key matches just one.
+                double_sided: double_sided.covers(&node_name) || double_sided.covers(&key),
             };
 
-            if primitive.material().alpha_mode() == gltf::material::AlphaMode::Blend || primitive.material().alpha_mode() == gltf::material::AlphaMode::Mask {
-                add_or_init_mesh_list(mesh_lists, &"transparent".to_string(), node.name().unwrap().to_owned(), mesh);
+            let list = if primitive.material().alpha_mode() == gltf::material::AlphaMode::Blend || primitive.material().alpha_mode() == gltf::material::AlphaMode::Mask {
+                "transparent"
             } else {
-                add_or_init_mesh_list(mesh_lists, &"opaque".to_string(), node.name().unwrap().to_owned(), mesh);
+                "opaque"
+            };
+
+            // Local-space AABB of this primitive, and where the node's own
+            // transform (already baked into `transform` above) puts it.
+            let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+            for v in &vertices {
+                for a in 0..3 {
+                    lo[a] = lo[a].min(v.position[a]);
+                    hi[a] = hi[a].max(v.position[a]);
+                }
             }
-            
+            let corner_after = |p: [f32; 3]| {
+                let m = transform.to_matrix_bufferable();
+                // column-major mat * (p, 1)
+                [
+                    m[0][0] * p[0] + m[1][0] * p[1] + m[2][0] * p[2] + m[3][0],
+                    m[0][1] * p[0] + m[1][1] * p[1] + m[2][1] * p[2] + m[3][1],
+                    m[0][2] * p[0] + m[1][2] * p[1] + m[2][2] * p[2] + m[3][2],
+                ]
+            };
+            let a_lo = corner_after(lo);
+            let a_hi = corner_after(hi);
+            model_log!(
+                "[model {}]   node \"{}\" / mesh \"{}\" prim {}: {} verts, {} indices, material {} ({:?}) -> \"{}\" list as key \"{}\"",
+                file_name,
+                node_name,
+                node.mesh().and_then(|m| m.name().map(str::to_owned)).unwrap_or_else(|| "<unnamed>".to_owned()),
+                primitive.index(),
+                vertices.len(),
+                indices.len(),
+                primitive.material().index().map(|i| i.to_string()).unwrap_or_else(|| format!("default({default_material_index})")),
+                primitive.material().alpha_mode(),
+                list,
+                key,
+            );
+            {
+                let (t, r, s) = node.transform().decomposed();
+                model_log!(
+                    "[model {}]       node transform T={:?} R={:?} S={:?} | local AABB [{:.2},{:.2},{:.2}]..[{:.2},{:.2},{:.2}] -> after node xf [{:.1},{:.1},{:.1}]..[{:.1},{:.1},{:.1}]",
+                    file_name, t, r, s,
+                    lo[0], lo[1], lo[2], hi[0], hi[1], hi[2],
+                    a_lo[0], a_lo[1], a_lo[2], a_hi[0], a_hi[1], a_hi[2],
+                );
+            }
+            add_or_init_mesh_list(mesh_lists, &list.to_string(), key, mesh);
+
         });
     for child in node.children() {
-        traverse_node(child, buffer_data, device, queue, transform_bind_group_layout, mesh_lists, file_name, Some(node.transform().decomposed()), default_material_index)?;
+        traverse_node(child, buffer_data, device, queue, transform_bind_group_layout, mesh_lists, file_name, Some(node.transform().decomposed()), default_material_index, double_sided)?;
     }
 
     Ok(())
@@ -522,7 +637,7 @@ fn prepare_level_assets(device: &Device, queue: &Queue, camera_position: Vector3
                 if existing_models.contains(model_name) {
                     instance_buffer_updates.insert(model_name.clone(), (instance_buffer, instance_count));
                 } else {
-                    match load_model_gltf(model_name, device, queue, &Mesh::create_bind_group_layout(device)) {
+                    match load_model_gltf(model_name, device, queue, &Mesh::create_bind_group_layout(device), DoubleSided::None) {
                         Ok(correct_model) => {
                             new_models.insert(
                                 model_name.to_string(),
@@ -560,6 +675,10 @@ pub struct PreparedEnvironment {
 pub fn prepare_environment(device: &Device, queue: &Queue, camera_bind_group_layout: &BindGroupLayout, config: &SurfaceConfiguration, environment: Environment) -> PreparedEnvironment {
     match environment {
         Environment::Color(color) => PreparedEnvironment { skybox: None, clear_color: color },
+        Environment::ProceduralSky => PreparedEnvironment {
+            skybox: Some(SkyboxRender::new_procedural(device, config, camera_bind_group_layout)),
+            clear_color: crate::engine::rendering::enviroment::environment::DEFAULT_CLEAR_COLOR,
+        },
         Environment::Skybox(faces) => {
             let texture = load_texture_cube(
                 [&faces.px, &faces.nx, &faces.py, &faces.ny, &faces.pz, &faces.nz],
@@ -643,13 +762,35 @@ pub fn load_instances(path: String) -> Option<Vec<GameObject>> {
 /// only gets a real `ModelDataInstance` (which owns a GPU instance buffer)
 /// once something actually instances it; see `loaded_models`'s own doc
 /// comment on `App` for why an empty one can't just be created here instead.
-pub fn register_model(app: &mut App, name: &str, path: &str) -> Result<(), String> {
+/// Which of a model's meshes render with backface culling OFF (two-sided).
+/// Culling is ON by default (`None`). Declared here at registration rather
+/// than poked in later - it's a property of the asset. Mesh names are glTF
+/// node names (the `Model::mesh_lists` inner key - e.g. "Afterburner",
+/// "canopy_glass", "Foo#prim1" for a multi-primitive mesh's extra prims).
+#[derive(Clone, Copy)]
+pub enum DoubleSided<'a> {
+    None,
+    All,
+    Meshes(&'a [&'a str]),
+}
+
+impl DoubleSided<'_> {
+    fn covers(&self, mesh_name: &str) -> bool {
+        match self {
+            DoubleSided::None => false,
+            DoubleSided::All => true,
+            DoubleSided::Meshes(names) => names.contains(&mesh_name),
+        }
+    }
+}
+
+pub fn register_model(app: &mut App, name: &str, path: &str, double_sided: DoubleSided) -> Result<(), String> {
     if app.loaded_models.contains_key(name) || app.game_models.contains_key(name) {
         return Err(format!("a model named '{name}' is already loaded"));
     }
 
     let bind_group_layout = Mesh::create_bind_group_layout(&app.renderer.device);
-    let loaded_model = load_model_gltf(path, &app.renderer.device, &app.renderer.queue, &bind_group_layout)
+    let loaded_model = load_model_gltf(path, &app.renderer.device, &app.renderer.queue, &bind_group_layout, double_sided)
         .map_err(|e| format!("failed to load model '{name}' from '{path}': {e}"))?;
 
     app.loaded_models.insert(name.to_owned(), loaded_model);
@@ -831,6 +972,7 @@ pub fn register_primitive_model(app: &mut App, name: &str, shape: PrimitiveShape
         base_transform: transform,
         parent_transform: None,
         alpha_mode: gltf::material::AlphaMode::Opaque,
+        double_sided: false,
     };
 
     let mut opaque = HashMap::new();

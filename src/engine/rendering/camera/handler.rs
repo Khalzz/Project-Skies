@@ -86,7 +86,12 @@ impl CameraResources {
     pub fn new(device: &Device, config: &wgpu::SurfaceConfiguration) -> Self {
         let near_far_uniform = NearFarUniform {
             near: 0.1,
-            far: 100000.0,
+            // Pushed way out so the huge "world_far" backdrop water plane (see
+            // play::scene::spawn_world) isn't clipped - reversed-Z keeps
+            // near/mid depth precision fine regardless of how far this goes.
+            // Kept in sync with the Projection::new call below and water.wgsl's
+            // own `const FAR`.
+            far: 4_000_000.0,
         };
 
         let uniform = CameraUniform::new(near_far_uniform);
@@ -248,7 +253,9 @@ impl SceneCameras {
     /// multiple cameras still needs an explicit `select_camera`.
     pub fn create_camera(&mut self, name: impl Into<String>, transform: Transform, fovy: f32) -> &mut CameraInstance {
         let camera = Camera::new(transform);
-        let projection = Projection::new(self.width, self.height, fovy, 0.1, 100000.0);
+        // Far plane kept in sync with CameraResources::new's near_far_uniform
+        // and water.wgsl's `const FAR` - see the comment there.
+        let projection = Projection::new(self.width, self.height, fovy, 0.1, 4_000_000.0);
 
         let name = name.into();
         if self.active == NO_CAMERA_SENTINEL {

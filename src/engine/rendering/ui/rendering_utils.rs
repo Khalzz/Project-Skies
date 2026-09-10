@@ -1,6 +1,6 @@
 use wgpu::RenderPipeline;
 
-pub fn create_render_pipeline(device: &wgpu::Device, layout: &wgpu::PipelineLayout, color_format: wgpu::TextureFormat, depth_format: Option<wgpu::TextureFormat>, vertex_layouts: &[wgpu::VertexBufferLayout], shader: wgpu::ShaderModuleDescriptor,) -> RenderPipeline {
+pub fn create_render_pipeline(device: &wgpu::Device, layout: &wgpu::PipelineLayout, color_format: wgpu::TextureFormat, depth_format: Option<wgpu::TextureFormat>, vertex_layouts: &[wgpu::VertexBufferLayout], shader: wgpu::ShaderModuleDescriptor, cull_mode: Option<wgpu::Face>, depth_write_enabled: bool) -> RenderPipeline {
     let shader = device.create_shader_module(shader);
 
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -37,7 +37,7 @@ pub fn create_render_pipeline(device: &wgpu::Device, layout: &wgpu::PipelineLayo
             topology: wgpu::PrimitiveTopology::TriangleList,
             strip_index_format: None,
             front_face: wgpu::FrontFace::Ccw,
-            cull_mode: Some(wgpu::Face::Back),
+            cull_mode,
             // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
             polygon_mode: wgpu::PolygonMode::Fill,
             // Requires Features::DEPTH_CLIP_CONTROL
@@ -47,7 +47,12 @@ pub fn create_render_pipeline(device: &wgpu::Device, layout: &wgpu::PipelineLayo
         },
         depth_stencil: depth_format.map(|format| wgpu::DepthStencilState {
             format,
-            depth_write_enabled: true,
+            // Transparent geometry passes `false` here - it still TESTS depth
+            // (opaque geometry in front still occludes it) but doesn't WRITE
+            // it, so transparent faces don't occlude each other and every one
+            // gets to blend. (Draw order between them is still unsorted -
+            // that's a separate, bigger fix.)
+            depth_write_enabled,
             // Reversed-Z: near = 1.0, far = 0.0, so "closer" means "greater".
             depth_compare: wgpu::CompareFunction::Greater,
             stencil: wgpu::StencilState::default(),

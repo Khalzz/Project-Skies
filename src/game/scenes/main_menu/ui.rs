@@ -469,7 +469,12 @@ pub fn build(app: &mut App) {
                 .set_child("title", label(app, "Project Skies").set_font_size(&mut app.ui.text.font_system, 50.0))
                 .set_child("Play", with_left_accent(button(app, "Play", |app| show_panel(app, "Play Select")).set_size(SizeValue::Grow, SizeValue::Fit)))
                 .set_child("Settings", with_left_accent(button(app, "Settings", |app| show_panel(app, "Settings")).set_size(SizeValue::Grow, SizeValue::Fit)))
-                .set_child("Quit", with_left_accent(button(app, "Quit", |_app| std::process::exit(0)).set_size(SizeValue::Grow, SizeValue::Fit)))
+                // Sets App::should_quit rather than std::process::exit(0)
+                // directly - see that field's own doc comment for why: a
+                // raw exit skipped App::run's own graceful shutdown (physics
+                // thread notified, SDL2/wgpu resources actually dropped) and
+                // any code main.rs has after its own `app.run()` call.
+                .set_child("Quit", with_left_accent(button(app, "Quit", |app| { app.should_quit = true; }).set_size(SizeValue::Grow, SizeValue::Fit)))
         );
 
     Layer::new(app)

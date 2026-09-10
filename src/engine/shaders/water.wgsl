@@ -21,7 +21,9 @@
 // mismatch - CameraUniform's real GPU buffer isn't padded to WGSL's own
 // implied struct size for it) and hardcoding the same default instead.
 const NEAR: f32 = 0.1;
-const FAR: f32 = 100000.0;
+// Must match the camera's projection far plane (see camera/handler.rs) or the
+// linearize_depth() calls for shore foam read the depth buffer wrong.
+const FAR: f32 = 4000000.0;
 
 // Darkest tint, at the wave's own lowest point (height_01 = 0 in fs_main) -
 // lightened from an earlier, near-black pass at this (0.0, 0.03, 0.08). That
@@ -250,14 +252,14 @@ const FOAM_COLOR: vec3<f32> = vec3<f32>(0.55, 0.75, 0.95);
 // something solid) is always full foam, this is how far that falls off to
 // nothing. Larger = a wider foam band around every shore/object.
 const SHORE_FOAM_RANGE: f32 = 25.0;
-// Camera distance (world units, matches in.view_depth) where shore_foam
-// starts fading out / is fully gone - foam is a close-up detail, at flight
-// distance/altitude it'd otherwise read as noisy fringing along every
-// coastline rather than something you're meant to notice up close. Uses
-// in.view_depth (already computed in vs_main for the fog blend below),
-// smoothstep'd the same way fog is.
-const FOAM_VISIBLE_DISTANCE: f32 = 2000.0;
-const FOAM_FADE_DISTANCE: f32 = 6000.0;
+// Shore / object-collision foam is tied to the SAME visibility envelope as
+// the waves themselves rather than its own distance constants: FALLOFF_START/
+// END over camera XZ-distance, HEIGHT_FALLOFF_START/END over camera altitude,
+// and the "world"-only y_scale gate (see foam_wave_visibility in fs_main).
+// Foam is a near-surface detail - it should appear exactly where the detailed
+// "world" water patch is and fade out on the same schedule, not linger on the
+// flat "world_far" backdrop (which has no waves to collide against anyway) or
+// fringe every coastline when viewed from flight altitude.
 
 struct CameraUniform {
     view_proj: mat4x4<f32>,
@@ -566,16 +568,46 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let scene_z = linearize_depth(scene_depth_raw, NEAR, FAR);
     let water_z = linearize_depth(in.clip_position.z, NEAR, FAR);
     let shore_distance = abs(scene_z - water_z);
-    let foam_distance_fade = 1.0 - smoothstep(FOAM_VISIBLE_DISTANCE, FOAM_FADE_DISTANCE, in.view_depth);
-    let shore_foam = (1.0 - smoothstep(0.0, SHORE_FOAM_RANGE, shore_distance)) * foam_distance_fade;
+    // Gate the foam to the exact same envelope the waves use: same camera
+    // XZ-distance fade (FALLOFF_START/END), same camera-altitude fade
+    // (HEIGHT_FALLOFF_START/END), and zeroed on the flat "world_far" backdrop
+    // via the same y_scale > 0.5 "world"-only test the discard at the top of
+    // fs_main uses. in.world_position.xz is still camera-relative, so its
+    // length is distance from camera - identical to vs_main's dist_from_camera.
+    let foam_dist_from_camera = length(in.world_position.xz);
+    let foam_camera_height = light.camera_position.y;
+    let foam_wave_visibility =
+        (1.0 - smoothstep(FALLOFF_START, FALLOFF_END, foam_dist_from_camera))
+        * (1.0 - smoothstep(HEIGHT_FALLOFF_START, HEIGHT_FALLOFF_END, foam_camera_height))
+        * step(0.5, in.y_scale);
+    let shore_foam = (1.0 - smoothstep(0.0, SHORE_FOAM_RANGE, shore_distance)) * foam_wave_visibility;
     let shore_tinted = mix(fresnel_tinted, FOAM_COLOR, shore_foam);
 
     let result = (ambient_color + diffuse_color) * shore_tinted + specular_color * 1.4;
 
-    let fog_start = 1000.0;
-    let fog_end = 80000.0;
-    let fog_factor = clamp((in.view_depth - fog_start) / (fog_end - fog_start), 0.0, 1.0);
-    let fogged_color = mix(result, vec3<f32>(0.3, 0.3, 0.5), fog_factor);
+    // Long-distance atmospheric haze - fades the water toward a pale hazy
+    // blue so the water/sky seam softens into a band instead of a hard line.
+    //
+    // "world_far" is ~1.5M half-extent and re-centres on the camera every
+    // frame (GameLogic::update_water_plane), so there's room for a genuinely
+    // gradual fade: fully blue for tens of km, then hazing over hundreds
+    // more, reaching fog_color well inside the mesh edge so it blends into
+    // the sky with no visible boundary.
+    //
+    // Driven by HORIZONTAL distance (in.world_position.xz is camera-relative,
+    // so its length is distance-from-camera on the ground plane), not
+    // in.view_depth - otherwise climbing makes the depth to the water
+    // directly below large enough to fog the ocean out from under the plane.
+    //
+    // fog_color / fog_start / fog_end are kept matched to depth.wgsl's model
+    // fog (same three values) so a distant object and the sea under it haze
+    // to the same tone. Retune one -> retune the other.
+    let fog_color = vec3<f32>(0.72, 0.80, 0.88);
+    let fog_start = 80000.0;
+    let fog_end = 1400000.0;
+    let horizon_dist = length(in.world_position.xz);
+    let fog_factor = smoothstep(fog_start, fog_end, horizon_dist);
+    let fogged_color = mix(result, fog_color, fog_factor);
 
     return vec4<f32>(fogged_color, 1.0);
 }

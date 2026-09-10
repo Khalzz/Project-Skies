@@ -40,6 +40,10 @@ pub struct Camera {
     pub mod_quaternion: UnitQuaternion<f32>,
     pub debug_offset: Vector3<f32>,
     pub debug_mode_active: bool,
+    // The current camera state's own plane-relative offset (what the camera
+    // would sit at with debug_mode_active off), refreshed every frame. Purely
+    // for the F7 Camera Editor to display alongside `debug_offset`.
+    pub debug_base_offset: Vector3<f32>,
     pub cockpit_current_rotation: UnitQuaternion<f32>,
     pub cockpit_target_fov: f32,
     pub cockpit_current_fov: f32,
@@ -62,8 +66,12 @@ impl Camera {
             look_at: None,
             next_look_at: None,
             mod_quaternion: UnitQuaternion::identity(),
-            debug_offset: Vector3::new(0.0, 0.6, -3.0),
+            // A delta from the active camera state's base offset (see
+            // `update`), not an absolute offset - starts at zero so enabling
+            // the editor doesn't jump the camera.
+            debug_offset: Vector3::zeros(),
             debug_mode_active: false,
+            debug_base_offset: Vector3::zeros(),
             cockpit_current_rotation: UnitQuaternion::identity(),
             cockpit_target_fov: 70.0,
             cockpit_current_fov: 70.0,
@@ -76,6 +84,16 @@ impl Camera {
             free_target_fov: 60.0,
             free_current_fov: 60.0,
             cinematic_return_blend: None,
+        }
+    }
+
+    pub fn state_name(&self) -> &'static str {
+        match self.state {
+            CameraState::Normal => "Normal",
+            CameraState::Cockpit => "Cockpit",
+            CameraState::Cinematic => "Cinematic",
+            CameraState::Frontal => "Frontal",
+            CameraState::Free => "Free",
         }
     }
 
@@ -235,6 +253,10 @@ impl Behavior for Camera {
                 },
             };
 
+            // Plane-relative offset of whatever the current state chose - for
+            // the F7 Camera Editor's "base" readout.
+            self.debug_base_offset = target.rotation.inverse() * (target_position - target.position);
+
             // Debug mode overlay: move camera offset with arrow keys / W / S
             let final_position = if self.debug_mode_active {
                 let speed = 2.0 * delta_time;
@@ -265,15 +287,17 @@ impl Behavior for Camera {
                     changed = true;
                 }
 
+                // `debug_offset` is a DELTA from the current state's own base
+                // offset - so nudging it starts from where the camera already
+                // is and switching camera states keeps the tweak. The value
+                // to paste into a camera definition is base + delta.
+                let resulting = self.debug_base_offset + self.debug_offset;
                 if changed {
                     println!("Camera offset: Vector3::new({:.3}, {:.3}, {:.3})",
-                        self.debug_offset.x,
-                        self.debug_offset.y,
-                        self.debug_offset.z);
+                        resulting.x, resulting.y, resulting.z);
                 }
 
-                // Apply debug offset relative to the plane
-                target.position + (target.rotation * self.debug_offset)
+                target.position + (target.rotation * resulting)
             } else {
                 target_position
             };

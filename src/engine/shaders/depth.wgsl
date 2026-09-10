@@ -88,35 +88,41 @@ var t_diffuse: texture_2d<f32>;
 var s_diffuse: sampler;
 
 @fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+fn fs_main(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> @location(0) vec4<f32> {
     let object_color: vec4<f32> = textureSample(t_diffuse, s_diffuse, in.tex_coords);
-    
-    // We don't need (or want) much ambient light, so 0.1 is fine
 
-    
+    // For double-sided meshes (backface culling off) the back face is
+    // rasterized with the same interpolated normal as the front - flip it so
+    // it's lit as the surface it actually is. Single-sided meshes only ever
+    // hit the front face, so this is a no-op for them.
+    var normal = normalize(in.world_normal);
+    if (!front_facing) {
+        normal = -normal;
+    }
+
     let ambient_strength = 0.8;
     let ambient_color = light.color * ambient_strength;
 
     let light_dir = normalize(light.position - in.world_position);
 
-    let diffuse_strength = max(dot(in.world_normal, light_dir), 0.0);
+    let diffuse_strength = max(dot(normal, light_dir), 0.0);
     let diffuse_color = light.color * diffuse_strength;
 
     let view_dir = normalize(camera.view_pos.xyz - in.world_position);
-    let reflect_dir = reflect(-light_dir, in.world_normal);
+    let reflect_dir = reflect(-light_dir, normal);
 
     let specular_strength = pow(max(dot(view_dir, reflect_dir), 0.0), 32.0);
     let specular_color = specular_strength * light.color;
 
     let result = (ambient_color + diffuse_color) * object_color.xyz;
 
-    // Fog calculation
-    let fog_start = 1000.0;
-    let fog_end = 80000.0;
-    let fog_factor = clamp((in.view_depth - fog_start) / (fog_end - fog_start), 0.0, 1.0);
-
-    // Linearly interpolate between the fragment color and the fog color
-    let fogged_color = mix(result, vec3<f32>(0.3, 0.3, 0.5), fog_factor);
+    // Long-distance atmospheric haze - kept matched to water.wgsl's own fog
+    // (same colour + start/end) so a distant object and the sea under it
+    // fade to the same tone instead of the object standing out against it.
+    let fog_start = 80000.0;
+    let fog_end = 1400000.0;
+    let fog_factor = smoothstep(fog_start, fog_end, in.view_depth);
+    let fogged_color = mix(result, vec3<f32>(0.72, 0.80, 0.88), fog_factor);
 
     return vec4<f32>(fogged_color, object_color.a);
 }

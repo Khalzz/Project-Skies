@@ -6,3 +6,4 @@ pub mod render_pipeline;
 pub mod ui;
 pub mod vertex;
 pub mod camera;
+pub mod egui_overlay;

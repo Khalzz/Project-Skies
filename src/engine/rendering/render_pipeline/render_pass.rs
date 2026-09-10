@@ -2,9 +2,15 @@ use std::collections::HashSet;
 
 use wgpu::RenderPassDepthStencilAttachment;
 
+use nalgebra::Vector3;
+
 use crate::app::App;
+use crate::engine::input::input;
 use crate::engine::primitive::manual_vertex::ManualVertex;
 use crate::engine::rendering::models::model::DrawModel;
+use crate::game::scenes::play::camera::camera::Camera;
+use crate::game::scenes::play::plane::physics::rolling_rate::{max_roll_rate_deg_s, RollRateParams};
+use crate::game::scenes::play::plane::plane::Plane;
 
 fn color_attachment(view: &wgpu::TextureView, load: wgpu::LoadOp<wgpu::Color>) -> Option<wgpu::RenderPassColorAttachment> {
     Some(wgpu::RenderPassColorAttachment {
@@ -73,8 +79,8 @@ impl App {
             skybox.render(&mut render_pass, &self.camera_resources.bind_group);
         }
 
-        render_pass.set_pipeline(&self.render_pipeline);
-
+        // draw_model_instanced_from_list sets the pipeline itself, per mesh
+        // (single- vs double-sided), so no set_pipeline here.
         for model_ref in self.distinct_model_refs(Some("sun")) {
             // Water-shaded models draw in their own later pass instead (see
             // render_water_pass) - they need a snapshot of this pass's own
@@ -85,7 +91,12 @@ impl App {
             }
             if let Some(model_data) = self.game_models.get(&model_ref) {
                 render_pass.set_vertex_buffer(1, model_data.instance_buffer.slice(..));
-                render_pass.draw_model_instanced_from_list(&model_data.model, 0..model_data.instance_count as u32, &self.camera_resources.bind_group, &self.light.rendering_data.bind_group, &"opaque".to_string());
+                render_pass.draw_model_instanced_from_list(
+                    &model_data.model, 0..model_data.instance_count as u32,
+                    &self.camera_resources.bind_group, &self.light.rendering_data.bind_group,
+                    &"opaque".to_string(),
+                    &self.render_pipeline, Some(&self.render_pipeline_double_sided), None,
+                );
             }
         }
     }
@@ -167,12 +178,16 @@ impl App {
             timestamp_writes: None,
         });
 
-        render_pass.set_pipeline(&self.render_pipeline);
-
+        // Pipeline is set per mesh inside draw_model_instanced_from_list.
         for model_ref in self.distinct_model_refs(None) {
             if let Some(model_data) = self.game_models.get(&model_ref) {
                 render_pass.set_vertex_buffer(1, model_data.instance_buffer.slice(..));
-                render_pass.draw_model_instanced_from_list(&model_data.model, 0..model_data.instance_count as u32, &self.camera_resources.bind_group, &self.light.rendering_data.bind_group, &"transparent".to_string());
+                render_pass.draw_model_instanced_from_list(
+                    &model_data.model, 0..model_data.instance_count as u32,
+                    &self.camera_resources.bind_group, &self.light.rendering_data.bind_group,
+                    &"transparent".to_string(),
+                    &self.render_pipeline_transparent, None, Some(&self.render_pipeline_transparent_front_cull),
+                );
             }
         }
     }
@@ -250,6 +265,377 @@ impl App {
         self.ui.text.text_renderer_on_top.render(&self.ui.text.text_atlas, &self.renderer.glyphon.viewport, &mut render_pass).unwrap();
     }
 
+    // F7 (see App::show_aero_debug_overlay's own doc comment) - two live
+    // egui windows (see engine::rendering::egui_overlay for why it's egui
+    // rendered into this same wgpu frame rather than a separate native
+    // window): the roll-authority-gain chart (rolling_rate's theoretical
+    // curve against the player's own recent trail), plus a second "Debug
+    // Info" window with everything else Plane::flight_data tracks (speed,
+    // altitude, mach, g, AoA, turn rates, ...) - this used to only be
+    // readable from the in-HUD text labels (still there, unaffected) or the
+    // old F3 debug_panel (FPS/position only) - this consolidates the same
+    // numbers into one place alongside the chart they're for tuning
+    // against. Input is deliberately minimal (pointer position + primary
+    // button + scroll) - just enough for egui_plot's own pan/zoom/hover,
+    // not full egui interactivity (no keyboard/text - this is a read-only
+    // debug view).
+    fn render_aero_debug_overlay_pass(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
+        if !self.show_aero_debug_overlay {
+            return;
+        }
+
+        // screen_rect/pointer input have to be in LOGICAL (window, not
+        // drawable) pixels - the same space input::mouse_x()/mouse_y()
+        // already report in (see that fn's own doc comment) - while the
+        // actual render target (`view`) is sized in PHYSICAL/drawable
+        // pixels. Mixing these up is what confines the whole overlay into
+        // one corner of the window on a HiDPI/Retina display instead of
+        // filling it - see EguiOverlay::render's own doc comment on
+        // pixels_per_point for why both are needed.
+        let logical_size = [self.window_manager.size.width, self.window_manager.size.height];
+        let physical_size = [self.window_manager.pixel_size.width, self.window_manager.pixel_size.height];
+        let pixels_per_point = physical_size[0] as f32 / logical_size[0] as f32;
+        // Both right-aligned against the actual (logical) screen width -
+        // "Debug Info" top-right, chart bottom-right beneath it, each
+        // independently right-aligned to its own estimated window width
+        // (300 for Debug Info's narrow text column, 580 for the chart's
+        // wider plot) rather than a fixed offset from each other, so both
+        // actually hug the real right edge on any screen size. 420 for the
+        // chart's Y assumes Debug Info's own window (title bar + ~13 rows +
+        // 2 separators + padding) is roughly that tall - not exact, just
+        // enough clearance that they don't start out overlapping.
+        let debug_info_default_x = (logical_size[0] as f32 - 300.0).max(20.0);
+        let aero_chart_default_x = (logical_size[0] as f32 - 580.0).max(20.0);
+        let pointer_pos = egui::pos2(input::mouse_x() as f32, input::mouse_y() as f32);
+        let raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(logical_size[0] as f32, logical_size[1] as f32))),
+            events: vec![
+                egui::Event::PointerMoved(pointer_pos),
+                egui::Event::PointerButton {
+                    pos: pointer_pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: input::mouse_left_button_down(),
+                    modifiers: egui::Modifiers::default(),
+                },
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Line,
+                    delta: egui::vec2(0.0, input::mouse_scroll_y()),
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        // Theoretical curve at AoA=0, sea level, in actual deg/s (not the
+        // dimensionless 0..1 roll_authority_gain fraction - that's correct
+        // as a multiplier but reads as meaningless "0 to 1" on a chart meant
+        // to be compared against real measured roll rate). Recomputed every
+        // frame rather than cached - 801 samples through a cheap closed-form
+        // function is negligible next to everything else this loop already
+        // does per frame.
+        let curve: Vec<[f64; 2]> = (0..=800)
+            .map(|knots| {
+                let speed_ms = knots as f32 * 0.514444;
+                let roll_rate = max_roll_rate_deg_s(speed_ms, 0.0, 0.0, &RollRateParams::default());
+                [knots as f64, roll_rate as f64]
+            })
+            .collect();
+        let trail: Vec<[f64; 2]> = self.aero_debug_trail.iter()
+            // .abs() - the stored value is the real, signed roll rate
+            // (positive rolling one way, negative the other, same value
+            // Plane::flight_data.roll_rate itself carries), but the
+            // theoretical curve is always non-negative (a max achievable
+            // MAGNITUDE, not a direction) - comparing a signed measurement
+            // against an unsigned curve read as "weird negative outliers"
+            // rather than the actual same-magnitude point it is.
+            .map(|(speed_kt, _aoa_y_deg, roll_rate)| [*speed_kt as f64, roll_rate.abs() as f64])
+            .collect();
+        // See App::wing_lift_trail's own doc comment - two separate line
+        // series sharing one x (sample index), gathered here same as
+        // trail/curve above for the same borrow-checker reason.
+        let main_wing_lift_trail: Vec<[f64; 2]> = self.wing_lift_trail.iter()
+            .map(|(index, main_lift_y, _elevator_lift_y)| [*index as f64, *main_lift_y as f64])
+            .collect();
+        let elevator_wing_lift_trail: Vec<[f64; 2]> = self.wing_lift_trail.iter()
+            .map(|(index, _main_lift_y, elevator_lift_y)| [*index as f64, *elevator_lift_y as f64])
+            .collect();
+
+        // Everything else this debug view shows - gathered up front into
+        // plain locals (same reason curve/trail are, above) since the
+        // build_ui closure below can't also borrow `self`. `flight_data` is
+        // `Plane`'s own struct, already Copy-friendly f32s, so this is just
+        // cheap field reads, not a real per-frame cost.
+        let fps = self.time.get_fps();
+        let player_position = self.scene_manager.content()
+            .and_then(|content| content.renderizable_instances.get("player"))
+            .map(|instance| instance.instance.transform.position);
+        let flight_data = self.scene_manager.content()
+            .and_then(|content| content.nodes.get("player"))
+            .and_then(|node| node.get_behavior::<Plane>())
+            .map(|plane| (plane.controls.throttle, plane.flight_data.speedometer, plane.flight_data.altimeter, plane.flight_data.mach, plane.flight_data.g_meter, plane.flight_data.aoa_x, plane.flight_data.aoa_y, plane.flight_data.aoa, plane.flight_data.roll_rate, plane.flight_data.pitch_rate, plane.flight_data.yaw_rate, plane.stall, plane.controls.aileron, plane.controls.elevator, plane.controls.rudder, plane.controls.trim.roll, plane.controls.trim.pitch, plane.controls.trim.yaw));
+
+        // Play camera (the "camera" node's Camera behavior), read into plain
+        // Copy locals for the build_ui closure. name / base offset / editor
+        // offset / whether the editor is currently applied.
+        let camera_info: Option<(&'static str, Vector3<f32>, Vector3<f32>, bool)> = self.scene_manager.content()
+            .and_then(|content| content.nodes.get("camera"))
+            .and_then(|node| node.get_behavior::<Camera>())
+            .map(|cam| (cam.state_name(), cam.debug_base_offset, cam.debug_offset, cam.debug_mode_active));
+        // Filled by the Camera Editor window's buttons; applied after render().
+        let mut camera_offset_delta = Vector3::<f32>::zeros();
+        let mut camera_set_active: Option<bool> = None;
+        let mut camera_reset_offset = false;
+
+        self.egui_overlay.render(
+            &self.renderer.device,
+            &self.renderer.queue,
+            encoder,
+            view,
+            physical_size,
+            pixels_per_point,
+            raw_input,
+            |ctx| {
+                egui::Window::new("Camera Editor (F7)")
+                    .default_pos(egui::pos2(20.0, 20.0))
+                    .show(ctx, |ui| {
+                        let Some((cam_name, base, editor, active)) = camera_info else {
+                            ui.label("(no play camera)");
+                            return;
+                        };
+                        // One nudge per click, in the plane's local frame
+                        // (+Z forward, +Y up, +X left - matches Camera's own
+                        // `target.rotation * debug_offset`).
+                        const STEP: f32 = 0.25;
+
+                        let resulting = base + editor;
+                        ui.label(format!("Camera: {}", cam_name));
+                        ui.label(format!("Base (state) offset: ({:+.2}, {:+.2}, {:+.2})", base.x, base.y, base.z));
+                        ui.label(format!("Editor nudge:        ({:+.2}, {:+.2}, {:+.2})", editor.x, editor.y, editor.z));
+                        ui.label(format!("Resulting offset:    ({:+.2}, {:+.2}, {:+.2})", resulting.x, resulting.y, resulting.z));
+                        ui.separator();
+
+                        ui.horizontal(|ui| {
+                            ui.add_space(40.0);
+                            if ui.button("  Up  ").clicked() { camera_offset_delta.y += STEP; }
+                        });
+                        ui.horizontal(|ui| {
+                            if ui.button(" Left ").clicked() { camera_offset_delta.x += STEP; }
+                            if ui.button("Right ").clicked() { camera_offset_delta.x -= STEP; }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.add_space(40.0);
+                            if ui.button(" Down ").clicked() { camera_offset_delta.y -= STEP; }
+                        });
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Forward").clicked() { camera_offset_delta.z += STEP; }
+                            if ui.button(" Back  ").clicked() { camera_offset_delta.z -= STEP; }
+                        });
+                        ui.separator();
+
+                        let mut active_mut = active;
+                        if ui.checkbox(&mut active_mut, "Editor active (also F5)").changed() {
+                            camera_set_active = Some(active_mut);
+                        }
+                        if ui.button("Reset nudge").clicked() {
+                            camera_reset_offset = true;
+                        }
+                        ui.add_space(2.0);
+                        ui.label(format!("position: Vector3::new({:.3}, {:.3}, {:.3})", resulting.x, resulting.y, resulting.z));
+                    });
+
+                egui::Window::new("Debug Info (F7)")
+                    .default_pos(egui::pos2(debug_info_default_x, 20.0))
+                    .show(ctx, |ui| {
+                        ui.label(format!("FPS: {:.0}", fps));
+                        if let Some(pos) = player_position {
+                            ui.label(format!("Position: ({:.1}, {:.1}, {:.1})", pos.x, pos.y, pos.z));
+                        } else {
+                            ui.label("Position: (no player)");
+                        }
+                        ui.separator();
+                        if let Some((throttle, speedometer, altimeter, mach, g_meter, aoa_x, aoa_y, aoa, roll_rate, pitch_rate, yaw_rate, stall, _aileron, _elevator, _rudder, _trim_roll, _trim_pitch, _trim_yaw)) = flight_data {
+                            ui.label(format!("Throttle: {:.0}%", throttle * 100.0));
+                            ui.label(format!("Speed: {:.0} kt", speedometer));
+                            ui.label(format!("Altitude: {:.0}", altimeter));
+                            ui.label(format!("Mach: {:.2}", mach));
+                            ui.label(format!("G: {:.1}", g_meter));
+                            ui.label(format!("Stall: {}", stall));
+                            ui.separator();
+                            // Plain "deg" rather than the "°" glyph - egui's
+                            // own default embedded font doesn't guarantee
+                            // that character renders (showed up blank/
+                            // missing in testing), ASCII always will.
+                            ui.label(format!("AoA X: {:.1} deg", aoa_x));
+                            ui.label(format!("AoA Y: {:.1} deg", aoa_y));
+                            ui.label(format!("AoA: {:.1} deg", aoa));
+                            ui.separator();
+                            ui.label(format!("Roll rate: {:.1} deg/s", roll_rate));
+                            ui.label(format!("Pitch rate: {:.1} deg/s", pitch_rate));
+                            ui.label(format!("Yaw rate: {:.1} deg/s", yaw_rate));
+                        } else {
+                            ui.label("Flight data: (no player)");
+                        }
+                    });
+
+                // Stick position indicator - X = aileron (roll), Y = elevator
+                // (pitch), rudder shown separately as a bar (no natural 2nd
+                // axis to pair it with here). Drawn with egui's own raw
+                // Painter rather than egui_plot - this isn't really a chart
+                // (no axes/data series), just a circle + a dot, which
+                // egui_plot has no particularly good primitive for.
+                egui::Window::new("Stick Input (F7)")
+                    .default_pos(egui::pos2(debug_info_default_x, 420.0))
+                    .show(ctx, |ui| {
+                        if let Some((.., aileron, elevator, rudder, trim_roll, trim_pitch, trim_yaw)) = flight_data {
+                            ui.label("X = aileron, Y = elevator. Circle = full deflection.");
+                            ui.label("Red = commanded stick. Yellow ring = trim only.");
+                            let size = egui::vec2(200.0, 200.0);
+                            let (response, painter) = ui.allocate_painter(size, egui::Sense::hover());
+                            let rect = response.rect;
+                            let center = rect.center();
+                            let radius = rect.width().min(rect.height()) * 0.5 - 4.0;
+
+                            painter.circle_stroke(center, radius, egui::Stroke::new(1.5, egui::Color32::GRAY));
+                            painter.line_segment([egui::pos2(center.x - radius, center.y), egui::pos2(center.x + radius, center.y)], egui::Stroke::new(1.0, egui::Color32::DARK_GRAY));
+                            painter.line_segment([egui::pos2(center.x, center.y - radius), egui::pos2(center.x, center.y + radius)], egui::Stroke::new(1.0, egui::Color32::DARK_GRAY));
+
+                            // Screen Y grows downward, so elevator is negated
+                            // here to make "nose up" (positive elevator, by
+                            // this game's own convention) plot upward on
+                            // screen, matching how a real stick display reads
+                            // - flip this back if elevator's own sign turns
+                            // out to mean the opposite in this game.
+                            let stick_pos = egui::pos2(
+                                center.x + aileron.clamp(-1.0, 1.0) * radius,
+                                center.y - elevator.clamp(-1.0, 1.0) * radius,
+                            );
+                            painter.circle_filled(stick_pos, 6.0, egui::Color32::from_rgb(255, 80, 80));
+
+                            // Trim-only marker - where "elevator"/"aileron"
+                            // above would sit from trim alone, ignoring
+                            // whatever the pilot's stick is doing right now.
+                            // Plotted directly from trim_roll/trim_pitch, not
+                            // from `elevator`/`aileron` (those already have
+                            // pitch trim folded in as of this session - see
+                            // Plane::update's own comment - so re-deriving
+                            // trim's contribution from them isn't possible
+                            // once the stick is off-center; trim_roll/
+                            // trim_pitch are the raw Trim values instead).
+                            // Same sign-of-elevator caveat as the stick dot
+                            // above.
+                            let trim_pos = egui::pos2(
+                                center.x + trim_roll.clamp(-1.0, 1.0) * radius,
+                                center.y - trim_pitch.clamp(-1.0, 1.0) * radius,
+                            );
+                            painter.circle_stroke(trim_pos, 6.0, egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 220, 60)));
+
+                            ui.add_space(4.0);
+                            ui.label(format!("Aileron: {:.2}  Elevator: {:.2}  Rudder: {:.2}", aileron, elevator, rudder));
+                            ui.label(format!("Trim roll: {:.2}  Trim pitch: {:.2}", trim_roll, trim_pitch));
+
+                            // Yaw trim has no natural 2nd axis to share the
+                            // circle with (same reason rudder itself isn't
+                            // plotted there either - see this block's own
+                            // top comment), so it gets its own bar here
+                            // instead. `flight_data` is a plain snapshot
+                            // gathered before this closure (can't borrow
+                            // `self` again inside it - see where it's built,
+                            // above), not a live handle into Plane's own
+                            // Trim, so this can't actually be dragged to set
+                            // yaw trim the way a normal Slider would suggest
+                            // - disabled to read as the display-only gauge
+                            // it is, matching everything else in this
+                            // window. Say the word if you want it wired up
+                            // to actually set trim.yaw instead.
+                            ui.add_space(4.0);
+                            let mut trim_yaw_display = trim_yaw;
+                            ui.add_enabled(false, egui::Slider::new(&mut trim_yaw_display, -1.0..=1.0).text("Yaw trim"));
+                        } else {
+                            ui.label("(no player)");
+                        }
+                    });
+
+                // Positioned clearly right of "Debug Info" (which sits at
+                // x=20 above) rather than the other way around, per request.
+                egui::Window::new("Aero Debug - Roll Authority Gain (F7)")
+                    .default_pos(egui::pos2(aero_chart_default_x, 420.0))
+                    .show(ctx, |ui| {
+                        ui.label("Line = theoretical max roll rate (AoA=0, sea level). Dots = recent flight trail (actual measured rate).");
+                        egui_plot::Plot::new("roll_rate_live_plot")
+                            .height(320.0)
+                            .width(520.0)
+                            .x_axis_label("Airspeed (knots)")
+                            .y_axis_label("Roll rate (deg/s)")
+                            .x_axis_formatter(|mark, _range| format!("{:.0}", mark.value))
+                            .y_axis_formatter(|mark, _range| format!("{:.0}", mark.value))
+                            // Fixed spacing rather than egui_plot's own
+                            // automatic tick-spacing algorithm on either
+                            // axis - that algorithm picks spacing based on
+                            // how much pixel width/height is actually
+                            // available, and appears to have been collapsing
+                            // to just the endpoint ticks when the plot ended
+                            // up smaller than expected. This guarantees
+                            // ticks at 0/100/.../800 knots and
+                            // 0/25/50/.../deg/s regardless of that (25 rather
+                            // than a round 50 so RollRateParams::default's
+                            // own 260 deg/s peak lands on a tick, not between
+                            // two).
+                            .x_grid_spacer(egui_plot::uniform_grid_spacer(|_input| [100.0, 100.0, 100.0]))
+                            .y_grid_spacer(egui_plot::uniform_grid_spacer(|_input| [25.0, 25.0, 25.0]))
+                            .legend(egui_plot::Legend::default())
+                            .show(ui, |plot_ui| {
+                                plot_ui.line(egui_plot::Line::new("Theoretical (AoA=0)", egui_plot::PlotPoints::from(curve.clone())));
+                                plot_ui.points(egui_plot::Points::new("Recent flight", egui_plot::PlotPoints::from(trail.clone())).radius(2.0));
+                            });
+                    });
+
+                // Live wing lift force - see App::wing_lift_trail's own doc
+                // comment. Positioned below "Aero Debug" (same x, height
+                // 420+320+~40 padding below that one's own y=420 start).
+                egui::Window::new("Wing Lift Forces (F7)")
+                    .default_pos(egui::pos2(aero_chart_default_x, 780.0))
+                    .show(ctx, |ui| {
+                        ui.label("Vertical (Y) lift force, Left wing (main) and Right elevator wing, most recent samples.");
+                        egui_plot::Plot::new("wing_lift_live_plot")
+                            .height(240.0)
+                            .width(520.0)
+                            .x_axis_label("Sample")
+                            .y_axis_label("Lift force Y (N)")
+                            .x_axis_formatter(|mark, _range| format!("{:.0}", mark.value))
+                            .y_axis_formatter(|mark, _range| format!("{:.0}", mark.value))
+                            .legend(egui_plot::Legend::default())
+                            .show(ui, |plot_ui| {
+                                plot_ui.line(egui_plot::Line::new("Main wing (Left)", egui_plot::PlotPoints::from(main_wing_lift_trail.clone())));
+                                plot_ui.line(egui_plot::Line::new("Elevator wing (Right)", egui_plot::PlotPoints::from(elevator_wing_lift_trail.clone())));
+                            });
+                    });
+            },
+        );
+
+        // Apply the Camera Editor window's button presses (couldn't touch
+        // `self` from inside the build_ui closure above).
+        if camera_offset_delta != Vector3::zeros() || camera_set_active.is_some() || camera_reset_offset {
+            if let Some(cam) = self.scene_manager.content_mut()
+                .and_then(|content| content.nodes.get_mut("camera"))
+                .and_then(|node| node.get_behavior_mut::<Camera>())
+            {
+                if camera_reset_offset {
+                    cam.debug_offset = Vector3::zeros();
+                }
+                cam.debug_offset += camera_offset_delta;
+                if let Some(v) = camera_set_active {
+                    cam.debug_mode_active = v;
+                }
+                // A nudge is meaningless unless the editor offset is actually
+                // being applied - turn it on.
+                if camera_offset_delta != Vector3::zeros() {
+                    cam.debug_mode_active = true;
+                }
+            }
+        }
+    }
+
     // Debug lines come from the physics thread in absolute world coordinates,
     // so make them camera-relative here to match camera.view_proj.
     fn render_physics_debug_lines<'rp>(&mut self, render_pass: &mut wgpu::RenderPass<'rp>) {
@@ -314,5 +700,7 @@ impl App {
         // see text_shader.wgsl) for any node with background_blur set.
         self.renderer.blur.render(encoder, view);
         self.render_ui_pass(encoder, view);
+        // Drawn last so it's always on top of the game's own HUD too.
+        self.render_aero_debug_overlay_pass(encoder, view);
     }
 }

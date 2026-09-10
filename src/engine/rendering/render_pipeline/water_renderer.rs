@@ -56,6 +56,8 @@ impl WaterRenderData {
             Some(Texture::DEPTH_FORMAT),
             &[model::ModelVertex::desc(), InstanceRaw::desc()],
             shader,
+            Some(wgpu::Face::Back),
+            true,
         );
 
         Self { depth_bind_group_layout, depth_bind_group, render_pipeline }

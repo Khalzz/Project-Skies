@@ -48,11 +48,24 @@ const SKYBOX_VERTICES: &[SkyboxVertex] = &[
 ];
 
 pub struct SkyboxRender {
-    pub texture: Texture,
+    // `None` for a procedural sky (see `new_procedural`) - it has no cubemap,
+    // its group-1 bind group is a small params uniform instead.
+    pub texture: Option<Texture>,
     pub bind_group_layout: BindGroupLayout,
     pub bind_group: BindGroup,
     pub render_pipeline: RenderPipeline,
     pub vertex_buffer: Buffer,
+}
+
+// Uniform for the procedural sky shader (sky.wgsl). All colours are linear
+// RGB; the alpha slots are padding.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct SkyUniform {
+    sun_direction: [f32; 4],
+    zenith_color: [f32; 4],
+    horizon_color: [f32; 4],
+    sun_color: [f32; 4],
 }
 
 impl SkyboxRender {
@@ -101,17 +114,94 @@ impl SkyboxRender {
             source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/skybox.wgsl").into()),
         });
 
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Skybox Render Pipeline"),
-            layout: Some(&pipeline_layout),
+        let render_pipeline = Self::build_pipeline(device, config, &pipeline_layout, &shader);
+
+        Self { texture: Some(texture), bind_group_layout, bind_group, render_pipeline, vertex_buffer }
+    }
+
+    /// Procedural clear-day sea sky - no cubemap. Group 1 is a small params
+    /// uniform (sun direction + palette, set once here) instead of a texture;
+    /// everything else (the camera-centred cube, the no-depth pipeline, the
+    /// `render` path) is identical to a real skybox. Tune the look below.
+    pub fn new_procedural(device: &Device, config: &SurfaceConfiguration, camera_bind_group_layout: &BindGroupLayout) -> Self {
+        let normalize3 = |v: [f32; 3]| {
+            let inv = 1.0 / (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+            [v[0] * inv, v[1] * inv, v[2] * inv, 0.0]
+        };
+        let sky_uniform = SkyUniform {
+            // Mid-morning sun, high and off to one side so the disc is visible.
+            sun_direction: normalize3([0.25, 0.80, 0.35]),
+            zenith_color: [0.19, 0.42, 0.78, 1.0],
+            horizon_color: [0.74, 0.83, 0.90, 1.0],
+            sun_color: [1.0, 0.95, 0.85, 1.0],
+        };
+
+        let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("procedural_sky_bind_group_layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("procedural_sky_uniform"),
+            contents: bytemuck::cast_slice(&[sky_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("procedural_sky_bind_group"),
+            layout: &bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buffer.as_entire_binding(),
+            }],
+        });
+
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Procedural Sky VB"),
+            contents: bytemuck::cast_slice(SKYBOX_VERTICES),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Procedural Sky Pipeline Layout"),
+            bind_group_layouts: &[camera_bind_group_layout, &bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Procedural Sky Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/sky.wgsl").into()),
+        });
+
+        let render_pipeline = Self::build_pipeline(device, config, &pipeline_layout, &shader);
+
+        Self { texture: None, bind_group_layout, bind_group, render_pipeline, vertex_buffer }
+    }
+
+    // Shared pipeline setup for skybox.wgsl / sky.wgsl - both take the same
+    // camera-centred cube VB, write straight to the swapchain with no blend,
+    // and neither write nor test depth (drawn first, behind everything).
+    fn build_pipeline(device: &Device, config: &SurfaceConfiguration, pipeline_layout: &wgpu::PipelineLayout, shader: &wgpu::ShaderModule) -> RenderPipeline {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Sky Render Pipeline"),
+            layout: Some(pipeline_layout),
             vertex: wgpu::VertexState {
-                module: &shader,
+                module: shader,
                 entry_point: Some("vs_main"),
                 buffers: &[SkyboxVertex::desc()],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
-                module: &shader,
+                module: shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
@@ -132,8 +222,6 @@ impl SkyboxRender {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: Texture::DEPTH_FORMAT,
-                // Drawn first, behind everything, and shouldn't occlude or be occluded by
-                // its own (arbitrary) cube depth - so it neither writes nor tests depth.
                 depth_write_enabled: false,
                 depth_compare: wgpu::CompareFunction::Always,
                 stencil: wgpu::StencilState::default(),
@@ -146,9 +234,7 @@ impl SkyboxRender {
             },
             multiview: None,
             cache: None,
-        });
-
-        Self { texture, bind_group_layout, bind_group, render_pipeline, vertex_buffer }
+        })
     }
 
     fn create_bind_group(device: &Device, layout: &BindGroupLayout, texture: &Texture) -> BindGroup {
@@ -172,7 +258,7 @@ impl SkyboxRender {
     #[allow(unused)]
     pub fn set_texture(&mut self, device: &Device, texture: Texture) {
         self.bind_group = Self::create_bind_group(device, &self.bind_group_layout, &texture);
-        self.texture = texture;
+        self.texture = Some(texture);
     }
 
     pub fn render<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>, camera_bind_group: &'a wgpu::BindGroup) {

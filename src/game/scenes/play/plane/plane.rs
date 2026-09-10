@@ -27,7 +27,10 @@ pub struct Trim {
 
 impl Trim {
     fn new() -> Self {
-        Self { pitch: 0.29, roll: 0.0, yaw: 0.0 }
+        // Pitch starts at -0.3 (requested directly, not derived) - roll/yaw
+        // still default untrimmed (0.0), adjustable by hand (I/K/J/L/U/O,
+        // see Trim::update below) same as before.
+        Self { pitch: -0.16, roll: 0.0, yaw: 0.0 }
     }
 
     fn update(&mut self, delta_time: f32) {
@@ -64,11 +67,43 @@ pub struct PlaneControls {
     pub aileron: f32,
     pub rudder: f32,
     pub trim: Trim,
+    // Mirrors Plane::fly_by_wire_pitch_autotrim (see that field's own doc
+    // comment) - PlaneControls, not Plane itself, is what actually crosses
+    // the plane_control_tx channel to the physics thread, where the pitch
+    // FLCS (WingManager::pitch_flcs, see PitchFlcs) lives - that's where the
+    // rigidbody and wing/airfoil data actually are. When set, `elevator`
+    // below is interpreted by that loop as a normal-g COMMAND, not a
+    // deflection.
+    pub fly_by_wire_pitch_autotrim: bool,
+    // The SAME g_meter shown on the F7 debug overlay ("G: {:.1}") - computed
+    // in Plane::apply_physics_feedback from real velocity-delta sampling,
+    // copied here each frame for any physics-side consumer that wants the
+    // exact HUD number. NOTE the pitch FLCS does NOT use this - it computes
+    // its own g fresh from linvel deltas on the physics thread to avoid this
+    // field's one-render-frame channel lag (see PitchFlcs::update).
+    pub g_meter: f32,
+    // Mirrors `Plane::landing_gear.deploy` (0 = up/stowed, 1 = down/locked) -
+    // crosses to the physics thread so WheelManager::update can scale the
+    // suspension force by it (a part-extended strut can't hold the airframe)
+    // and skip the raycast entirely at 0.
+    pub gear_deploy: f32,
+    // TESTING ONLY - the opposite direction from every other field here:
+    // written by Plane::apply_physics_feedback from that tick's own
+    // WingDebugData (see that fn's own comment), read by ControlInput::value
+    // to make the elevator control-surface MESH animate off what the
+    // simulated elevator wing's control_input actually is, instead of raw
+    // player input - so a fly-by-wire solve override (or anything else that
+    // makes the simulated wing diverge from the stick) is visible in real
+    // time on the model itself. Never sent to the physics thread (nothing
+    // there reads it) and never set anywhere PlaneControls gets built fresh
+    // (Plane::new/PlaneControls::new), only mutated in place afterward -
+    // None until the first physics tick reports back.
+    pub debug_simulated_elevator_control_input: Option<f32>,
 }
 
 impl PlaneControls {
     pub fn new() -> Self {
-        Self { throttle: 0.0, elevator: 0.0, aileron: 0.0, rudder: 0.0, trim: Trim::new() }
+        Self { throttle: 0.0, elevator: 0.0, aileron: 0.0, rudder: 0.0, trim: Trim::new(), fly_by_wire_pitch_autotrim: false, g_meter: 1.0, gear_deploy: 1.0, debug_simulated_elevator_control_input: None }
     }
 }
 
@@ -110,7 +145,20 @@ enum ControlInput {
 impl ControlInput {
     fn value(&self, controls: &PlaneControls) -> f32 {
         match self {
-            ControlInput::Elevator => controls.elevator,
+            // Negated - see PlaneControls.elevator's own assignment (in
+            // Plane::update) for why: that value's sign convention flipped
+            // (W now +1/S now -1, matching aileron/rudder's own convention)
+            // but the elevator control surface's own visual animation
+            // direction shouldn't change just because of that, so this
+            // undoes the flip locally. TESTING: when
+            // debug_simulated_elevator_control_input is available, this uses
+            // that instead - it's already in the SAME convention as -elevator
+            // (the elevator wing's own control_input is defined as
+            // -plane_controls.elevator in wing_manager.rs's non-fly-by-wire
+            // path, so this is a like-for-like swap, not an extra negation),
+            // so the mesh shows the simulated wing's real, post-solve state
+            // rather than raw stick. See that field's own doc comment.
+            ControlInput::Elevator => controls.debug_simulated_elevator_control_input.unwrap_or(-controls.elevator),
             ControlInput::Aileron => controls.aileron,
             ControlInput::Rudder => controls.rudder,
         }
@@ -170,61 +218,128 @@ impl ControlSurface {
     }
 }
 
-// How fast the gear eases toward its target position each frame - same
-// asymptotic lerp-toward-target pattern `ControlSurface::apply` uses for its
-// own lerp_speed, not a fixed-duration timer.
-const LANDING_GEAR_LERP_SPEED: f32 = 1.5;
+// Gear extend/retract speed, as a fraction of the full cycle per second
+// (so 0.55 => ~1.8s each way). EMERGENCY is the rate used when ground contact
+// forces the gear back down mid-cycle.
+const GEAR_RATE_PER_S: f32 = 0.55;
+const GEAR_EMERGENCY_RATE_PER_S: f32 = 3.0;
+// At/above this `deploy` the gear counts as down-and-locked.
+const GEAR_LOCKED_THRESHOLD: f32 = 0.999;
 
 struct LandingGearWheel {
-    // Reuses the exact mesh names `WheelManager`'s physics side already
-    // keys `RenderMessage`'s wheel data by (see
-    // `Plane::apply_physics_feedback`) - same meshes, just also driven by
-    // this whenever the gear is closed instead of always by live suspension.
+    // Same mesh names `WheelManager` keys its wheel data by (see
+    // `Plane::apply_physics_feedback`).
     mesh_name: &'static str,
-    // Gear down - this wheel's authored rest-pose translation in
-    // res/F16/f16.gltf, i.e. where it sat before this feature existed.
-    open_position: Vector3<f32>,
-    // Gear up - tucked in near the fuselage centerline. Hand-picked, eyeball/
-    // adjust these in-engine against the actual model rather than trusting
-    // them blindly.
-    closed_position: Vector3<f32>,
+    // Fully retracted - tucked in near the fuselage centerline. Hand-picked;
+    // eyeball against the model.
+    retracted_position: Vector3<f32>,
+    // Fully deployed pose, used ONLY as a fallback when there's no live
+    // suspension raycast data yet (first frames / physics not running).
+    // Normally the deployed pose is the raycast point, so the wheels track
+    // the ground / bumps.
+    deployed_fallback: Vector3<f32>,
 }
 
-/// The landing gear's own state - just which position each wheel mesh should
-/// snap to right now, no in-between: `closed` picks `open_position` or
-/// `closed_position` directly, no lerp/timer.
+/// Landing-gear state machine. `deploy` is the whole state: 0.0 = up and
+/// stowed, 1.0 = down and locked, anything between = mid-cycle. The wheel
+/// meshes and the suspension-force scale sent to the physics thread are both
+/// derived from it.
+///
+/// Rules:
+/// - starts down (see `Plane::new`);
+/// - can't retract while down-and-locked AND a wheel is on the ground;
+/// - freely toggled in the air;
+/// - if a wheel ray finds ground while the gear is mid-cycle (not
+///   down-and-locked), it's retracted the rest of the way UP, fast - a
+///   part-extended strut can't safely carry the airframe.
 pub struct LandingGear {
-    // The commanded state - which position `update` writes each frame.
-    pub closed: bool,
+    /// 0..1 gear extension. Copied into `PlaneControls::gear_deploy` each frame.
+    pub deploy: f32,
+    /// What the pilot last commanded (`true` = down).
+    commanded_down: bool,
+    /// Any wheel ray touched ground last physics frame - refreshed by
+    /// `Plane::apply_physics_feedback`.
+    pub any_grounded: bool,
     wheels: Vec<LandingGearWheel>,
 }
 
 impl LandingGear {
-    // `starts_closed` is the "define whether the plane starts with the gear
-    // up or down" knob - set here, at construction (see `Plane::new`), since
-    // "player" currently spawns already airborne at 1000m rather than on a
-    // runway.
-    fn new(starts_closed: bool) -> Self {
+    fn new(starts_down: bool) -> Self {
         Self {
-            closed: starts_closed,
+            deploy: if starts_down { 1.0 } else { 0.0 },
+            commanded_down: starts_down,
+            any_grounded: false,
             wheels: vec![
-                LandingGearWheel { mesh_name: "wheel-f", open_position: Vector3::new(0.0, -0.279, 0.756), closed_position: Vector3::new(0.0, 0.00, 0.456) },
-                LandingGearWheel { mesh_name: "wheel-lb", open_position: Vector3::new(0.2, -0.266, 0.167), closed_position: Vector3::new(-0.08, 0.02, 0.367) },
-                LandingGearWheel { mesh_name: "wheel-rb", open_position: Vector3::new(-0.2, -0.266, 0.167), closed_position: Vector3::new(0.08, 0.02, 0.367) },
+                LandingGearWheel { mesh_name: "wheel-f",  retracted_position: Vector3::new(0.0, 0.00, 0.456),  deployed_fallback: Vector3::new(0.0, -0.279, 0.756) },
+                LandingGearWheel { mesh_name: "wheel-lb", retracted_position: Vector3::new(-0.08, 0.02, 0.367), deployed_fallback: Vector3::new(-0.2, -0.266, 0.167) },
+                LandingGearWheel { mesh_name: "wheel-rb", retracted_position: Vector3::new(0.08, 0.02, 0.367),  deployed_fallback: Vector3::new(0.2, -0.266, 0.167) },
             ],
         }
     }
 
-    fn toggle(&mut self) {
-        self.closed = !self.closed;
+    fn locked_down(&self) -> bool {
+        self.deploy >= GEAR_LOCKED_THRESHOLD
     }
 
-    fn update(&mut self, model: &mut LoadedModel, delta_time: f32, queue: &wgpu::Queue) {
+    /// Pilot pressed the gear toggle. No-op only when the gear is already
+    /// down-and-locked and a wheel is on the ground (can't retract the gear
+    /// you're standing on); otherwise flips the command.
+    fn request_toggle(&mut self) {
+        self.set_commanded_down(!self.commanded_down);
+    }
+
+    fn set_commanded_down(&mut self, down: bool) {
+        if !down && self.locked_down() && self.any_grounded {
+            return; // reject "gear up" with weight on wheels
+        }
+        self.commanded_down = down;
+    }
+
+    /// Advance one frame. Call after `apply_physics_feedback` has refreshed
+    /// `any_grounded`.
+    fn tick(&mut self, delta_time: f32) {
+        // A wheel ray found ground while the gear is NOT down-and-locked -
+        // i.e. it's mid-cycle. A part-extended strut can't safely carry the
+        // airframe, so pull the gear the rest of the way UP (fast) and get it
+        // out of the way rather than leaving it half-out under load.
+        let forced = self.any_grounded && !self.locked_down();
+        if forced {
+            self.commanded_down = false;
+        }
+
+        let target = if self.commanded_down { 1.0 } else { 0.0 };
+        let rate = if forced { GEAR_EMERGENCY_RATE_PER_S } else { GEAR_RATE_PER_S };
+        let step = rate * delta_time;
+        self.deploy = (self.deploy + (target - self.deploy).clamp(-step, step)).clamp(0.0, 1.0);
+    }
+
+    /// Positions every wheel mesh, blending each between its retracted pose
+    /// and its live deployed pose (raycast point, or the fallback) by
+    /// `deploy`. Also latches `any_grounded`. Called from
+    /// `apply_physics_feedback`, which has the model and the wheel metadata.
+    fn place_wheel_meshes(
+        &mut self,
+        model: &mut LoadedModel,
+        wheel_data: Option<&std::collections::HashMap<String, crate::game::scenes::play::plane::physics::wheels::wheel::WheelData>>,
+        instance_scale: Vector3<f32>,
+        queue: &wgpu::Queue,
+    ) {
+        self.any_grounded = wheel_data
+            .map(|w| w.values().any(|d| d.grounded))
+            .unwrap_or(false);
+
         let Some(meshes) = model.mesh_lists.get_mut("opaque") else { return };
-        for wheel in &self.wheels {
-            let Some(mesh) = meshes.get_mut(wheel.mesh_name) else { continue };
-            let target = if self.closed { wheel.closed_position } else { wheel.open_position };
-            mesh.transform.position = lerp_vector3(mesh.transform.position, target, delta_time * LANDING_GEAR_LERP_SPEED);
+        for lg in &self.wheels {
+            let Some(mesh) = meshes.get_mut(lg.mesh_name) else { continue };
+            let deployed = match wheel_data.and_then(|w| w.get(lg.mesh_name)) {
+                Some(d) => Vector3::new(
+                    d.local_position.x / instance_scale.x,
+                    d.local_position.y / instance_scale.y,
+                    d.local_position.z / instance_scale.z,
+                ),
+                None => lg.deployed_fallback,
+            };
+            mesh.transform.position = lerp_vector3(lg.retracted_position, deployed, self.deploy);
             mesh.update_transform(queue);
         }
     }
@@ -237,6 +352,12 @@ pub struct FlightData {
     pub altimeter: f32,
     pub speedometer: f32,
     pub g_meter: f32,
+    // True airspeed (physics_message.linvel, m/s) divided by a fixed sea-
+    // level speed of sound (340.29 m/s, standard ISA value at 15°C) - not
+    // altitude-corrected, same sea-level-only assumption the rest of this
+    // aerodynamics model already makes (see e.g. Wing::physics_force's own
+    // fixed air_density constant).
+    pub mach: f32,
     // Angle of attack, decomposed into the plane's own body axes (see
     // apply_physics_feedback for the exact rotation.inverse() * linvel
     // derivation) - forward is local +Z, up is local +Y, right is local +X
@@ -298,6 +419,23 @@ pub struct Plane {
     // to ever light it up.
     pub stall: bool,
     rng: ThreadRng,
+    // Whether this aircraft's pitch axis is fly-by-wire normal-g command
+    // (like the real F-16's normal-mode pitch law - the pilot commands g,
+    // the loop drives the stabilator to hold it and its integrator stands in
+    // for trim) vs. the plain manual + persistent-trim path. Toggleable in
+    // flight via "toggle_fbw_pitch" (B). Per-`Plane` rather than a global
+    // since not every future aircraft will be fly-by-wire; `false` reproduces
+    // the manual/trim behavior exactly. See PitchFlcs for the control law.
+    pub fly_by_wire_pitch_autotrim: bool,
+    // Every wing's own last_lift_force (see Wing's own field of the same
+    // name), keyed by label ("Left wing", "Right elevator wing", etc.) -
+    // written each tick by apply_physics_feedback from that tick's own
+    // WingDebugData (same "wings" metadata debug_simulated_elevator_
+    // control_input already reads - see that field's own doc comment),
+    // read by play::scene::GameLogic::update to feed App::wing_lift_trail
+    // for the F7 "Wing Lift Forces" chart. Empty until the first physics
+    // tick reports back.
+    pub wing_lift_forces: std::collections::HashMap<String, Vector3<f32>>,
 }
 
 impl Plane {
@@ -306,13 +444,18 @@ impl Plane {
             controls: PlaneControls::new(),
             input_locked: false,
             control_surfaces: Self::default_control_surfaces(),
-            landing_gear: LandingGear::new(true),
+            landing_gear: LandingGear::new(true), // starts down
             afterburner: Afterburner::new(),
-            flight_data: FlightData { altimeter: 0.0, speedometer: 0.0, g_meter: 1.0, aoa_x: 0.0, aoa_y: 0.0, aoa: 0.0, roll_rate: 0.0, pitch_rate: 0.0, yaw_rate: 0.0 },
+            flight_data: FlightData { altimeter: 0.0, speedometer: 0.0, g_meter: 1.0, aoa_x: 0.0, aoa_y: 0.0, aoa: 0.0, roll_rate: 0.0, pitch_rate: 0.0, yaw_rate: 0.0, mach: 0.0 },
             previous_velocity: None,
             velocity_sample_elapsed: 0.0,
             stall: false,
             rng: rand::thread_rng(),
+            // Pitch fly-by-wire: normal-g command law (see PitchFlcs). On by
+            // default - this is the F-16. Toggle in flight with
+            // "toggle_fbw_pitch" (B) to fall back to manual + trim.
+            fly_by_wire_pitch_autotrim: true,
+            wing_lift_forces: std::collections::HashMap::new(),
         }
     }
 
@@ -339,6 +482,10 @@ impl Plane {
     /// than widening every `Behavior`'s signature for this one consumer.
     pub fn apply_physics_feedback(&mut self, model: &mut LoadedModel, physics_message: &RenderMessage, gravity: Vector3<f32>, instance_scale: Vector3<f32>, queue: &wgpu::Queue, delta_time: f32) {
         self.flight_data.speedometer = physics_message.linvel.magnitude() * 1.94384;
+        // See FlightData::mach's own doc comment for the sea-level-only
+        // caveat on this constant.
+        const SPEED_OF_SOUND_SEA_LEVEL_MS: f32 = 340.29;
+        self.flight_data.mach = physics_message.linvel.magnitude() / SPEED_OF_SOUND_SEA_LEVEL_MS;
         // Raw world Y - this game's own "sea level" is Y=0 (see e.g.
         // play::scene::spawn_world's "world"/water node), so this doubles as
         // height above water without needing the wave-surface's own current
@@ -387,15 +534,27 @@ impl Plane {
             _ => {}
         }
 
-        if let Some(meshes) = model.mesh_lists.get_mut("opaque") {
-            if let Some(MetadataType::Wheels(wheels)) = physics_message.metadata.get("wheels") {
-                for (index, wheel) in wheels.iter() {
-                    if let Some(wheel_mesh) = meshes.get_mut(index.as_str()) {
-                        let local_position = &wheel.local_position;
-                        wheel_mesh.transform.position = Vector3::new(local_position.x / instance_scale.x, local_position.y / instance_scale.y, local_position.z / instance_scale.z);
-                        wheel_mesh.update_transform(queue);
-                    }
-                }
+        // Landing gear: LandingGear owns every wheel mesh position, blending
+        // each between its retracted pose and its live suspension-raycast
+        // pose by `deploy` (the smoothly-animated 0..1 state - see
+        // LandingGear::tick). Also refreshes `any_grounded` for that state
+        // machine. This is the ONLY writer of the wheel mesh transforms.
+        let wheel_data = match physics_message.metadata.get("wheels") {
+            Some(MetadataType::Wheels(w)) => Some(w),
+            _ => None,
+        };
+        self.landing_gear.place_wheel_meshes(model, wheel_data, instance_scale, queue);
+
+        // TESTING - see debug_simulated_elevator_control_input's own doc
+        // comment. Either elevator wing works (they're driven to the same
+        // control_input, fly-by-wire override included).
+        if let Some(MetadataType::Wings(wings)) = physics_message.metadata.get("wings") {
+            if let Some(elevator_wing) = wings.iter().find(|w| w.label == "Right elevator wing") {
+                self.controls.debug_simulated_elevator_control_input = Some(elevator_wing.control_input);
+            }
+            // See wing_lift_forces' own doc comment.
+            for wing in wings {
+                self.wing_lift_forces.insert(wing.label.clone(), wing.last_lift_force);
             }
         }
     }
@@ -408,23 +567,135 @@ impl Behavior for Plane {
             // stick binding gives proportional deflection while a keyboard binding
             // still cleanly resolves to -1.0/0.0/1.0 (a key's strength is always
             // exactly 0.0 or 1.0).
-            self.controls.elevator = input::get_axis("pitch_up", "pitch_down");
-            self.controls.aileron = input::get_axis("roll_left", "roll_right");
-            self.controls.rudder = input::get_axis("rudder_left", "rudder_right");
-            // Absolute position, not a ramp: a trigger's deflection directly sets
-            // throttle, like a real lever.
-            self.controls.throttle = input::get_axis("throttle_down", "throttle_up").clamp(0.0, 1.0);
+            // get_axis(negative, positive) - "pitch_down" (S) had been
+            // passed as the SECOND (positive) arg and "pitch_up" (W) as the
+            // first (negative) one, backwards relative to how aileron/rudder
+            // below are both ordered (their own first arg is each one's own
+            // "-1" key) - meant W read as -1 and S as +1. Swapped so W is +1
+            // and S is -1, matching that same convention. Everywhere this
+            // value gets consumed for actual flight behavior (not just this
+            // struct) had to negate it to compensate, so W/S still produce
+            // the exact same physical pitch as before this - see
+            // ControlInput::value's own Elevator arm and wing_manager.rs's
+            // own "elevator wing" control_input, both of which now do that.
+            // TESTING ONLY - stick-response smoothing (see
+            // STICK_INPUT_LERP_SPEED's own comment). Raw target axis reads
+            // straight off input as before; each control then lerps its own
+            // current value toward that target rather than snapping to it
+            // instantly, same lerp(current, target, delta_time * SPEED)
+            // idiom used elsewhere (LandingGear/ControlSurface) - self-
+            // referential (self.controls.X read as "current" and
+            // overwritten with the eased step), so no extra state is
+            // needed. SPEED=6.0 puts center-to-max at ~1-e^(-0.5*6)≈95% of
+            // the way there by 0.5s (an exact linear "reaches -1 at exactly
+            // 0.5s" ramp was the literal ask, but this asymptotic approach
+            // is close enough to read as "0.5s to max" and matches this
+            // codebase's own established easing idiom instead of a new one).
+            const STICK_INPUT_LERP_SPEED: f32 = 6.0;
+            let raw_elevator_stick = input::get_axis("pitch_down", "pitch_up");
+            let target_elevator = raw_elevator_stick;
+            let target_aileron = input::get_axis("roll_left", "roll_right");
+            let target_rudder = input::get_axis("rudder_left", "rudder_right");
+
+            // Pitch and roll trim folded in HERE (input stage) rather than
+            // left as separate terms added inside wing_manager.rs's
+            // control_input - see the conversation this came out of. Two
+            // effects: trim changes now ride the same lerp as stick input
+            // instead of applying instantly, and the stick-gauge dot /
+            // readouts on the F7 overlay now reflect the actual trimmed
+            // command rather than raw stick alone. Added (not subtracted) -
+            // an earlier version of this subtracted trim.pitch here to
+            // exactly reproduce wing_manager.rs's old `-elevator +
+            // trim.pitch` formula, but that made self.controls.elevator's
+            // OWN sign run backwards from trim (increasing trim.pitch
+            // DECREASED elevator), which visually showed the stick-gauge
+            // dot moving the wrong way when trimming. Adding instead keeps
+            // self.controls.elevator/aileron in the same intuitive
+            // convention trim.pitch/trim.roll already use on their own (and
+            // makes the red stick dot exactly coincide with the yellow
+            // trim-only marker whenever the stick is centered, which is a
+            // good sanity check that this is right) - wing_manager.rs's
+            // elevator wings now do plain `-plane_controls.elevator`, and
+            // "Left"/"Right wing" now do plain `-`/`+ plane_controls.aileron`,
+            // neither with a separate trim term, so this is where all of
+            // pitch and roll trim's effect comes from. This does change
+            // roll trim's actual behavior, not just where it applies: the
+            // old wing_manager.rs formula added trim.roll with the SAME
+            // sign to both wings (a uniform bias - since both wings' lift
+            // responds to control_input the same way, that was actually
+            // behaving more like a symmetric lift/flap trim than genuine
+            // roll authority, not really "roll" despite the name). Folding
+            // it in before the L/R sign split makes it properly
+            // differential like aileron itself, matching how a real
+            // aileron trim tab works - only yaw trim is left alone, out of
+            // scope for this pass, though the same folding would be
+            // straightforward there too if wanted (Rudder wing has no L/R
+            // pair to be asymmetric about).
+            // Pitch trim is NOT folded in while fly-by-wire pitch is engaged:
+            // there the stick is a normal-g command (see PitchFlcs), the loop's
+            // own integrator is the trim, and the I/K trim keys are inert for
+            // pitch. Roll trim is unaffected either way.
+            let target_elevator = if self.fly_by_wire_pitch_autotrim {
+                target_elevator
+            } else {
+                target_elevator + self.controls.trim.pitch
+            };
+            let target_aileron = target_aileron + self.controls.trim.roll;
+
+            self.controls.elevator = lerp(self.controls.elevator, target_elevator, delta_time * STICK_INPUT_LERP_SPEED);
+            self.controls.aileron = lerp(self.controls.aileron, target_aileron, delta_time * STICK_INPUT_LERP_SPEED);
+            self.controls.rudder = lerp(self.controls.rudder, target_rudder, delta_time * STICK_INPUT_LERP_SPEED);
+            // Accumulator, not an absolute lever position - holding
+            // throttle_up/throttle_down adds/subtracts power over time
+            // rather than snapping straight to axis strength. A keyboard
+            // binding's own axis strength is always exactly 0 or 1 (see
+            // this fn's own top comment on get_axis), so the old
+            // `.clamp(0.0, 1.0)` of that value directly meant "full power
+            // exactly while held, zero the instant it's released" - not a
+            // real throttle at all on keyboard, only a hair better on an
+            // analog trigger. THROTTLE_RATE is how much power (0..1) builds
+            // per second of being held - not yet tuned, just a starting
+            // guess.
+            const THROTTLE_RATE: f32 = 0.5;
+            self.controls.throttle = (self.controls.throttle + input::get_axis("throttle_down", "throttle_up") * THROTTLE_RATE * delta_time).clamp(0.0, 1.0);
             self.controls.trim.update(delta_time);
 
+            // Pitch fly-by-wire (normal-g command law) - toggleable in flight
+            // for A/B comparison against the manual/trim path. When engaged,
+            // `self.controls.elevator` is a G COMMAND rather than a deflection
+            // (mapped in PitchFlcs), and the loop's integrator replaces trim.
+            // This flag is what actually crosses plane_control_tx to the
+            // physics thread (PlaneControls, not Plane); the PitchFlcs itself
+            // lives on the physics side (WingManager).
+            if input::is_action_just_pressed("toggle_fbw_pitch") {
+                self.fly_by_wire_pitch_autotrim = !self.fly_by_wire_pitch_autotrim;
+                println!(
+                    "Pitch fly-by-wire (g-command): {}",
+                    if self.fly_by_wire_pitch_autotrim { "ENGAGED - stick commands g" } else { "OFF - manual + trim" }
+                );
+            }
+            self.controls.fly_by_wire_pitch_autotrim = self.fly_by_wire_pitch_autotrim;
+            self.controls.g_meter = self.flight_data.g_meter;
+
+            // Gear input feeds the LandingGear state machine (see its doc
+            // comment). request_toggle / set_commanded_down enforce the
+            // "can't retract with weight on wheels" rule; tick() advances the
+            // `deploy` animation and applies the "ground contact mid-cycle ->
+            // slam down" override. `any_grounded` was refreshed earlier this
+            // frame by apply_physics_feedback.
             if input::is_action_just_pressed("toggle_landing_gear") {
-                self.landing_gear.toggle();
+                self.landing_gear.request_toggle();
             }
             if input::is_action_just_pressed("landing_gear_up") {
-                self.landing_gear.closed = true;
+                self.landing_gear.set_commanded_down(false);
             }
             if input::is_action_just_pressed("landing_gear_down") {
-                self.landing_gear.closed = false;
+                self.landing_gear.set_commanded_down(true);
             }
+            self.landing_gear.tick(delta_time);
+            // Crosses to the physics thread - WheelManager scales suspension
+            // force by this and skips the raycast at 0.
+            self.controls.gear_deploy = self.landing_gear.deploy;
         }
 
         let Some(model_ref) = node.get_property::<ModelProperty>().map(|model| model.model_ref.clone()) else { return };
@@ -436,7 +707,9 @@ impl Behavior for Plane {
             surface.apply(&mut model_instance.model, &self.controls, delta_time, &app.renderer.queue);
         }
 
-        self.landing_gear.update(&mut model_instance.model, delta_time, &app.renderer.queue);
+        // Wheel meshes / gear state are driven from Plane::apply_physics_feedback
+        // (place_wheel_meshes) and the input block above (tick) - nothing to do
+        // here.
 
         if let Some(meshes) = model_instance.model.mesh_lists.get_mut("transparent") {
             if let Some(afterburner_mesh) = meshes.get_mut("Afterburner") {

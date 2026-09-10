@@ -4,6 +4,7 @@ use std::sync::mpsc::Sender;
 use crate::game::scenes::play::plane::physics::wheels::wheel::{Wheel, WheelData};
 use crate::game::scenes::play::plane::physics::wheels::wheel_manager::WheelManager;
 use crate::game::scenes::play::plane::physics::wings::wing_manager::WingManager;
+use crate::game::scenes::play::plane::physics::rolling_rate::{commanded_roll_rate_deg_s, RollRateParams};
 use crate::game::scenes::play::plane::plane::{PlaneControls};
 use crate::engine::physics::physics::DebugPhysicsMessageType;
 use crate::engine::physics::physics_handler::{ColliderDebugData, MetadataType, PhysicsData, PhysicsTick, SuspensionDebugData, WingDebugData};
@@ -86,17 +87,85 @@ impl PlanePhysicsLogic {
             rigidbody.add_force(fuselage_side_force, true);
         }
 
-        let suspension_debug_data = self.wheel_manager.update(physics_data, collider_set, rigidbody_set, query_pipeline);
+        let suspension_debug_data = self.wheel_manager.update(plane_controls.gear_deploy, physics_data, collider_set, rigidbody_set, query_pipeline);
+        // WheelManager::update fills its OWN `renderizable_wheels`; pull it up
+        // so the "wheels" metadata below (which Plane::apply_physics_feedback
+        // reads to place the wheel meshes at their suspension-raycast points)
+        // isn't left permanently empty.
+        self.renderizable_wheels = self.wheel_manager.renderizable_wheels.clone();
         self.wing_manager.update(plane_controls, rigidbody_set.get_mut(physics_data.rigidbody_handle).unwrap());
 
+        // TESTING ONLY - see USE_KINEMATIC_ROLL's own doc comment. The
+        // force-based aileron simulation above (Wing::physics_force, via
+        // wing_manager.update) is left completely untouched/still running -
+        // this just overwrites the roll AXIS COMPONENT of the resulting
+        // angular velocity afterward, directly following
+        // rolling_rate::commanded_roll_rate_deg_s (the same curve the F7
+        // debug overlay plots) instead of whatever the force sim produced.
+        // Pitch/yaw are untouched, still fully force-driven. Set
+        // USE_KINEMATIC_ROLL to false to go back to pure force-based roll -
+        // nothing else needs to change to revert.
+        const USE_KINEMATIC_ROLL: bool = true;
+        // Weight-on-wheels: with a wheel on the ground the landing gear reacts
+        // the rolling moment into the runway - the jet physically can't roll
+        // no matter the aileron input. Skip the kinematic override entirely
+        // then and let the force sim + suspension keep it level, instead of
+        // teleporting angvel.z from a curve that still returns a few deg/s at
+        // taxi speed (which read as "the plane rolls standing still").
+        let on_ground = self.renderizable_wheels.values().any(|w| w.grounded);
+        if USE_KINEMATIC_ROLL && !on_ground {
+            if let Some(rigidbody) = rigidbody_set.get_mut(physics_data.rigidbody_handle) {
+                let rotation = *rigidbody.rotation();
+                let true_airspeed_ms = rigidbody.linvel().magnitude();
+                let altitude_m = rigidbody.translation().y;
+                // Same aoa_y derivation as Plane::apply_physics_feedback -
+                // forward is local +Z, up is local +Y (see that fn's own
+                // comment on the axis convention). Absolute value since
+                // rolling_rate's own aoa_taper only treats positive/nose-up
+                // AoA as authority-reducing, same as wing.rs's own use of it.
+                let local_vel = rotation.inverse() * rigidbody.linvel();
+                let aoa_deg = (-local_vel.y).atan2(local_vel.z).to_degrees().abs();
 
-        // Send wing and suspension debug data via metadata for main-thread rendering
+                let commanded_rate_deg_s = commanded_roll_rate_deg_s(plane_controls.aileron, true_airspeed_ms, altitude_m, aoa_deg, &RollRateParams::default());
+                let commanded_rate_rad_s = commanded_rate_deg_s.to_radians();
+
+                // Decompose world angvel into body axes, replace only the
+                // roll (local Z) component, recompose back to world space -
+                // same body-axis convention as Plane::apply_physics_feedback
+                // (roll_rate = body_angvel.z). Direct/instant, no easing
+                // (ramp, first-order lag, and lerp were all tried and
+                // reverted - see git history) - any easing means the
+                // measured rate lags behind the target while spooling,
+                // which reads as a mismatch against the chart's curve; this
+                // is a kinematic-match test, exact agreement with the curve
+                // matters more here than spool-up feel does. Revisit easing
+                // once this is confirmed matching, applied in a way that
+                // doesn't read as "wrong" against the chart (e.g. only
+                // shown/measured after it's had time to settle).
+                let local_angvel = rotation.inverse() * rigidbody.angvel();
+                let new_local_angvel = nalgebra::Vector3::new(local_angvel.x, local_angvel.y, commanded_rate_rad_s);
+                let new_world_angvel = rotation * new_local_angvel;
+                rigidbody.set_angvel(new_world_angvel, true);
+            }
+        }
+
+
+        // Wing debug data (control_input included) is sent every tick,
+        // unconditionally - unlike colliders/suspensions below, this is
+        // also how Plane::apply_physics_feedback finds out what the
+        // simulated elevator wings' control_input actually is (e.g. a
+        // fly-by-wire solve override), not just an F-key-gated visual aid,
+        // so it can't be gated behind debug_rendering_enabled. 5 small
+        // structs, cheap either way.
+        let wing_debug: Vec<WingDebugData> = self.wing_manager.wings.iter().map(|w| WingDebugData {
+            label: w.label.clone(),
+            pressure_center: w.pressure_center,
+            last_lift_force: w.last_lift_force,
+            control_input: w.control_input,
+        }).collect();
+        physics_data.metadata.insert("wings".to_string(), MetadataType::Wings(wing_debug));
+
         if self.debug_rendering_enabled {
-            let wing_debug: Vec<WingDebugData> = self.wing_manager.wings.iter().map(|w| WingDebugData {
-                pressure_center: w.pressure_center,
-                last_lift_force: w.last_lift_force,
-            }).collect();
-            physics_data.metadata.insert("wings".to_string(), MetadataType::Wings(wing_debug));
             physics_data.metadata.insert("suspensions".to_string(), MetadataType::Suspensions(suspension_debug_data));
         }
 
