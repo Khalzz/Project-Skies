@@ -4,7 +4,7 @@ use nalgebra::Vector3;
 use rapier3d::prelude::RigidBody;
 
 use crate::engine::utils::lerps::lerp;
-use crate::game::scenes::play::plane::plane::PlaneControls;
+use crate::game::scenes::play::plane::controls::PlaneControls;
 
 use super::rolling_rate::isa_density;
 

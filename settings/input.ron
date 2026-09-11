@@ -18,6 +18,7 @@
         (action: "landing_gear_up", bindings: []),
         (action: "landing_gear_down", bindings: []),
         (action: "toggle_debug", bindings: [Key("F1")]),
+        (action: "follow_cam_toggle", bindings: [Key("F1")]),
         (action: "toggle_ui_debug", bindings: [Key("F2")]),
         (action: "toggle_console", bindings: [Key("F3")]),
         (action: "toggle_pause", bindings: [Key("F12")]),

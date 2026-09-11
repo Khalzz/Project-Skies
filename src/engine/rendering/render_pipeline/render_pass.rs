@@ -372,7 +372,7 @@ impl App {
         let flight_data = self.scene_manager.content()
             .and_then(|content| content.nodes.get("player"))
             .and_then(|node| node.get_behavior::<Plane>())
-            .map(|plane| (plane.controls.throttle, plane.flight_data.speedometer, plane.flight_data.altimeter, plane.flight_data.mach, plane.flight_data.g_meter, plane.flight_data.aoa_x, plane.flight_data.aoa_y, plane.flight_data.aoa, plane.flight_data.roll_rate, plane.flight_data.pitch_rate, plane.flight_data.yaw_rate, plane.stall, plane.controls.aileron, plane.controls.elevator, plane.controls.rudder, plane.controls.trim.roll, plane.controls.trim.pitch, plane.controls.trim.yaw));
+            .map(|plane| (plane.controls.throttle, plane.instrumentation.flight_data.speedometer, plane.instrumentation.flight_data.altimeter, plane.instrumentation.flight_data.mach, plane.instrumentation.flight_data.g_meter, plane.instrumentation.flight_data.aoa_x, plane.instrumentation.flight_data.aoa_y, plane.instrumentation.flight_data.aoa, plane.instrumentation.flight_data.roll_rate, plane.instrumentation.flight_data.pitch_rate, plane.instrumentation.flight_data.yaw_rate, plane.instrumentation.stall, plane.controls.aileron, plane.controls.elevator, plane.controls.rudder, plane.controls.trim.roll, plane.controls.trim.pitch, plane.controls.trim.yaw));
 
         // Play camera (the "camera" node's Camera behavior), read into plain
         // Copy locals for the build_ui closure. name / base offset / editor

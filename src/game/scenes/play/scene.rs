@@ -6,7 +6,7 @@ use crate::{app::App, engine::audio::subtitles::Subtitle, engine::input::input, 
 use crate::engine::game_nodes::game_object::{Camera as GameObjectCamera, Cameras, ColliderType, Lighting, Physics as PhysicsProperty, RigidBodyData};
 use super::{camera::camera::Camera, event_handling::EventSystem, plane::{physics_logic::PlanePhysicsLogic, plane::Plane}};
 use std::sync::mpsc::Sender;
-use crate::game::scenes::play::plane::plane::PlaneControls;
+use crate::game::scenes::play::plane::controls::PlaneControls;
 use crate::game::selected_level::SELECTED_LEVEL;
 use crate::game::ui::label;
 use crate::game::scenes::play::ui as play_ui;
@@ -674,15 +674,15 @@ impl GameLogic {
                     // and curve are directly comparable.
                     if app.show_aero_debug_overlay {
                         let speed_ms = physics_message.linvel.magnitude();
-                        let aoa_y = plane.flight_data.aoa_y;
-                        app.aero_debug_trail.push_back((speed_ms * 1.94384, aoa_y, plane.flight_data.roll_rate));
+                        let aoa_y = plane.instrumentation.flight_data.aoa_y;
+                        app.aero_debug_trail.push_back((speed_ms * 1.94384, aoa_y, plane.instrumentation.flight_data.roll_rate));
                         if app.aero_debug_trail.len() > Self::AERO_DEBUG_TRAIL_CAPACITY {
                             app.aero_debug_trail.pop_front();
                         }
 
-                        // See App::wing_lift_trail's own doc comment.
-                        let main_wing_lift_y = plane.wing_lift_forces.get("Left wing").map(|f| f.y).unwrap_or(0.0);
-                        let elevator_wing_lift_y = plane.wing_lift_forces.get("Right elevator wing").map(|f| f.y).unwrap_or(0.0);
+                        // See Instrumentation::wing_lift_forces' own doc comment.
+                        let main_wing_lift_y = plane.instrumentation.wing_lift_forces.get("Left wing").map(|f| f.y).unwrap_or(0.0);
+                        let elevator_wing_lift_y = plane.instrumentation.wing_lift_forces.get("Right elevator wing").map(|f| f.y).unwrap_or(0.0);
                         let next_index = app.wing_lift_trail.back().map(|(i, _, _)| i + 1.0).unwrap_or(0.0);
                         app.wing_lift_trail.push_back((next_index, main_wing_lift_y, elevator_wing_lift_y));
                         if app.wing_lift_trail.len() > Self::AERO_DEBUG_TRAIL_CAPACITY {
@@ -733,7 +733,7 @@ impl GameLogic {
             // fetching it again at every label below.
             let (throttle, g_meter, altimeter, speedometer, previous_velocity, stall) = scene.content.nodes.get("player")
                 .and_then(|node| node.get_behavior::<Plane>())
-                .map(|plane| (plane.controls.throttle, plane.flight_data.g_meter, plane.flight_data.altimeter, plane.flight_data.speedometer, plane.previous_velocity, plane.stall))
+                .map(|plane| (plane.controls.throttle, plane.instrumentation.flight_data.g_meter, plane.instrumentation.flight_data.altimeter, plane.instrumentation.flight_data.speedometer, plane.instrumentation.previous_velocity, plane.instrumentation.stall))
                 .unwrap_or((0.0, 0.0, 0.0, 0.0, None, false));
 
             if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/data_box/framerate").and_then(|n| n.as_label_mut()) {

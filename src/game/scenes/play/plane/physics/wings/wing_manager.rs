@@ -1,7 +1,7 @@
 use nalgebra::vector;
 use rapier3d::{dynamics::{RigidBody}};
 
-use crate::{game::scenes::play::plane::{physics::{pitch_flcs::PitchFlcs, wings::{airfoil::AirFoil, wing::Wing}}, plane::PlaneControls}};
+use crate::{game::scenes::play::plane::{physics::{pitch_flcs::PitchFlcs, wings::{airfoil::AirFoil, wing::Wing}}, controls::PlaneControls}};
 
 pub struct WingManager {
   pub wings: Vec<Wing>,

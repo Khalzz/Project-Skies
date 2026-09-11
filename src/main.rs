@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use app::App;
-use game::scenes::{main_menu, play, sandbox};
+use game::scenes::{follow_test, main_menu, play, sandbox};
 
 use crate::engine::rendering::enviroment::environment::{Environment, SkyboxFaces};
 use crate::engine::splash_screen::SplashScreenConfig;
@@ -61,6 +61,9 @@ async fn main() -> Result<(), String> {
             if let Err(e) = resources::register_model(&mut app, "Runway", "Runway/Runway.glb", DoubleSided::All) {
                 eprintln!("{e}");
             }
+            if let Err(e) = resources::register_model(&mut app, "MQ9", "MQ-9/mq-9.glb", DoubleSided::None) {
+                eprintln!("{e}");
+            }
             // Procedural test mesh for trying a water shader's vertex
             // displacement against - subdivided so there's actually geometry
             // for a shader to move, unlike the flat Water model above. Spawn
@@ -113,8 +116,11 @@ async fn main() -> Result<(), String> {
             );
             app.scene_manager.create_scene("main_menu", |scene, app| main_menu::scene::GameLogic::new(scene, app, default_skybox()));
             app.scene_manager.create_scene("sandbox", |scene, app| sandbox::scene::GameLogic::new(scene, app, default_skybox()));
+            // Follow-point camera testbed - island/water/sky + a static MQ-9
+            // and the free-fly camera. Uses the procedural sea sky like play.
+            app.scene_manager.create_scene("follow_test", |scene, app| follow_test::scene::GameLogic::new(scene, app, Environment::ProceduralSky));
 
-            app.scene_manager.open_scene("main_menu");
+            app.scene_manager.open_scene("follow_test");
 
             app.run();
         },

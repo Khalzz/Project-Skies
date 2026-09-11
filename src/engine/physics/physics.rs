@@ -9,7 +9,7 @@ use crate::engine::rendering::ui::physics_rendering::RenderPhysics;
 use crate::engine::rendering::camera::handler::CameraResources;
 use crate::engine::physics::physics_handler::{Physics, RenderMessage, PhysicsCommand, PhysicsTick};
 use crate::engine::physics::physics_resources::{load_physics_from_definitions, PhysicsObjectDef};
-use crate::game::scenes::play::plane::plane::PlaneControls;
+use crate::game::scenes::play::plane::controls::PlaneControls;
 use crate::engine::primitive::manual_vertex::ManualVertex;
 
 #[derive(Clone)]

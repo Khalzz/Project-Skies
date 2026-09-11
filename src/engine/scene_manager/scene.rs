@@ -11,7 +11,7 @@ use crate::engine::game_nodes::game_object::Physics;
 use crate::engine::rendering::camera::handler::{CameraInstance, LookAtTarget, SceneCameras};
 use crate::engine::rendering::enviroment::environment::SceneEnvironment;
 use crate::engine::rendering::instance_management::InstanceData;
-use crate::game::scenes::play::plane::plane::PlaneControls;
+use crate::game::scenes::play::plane::controls::PlaneControls;
 use crate::engine::physics::physics::DebugPhysicsMessageType;
 use crate::engine::physics::physics_handler::{PhysicsCommand, PhysicsTick, RenderMessage};
 use crate::engine::physics::physics_resources::PhysicsObjectDef;

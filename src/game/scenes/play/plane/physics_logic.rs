@@ -5,7 +5,7 @@ use crate::game::scenes::play::plane::physics::wheels::wheel::{Wheel, WheelData}
 use crate::game::scenes::play::plane::physics::wheels::wheel_manager::WheelManager;
 use crate::game::scenes::play::plane::physics::wings::wing_manager::WingManager;
 use crate::game::scenes::play::plane::physics::rolling_rate::{commanded_roll_rate_deg_s, RollRateParams};
-use crate::game::scenes::play::plane::plane::{PlaneControls};
+use crate::game::scenes::play::plane::controls::PlaneControls;
 use crate::engine::physics::physics::DebugPhysicsMessageType;
 use crate::engine::physics::physics_handler::{ColliderDebugData, MetadataType, PhysicsData, PhysicsTick, SuspensionDebugData, WingDebugData};
 use rapier3d::prelude::{ColliderSet, QueryPipeline, RigidBodySet};

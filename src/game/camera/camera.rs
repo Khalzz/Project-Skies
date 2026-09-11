@@ -1,6 +1,6 @@
 use std::f32::consts::PI;
 
-use nalgebra::Vector3;
+use nalgebra::{Point3, Vector3};
 
 use crate::app::App;
 use crate::engine::input::input;
@@ -40,6 +40,14 @@ pub struct CameraConfig {
     // flight-follow-cam, which are their own bespoke per-scene logic on top
     // of a camera, not something this flag turns on.
     pub free: bool,
+    // Input action that toggles this camera between free-fly and
+    // orbit-a-target mode (matching play's own `CameraState::Free` - pivots
+    // around a point and always looks at it). `None` keeps the old behavior
+    // exactly: always free-fly, no toggle. Orbit mode does nothing until the
+    // owning scene feeds it a pivot via `Camera::set_orbit_target` (call it
+    // every frame from `SceneBehaviour::update` while the target can move).
+    // Only meaningful when `free` is true.
+    pub orbit_toggle_action: Option<String>,
 }
 
 pub struct Camera {
@@ -50,6 +58,13 @@ pub struct Camera {
   look_sensitivity_scale: f32,
   max_pitch_deg: f32,
   free: bool,
+  orbit_toggle_action: Option<String>,
+  // Runtime orbit-mode state (see CameraConfig::orbit_toggle_action).
+  orbiting: bool,
+  orbit_target: Option<Vector3<f32>>,
+  orbit_yaw: f32,
+  orbit_pitch: f32,
+  orbit_distance: f32,
 }
 
 impl Camera {
@@ -62,7 +77,57 @@ impl Camera {
             look_sensitivity_scale: config.look_sensitivity_scale,
             max_pitch_deg: config.max_pitch_deg,
             free: config.free,
+            orbit_toggle_action: config.orbit_toggle_action,
+            orbiting: false,
+            orbit_target: None,
+            orbit_yaw: 0.0,
+            orbit_pitch: 18.0,
+            orbit_distance: 45.0,
         }
+    }
+
+    /// Point the orbit-mode camera pivots around and looks at. Call every
+    /// frame from the owning scene while the target can move; ignored
+    /// entirely while in free-fly mode.
+    pub fn set_orbit_target(&mut self, position: Vector3<f32>) {
+        self.orbit_target = Some(position);
+    }
+
+    /// Whether the camera is currently in orbit-a-target mode.
+    pub fn is_orbiting(&self) -> bool {
+        self.orbiting
+    }
+
+    // Orbit-a-target update - mouse yaw/pitch swing the camera around
+    // `target` on a boom of `orbit_distance`, scroll reels the boom in/out,
+    // and the camera always looks straight at `target`. Same idea as play's
+    // `CameraState::Free`.
+    fn update_orbit(&mut self, cameras: &mut SceneCameras, target: Vector3<f32>, _dt: f32) {
+        let sens = input::mouse_sensitivity();
+
+        let scroll = input::mouse_scroll_y();
+        if scroll != 0.0 {
+            self.orbit_distance = (self.orbit_distance - scroll * 4.0).clamp(6.0, 500.0);
+        }
+
+        self.orbit_yaw -= input::mouse_rel_x() as f32 * sens.0 * self.look_sensitivity_scale;
+        self.orbit_pitch = (self.orbit_pitch - input::mouse_rel_y() as f32 * sens.1 * self.look_sensitivity_scale)
+            .clamp(-self.max_pitch_deg, self.max_pitch_deg);
+
+        let yaw = self.orbit_yaw.to_radians();
+        let pitch = self.orbit_pitch.to_radians();
+        // Spherical offset from the target - +orbit_pitch lifts the eye up
+        // and over, so it looks down at the target.
+        let offset = Vector3::new(
+            yaw.cos() * pitch.cos(),
+            pitch.sin(),
+            yaw.sin() * pitch.cos(),
+        ) * self.orbit_distance;
+
+        let active = cameras.active_mut();
+        active.camera.set_position(Point3::from(target + offset));
+        active.camera.look_at(Point3::from(target));
+        active.camera.up = *Vector3::y_axis();
     }
 }
 
@@ -86,6 +151,19 @@ impl Behavior for Camera {
     // otherwise, so a static Camera just sits at its spawned pose forever.
     fn update(&mut self, _node: &mut Node, cameras: &mut SceneCameras, _app: &mut App, dt: f32) {
         if !self.free {
+            return;
+        }
+
+        // Free-fly <-> orbit-a-target toggle (see CameraConfig::orbit_toggle_action).
+        if let Some(action) = &self.orbit_toggle_action {
+            if input::is_action_just_pressed(action) {
+                self.orbiting = !self.orbiting;
+            }
+        }
+        if self.orbiting {
+            if let Some(target) = self.orbit_target {
+                self.update_orbit(cameras, target, dt);
+            }
             return;
         }
 
