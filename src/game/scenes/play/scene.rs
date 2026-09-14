@@ -6,6 +6,7 @@ use crate::{app::App, engine::audio::subtitles::Subtitle, engine::input::input, 
 use crate::engine::game_nodes::game_object::{Camera as GameObjectCamera, Cameras, ColliderType, Lighting, Physics as PhysicsProperty, RigidBodyData};
 use super::{camera::camera::Camera, event_handling::EventSystem, plane::{physics_logic::PlanePhysicsLogic, plane::Plane}};
 use std::sync::mpsc::Sender;
+use crate::game::scenes::play::plane::aircraft_spec::{AircraftSpec, WingSpec};
 use crate::game::scenes::play::plane::controls::PlaneControls;
 use crate::game::selected_level::SELECTED_LEVEL;
 use crate::game::ui::label;
@@ -246,6 +247,39 @@ impl GameLogic {
                         ColliderType::Cuboid { half_extents: (4.2, 0.14, 2.8), position: (-6.0, 0.42, 2.8) },
                     ],
                 })
+                // The F-16's own aero data - the only source for it, see
+                // AircraftSpec's own doc comment. Presence of this property
+                // is also what opts this node into its own aero/thrust/wheel
+                // simulation unit on the physics thread (see PlanePhysicsLogic).
+                //
+                // Sized to real F-16 reference areas (see the conversation
+                // this came out of - the old 16.5/2.70 pair was invented/
+                // hand-tuned, not grounded in real dimensions, and that
+                // mismatch was a real contributor to the "6° AoA at any
+                // speed" trim problem: an oversized, over-lifting main wing
+                // paired with an undersized tail that couldn't pull the
+                // torque balance back down). Real F-16 wing reference area
+                // is ~300 sq ft = 27.87 m² total (already includes the
+                // LEX/strake) -> 13.94 m² per side. Real F-16 horizontal
+                // tail/stabilator area is ~11.84 m² total (~63.7 sq ft per
+                // side) -> 5.92 m² per side. control_surface_area on the
+                // main wings kept at the same ~73% fraction of wing_area
+                // (10.1/13.94 ≈ 0.73), so roll authority isn't incidentally
+                // changed. Elevator wings ARE the control surface, full stop
+                // - the F-16's real horizontal tail is an all-moving
+                // stabilator, not a flap on a fixed tailplane, so
+                // control_surface_area == wing_area there is physically
+                // correct.
+                .add_property(AircraftSpec {
+                    wings: vec![
+                        WingSpec { label: "Left wing".to_owned(), pressure_center: Vector3::new(5.6, 0.0, 1.4), wing_area: 13.94, chord: 0.0, airfoil_path: "assets/aero_data/f16.ron".to_owned(), normal: Vector3::new(1.0, 0.0, 0.0), is_roll_axis: true, stable: false, incidence_angle: 0.0, max_force: 500_000.0, control_surface_area: 10.1 },
+                        WingSpec { label: "Right wing".to_owned(), pressure_center: Vector3::new(-5.6, 0.0, 1.4), wing_area: 13.94, chord: 0.0, airfoil_path: "assets/aero_data/f16.ron".to_owned(), normal: Vector3::new(1.0, 0.0, 0.0), is_roll_axis: true, stable: false, incidence_angle: 0.0, max_force: 500_000.0, control_surface_area: 10.1 },
+                        // -5° trim to counter the main wings' +4° incidence pitching the nose up at cruise.
+                        WingSpec { label: "Right elevator wing".to_owned(), pressure_center: Vector3::new(4.2, 0.0, -7.0), wing_area: 5.92, chord: 0.0, airfoil_path: "assets/aero_data/f16-elevators.ron".to_owned(), normal: Vector3::new(1.0, 0.0, 0.0), is_roll_axis: false, stable: false, incidence_angle: -1.26, max_force: 120_000.0, control_surface_area: 5.92 },
+                        WingSpec { label: "Left elevator wing".to_owned(), pressure_center: Vector3::new(-4.2, 0.0, -7.0), wing_area: 5.92, chord: 0.0, airfoil_path: "assets/aero_data/f16-elevators.ron".to_owned(), normal: Vector3::new(1.0, 0.0, 0.0), is_roll_axis: false, stable: false, incidence_angle: -1.26, max_force: 120_000.0, control_surface_area: 5.92 },
+                        WingSpec { label: "Rudder wing".to_owned(), pressure_center: Vector3::new(0.0, 4.2, -11.2), wing_area: 1.70, chord: 0.0, airfoil_path: "assets/aero_data/f16-elevators.ron".to_owned(), normal: Vector3::new(0.0, 1.0, 0.0), is_roll_axis: false, stable: true, incidence_angle: 0.0, max_force: 200_000.0, control_surface_area: 1.70 },
+                    ],
+                })
         ).expect("play should only spawn 'player' once");
         if let Some(player) = scene.content.renderizable_instances.get_mut("player") {
             let mut cameras: Cameras = HashMap::new();
@@ -443,13 +477,13 @@ impl GameLogic {
     // not its lowest point), not a difficulty/leniency knob.
     const WATER_DEATH_MARGIN: f32 = 5.0;
 
-    // Cap on App::aero_debug_trail (see that field's own doc comment) -
-    // oldest sample drops once this is exceeded, so it reads as a "recent
-    // history" trail rather than growing forever while the overlay is on.
-    const AERO_DEBUG_TRAIL_CAPACITY: usize = 500;
-
     // this is called every frame
-    pub fn update(&mut self, scene: &mut Scene, app: &mut App, plane_control_tx: Option<&Sender<PlaneControls>>, physics_command_tx: Option<&Sender<PhysicsCommand>>, physics_data: &HashMap<String, RenderMessage>) {
+    // physics_data is unused now - Plane::fixed_update reacts to physics
+    // results generically (see that fn's own doc comment on what used to
+    // read this here instead) - kept as a parameter rather than dropped
+    // since ctx.physics_data still needs somewhere to go through FrameContext
+    // and another SceneBehaviour-level consumer may want it later.
+    pub fn update(&mut self, scene: &mut Scene, app: &mut App, plane_control_tx: Option<&Sender<PlaneControls>>, physics_command_tx: Option<&Sender<PhysicsCommand>>, _physics_data: &HashMap<String, RenderMessage>) {
         // See play::camera::camera::Camera::set_target's own doc comment -
         // has to run unconditionally, before ANY early return below
         // (app.is_paused, self.is_dead), so the "camera" node's own generic
@@ -649,46 +683,21 @@ impl GameLogic {
 
         self.was_cinematic_active = cinematic_active;
 
+        // Physics feedback (instrumentation, gear/afterburner-adjacent mesh
+        // state, the F7 aero debug trails) is no longer applied here - it
+        // runs generically through Plane::fixed_update now, fed this node's
+        // own physics_message by SceneNodes::fixed_update/Node::
+        // run_fixed_update (see those doc comments). Only what genuinely
+        // can't move stays: input_locked depends on cinematic/event-system
+        // state only this SceneBehaviour sees, and plane_control_tx is
+        // FrameContext-scoped, not something Behavior::fixed_update's
+        // signature carries.
         if let Some(node) = scene.content.nodes.get_mut("player") {
-            let scale = node.get_property::<Transform3D>().map(|transform| transform.scale).unwrap_or(Vector3::new(1.0, 1.0, 1.0));
-            let model_ref = node.get_property::<Model>().map(|model| model.model_ref.clone());
-
             if let Some(plane) = node.get_behavior_mut::<Plane>() {
                 plane.input_locked = cinematic_active || input_lock_end.is_some();
 
                 if let Some(plane_control_tx) = plane_control_tx {
                     let _ = plane_control_tx.send(plane.controls.clone());
-                }
-
-                if let (Some(model_ref), Some(physics_message)) = (&model_ref, physics_data.get("player")) {
-                    if let Some(model_instance) = app.game_models.get_mut(model_ref) {
-                        plane.apply_physics_feedback(&mut model_instance.model, physics_message, self.gravity, scale, &app.renderer.queue, app.time.delta_time);
-                    }
-
-                    // See App::aero_debug_trail's own doc comment - the
-                    // ACTUAL measured roll rate (Plane::flight_data's own,
-                    // already computed by apply_physics_feedback just above)
-                    // rather than the theoretical roll_authority_gain
-                    // fraction - that's what render_pass.rs's own chart
-                    // plots the curve in now too, both in deg/s, so trail
-                    // and curve are directly comparable.
-                    if app.show_aero_debug_overlay {
-                        let speed_ms = physics_message.linvel.magnitude();
-                        let aoa_y = plane.instrumentation.flight_data.aoa_y;
-                        app.aero_debug_trail.push_back((speed_ms * 1.94384, aoa_y, plane.instrumentation.flight_data.roll_rate));
-                        if app.aero_debug_trail.len() > Self::AERO_DEBUG_TRAIL_CAPACITY {
-                            app.aero_debug_trail.pop_front();
-                        }
-
-                        // See Instrumentation::wing_lift_forces' own doc comment.
-                        let main_wing_lift_y = plane.instrumentation.wing_lift_forces.get("Left wing").map(|f| f.y).unwrap_or(0.0);
-                        let elevator_wing_lift_y = plane.instrumentation.wing_lift_forces.get("Right elevator wing").map(|f| f.y).unwrap_or(0.0);
-                        let next_index = app.wing_lift_trail.back().map(|(i, _, _)| i + 1.0).unwrap_or(0.0);
-                        app.wing_lift_trail.push_back((next_index, main_wing_lift_y, elevator_wing_lift_y));
-                        if app.wing_lift_trail.len() > Self::AERO_DEBUG_TRAIL_CAPACITY {
-                            app.wing_lift_trail.pop_front();
-                        }
-                    }
                 }
             }
         }
@@ -834,6 +843,6 @@ impl SceneBehaviour for GameLogic {
 
     fn fixed_update(&self, scene: &Scene, app: &App) -> Option<(Vec<PhysicsObjectDef>, Box<dyn PhysicsTick + Send>)> {
         let _ = app;
-        Some((scene.content.physics_bodies.clone(), Box::new(PlanePhysicsLogic::new())))
+        Some((scene.content.physics_bodies.clone(), Box::new(PlanePhysicsLogic::new(scene.content.aircraft_specs.clone()))))
     }
 }

@@ -1,53 +1,48 @@
 use std::collections::HashMap;
 use std::sync::mpsc::Sender;
 
-use crate::game::scenes::play::plane::physics::wheels::wheel::{Wheel, WheelData};
+use crate::game::scenes::play::plane::aircraft_spec::AircraftSpec;
+use crate::game::scenes::play::plane::physics::wheels::wheel::WheelData;
 use crate::game::scenes::play::plane::physics::wheels::wheel_manager::WheelManager;
 use crate::game::scenes::play::plane::physics::wings::wing_manager::WingManager;
 use crate::game::scenes::play::plane::physics::rolling_rate::{commanded_roll_rate_deg_s, RollRateParams};
 use crate::game::scenes::play::plane::controls::PlaneControls;
 use crate::engine::physics::physics::DebugPhysicsMessageType;
-use crate::engine::physics::physics_handler::{ColliderDebugData, MetadataType, PhysicsData, PhysicsTick, SuspensionDebugData, WingDebugData};
+use crate::engine::physics::physics_handler::{ColliderDebugData, MetadataType, PhysicsData, PhysicsTick, WingDebugData};
 use rapier3d::prelude::{ColliderSet, QueryPipeline, RigidBodySet};
 use crate::game::scenes::play::plane::flight_system::FlightSystem;
 
-pub struct PlanePhysicsLogic {
-    pub wheel_manager: WheelManager,
-    pub wing_manager: WingManager,
-    pub renderizable_wheels: HashMap<String, WheelData>,
-    pub renderizable_lines: Vec<DebugPhysicsMessageType>,
-    pub flight_system: FlightSystem,
-    pub debug_rendering_enabled: bool,
+/// One aircraft's own aero/thrust/wheel simulation state - everything
+/// `PlanePhysicsLogic` used to own directly for the single hardcoded
+/// "player" body, now one instance per node that carries its own
+/// `AircraftSpec` property (see that type's own doc comment).
+struct AircraftUnit {
+    wheel_manager: WheelManager,
+    wing_manager: WingManager,
+    renderizable_wheels: HashMap<String, WheelData>,
+    flight_system: FlightSystem,
 }
 
-impl PlanePhysicsLogic {
-    pub fn new() -> Self {
-        let wheel_manager = WheelManager::new();
-        let wing_manager = WingManager::new();
-
+impl AircraftUnit {
+    fn new(spec: &AircraftSpec) -> Self {
         Self {
-            wheel_manager,
-            wing_manager,
+            wheel_manager: WheelManager::new(),
+            wing_manager: WingManager::new(spec),
             renderizable_wheels: HashMap::new(),
-            renderizable_lines: Vec::new(),
             flight_system: FlightSystem::new(),
-            debug_rendering_enabled: false,
         }
     }
-    
-    /// Toggle debug rendering on/off
-    pub fn toggle_debug_rendering(&mut self) {
-        self.debug_rendering_enabled = !self.debug_rendering_enabled;
-        println!("Debug rendering: {}", if self.debug_rendering_enabled { "ENABLED" } else { "DISABLED" });
-    }
 
-    /// Configure roll damping for different aircraft types
-    pub fn update(&mut self, plane_controls: &PlaneControls, collider_set: &ColliderSet, rigidbody_set: &mut RigidBodySet, query_pipeline: &QueryPipeline, physics_data: &mut PhysicsData, debug_physics_tx: &Sender<Vec<DebugPhysicsMessageType>>, delta_time: f32) {
-        self.renderizable_lines.clear();
+    /// One tick's worth of this aircraft's own physics - unchanged from the
+    /// old single-aircraft `PlanePhysicsLogic::update`, just no longer
+    /// reaching into `self` for the debug-rendering flag (that's shared
+    /// across every aircraft, not per-instance, so `PlanePhysicsLogic::tick`
+    /// passes it in as a plain arg instead).
+    fn update(&mut self, plane_controls: &PlaneControls, collider_set: &ColliderSet, rigidbody_set: &mut RigidBodySet, query_pipeline: &QueryPipeline, physics_data: &mut PhysicsData, _debug_physics_tx: &Sender<Vec<DebugPhysicsMessageType>>, delta_time: f32, debug_rendering_enabled: bool) {
         physics_data.metadata.clear();
 
         // Send collider shapes as metadata so the main thread can render them in sync with the model
-        if self.debug_rendering_enabled {
+        if debug_rendering_enabled {
             let mut collider_debug: Vec<ColliderDebugData> = Vec::new();
             for collider_handle in &physics_data.collider_handles {
                 if let Some(collider) = collider_set.get(*collider_handle) {
@@ -165,7 +160,7 @@ impl PlanePhysicsLogic {
         }).collect();
         physics_data.metadata.insert("wings".to_string(), MetadataType::Wings(wing_debug));
 
-        if self.debug_rendering_enabled {
+        if debug_rendering_enabled {
             physics_data.metadata.insert("suspensions".to_string(), MetadataType::Suspensions(suspension_debug_data));
         }
 
@@ -173,15 +168,55 @@ impl PlanePhysicsLogic {
     }
 }
 
+/// Drives every aircraft's own physics, keyed by node id - one `AircraftUnit`
+/// built from that node's own `AircraftSpec` property (see that type's own
+/// doc comment), instead of a single hardcoded "player" body. `controls`
+/// (see `PhysicsTick::tick`'s own signature) is still a single value shared
+/// by every entry - routing distinct controls per aircraft is a separate,
+/// already-identified follow-up, not done here.
+pub struct PlanePhysicsLogic {
+    aircraft: HashMap<String, AircraftUnit>,
+    // Shared debug viz across every aircraft, not per-instance - see
+    // `tick`'s own comment on why it's cleared once per tick rather than
+    // once per aircraft.
+    renderizable_lines: Vec<DebugPhysicsMessageType>,
+    // Shared F2 toggle across every aircraft, not per-instance.
+    debug_rendering_enabled: bool,
+}
+
+impl PlanePhysicsLogic {
+    pub fn new(aircraft_specs: HashMap<String, AircraftSpec>) -> Self {
+        let aircraft = aircraft_specs.iter().map(|(id, spec)| (id.clone(), AircraftUnit::new(spec))).collect();
+
+        Self {
+            aircraft,
+            renderizable_lines: Vec::new(),
+            debug_rendering_enabled: false,
+        }
+    }
+
+    /// Toggle debug rendering on/off
+    pub fn toggle_debug_rendering(&mut self) {
+        self.debug_rendering_enabled = !self.debug_rendering_enabled;
+        println!("Debug rendering: {}", if self.debug_rendering_enabled { "ENABLED" } else { "DISABLED" });
+    }
+}
+
 impl PhysicsTick for PlanePhysicsLogic {
-    // The "player" key is a plane-specific convention, so it belongs here rather
-    // than in the generic physics engine module.
     fn tick(&mut self, controls: &PlaneControls, collider_set: &ColliderSet, rigidbody_set: &mut RigidBodySet, query_pipeline: &QueryPipeline, physics_elements: &mut HashMap<String, Option<PhysicsData>>, debug_physics_tx: &Sender<Vec<DebugPhysicsMessageType>>, delta_time: f32) {
-        match physics_elements.get_mut("player") {
-            Some(Some(physics_data)) => {
-                self.update(controls, collider_set, rigidbody_set, query_pipeline, physics_data, debug_physics_tx, delta_time);
-            },
-            _ => println!("Player not found"),
+        // Cleared once per tick, not inside each aircraft's own update - with
+        // more than one aircraft, clearing per-aircraft would wipe an
+        // earlier aircraft's debug lines this same tick.
+        self.renderizable_lines.clear();
+        let debug_rendering_enabled = self.debug_rendering_enabled;
+
+        for (id, aircraft) in &mut self.aircraft {
+            match physics_elements.get_mut(id) {
+                Some(Some(physics_data)) => {
+                    aircraft.update(controls, collider_set, rigidbody_set, query_pipeline, physics_data, debug_physics_tx, delta_time, debug_rendering_enabled);
+                },
+                _ => println!("Aircraft '{id}' not found in physics_elements"),
+            }
         }
     }
 

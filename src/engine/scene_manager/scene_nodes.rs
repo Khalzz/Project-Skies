@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::app::App;
+use crate::engine::physics::physics_handler::RenderMessage;
 use crate::engine::rendering::camera::handler::SceneCameras;
 
 use super::behavior::Behavior;
@@ -93,9 +94,17 @@ impl SceneNodes {
     /// Runs every node's attached behaviors' `fixed_update` - see
     /// `Behavior::fixed_update`'s own doc comment for why this is an
     /// approximation of a true fixed tick, not the real physics-thread rate.
-    pub fn fixed_update(&mut self, cameras: &mut SceneCameras, app: &mut App, dt: f32) {
+    /// `physics_data` is this frame's physics-thread results, keyed by node
+    /// id (same map `FrameContext::physics_data` carries to
+    /// `SceneBehaviour::update`) - each node's own behaviors get just their
+    /// own entry, so "react to this node's physics results" is a generic
+    /// hook any `Behavior` can implement instead of a scene hand-picking one
+    /// node by name (see `Plane::fixed_update`'s own doc comment for the
+    /// case this replaced).
+    pub fn fixed_update(&mut self, cameras: &mut SceneCameras, app: &mut App, dt: f32, physics_data: &HashMap<String, RenderMessage>) {
         for node in self.nodes.values_mut() {
-            node.run_fixed_update(cameras, app, dt);
+            let physics_message = physics_data.get(&node.id);
+            node.run_fixed_update(cameras, app, dt, physics_message);
         }
     }
 }

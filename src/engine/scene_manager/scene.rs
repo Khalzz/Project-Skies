@@ -11,6 +11,7 @@ use crate::engine::game_nodes::game_object::Physics;
 use crate::engine::rendering::camera::handler::{CameraInstance, LookAtTarget, SceneCameras};
 use crate::engine::rendering::enviroment::environment::SceneEnvironment;
 use crate::engine::rendering::instance_management::InstanceData;
+use crate::game::scenes::play::plane::aircraft_spec::AircraftSpec;
 use crate::game::scenes::play::plane::controls::PlaneControls;
 use crate::engine::physics::physics::DebugPhysicsMessageType;
 use crate::engine::physics::physics_handler::{PhysicsCommand, PhysicsTick, RenderMessage};
@@ -62,6 +63,14 @@ pub struct SceneContent {
     // PhysicsObjectDef's own doc comment for why. Read once by
     // SceneBehaviour::fixed_update to seed the physics thread.
     pub physics_bodies: Vec<PhysicsObjectDef>,
+    // Every node spawned with an AircraftSpec property, keyed by node id -
+    // see that type's own doc comment. Read once by SceneBehaviour::
+    // fixed_update, same as physics_bodies, so a physics-thread PhysicsTick
+    // impl (e.g. PlanePhysicsLogic) knows which bodies want their own
+    // aero/thrust/wheel simulation unit, and what to build it from - this
+    // node data is the only source for those values, not a fallback over a
+    // hardcoded default.
+    pub aircraft_specs: HashMap<String, AircraftSpec>,
 }
 
 impl SceneContent {
@@ -69,6 +78,7 @@ impl SceneContent {
         self.nodes.clear();
         self.renderizable_instances.clear();
         self.physics_bodies.clear();
+        self.aircraft_specs.clear();
     }
 }
 
@@ -144,6 +154,7 @@ impl Scene {
         let id = node.id.clone();
         let has_model = node.get_property::<NodeModelProperty>().is_some();
         let has_physics = node.get_property::<Physics>().is_some();
+        let aircraft_spec = node.get_property::<AircraftSpec>().cloned();
 
         self.content.nodes.spawn(node, &mut self.cameras, app)?;
 
@@ -153,6 +164,10 @@ impl Scene {
 
         if has_physics {
             physics_bridge::register_physics_body(self, &id)?;
+        }
+
+        if let Some(spec) = aircraft_spec {
+            self.content.aircraft_specs.insert(id, spec);
         }
 
         Ok(())

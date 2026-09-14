@@ -12,3 +12,4 @@ pub mod flight_data;
 pub mod instrumentation;
 pub mod fcs;
 pub mod airframe;
+pub mod aircraft_spec;

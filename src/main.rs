@@ -120,7 +120,7 @@ async fn main() -> Result<(), String> {
             // and the free-fly camera. Uses the procedural sea sky like play.
             app.scene_manager.create_scene("follow_test", |scene, app| follow_test::scene::GameLogic::new(scene, app, Environment::ProceduralSky));
 
-            app.scene_manager.open_scene("follow_test");
+            app.scene_manager.open_scene("main_menu");
 
             app.run();
         },

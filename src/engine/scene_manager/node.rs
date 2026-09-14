@@ -2,6 +2,7 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 
 use crate::app::App;
+use crate::engine::physics::physics_handler::RenderMessage;
 use crate::engine::rendering::camera::handler::SceneCameras;
 
 use super::behavior::Behavior;
@@ -89,10 +90,10 @@ impl Node {
         self.behaviors = behaviors;
     }
 
-    pub(crate) fn run_fixed_update(&mut self, cameras: &mut SceneCameras, app: &mut App, dt: f32) {
+    pub(crate) fn run_fixed_update(&mut self, cameras: &mut SceneCameras, app: &mut App, dt: f32, physics_message: Option<&RenderMessage>) {
         let mut behaviors = std::mem::take(&mut self.behaviors);
         for behavior in behaviors.iter_mut() {
-            behavior.fixed_update(self, cameras, app, dt);
+            behavior.fixed_update(self, cameras, app, dt, physics_message);
         }
         self.behaviors = behaviors;
     }

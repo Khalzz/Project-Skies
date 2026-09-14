@@ -205,7 +205,7 @@ impl Behavior for Camera {
         }
     }
 
-    fn fixed_update(&mut self, _node: &mut Node, _cameras: &mut SceneCameras, _app: &mut App, _dt: f32) {
-
-    }
+    // No fixed_update override - this camera has nothing to react to in
+    // physics results, so the trait's own no-op default already does the
+    // right thing.
 }

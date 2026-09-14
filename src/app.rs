@@ -872,7 +872,7 @@ impl App {
 
                     let delta_time = self.time.delta_time;
                     scene.content.nodes.update(&mut scene.cameras, &mut self, delta_time);
-                    scene.content.nodes.fixed_update(&mut scene.cameras, &mut self, delta_time);
+                    scene.content.nodes.fixed_update(&mut scene.cameras, &mut self, delta_time, &physics_data);
 
                     // Re-aims every look_at-configured camera at its current
                     // target - last, so it wins over whatever a Behavior/
