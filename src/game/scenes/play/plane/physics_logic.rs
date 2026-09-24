@@ -11,6 +11,19 @@ use crate::engine::physics::physics::DebugPhysicsMessageType;
 use crate::engine::physics::physics_handler::{ColliderDebugData, MetadataType, PhysicsData, PhysicsTick, WingDebugData};
 use rapier3d::prelude::{ColliderSet, QueryPipeline, RigidBodySet};
 use crate::game::scenes::play::plane::flight_system::FlightSystem;
+use rayon::prelude::*;
+
+/// What `AircraftUnit::compute` produces and `AircraftUnit::apply` applies -
+/// the boundary between the parallel and serial halves of one physics tick
+/// (see `PlanePhysicsLogic::tick`). Only the forces that can be derived from
+/// a read-only snapshot of the rigidbody live here; anything that needs to
+/// mutate `RigidBodySet` while computing (wheel suspension raycasts, wing
+/// force application, the kinematic roll override) still happens inside
+/// `apply`, unchanged and still serial.
+struct ComputedForces {
+    thrust_force: nalgebra::Vector3<f32>,
+    fuselage_side_force: nalgebra::Vector3<f32>,
+}
 
 /// One aircraft's own aero/thrust/wheel simulation state - everything
 /// `PlanePhysicsLogic` used to own directly for the single hardcoded
@@ -33,12 +46,40 @@ impl AircraftUnit {
         }
     }
 
-    /// One tick's worth of this aircraft's own physics - unchanged from the
-    /// old single-aircraft `PlanePhysicsLogic::update`, just no longer
-    /// reaching into `self` for the debug-rendering flag (that's shared
-    /// across every aircraft, not per-instance, so `PlanePhysicsLogic::tick`
-    /// passes it in as a plain arg instead).
-    fn update(&mut self, plane_controls: &PlaneControls, collider_set: &ColliderSet, rigidbody_set: &mut RigidBodySet, query_pipeline: &QueryPipeline, physics_data: &mut PhysicsData, _debug_physics_tx: &Sender<Vec<DebugPhysicsMessageType>>, delta_time: f32, debug_rendering_enabled: bool) {
+    /// The parallel half of one tick: everything derivable from a read-only
+    /// snapshot of this aircraft's own rigidbody, touching nothing but this
+    /// `AircraftUnit`'s own state (safe to call from inside a rayon
+    /// `par_iter_mut` over every aircraft at once - see
+    /// `PlanePhysicsLogic::tick`) and `rigidbody_set` *immutably*. Doesn't
+    /// touch `physics_data.metadata` or apply anything to the rigidbody -
+    /// that's `apply`'s job, run serially afterward.
+    fn compute(&mut self, plane_controls: &PlaneControls, rigidbody_set: &RigidBodySet, physics_data: &PhysicsData) -> ComputedForces {
+        let Some(rigidbody) = rigidbody_set.get(physics_data.rigidbody_handle) else {
+            return ComputedForces { thrust_force: nalgebra::Vector3::zeros(), fuselage_side_force: nalgebra::Vector3::zeros() };
+        };
+
+        let thrust_force = self.flight_system.compute_thrust(rigidbody.translation().y, *rigidbody.rotation(), plane_controls.throttle);
+
+        let local_vel = rigidbody.rotation().inverse() * rigidbody.linvel();
+        let sideslip_speed = local_vel.x;
+        let air_density = 1.225f32;
+        let fuselage_side_area = 20.0; // m² - approximate F-16 fuselage side profile
+        let fuselage_cd = 1.2;         // bluff body drag coefficient
+        let fuselage_side_force_mag = -0.5 * air_density * sideslip_speed * sideslip_speed.abs() * fuselage_side_area * fuselage_cd;
+        let fuselage_side_force = rigidbody.rotation() * nalgebra::Vector3::new(fuselage_side_force_mag, 0.0, 0.0);
+
+        ComputedForces { thrust_force, fuselage_side_force }
+    }
+
+    /// The serial half of one tick: applies `forces` (from `compute`, run
+    /// beforehand) to the shared `RigidBodySet`, then runs the wheel/wing/
+    /// kinematic-roll logic exactly as the old single-phase `update` did -
+    /// those still mutate `rigidbody_set` directly mid-computation (wheel
+    /// suspension raycasts, force-based aileron application, the roll
+    /// override) and haven't been split into their own compute/apply halves,
+    /// so they stay untouched and sequential here rather than being
+    /// rewritten blind.
+    fn apply(&mut self, plane_controls: &PlaneControls, collider_set: &ColliderSet, rigidbody_set: &mut RigidBodySet, query_pipeline: &QueryPipeline, physics_data: &mut PhysicsData, _debug_physics_tx: &Sender<Vec<DebugPhysicsMessageType>>, _delta_time: f32, debug_rendering_enabled: bool, forces: ComputedForces) {
         physics_data.metadata.clear();
 
         // Send collider shapes as metadata so the main thread can render them in sync with the model
@@ -70,16 +111,8 @@ impl AircraftUnit {
             // Use physics_data.metadata to pass debug values to the main thread if needed
 
             //self.flight_system.calculate_state(rigidbody, delta_time);
-            self.flight_system.update_thrust(rigidbody, delta_time, plane_controls.throttle);
-
-            let local_vel = rigidbody.rotation().inverse() * rigidbody.linvel();
-            let sideslip_speed = local_vel.x;
-            let air_density = 1.225f32;
-            let fuselage_side_area = 20.0; // m² - approximate F-16 fuselage side profile
-            let fuselage_cd = 1.2;         // bluff body drag coefficient
-            let fuselage_side_force_mag = -0.5 * air_density * sideslip_speed * sideslip_speed.abs() * fuselage_side_area * fuselage_cd;
-            let fuselage_side_force = rigidbody.rotation() * nalgebra::Vector3::new(fuselage_side_force_mag, 0.0, 0.0);
-            rigidbody.add_force(fuselage_side_force, true);
+            rigidbody.add_force(forces.thrust_force, true);
+            rigidbody.add_force(forces.fuselage_side_force, true);
         }
 
         let suspension_debug_data = self.wheel_manager.update(plane_controls.gear_deploy, physics_data, collider_set, rigidbody_set, query_pipeline);
@@ -210,12 +243,38 @@ impl PhysicsTick for PlanePhysicsLogic {
         self.renderizable_lines.clear();
         let debug_rendering_enabled = self.debug_rendering_enabled;
 
-        for (id, aircraft) in &mut self.aircraft {
-            match physics_elements.get_mut(id) {
-                Some(Some(physics_data)) => {
-                    aircraft.update(controls, collider_set, rigidbody_set, query_pipeline, physics_data, debug_physics_tx, delta_time, debug_rendering_enabled);
-                },
-                _ => println!("Aircraft '{id}' not found in physics_elements"),
+        // Phase 1 (parallel): each aircraft computes its own thrust/fuselage-
+        // drag forces from a read-only snapshot of the shared rigidbody set -
+        // no aircraft reads or writes another's data, so rayon can farm these
+        // out across threads instead of walking the HashMap one entry at a
+        // time. `rigidbody_set`/`physics_elements` are only reborrowed
+        // immutably for this pass; the mutable borrows they came in as are
+        // free again by the time phase 2 needs them (NLL ends these once
+        // `computed` is done collecting).
+        let rigidbody_set_ref: &RigidBodySet = rigidbody_set;
+        let physics_elements_ref: &HashMap<String, Option<PhysicsData>> = physics_elements;
+        let computed: Vec<(String, Option<ComputedForces>)> = self.aircraft
+            .par_iter_mut()
+            .map(|(id, aircraft)| {
+                let forces = match physics_elements_ref.get(id) {
+                    Some(Some(physics_data)) => Some(aircraft.compute(controls, rigidbody_set_ref, physics_data)),
+                    _ => None,
+                };
+                (id.clone(), forces)
+            })
+            .collect();
+
+        // Phase 2 (serial): apply each aircraft's computed forces, then run
+        // the still-sequential wheel/wing/kinematic-roll logic exactly as
+        // before (see `AircraftUnit::apply`'s own doc comment on why those
+        // aren't parallelized yet).
+        for (id, forces) in computed {
+            let Some(forces) = forces else {
+                println!("Aircraft '{id}' not found in physics_elements");
+                continue;
+            };
+            if let (Some(aircraft), Some(Some(physics_data))) = (self.aircraft.get_mut(&id), physics_elements.get_mut(&id)) {
+                aircraft.apply(controls, collider_set, rigidbody_set, query_pipeline, physics_data, debug_physics_tx, delta_time, debug_rendering_enabled, forces);
             }
         }
     }

@@ -21,6 +21,7 @@ rodio = "*"
 # Physics
 rapier3d = { version = "*", features = [ "simd-stable", "serde-serialize" ] }
 nalgebra = "*"
+rayon = "1"
 
 # External file management
 serde = { version = "1.0", features = ["derive"] }

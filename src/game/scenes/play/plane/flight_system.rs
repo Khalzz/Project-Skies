@@ -48,19 +48,28 @@ impl FlightSystem {
     }
 
     /// Spool the engine toward the throttle/altitude-commanded thrust and
-    /// apply it along the body's forward axis (+Z local).
+    /// return the resulting force in world space, along the body's forward
+    /// axis (+Z local) - the pure-computation half of the old
+    /// `update_thrust`, split out so it only needs read access to the
+    /// rigidbody (`altitude_m`/`rotation` snapshotted by the caller) instead
+    /// of a live `&mut RigidBody`. That's what lets `AircraftUnit::compute`
+    /// (see physics_logic.rs) call this from inside a rayon `par_iter_mut`
+    /// pass over every aircraft at once - each aircraft only mutates its own
+    /// `FlightSystem` (disjoint, safe in parallel) and never touches the
+    /// shared `RigidBodySet` here. Applying the returned force back onto the
+    /// rigidbody still happens serially afterward, in
+    /// `AircraftUnit::apply`.
     ///
     /// `_delta_time` (the physics step dt) is ignored on purpose - it's stale
     /// on spin-loop iterations that don't advance a physics step. The spool
     /// lag is integrated against a real wall clock instead.
-    pub fn update_thrust(&mut self, rigidbody: &mut RigidBody, _delta_time: f32, throttle: f32) {
+    pub fn compute_thrust(&mut self, altitude_m: f32, rotation: nalgebra::UnitQuaternion<f32>, throttle: f32) -> Vector3<f32> {
         let now = Instant::now();
         // Clamp so a pause/resume or a long hitch can't dump a huge dt into
         // the lag (which would let it snap straight to target).
         let dt = (now - self.last_thrust_update).as_secs_f32().min(0.1);
         self.last_thrust_update = now;
 
-        let altitude_m = rigidbody.translation().y;
         let target = engine::target_thrust(throttle, altitude_m);
 
         // First-order lag toward target. alpha = 1 - e^(-dt/tau) composes
@@ -78,7 +87,16 @@ impl FlightSystem {
         self.current_thrust += (target - self.current_thrust) * alpha;
 
         let thrust_local = nalgebra::Vector3::new(0.0, 0.0, self.current_thrust);
-        let thrust_world = rigidbody.rotation() * thrust_local;
+        rotation * thrust_local
+    }
+
+    /// Thin wrapper kept for any caller that still wants the old
+    /// compute-and-apply-in-one-call shape - snapshots what `compute_thrust`
+    /// needs off `rigidbody`, then applies the resulting force to it
+    /// directly. `AircraftUnit` no longer uses this (see `compute_thrust`'s
+    /// own doc comment); it's the non-parallel fallback.
+    pub fn update_thrust(&mut self, rigidbody: &mut RigidBody, _delta_time: f32, throttle: f32) {
+        let thrust_world = self.compute_thrust(rigidbody.translation().y, *rigidbody.rotation(), throttle);
         rigidbody.add_force(thrust_world, true);
     }
 }
