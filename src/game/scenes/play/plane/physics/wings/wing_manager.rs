@@ -34,7 +34,7 @@ impl WingManager {
     Self { wings, pitch_flcs: PitchFlcs::new() }
   }
 
-  pub fn update(&mut self, plane_controls: &PlaneControls, rigidbody: &mut RigidBody) {
+  pub fn update(&mut self, plane_controls: &PlaneControls, rigidbody: &mut RigidBody, dt: f32) {
     // Elevator (all-moving stabilator) command for this tick. Two modes:
     //
     //  - fly-by-wire engaged: PitchFlcs runs an F-16-style normal-g command
@@ -50,7 +50,7 @@ impl WingManager {
     // The FLCS is kept reset while disengaged so a later engage starts from
     // a clean integrator rather than a stale one.
     let elevator_command = if plane_controls.fly_by_wire_pitch_autotrim {
-      self.pitch_flcs.update(rigidbody, plane_controls).clamp(-1.0, 1.0)
+      self.pitch_flcs.update(rigidbody, plane_controls, dt).clamp(-1.0, 1.0)
     } else {
       self.pitch_flcs.reset();
       (-plane_controls.elevator).clamp(-1.0, 1.0)

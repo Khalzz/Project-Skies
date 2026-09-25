@@ -10,6 +10,7 @@ use crate::engine::primitive::manual_vertex::ManualVertex;
 use crate::engine::rendering::models::model::DrawModel;
 use crate::game::scenes::play::camera::camera::Camera;
 use crate::game::scenes::play::plane::physics::rolling_rate::{max_roll_rate_deg_s, RollRateParams};
+use crate::game::scenes::play::plane::messages::AircraftState;
 use crate::game::scenes::play::plane::plane::Plane;
 
 fn color_attachment(view: &wgpu::TextureView, load: wgpu::LoadOp<wgpu::Color>) -> Option<wgpu::RenderPassColorAttachment> {
@@ -363,7 +364,7 @@ impl App {
         // Everything else this debug view shows - gathered up front into
         // plain locals (same reason curve/trail are, above) since the
         // build_ui closure below can't also borrow `self`. `flight_data` is
-        // `Plane`'s own struct, already Copy-friendly f32s, so this is just
+        // the plane's published `AircraftState` struct, already Copy-friendly f32s, so this is just
         // cheap field reads, not a real per-frame cost.
         let fps = self.time.get_fps();
         let player_position = self.scene_manager.content()
@@ -371,8 +372,8 @@ impl App {
             .map(|instance| instance.instance.transform.position);
         let flight_data = self.scene_manager.content()
             .and_then(|content| content.nodes.get("player"))
-            .and_then(|node| node.get_behavior::<Plane>())
-            .map(|plane| (plane.controls.throttle, plane.instrumentation.flight_data.speedometer, plane.instrumentation.flight_data.altimeter, plane.instrumentation.flight_data.mach, plane.instrumentation.flight_data.g_meter, plane.instrumentation.flight_data.aoa_x, plane.instrumentation.flight_data.aoa_y, plane.instrumentation.flight_data.aoa, plane.instrumentation.flight_data.roll_rate, plane.instrumentation.flight_data.pitch_rate, plane.instrumentation.flight_data.yaw_rate, plane.instrumentation.stall, plane.controls.aileron, plane.controls.elevator, plane.controls.rudder, plane.controls.trim.roll, plane.controls.trim.pitch, plane.controls.trim.yaw));
+            .and_then(|node| Some((node.get_behavior::<Plane>()?, &node.physics_state::<AircraftState>()?.flight_data)))
+            .map(|(plane, f)| (plane.controls.throttle, f.speedometer, f.altimeter, f.mach, f.g_meter, f.aoa_x, f.aoa_y, f.aoa, f.roll_rate, f.pitch_rate, f.yaw_rate, f.stall, plane.controls.aileron, plane.controls.elevator, plane.controls.rudder, plane.controls.trim.roll, plane.controls.trim.pitch, plane.controls.trim.yaw));
 
         // Play camera (the "camera" node's Camera behavior), read into plain
         // Copy locals for the build_ui closure. name / base offset / editor

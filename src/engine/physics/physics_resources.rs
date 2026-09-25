@@ -147,7 +147,7 @@ pub fn load_physics_from_definitions(defs: &[PhysicsObjectDef], collider_set: &m
             collider_handles.push(handle);
         }
 
-        physics_handlers.insert(def.id.clone(), Some(PhysicsData { rigidbody_handle, collider_handles, metadata: HashMap::new() }));
+        physics_handlers.insert(def.id.clone(), Some(PhysicsData { rigidbody_handle, collider_handles }));
     }
 }
 
@@ -226,7 +226,7 @@ pub fn load_physics_from_level(mut level_path: String, collider_set: &mut Collid
                             collider_handles.push(handle);
                         }
 
-                        physics_data = Some(PhysicsData { rigidbody_handle, collider_handles, metadata: HashMap::new() });
+                        physics_data = Some(PhysicsData { rigidbody_handle, collider_handles });
                     };
 
                     // println!("loaded data: {}", ids[i]);

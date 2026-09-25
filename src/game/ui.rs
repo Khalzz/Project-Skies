@@ -1,9 +1,12 @@
 use glyphon::cosmic_text::Align::{Center, Left};
 
+use glyphon::Weight;
+
 use crate::app::App;
+use crate::engine::ui::components::label::Font;
 use crate::engine::ui::color::{Fill, GradientDirection, GradientStop, UiColor};
 use crate::engine::ui::ui_node::UiNode;
-use crate::engine::ui::ui_transform::BorderEdges;
+use crate::engine::ui::ui_transform::{Anchor, BorderEdges, ChildAnchor, SizeValue};
 use crate::engine::ui::ui_transform::Orientation::Horizontal;
 use crate::engine::ui::ui_transform::PositionValue;
 
@@ -24,6 +27,49 @@ pub fn main_fade_gradient() -> Fill {
     ])
 }
 
+// On/off switch palette - the same "keycap" language as the settings chips
+// (see `main_menu::ui::keycap_style`): faint at rest, lit near-white when on.
+const SWITCH_TRACK_OFF: UiColor = UiColor::Rgba(255, 255, 255, 28);
+const SWITCH_TRACK_ON: UiColor = UiColor::Rgba(255, 255, 255, 225);
+const SWITCH_KNOB_OFF: UiColor = UiColor::Rgb(220, 220, 220);
+const SWITCH_KNOB_ON: UiColor = UiColor::Rgb(20, 20, 20);
+
+/// An on/off switch: a pill-shaped track with a round knob sitting at its
+/// left end (off) or right end (on). Purely visual - whatever owns it flips
+/// it with `set_toggle_switch` (see `main_menu::ui::settings_toggle_row`).
+pub fn toggle_switch(on: bool) -> UiNode {
+    let mut switch = UiNode::container()
+        .set_size(SizeValue::Pixels(44.0), SizeValue::Pixels(24.0))
+        .set_padding(3.0)
+        .set_corner_radius(12.0)
+        .set_border_width(1.0)
+        .set_border_color(UiColor::Rgba(255, 255, 255, 45))
+        .set_transition(120.0)
+        .set_child("Knob",
+            UiNode::container()
+                .set_size(SizeValue::Pixels(18.0), SizeValue::Pixels(18.0))
+                .set_corner_radius(9.0)
+                .set_transition(120.0));
+    set_toggle_switch(&mut switch, on);
+    switch
+}
+
+/// Moves `switch`'s knob to the matching end and recolors it - `switch` must
+/// be a node built by `toggle_switch`. The caller still has to mark the UI
+/// changed (`app.ui.has_changed`) so the new layout gets resolved.
+pub fn set_toggle_switch(switch: &mut UiNode, on: bool) {
+    let (track, knob_color, knob_side) = if on {
+        (SWITCH_TRACK_ON, SWITCH_KNOB_ON, Anchor::End)
+    } else {
+        (SWITCH_TRACK_OFF, SWITCH_KNOB_OFF, Anchor::Start)
+    };
+    switch.transform.child_anchor = ChildAnchor { horizontal: knob_side, vertical: Anchor::Center };
+    switch.update_style(|s| s.set_background_color(track));
+    if let Some(knob) = switch.get_children_mut().and_then(|children| children.iter_mut().find(|(id, _)| id == "Knob")) {
+        knob.1.update_style(|s| s.set_background_color(knob_color));
+    }
+}
+
 pub fn card() -> UiNode {
   UiNode::container()
     .set_corner_radius(10.0)
@@ -32,6 +78,10 @@ pub fn card() -> UiNode {
     .set_background_color(UiColor::Rgba(0, 0, 0, 230))
     .set_text_color(UiColor::Rgb(200, 200, 200))
 }
+
+/// Inter Regular (bundled, see `Ui::new`) - sturdier and easier to read at
+/// small HUD sizes than the default sans-serif, and the same on every platform.
+pub const HUD_FONT: Font = Font { family: Some("Inter"), weight: Weight::NORMAL };
 
 pub fn label(app: &mut App, label: &str) -> UiNode {
   UiNode::label(&mut app.ui.text.font_system, label, None, None)

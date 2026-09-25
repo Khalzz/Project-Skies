@@ -6,7 +6,7 @@ use crate::engine::rendering::ui::ui::UiRendering;
 use crate::engine::rendering::vertex::{ImageVertex, VertexUi};
 use crate::engine::utils::lerps::lerp;
 use super::color::{lerp_rgba, Fill, UiColor};
-use super::components::label::{Label, DEFAULT_FONT_SIZE, min_height_for_font_size};
+use super::components::label::{Font, Label, DEFAULT_FONT_SIZE, min_height_for_font_size};
 use super::components::container::Container;
 use super::components::image::ImageNode;
 use super::ui_transform::{Anchor, BorderEdges, ChildAnchor, Orientation, Fit, Padding, PositionValue, Rect, SizeValue, UiTransform};
@@ -367,6 +367,13 @@ impl UiNode {
     pub fn as_label_mut(&mut self) -> Option<&mut Label> {
         match &mut self.content {
             UiNodeContent::Text(label) => Some(label),
+            _ => None,
+        }
+    }
+
+    pub fn as_image_mut(&mut self) -> Option<&mut ImageNode> {
+        match &mut self.content {
+            UiNodeContent::Image(image) => Some(image),
             _ => None,
         }
     }
@@ -965,7 +972,7 @@ impl UiNode {
                 // see apply_padding) box - same treatment as Text, though there's no
                 // background quad behind an Image node today to show through the gap.
                 let inner_rect = Self::inner_rect(&self.transform, &self.padding);
-                let vertices = Self::compute_image_vertices(&inner_rect, size, current.alpha);
+                let vertices = Self::compute_image_vertices(&inner_rect, size, current.alpha, image.quarter_turns);
                 ui.image_quads.entry(image.path.clone()).or_default().extend_from_slice(&vertices);
             },
         }
@@ -1040,17 +1047,24 @@ impl UiNode {
 
     // ── Vertex/Index helpers ──
 
-    fn compute_image_vertices(rect: &Rect, screen_size: &Size, alpha: f32) -> [ImageVertex; 4] {
+    fn compute_image_vertices(rect: &Rect, screen_size: &Size, alpha: f32, quarter_turns: u8) -> [ImageVertex; 4] {
         let top = 1.0 - (rect.top / (screen_size.height as f32 / 2.0));
         let left = (rect.left / (screen_size.width as f32 / 2.0)) - 1.0;
         let bottom = 1.0 - (rect.bottom / (screen_size.height as f32 / 2.0));
         let right = (rect.right / (screen_size.width as f32 / 2.0)) - 1.0;
 
+        // Texture corners in the same TL, BL, BR, TR order as the quad's own
+        // corners below. Rotating the image one quarter turn clockwise means
+        // each screen corner shows the texture corner one step further round
+        // (screen TL shows texture BL, ...), hence the offset index.
+        const CORNER_UVS: [[f32; 2]; 4] = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
+        let uv = |corner: usize| CORNER_UVS[(corner + quarter_turns as usize) % 4];
+
         [
-            ImageVertex { position: vector![left, top, 0.0].into(), uv: [0.0, 0.0], alpha },
-            ImageVertex { position: vector![left, bottom, 0.0].into(), uv: [0.0, 1.0], alpha },
-            ImageVertex { position: vector![right, bottom, 0.0].into(), uv: [1.0, 1.0], alpha },
-            ImageVertex { position: vector![right, top, 0.0].into(), uv: [1.0, 0.0], alpha },
+            ImageVertex { position: vector![left, top, 0.0].into(), uv: uv(0), alpha },
+            ImageVertex { position: vector![left, bottom, 0.0].into(), uv: uv(1), alpha },
+            ImageVertex { position: vector![right, bottom, 0.0].into(), uv: uv(2), alpha },
+            ImageVertex { position: vector![right, top, 0.0].into(), uv: uv(3), alpha },
         ]
     }
 
@@ -1307,6 +1321,16 @@ impl UiNode {
         Self::base(transform, Style::default(), content)
     }
 
+    /// Draws this image node's texture rotated clockwise by `quarter_turns`
+    /// quarter turns (see `ImageNode::quarter_turns`). No-op on other node
+    /// types.
+    pub fn rotate_image(mut self, quarter_turns: u8) -> Self {
+        if let UiNodeContent::Image(image) = &mut self.content {
+            image.quarter_turns = quarter_turns % 4;
+        }
+        self
+    }
+
     /// Create an empty container node from code, positioned at the origin and sized
     /// to fit its children (`SizeValue::Fit` on both axes) by default - configure
     /// both through the builder instead of the constructor: `.set_size(...)` then
@@ -1518,6 +1542,16 @@ impl UiNode {
     /// `size`/old font_size would drift from font hinting) - every call site
     /// already has one in scope (`app.ui.text.font_system`), same as `label(...)`
     /// itself needs.
+    /// Which typeface/weight a label draws with (see `Font`) - inert on
+    /// content types other than Text. Call before `.set_font_size(...)`, so
+    /// that one sizes the box for this font's own glyph widths.
+    pub fn set_font(mut self, font_system: &mut FontSystem, font: Font) -> Self {
+        if let UiNodeContent::Text(label) = &mut self.content {
+            label.set_font(font_system, font);
+        }
+        self
+    }
+
     pub fn set_font_size(mut self, font_system: &mut FontSystem, size: f32) -> Self {
         self.style.font_size = Some(size);
         if let UiNodeContent::Text(label) = &self.content {

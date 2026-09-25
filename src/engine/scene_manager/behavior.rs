@@ -70,8 +70,9 @@ pub trait Behavior: Any + AsAny {
     /// thread (see `engine::physics::physics_handler::Physics::physics_thread`)
     /// would require making the whole property system `Send`-safe - not worth
     /// it for logic that reacts to results rather than computing forces or
-    /// collisions itself (that belongs in a `PhysicsTick` impl instead, which
-    /// already runs on the real physics thread and never touches `Node`).
+    /// collisions itself (that belongs in a `PhysicsBehavior` attached via
+    /// `Node::add_physics_behavior` instead, which runs at the real fixed
+    /// rate on the physics thread and never touches `Node`).
     ///
     /// `physics_message` is this node's own entry from that frame's physics
     /// results (`None` until the physics thread has actually reported back

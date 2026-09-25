@@ -2,11 +2,10 @@ use std::{collections::HashMap, f32::consts::PI, time::{Duration, Instant}};
 
 use glyphon::FontSystem;
 use nalgebra::{vector, Point3, UnitQuaternion, Vector3};
-use crate::{app::App, engine::audio::subtitles::Subtitle, engine::input::input, engine::physics::physics_handler::{MetadataType, PhysicsCommand, PhysicsTick, RenderMessage}, engine::physics::physics_resources::PhysicsObjectDef, engine::primitive::manual_vertex::ManualVertex, engine::rendering::{camera::camera::yaw_pitch_rotation, enviroment::environment::Environment, ui::ui::Ui}, engine::scene_manager::{node::Node, properties::{Model, Transform3D}, scene::{FrameContext, Scene, SceneBehaviour}}, transform::Transform, engine::ui::{color::UiColor, ui_node::{UiNode, UiNodeContent}, ui_transform::{Anchor, Orientation, PositionValue, SizeValue}}};
+use crate::{app::App, engine::audio::subtitles::Subtitle, engine::input::input, engine::physics::physics_handler::{PhysicsCommand, RenderMessage}, engine::primitive::manual_vertex::ManualVertex, engine::rendering::{camera::camera::yaw_pitch_rotation, enviroment::environment::Environment, ui::ui::Ui}, engine::scene_manager::{node::Node, properties::{Model, Transform3D}, scene::{FrameContext, Scene, SceneBehaviour}}, transform::Transform, engine::ui::{color::UiColor, ui_node::{UiNode, UiNodeContent}, ui_transform::{Anchor, Orientation, PositionValue, SizeValue}}};
 use crate::engine::game_nodes::game_object::{Camera as GameObjectCamera, Cameras, ColliderType, Lighting, Physics as PhysicsProperty, RigidBodyData};
-use super::{camera::camera::Camera, event_handling::EventSystem, plane::{physics_logic::PlanePhysicsLogic, plane::Plane}};
+use super::{camera::camera::Camera, event_handling::EventSystem, plane::{aircraft_physics::AircraftPhysics, aircraft_spec::AircraftSpec, messages::AircraftState, plane::Plane, quick_list}};
 use std::sync::mpsc::Sender;
-use crate::game::scenes::play::plane::controls::PlaneControls;
 use crate::game::selected_level::SELECTED_LEVEL;
 use crate::game::ui::label;
 use crate::game::scenes::play::ui as play_ui;
@@ -80,6 +79,9 @@ impl GameLogic {
         let mut skip_prompt = play_ui::build_skip_prompt(app);
         skip_prompt.resolve(screen_width, screen_height);
         app.ui.add_to_ui("skip_prompt".to_owned(), skip_prompt);
+        let mut quick_menu = quick_list::build_quick_list_ui(app);
+        quick_menu.resolve(screen_width, screen_height);
+        app.ui.add_to_ui(quick_list::QUICK_LIST_UI.to_owned(), quick_menu);
         let mut debug_panel = play_ui::build_debug_panel(app);
         debug_panel.resolve(screen_width, screen_height);
         app.ui.add_to_ui("debug_panel".to_owned(), debug_panel);
@@ -246,13 +248,11 @@ impl GameLogic {
                         ColliderType::Cuboid { half_extents: (4.2, 0.14, 2.8), position: (-6.0, 0.42, 2.8) },
                     ],
                 })
-                // The F-16's own aero data now lives on Plane itself (see
-                // Plane::default_aircraft_spec's own doc comment) rather than
-                // hardcoded here - this node's Plane behavior is the single
-                // source for it. Presence of this property is also what opts
-                // this node into its own aero/thrust/wheel simulation unit on
-                // the physics thread (see PlanePhysicsLogic).
-                .add_property(Plane::default_aircraft_spec())
+                // The plane's physics half - aero, thrust, wheels, gear,
+                // instruments - run on the physics thread at the fixed rate.
+                // Talks to the Plane behavior above only through
+                // plane::messages.
+                .add_physics_behavior(AircraftPhysics::new(&AircraftSpec::f16()))
         ).expect("play should only spawn 'player' once");
         if let Some(player) = scene.content.renderizable_instances.get_mut("player") {
             let mut cameras: Cameras = HashMap::new();
@@ -456,7 +456,7 @@ impl GameLogic {
     // read this here instead) - kept as a parameter rather than dropped
     // since ctx.physics_data still needs somewhere to go through FrameContext
     // and another SceneBehaviour-level consumer may want it later.
-    pub fn update(&mut self, scene: &mut Scene, app: &mut App, plane_control_tx: Option<&Sender<PlaneControls>>, physics_command_tx: Option<&Sender<PhysicsCommand>>, _physics_data: &HashMap<String, RenderMessage>) {
+    pub fn update(&mut self, scene: &mut Scene, app: &mut App, physics_command_tx: Option<&Sender<PhysicsCommand>>, _physics_data: &HashMap<String, RenderMessage>) {
         // See play::camera::camera::Camera::set_target's own doc comment -
         // has to run unconditionally, before ANY early return below
         // (app.is_paused, self.is_dead), so the "camera" node's own generic
@@ -656,23 +656,12 @@ impl GameLogic {
 
         self.was_cinematic_active = cinematic_active;
 
-        // Physics feedback (instrumentation, gear/afterburner-adjacent mesh
-        // state, the F7 aero debug trails) is no longer applied here - it
-        // runs generically through Plane::fixed_update now, fed this node's
-        // own physics_message by SceneNodes::fixed_update/Node::
-        // run_fixed_update (see those doc comments). Only what genuinely
-        // can't move stays: input_locked depends on cinematic/event-system
-        // state only this SceneBehaviour sees, and plane_control_tx is
-        // FrameContext-scoped, not something Behavior::fixed_update's
-        // signature carries.
-        if let Some(node) = scene.content.nodes.get_mut("player") {
-            if let Some(plane) = node.get_behavior_mut::<Plane>() {
-                plane.input_locked = cinematic_active || input_lock_end.is_some();
-
-                if let Some(plane_control_tx) = plane_control_tx {
-                    let _ = plane_control_tx.send(plane.controls.clone());
-                }
-            }
+        // Everything else about the plane (input, physics feedback, model
+        // animation) runs in its own Plane behavior - input_locked is the one
+        // thing that depends on cinematic/event-system state only this
+        // SceneBehaviour sees.
+        if let Some(plane) = scene.content.nodes.get_mut("player").and_then(|node| node.get_behavior_mut::<Plane>()) {
+            plane.input_locked = cinematic_active || input_lock_end.is_some();
         }
 
         Self::update_water_plane(scene);
@@ -708,15 +697,17 @@ impl GameLogic {
         if ui_elapsed >= app.throttling.ui_update_interval {
             let ui_delta_time = ui_elapsed.as_secs_f32();
 
-            // A Behavior isn't reachable from here as `&mut Scene` - only
-            // `SceneBehaviour` methods get that - so this reads the "player"
-            // node's Plane once up front (plain Copy values, so nothing
-            // borrowed from `scene` needs to stay alive afterward) instead of
-            // fetching it again at every label below.
-            let (throttle, g_meter, altimeter, speedometer, previous_velocity, stall) = scene.content.nodes.get("player")
-                .and_then(|node| node.get_behavior::<Plane>())
-                .map(|plane| (plane.controls.throttle, plane.instrumentation.flight_data.g_meter, plane.instrumentation.flight_data.altimeter, plane.instrumentation.flight_data.speedometer, plane.instrumentation.previous_velocity, plane.instrumentation.stall))
-                .unwrap_or((0.0, 0.0, 0.0, 0.0, None, false));
+            // Reads the "player" node once up front (plain Copy values, so
+            // nothing borrowed from `scene` needs to stay alive afterward)
+            // instead of fetching it again at every label below - throttle
+            // from its Plane behavior, everything else from the latest state
+            // its physics half published.
+            let player = scene.content.nodes.get("player");
+            let throttle = player.and_then(|node| node.get_behavior::<Plane>()).map(|plane| plane.controls.throttle).unwrap_or(0.0);
+            let (g_meter, altimeter, speedometer, velocity, stall) = player
+                .and_then(|node| node.physics_state::<AircraftState>())
+                .map(|state| (state.flight_data.g_meter, state.flight_data.altimeter, state.flight_data.speedometer, Some(state.flight_data.velocity), state.flight_data.stall))
+                .unwrap_or((0.0, 0.0, 0.0, None, false));
 
             if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/data_box/framerate").and_then(|n| n.as_label_mut()) {
                 label.set_text(&mut app.ui.text.font_system, &format!("FPS: {}", app.time.get_fps()), true);
@@ -774,7 +765,7 @@ impl GameLogic {
             }
 
             // Update velocity vector marker position
-            if let Some(velocity) = &previous_velocity {
+            if let Some(velocity) = &velocity {
                 if velocity.magnitude() > 0.1 {
                     if let Some(player) = scene.content.renderizable_instances.get("player") {
                         let pos = player.instance.transform.position;
@@ -811,11 +802,6 @@ impl GameLogic {
 
 impl SceneBehaviour for GameLogic {
     fn update(&mut self, scene: &mut Scene, app: &mut App, ctx: &mut FrameContext) {
-        self.update(scene, app, ctx.plane_control_tx, ctx.physics_command_tx, ctx.physics_data);
-    }
-
-    fn fixed_update(&self, scene: &Scene, app: &App) -> Option<(Vec<PhysicsObjectDef>, Box<dyn PhysicsTick + Send>)> {
-        let _ = app;
-        Some((scene.content.physics_bodies.clone(), Box::new(PlanePhysicsLogic::new(scene.content.aircraft_specs.clone()))))
+        self.update(scene, app, ctx.physics_command_tx, ctx.physics_data);
     }
 }

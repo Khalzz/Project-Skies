@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::app::App;
+use crate::engine::physics::physics_behavior::{PhysicsBehavior, PhysicsInput, PhysicsPayload};
 use crate::engine::physics::physics_handler::RenderMessage;
 use crate::engine::rendering::camera::handler::SceneCameras;
 
@@ -81,6 +82,32 @@ impl SceneNodes {
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Node> {
         self.nodes.values_mut()
+    }
+
+    /// Moves every node's physics half out, keyed by node id - called once,
+    /// when the scene's physics thread starts (see `Scene::start_physics`).
+    pub(crate) fn take_physics_behaviors(&mut self) -> Vec<(String, Vec<Box<dyn PhysicsBehavior>>)> {
+        self.nodes.values_mut()
+            .map(|node| (node.id.clone(), node.take_physics_behaviors()))
+            .filter(|(_, behaviors)| !behaviors.is_empty())
+            .collect()
+    }
+
+    /// Collects this frame's main → physics messages from every node, keyed
+    /// by node id - emptied on the node side, so nothing is sent twice.
+    pub(crate) fn take_physics_inputs(&mut self) -> HashMap<String, PhysicsInput> {
+        self.nodes.values_mut()
+            .filter_map(|node| node.take_physics_input().map(|input| (node.id.clone(), input)))
+            .collect()
+    }
+
+    /// Hands each node the states its physics half published.
+    pub(crate) fn apply_physics_states(&mut self, states: HashMap<String, Vec<PhysicsPayload>>) {
+        for (id, node_states) in states {
+            if let Some(node) = self.nodes.get_mut(&id) {
+                node.set_physics_states(node_states);
+            }
+        }
     }
 
     /// Runs every node's attached behaviors' `update` - called once per

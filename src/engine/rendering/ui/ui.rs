@@ -164,6 +164,11 @@ impl Ui {
         let mut font_system = FontSystem::new();
         let font = include_bytes!("../../../../assets/fonts/Inter-Thin.ttf");
         font_system.db_mut().load_font_data(font.to_vec());
+        // Regular weight of the same family, for labels that ask for it by
+        // name (`Font { family: Some("Inter"), .. }`) - loading it doesn't
+        // change what the default sans-serif labels resolve to.
+        let font = include_bytes!("../../../../assets/fonts/Inter-Regular.ttf");
+        font_system.db_mut().load_font_data(font.to_vec());
 
         let text_cache = SwashCache::new();
         let mut text_atlas = TextAtlas::new(&device, queue, cache, config.format);
@@ -472,6 +477,21 @@ impl Ui {
 
         self.images.insert(path.to_owned(), UiImage { texture, bind_group });
         Ok(())
+    }
+
+    /// Loads `paths` (relative to assets/) now, blocking - for code-built UI,
+    /// whose textures nothing else loads (`load_referenced_images` only runs
+    /// for RON-loaded UI), including ones it only swaps to later. Already-
+    /// loaded paths are skipped; failures are logged, not fatal.
+    pub fn preload_images(&mut self, paths: &[&str], device: &Device, queue: &Queue) {
+        task::block_in_place(|| {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            for path in paths {
+                if let Err(e) = runtime.block_on(self.load_image(path, device, queue)) {
+                    eprintln!("Failed to load UI image '{}': {}", path, e);
+                }
+            }
+        });
     }
 
     // Finds every UiNodeContent::Image under renderizable_elements and loads its

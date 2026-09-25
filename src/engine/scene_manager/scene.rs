@@ -11,10 +11,8 @@ use crate::engine::game_nodes::game_object::Physics;
 use crate::engine::rendering::camera::handler::{CameraInstance, LookAtTarget, SceneCameras};
 use crate::engine::rendering::enviroment::environment::SceneEnvironment;
 use crate::engine::rendering::instance_management::InstanceData;
-use crate::game::scenes::play::plane::aircraft_spec::AircraftSpec;
-use crate::game::scenes::play::plane::controls::PlaneControls;
-use crate::engine::physics::physics::DebugPhysicsMessageType;
-use crate::engine::physics::physics_handler::{PhysicsCommand, PhysicsTick, RenderMessage};
+use crate::engine::physics::physics::{physics_handling, DebugPhysicsMessageType, PhysicsDataTransmission};
+use crate::engine::physics::physics_handler::{PhysicsCommand, RenderMessage};
 use crate::engine::physics::physics_resources::PhysicsObjectDef;
 use crate::engine::scene_manager::node::Node;
 use crate::engine::scene_manager::physics_bridge;
@@ -27,15 +25,14 @@ use crate::transform::Transform;
 /// Everything a scene might need out of a single frame, bundled so `SceneBehaviour::update`
 /// keeps one stable signature no matter which of these fields a given scene actually
 /// uses (a menu scene only cares about event_pump, Playing only cares about
-/// plane_control_tx/physics_data). Input state isn't here - query it directly via
+/// physics_command_tx/physics_data). Input state isn't here - query it directly via
 /// crate::engine::input::input (a global singleton, which also owns controller
 /// connect/disconnect - see that module).
 pub struct FrameContext<'a> {
     pub app_state: &'a mut AppState,
     pub event_pump: &'a mut EventPump,
-    // None whenever the active scene's SceneBehaviour::fixed_update doesn't want physics.
-    pub plane_control_tx: Option<&'a Sender<PlaneControls>>,
-    // Same None-ness as plane_control_tx - lets a scene pause/resume/teleport a
+    // None whenever the active scene has no physics running (see
+    // Scene::start_physics) - lets a scene pause/resume/teleport a
     // physics-driven object (see PhysicsCommand::SetTransform) for a scripted
     // cinematic, e.g. CameraTrack::LookAt.
     pub physics_command_tx: Option<&'a Sender<PhysicsCommand>>,
@@ -61,16 +58,8 @@ pub struct SceneContent {
     // engine::scene_manager::physics_bridge), collected as plain, Send-safe
     // data - not a live reference back to the node itself, see
     // PhysicsObjectDef's own doc comment for why. Read once by
-    // SceneBehaviour::fixed_update to seed the physics thread.
+    // Scene::start_physics to seed the physics thread.
     pub physics_bodies: Vec<PhysicsObjectDef>,
-    // Every node spawned with an AircraftSpec property, keyed by node id -
-    // see that type's own doc comment. Read once by SceneBehaviour::
-    // fixed_update, same as physics_bodies, so a physics-thread PhysicsTick
-    // impl (e.g. PlanePhysicsLogic) knows which bodies want their own
-    // aero/thrust/wheel simulation unit, and what to build it from - this
-    // node data is the only source for those values, not a fallback over a
-    // hardcoded default.
-    pub aircraft_specs: HashMap<String, AircraftSpec>,
 }
 
 impl SceneContent {
@@ -78,34 +67,19 @@ impl SceneContent {
         self.nodes.clear();
         self.renderizable_instances.clear();
         self.physics_bodies.clear();
-        self.aircraft_specs.clear();
     }
 }
 
 /// The custom logic driving one `Scene` - what used to be a scene's own
 /// `impl Scene for GameLogic` (e.g. `main_menu::scene::GameLogic`,
 /// `play::scene::GameLogic`). Mirrors `Behavior` (see that trait's own doc
-/// comment) - `on_spawn`/`update`/`fixed_update` all get `&mut Scene` instead
+/// comment) - `on_spawn`/`update` both get `&mut Scene` instead
 /// of `&mut Node`, so a scene's logic can reach its own `content` (spawn
 /// nodes, read/write renderable instances) the same way a node's behavior
 /// reaches its own properties.
 pub trait SceneBehaviour {
     fn on_spawn(&mut self, scene: &mut Scene, app: &mut App) { let _ = (scene, app); }
     fn update(&mut self, scene: &mut Scene, app: &mut App, ctx: &mut FrameContext) { let _ = (scene, app, ctx); }
-
-    // Not a per-frame tick despite the name - called exactly once, right
-    // after this scene becomes active (see App::run's reset handling), to
-    // optionally register this scene's own PhysicsTick with the physics
-    // thread, seeded from whatever `PhysicsObjectDef`s spawning already
-    // collected on `scene.content.physics_bodies` (see
-    // `engine::scene_manager::physics_bridge`). Keeps the
-    // misleading-but-established name from the old `Scene` trait this was
-    // lifted from, rather than renaming it in the same pass as this
-    // refactor.
-    fn fixed_update(&self, scene: &Scene, app: &App) -> Option<(Vec<PhysicsObjectDef>, Box<dyn PhysicsTick + Send>)> {
-        let _ = (scene, app);
-        None
-    }
 }
 
 /// A "screen" the game can be in (main menu, plane selection, playing, ...) -
@@ -154,7 +128,6 @@ impl Scene {
         let id = node.id.clone();
         let has_model = node.get_property::<NodeModelProperty>().is_some();
         let has_physics = node.get_property::<Physics>().is_some();
-        let aircraft_spec = node.get_property::<AircraftSpec>().cloned();
 
         self.content.nodes.spawn(node, &mut self.cameras, app)?;
 
@@ -164,10 +137,6 @@ impl Scene {
 
         if has_physics {
             physics_bridge::register_physics_body(self, &id)?;
-        }
-
-        if let Some(spec) = aircraft_spec {
-            self.content.aircraft_specs.insert(id, spec);
         }
 
         Ok(())
@@ -214,8 +183,19 @@ impl Scene {
         }
     }
 
-    pub(crate) fn run_fixed_update(&self, app: &App) -> Option<(Vec<PhysicsObjectDef>, Box<dyn PhysicsTick + Send>)> {
-        self.behaviour.as_ref().and_then(|behaviour| behaviour.fixed_update(self, app))
+    /// Starts this scene's physics thread, if it has anything to simulate -
+    /// any node spawned with a `Physics` property (see `physics_bridge`) or a
+    /// `PhysicsBehavior` (see `Node::add_physics_behavior`). Called once,
+    /// right after the scene becomes active: rigidbodies and node physics
+    /// halves are both moved onto the new thread here, so a node spawned
+    /// later gets neither.
+    pub(crate) fn start_physics(&mut self, app: &App) -> Option<PhysicsDataTransmission> {
+        let node_behaviors = self.content.nodes.take_physics_behaviors();
+        if self.content.physics_bodies.is_empty() && node_behaviors.is_empty() {
+            return None;
+        }
+
+        Some(physics_handling(&app.renderer.device, &app.renderer.config, &app.camera_resources, self.content.physics_bodies.clone(), node_behaviors))
     }
 }
 

@@ -15,8 +15,11 @@
 //!   index data) this frame's render pass needs, given a resolved `color`.
 //! - `set_text(font_system, text, realign)` - changes the displayed text in place
 //!   (a no-op if it's unchanged); `get_text_width` reads back the shaped result.
+//! - `set_font(font_system, font)` - which typeface/weight to shape with (see
+//!   `Font`); unlike size/color it lives here, since it's rarely changed and
+//!   never hover-driven.
 
-use glyphon::{cosmic_text::Align, Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, TextArea, TextBounds};
+use glyphon::{cosmic_text::Align, Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, TextArea, TextBounds, Weight};
 
 use crate::app::Size;
 use crate::engine::rendering::vertex::VertexUi;
@@ -40,6 +43,32 @@ const LINE_HEIGHT_RATIO: f32 = 1.2;
 // a bare 1:1 fit isn't actually safe in practice.
 const MIN_HEIGHT_RATIO: f32 = 1.5;
 const BASE_FONT: Family = Family::SansSerif;
+
+/// Which typeface a label shapes its text with. The default - the generic
+/// sans-serif family at regular weight - is what every label used before
+/// this existed (on Windows that resolves to Segoe UI). A named `family` must
+/// be loaded into the `FontSystem` (see `Ui::new`), or it falls back.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Font {
+    pub family: Option<&'static str>,
+    pub weight: Weight,
+}
+
+impl Default for Font {
+    fn default() -> Self {
+        Self { family: None, weight: Weight::NORMAL }
+    }
+}
+
+impl Font {
+    fn attrs(&self) -> Attrs<'static> {
+        let family = match self.family {
+            Some(name) => Family::Name(name),
+            None => BASE_FONT,
+        };
+        Attrs::new().family(family).weight(self.weight)
+    }
+}
 // Auto-height fallback for a single line of text - generous enough for
 // DEFAULT_FONT_SIZE without clipping. A larger custom font_size needs more than
 // this flat value gives, which is what min_height_for_font_size (below) is for
@@ -63,10 +92,10 @@ pub fn min_height_for_font_size(font_size: f32) -> f32 {
 // off (`Wrap::None`) regardless, but an unbounded width is what actually reports
 // the text's true natural size instead of whatever the (possibly wrong, that's
 // the point of calling this) current box width would clip it to.
-fn natural_line_width(font_system: &mut FontSystem, text: &str, font_size: f32) -> f32 {
+fn natural_line_width(font_system: &mut FontSystem, text: &str, font_size: f32, font: Font) -> f32 {
     let mut buffer = Buffer::new(font_system, Metrics::new(font_size, font_size * LINE_HEIGHT_RATIO));
     buffer.set_size(font_system, None, Some(font_size * LINE_HEIGHT_RATIO));
-    buffer.set_text(font_system, text, &Attrs::new().family(BASE_FONT), Shaping::Advanced);
+    buffer.set_text(font_system, text, &font.attrs(), Shaping::Advanced);
     buffer.set_wrap(font_system, glyphon::Wrap::None);
     buffer.shape_until_scroll(font_system, true);
     buffer.layout_runs().fold(0.0f32, |w, run| run.line_w.max(w))
@@ -81,6 +110,7 @@ pub struct TextWidth {
 pub struct Label {
     pub buffer: Buffer,
     text: String,
+    font: Font,
 }
 
 impl Label {
@@ -92,7 +122,7 @@ impl Label {
         let resolved_height = height.unwrap_or(AUTO_HEIGHT);
         let resolved_width = match width {
             Some(w) => w,
-            None => natural_line_width(font_system, text, DEFAULT_FONT_SIZE),
+            None => natural_line_width(font_system, text, DEFAULT_FONT_SIZE, Font::default()),
         };
         (resolved_width, resolved_height)
     }
@@ -105,11 +135,20 @@ impl Label {
         let mut buffer = Buffer::new(font_system, Metrics::new(DEFAULT_FONT_SIZE, DEFAULT_FONT_SIZE * LINE_HEIGHT_RATIO));
 
         buffer.set_size(font_system, Some(width), Some(height));
-        buffer.set_text(font_system, text, &Attrs::new().family(BASE_FONT), Shaping::Advanced);
+        buffer.set_text(font_system, text, &Font::default().attrs(), Shaping::Advanced);
         buffer.set_wrap(font_system, glyphon::Wrap::None);
         buffer.shape_until_scroll(font_system, true);
 
-        Self { buffer, text: text.to_owned() }
+        Self { buffer, text: text.to_owned(), font: Font::default() }
+    }
+
+    /// Switches the typeface/weight and re-shapes the current text with it.
+    pub fn set_font(&mut self, font_system: &mut FontSystem, font: Font) {
+        if font != self.font {
+            self.font = font;
+            self.buffer.set_text(font_system, &self.text, &font.attrs(), Shaping::Advanced);
+            self.buffer.shape_until_scroll(font_system, true);
+        }
     }
 
     /// This label's own natural (unwrapped) line width if it were shaped at
@@ -120,7 +159,7 @@ impl Label {
     /// width from `measure_or`). Doesn't touch `self.buffer` - see
     /// `natural_line_width`.
     pub fn natural_width_at(&self, font_system: &mut FontSystem, font_size: f32) -> f32 {
-        natural_line_width(font_system, &self.text, font_size)
+        natural_line_width(font_system, &self.text, font_size, self.font)
     }
 
     /// Re-shapes this label's buffer at `font_size`/`align` - called fresh every
@@ -215,7 +254,7 @@ impl Label {
     pub fn set_text(&mut self, font_system: &mut FontSystem, text: &str, realign: bool) {
         if text != self.text {
             self.text = text.to_owned();
-            self.buffer.set_text(font_system, text, &Attrs::new().family(Family::SansSerif), Shaping::Advanced);
+            self.buffer.set_text(font_system, text, &self.font.attrs(), Shaping::Advanced);
             if realign {
                 self.realign(font_system);
             }

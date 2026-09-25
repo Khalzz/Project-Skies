@@ -1,5 +1,3 @@
-use std::time::Instant;
-
 use nalgebra::Vector3;
 use rapier3d::prelude::RigidBody;
 
@@ -118,9 +116,6 @@ const MAX_OUTPUT_SLEW_PER_S: f32 = 16.0;
 // Below this airspeed (m/s) the loop is inert: output 0, integrator bled off.
 const MIN_ACTIVE_SPEED: f32 = 20.0;
 
-// Real per-call dt is clamped here before it drives the integrator.
-const MAX_DT: f32 = 0.05;
-
 // g-measurement low-pass rate (per second) - matches the HUD g-meter's own
 // lerp(g, target, dt * 10.0).
 const G_FILTER_RATE: f32 = 10.0;
@@ -146,7 +141,6 @@ pub struct PitchFlcs {
     needs_seed: bool,
     last_linvel: Option<Vector3<f32>>,
     linvel_dt_accum: f32,
-    last_instant: Option<Instant>,
     debug_accum: f32,
     pub last_g_cmd: f32,
     pub last_g_meas: f32,
@@ -162,7 +156,6 @@ impl PitchFlcs {
             needs_seed: true,
             last_linvel: None,
             linvel_dt_accum: 0.0,
-            last_instant: None,
             debug_accum: 0.0,
             last_g_cmd: 1.0,
             last_g_meas: 1.0,
@@ -176,15 +169,9 @@ impl PitchFlcs {
     }
 
     /// Returns the elevator `control_input` (-1..1) for both elevator wings
-    /// this tick. Call every physics tick while FBW pitch is engaged.
-    pub fn update(&mut self, rigidbody: &RigidBody, plane_controls: &PlaneControls) -> f32 {
-        // --- real wall-clock dt (this is called many times per 120 Hz step) -
-        let now = Instant::now();
-        let dt = match self.last_instant {
-            Some(prev) => (now - prev).as_secs_f32().min(MAX_DT),
-            None => 0.0,
-        };
-        self.last_instant = Some(now);
+    /// this tick. Call every physics tick while FBW pitch is engaged - `dt`
+    /// is the fixed physics step (see `AircraftPhysics::fixed_update`).
+    pub fn update(&mut self, rigidbody: &RigidBody, plane_controls: &PlaneControls, dt: f32) -> f32 {
 
         let rotation = *rigidbody.rotation();
         let linvel = *rigidbody.linvel();
@@ -192,8 +179,8 @@ impl PitchFlcs {
         let plane_up = rotation * Vector3::y();
 
         // --- fresh normal-g from linvel deltas ---------------------------
-        // linvel only changes on an actual physics step; accumulate real time
-        // and divide the velocity delta by THAT, not this call's tiny dt.
+        // Called once per physics step, so linvel normally changes every
+        // call; the accumulator only matters if it ever doesn't.
         self.linvel_dt_accum += dt;
         if let Some(prev) = self.last_linvel {
             if prev != linvel && self.linvel_dt_accum > 1e-5 {
@@ -239,7 +226,7 @@ impl PitchFlcs {
 
         // --- AoA limiter: clip the g command near the AoA limit ----------
         // True AoA (positive = nose above the relative wind), same convention
-        // as Plane::apply_physics_feedback's aoa_y.
+        // as Instrumentation::update's aoa_y.
         let body_velocity = rotation.inverse() * linvel;
         let mut aoa_deg = 0.0;
         if body_velocity.magnitude() > 0.5 {
@@ -295,9 +282,9 @@ impl PitchFlcs {
             if self.debug_accum >= 0.1 {
                 self.debug_accum = 0.0;
                 eprintln!(
-                    "[flcs] spd={:5.0} q={:7.0} ki={:.3} | stick_g={:+.2} g_cmd={:+.2}->{:+.2} g_meas={:+.2} g_hud={:+.2} err={:+.2} aoa={:+.1} | ff={:+.3} trim={:+.3} out={:+.3}",
+                    "[flcs] spd={:5.0} q={:7.0} ki={:.3} | stick_g={:+.2} g_cmd={:+.2}->{:+.2} g_meas={:+.2} err={:+.2} aoa={:+.1} | ff={:+.3} trim={:+.3} out={:+.3}",
                     airspeed, q, ki, stick_g, g_cmd, self.g_cmd_ramp, g_meas,
-                    plane_controls.g_meter, g_err, aoa_deg, ff, self.trim, self.output
+                    g_err, aoa_deg, ff, self.trim, self.output
                 );
             }
         }

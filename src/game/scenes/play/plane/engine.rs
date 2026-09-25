@@ -1,6 +1,6 @@
 //! Simplified F110-GE-129-class engine model: throttle -> thrust with a
 //! dry/afterburner split and an altitude lapse. First-order spool lag is
-//! applied on top of this in `FlightSystem::update_thrust` (it needs state);
+//! applied on top of this in `FlightSystem::compute_thrust` (it needs state);
 //! everything here is a pure steady-state function.
 //!
 //! NOT a real engine deck - an illustrative model tuned so the F-16 stops
@@ -30,7 +30,7 @@ pub const MAX_THRUST_SL: f32 = 129_000.0;
 pub const AB_GATE: f32 = 0.85;
 
 /// Spool time constants (seconds) for the first-order lag toward target
-/// thrust, applied in `FlightSystem::update_thrust`.
+/// thrust, applied in `FlightSystem::compute_thrust`.
 pub const SPOOL_TAU_UP: f32 = 1.4; // idle -> mil, core spool-up
 pub const SPOOL_TAU_AB: f32 = 0.5; // inside the AB range, fuel/nozzle light-off
 pub const SPOOL_TAU_DOWN: f32 = 0.8; // throttle chop

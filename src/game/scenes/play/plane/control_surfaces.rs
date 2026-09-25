@@ -19,22 +19,24 @@ pub enum ControlInput {
 }
 
 impl ControlInput {
-    fn value(&self, controls: &PlaneControls) -> f32 {
+    /// `simulated_elevator` is `AircraftState::elevator_control_input` -
+    /// `None` until the physics half has reported back.
+    fn value(&self, controls: &PlaneControls, simulated_elevator: Option<f32>) -> f32 {
         match self {
             // Negated - see PlaneControls.elevator's own assignment (in
             // Plane::update) for why: that value's sign convention flipped
             // (W now +1/S now -1, matching aileron/rudder's own convention)
             // but the elevator control surface's own visual animation
             // direction shouldn't change just because of that, so this
-            // undoes the flip locally. TESTING: when
-            // debug_simulated_elevator_control_input is available, this uses
-            // that instead - it's already in the SAME convention as -elevator
-            // (the elevator wing's own control_input is defined as
-            // -plane_controls.elevator in wing_manager.rs's non-fly-by-wire
-            // path, so this is a like-for-like swap, not an extra negation),
-            // so the mesh shows the simulated wing's real, post-solve state
-            // rather than raw stick. See that field's own doc comment.
-            ControlInput::Elevator => controls.debug_simulated_elevator_control_input.unwrap_or(-controls.elevator),
+            // undoes the flip locally. When the simulated elevator wing's own
+            // control_input is available, this uses that instead - it's
+            // already in the SAME convention as -elevator (the elevator
+            // wing's own control_input is defined as -plane_controls.elevator
+            // in wing_manager.rs's non-fly-by-wire path, so this is a
+            // like-for-like swap, not an extra negation), so the mesh shows
+            // the simulated wing's real, post-solve state (e.g. a fly-by-wire
+            // override) rather than raw stick.
+            ControlInput::Elevator => simulated_elevator.unwrap_or(-controls.elevator),
             ControlInput::Aileron => controls.aileron,
             ControlInput::Rudder => controls.rudder,
         }
@@ -76,7 +78,7 @@ impl ControlSurface {
         Self { mesh_list, mesh_name, axis, scale, lerp_speed, base, input }
     }
 
-    pub fn apply(&mut self, model: &mut LoadedModel, controls: &PlaneControls, delta_time: f32, queue: &wgpu::Queue) {
+    pub fn apply(&mut self, model: &mut LoadedModel, controls: &PlaneControls, simulated_elevator: Option<f32>, delta_time: f32, queue: &wgpu::Queue) {
         let Some(meshes) = model.mesh_lists.get_mut(self.mesh_list) else { return };
         let Some(mesh) = meshes.get_mut(self.mesh_name) else { return };
 
@@ -86,7 +88,7 @@ impl ControlSurface {
             SurfaceBase::Captured(captured) => UnitQuaternion::from_quaternion(*captured.get_or_insert(mesh.transform.rotation)),
         };
 
-        let control_value = self.input.value(controls);
+        let control_value = self.input.value(controls, simulated_elevator);
         let target = base * UnitQuaternion::from_axis_angle(&Unit::new_normalize(self.axis), self.scale * control_value);
         let new_rotation = lerp_quaternion(mesh.transform.rotation, *target, delta_time * self.lerp_speed);
         let new_transform = Transform::new(mesh.transform.position, new_rotation, mesh.transform.scale);

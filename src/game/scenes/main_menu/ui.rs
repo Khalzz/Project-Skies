@@ -5,10 +5,11 @@ use crate::engine::input::input;
 use crate::engine::rendering::ui::ui::Ui;
 use crate::engine::ui::color::{Fill, UiColor};
 use crate::engine::ui::layer::Layer;
+use crate::game::game_settings::{GameSettings, GAME_SETTINGS};
 use crate::engine::ui::ui_node::UiNode;
 use crate::engine::ui::ui_transform::{Anchor, BorderEdges, Orientation, PositionValue, SizeValue};
 use crate::game::selected_level::{SelectedLevel, SELECTED_LEVEL};
-use crate::game::ui::{button, label, main_fade_gradient, with_left_accent};
+use crate::game::ui::{button, label, main_fade_gradient, set_toggle_switch, toggle_switch, with_left_accent};
 use super::rebind_modal;
 
 const SETTINGS_TABS: [&str; 3] = ["Video", "Controller", "Audio"];
@@ -136,10 +137,57 @@ pub(crate) fn settings_ui(app: &mut App, on_back: impl Fn(&mut App) + 'static) -
                         .set_child("Title", label(app, "Controller").set_font_size(&mut app.ui.text.font_system, 26.0).set_text_color(UiColor::WHITE))
                         .set_child("List", controller_settings_list(app))
                         .active(true))
-                .set_child("Video", label(app, "Video Settings").set_font_size(&mut app.ui.text.font_system, 26.0).set_text_color(UiColor::WHITE).active(false))
+                .set_child("Video", video_settings(app).active(false))
                 .set_child("Audio", label(app, "Audio Settings").set_font_size(&mut app.ui.text.font_system, 26.0).set_text_color(UiColor::WHITE).active(false))
         )
         .active(false)
+}
+
+/// The Video tab - one `settings_toggle_row` per on/off setting.
+fn video_settings(app: &mut App) -> UiNode {
+    UiNode::container()
+        .set_background_color(UiColor::TRANSPARENT)
+        .set_size(SizeValue::Grow, SizeValue::Fit)
+        .set_gap(20.0)
+        .set_child("Title", label(app, "Video").set_font_size(&mut app.ui.text.font_system, 26.0).set_text_color(UiColor::WHITE))
+        .set_child("FreeCameraFollowsPlane", settings_toggle_row(app, "Video", "FreeCameraFollowsPlane", "Free camera follows plane",
+            |settings| settings.free_camera_follows_plane,
+            |settings| settings.free_camera_follows_plane = !settings.free_camera_follows_plane))
+}
+
+/// One on/off setting: its name beside a `toggle_switch`, laid out like a
+/// controller settings row (bare row, thin bottom border). Clicking anywhere
+/// on the row flips it in `GAME_SETTINGS` via `flip`, then re-reads it with
+/// `read` to move the switch - so the switch always shows what's actually
+/// stored. `tab`/`key` must be this row's own place in the tree
+/// ("Settings/Content/{tab}/{key}"), which is how the click finds its switch.
+fn settings_toggle_row(app: &mut App, tab: &str, key: &str, name: &str, read: fn(&GameSettings) -> bool, flip: fn(&mut GameSettings)) -> UiNode {
+    let switch_path = format!("Settings/Content/{tab}/{key}/Switch");
+    let on = read(&GAME_SETTINGS.lock().unwrap());
+
+    UiNode::container()
+        .set_orientation(Orientation::Horizontal)
+        .set_background_color(UiColor::TRANSPARENT)
+        .set_border_edges(BorderEdges::BOTTOM)
+        .set_border_width(1.0)
+        .set_border_color(UiColor::Rgba(255, 255, 255, 25))
+        .set_padding(14.0)
+        .set_size(SizeValue::Grow, SizeValue::Fit)
+        .set_child_anchor(Anchor::Start, Anchor::Center)
+        .set_gap(16.0)
+        .set_child("Name", label(app, name).set_size(SizeValue::Pixels(260.0), SizeValue::Fit).set_text_color(UiColor::Rgb(200, 200, 200)))
+        .set_child("Switch", toggle_switch(on))
+        .on_click(move |app| {
+            let on = {
+                let mut settings = GAME_SETTINGS.lock().unwrap();
+                flip(&mut settings);
+                read(&settings)
+            };
+            if let Some(switch) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &switch_path) {
+                set_toggle_switch(switch, on);
+            }
+            app.ui.has_changed = true;
+        })
 }
 
 /// Which actions get a row here, and in what order - see settings/controller.ron

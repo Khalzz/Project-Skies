@@ -7,7 +7,7 @@ use sdl2::{JoystickSubsystem, GameControllerSubsystem, HapticSubsystem};
 use glyphon::{Cache, Resolution, TextArea, Viewport};
 
 use crate::engine::audio::audio::Audio;
-use crate::engine::physics::physics::{physics_handling, DebugPhysicsMessageType, PhysicsDataTransmission};
+use crate::engine::physics::physics::{DebugPhysicsMessageType, PhysicsDataTransmission};
 use crate::engine::physics::physics_handler::{RenderMessage, PhysicsCommand};
 use crate::engine::rendering::enviroment::skybox_renderer::SkyboxRender;
 use crate::engine::rendering::enviroment::environment;
@@ -700,9 +700,7 @@ impl App {
                     // just the ones that happened to need a manual clamp already.
                     self.time.update();
 
-                    physics_data_channel = scene.run_fixed_update(&self).map(|(physics_bodies, physics_tick)| {
-                        physics_handling(&self.renderer.device, &self.renderer.config, &self.camera_resources, physics_bodies, physics_tick)
-                    });
+                    physics_data_channel = scene.start_physics(&self);
 
                     self.scene_manager.active_scene = Some(scene);
                 } else if let Some(spec) = self.scene_manager.loader_for(&active) {
@@ -755,16 +753,15 @@ impl App {
                 // Request physics data from physics thread, only if the active
                 // scene actually has one running.
                 let physics_data = if let Some(physics) = &physics_data_channel {
-                    if let Err(e) = physics.request_data_tx.send(PhysicsCommand::RequestData) {
-                        eprintln!("Failed to send physics command: {}", e);
-                    }
-
-                    // Toggle debug rendering with F2 (also shows console)
+                    // Toggle physics debug lines with F2 - just flips the
+                    // render side; the request below asks the physics thread
+                    // for lines only while it's on.
                     if input::is_action_just_pressed("toggle_debug") {
                         self.render_physics.visible = !self.render_physics.visible;
-                        if let Err(e) = physics.request_data_tx.send(PhysicsCommand::ToggleDebug) {
-                            eprintln!("Failed to send toggle debug command: {}", e);
-                        }
+                    }
+
+                    if let Err(e) = physics.request_data_tx.send(PhysicsCommand::RequestData { debug_lines: self.render_physics.visible }) {
+                        eprintln!("Failed to send physics command: {}", e);
                     }
 
                     // Toggle physics pause with F12
@@ -780,14 +777,11 @@ impl App {
                         Err(_) => HashMap::new(),
                     };
 
-                    // Drain all queued debug physics messages, keep only the latest
-                    let mut got_new = false;
+                    // Drain all queued debug physics messages, keep only the
+                    // latest - and keep showing it on a frame where none
+                    // arrived, instead of the lines flickering off for a frame.
                     while let Ok(data) = physics.debug_physics_rx.try_recv() {
                         debug_physics = data;
-                        got_new = true;
-                    }
-                    if !got_new {
-                        debug_physics.clear();
                     }
 
                     physics_data
@@ -863,16 +857,33 @@ impl App {
                     let mut ctx = FrameContext {
                         app_state: &mut app_state,
                         event_pump: &mut event_pump,
-                        plane_control_tx: physics_data_channel.as_ref().map(|physics| &physics.plane_control_tx),
                         physics_command_tx: physics_data_channel.as_ref().map(|physics| &physics.request_data_tx),
                         physics_data: &physics_data,
                         debug_physics: &debug_physics,
                     };
+                    // Whatever node physics halves published since last frame,
+                    // in place before any behavior's update gets to read it.
+                    if let Some(physics) = &physics_data_channel {
+                        while let Ok(states) = physics.node_state_rx.try_recv() {
+                            scene.content.nodes.apply_physics_states(states);
+                        }
+                    }
+
                     scene.run_update(&mut self, &mut ctx);
 
                     let delta_time = self.time.delta_time;
                     scene.content.nodes.update(&mut scene.cameras, &mut self, delta_time);
                     scene.content.nodes.fixed_update(&mut scene.cameras, &mut self, delta_time, &physics_data);
+
+                    // Everything behaviors wrote for their physics halves this
+                    // frame, sent as one batch. Always taken, even with no
+                    // physics running, so it can't pile up on the nodes.
+                    let physics_inputs = scene.content.nodes.take_physics_inputs();
+                    if let (Some(physics), false) = (&physics_data_channel, physics_inputs.is_empty()) {
+                        if let Err(e) = physics.node_input_tx.send(physics_inputs) {
+                            eprintln!("Failed to send node physics inputs: {}", e);
+                        }
+                    }
 
                     // Re-aims every look_at-configured camera at its current
                     // target - last, so it wins over whatever a Behavior/
@@ -929,9 +940,7 @@ impl App {
                             // right after its own constructor returns - see that
                             // comment further up.
                             self.time.update();
-                            physics_data_channel = scene.run_fixed_update(&self).map(|(physics_bodies, physics_tick)| {
-                                physics_handling(&self.renderer.device, &self.renderer.config, &self.camera_resources, physics_bodies, physics_tick)
-                            });
+                            physics_data_channel = scene.start_physics(&self);
                             self.scene_manager.active_scene = Some(scene);
                             // pending (and scene_manager.loading) stays cleared - don't put it back.
                         } else {

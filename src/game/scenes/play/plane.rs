@@ -1,6 +1,13 @@
 pub mod physics;
 pub mod plane;
-pub mod physics_logic;
+pub mod aircraft_physics;
+pub mod messages;
+// D-pad layout of the quick menu - its HUD/navigation is unused while the
+// list version (quick_list) is being tried out; its actions/status types are
+// shared with it.
+#[allow(dead_code)]
+pub mod quick_menu;
+pub mod quick_list;
 pub mod flight_system;
 pub mod engine;
 pub mod utils;

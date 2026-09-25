@@ -1,6 +1,8 @@
 use super::landing_gear::LandingGear;
 
-/// The plane's mechanical systems - landing gear today, a natural home for
+/// The plane's mechanical systems - physics-side state, owned by
+/// `AircraftPhysics` (their positions feed straight into forces) - landing
+/// gear today, a natural home for
 /// speed brakes/flaps/variable-geometry wings/etc. later (see the
 /// conversation this came out of). Deliberately just a plain grouping, not a
 /// shared "mechanism" abstraction - add the next system as its own concrete
