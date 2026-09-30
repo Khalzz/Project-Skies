@@ -79,19 +79,25 @@ impl ControlSurface {
     }
 
     pub fn apply(&mut self, model: &mut LoadedModel, controls: &PlaneControls, simulated_elevator: Option<f32>, delta_time: f32, queue: &wgpu::Queue) {
-        let Some(meshes) = model.mesh_lists.get_mut(self.mesh_list) else { return };
-        let Some(mesh) = meshes.get_mut(self.mesh_name) else { return };
+        // Every material of the surface (see Model::meshes_named_mut) - they
+        // share one node transform, so the first one's rotation is the
+        // reference and all of them get the same new one.
+        let mut meshes: Vec<_> = model.meshes_named_mut(self.mesh_list, self.mesh_name).collect();
+        let Some(reference) = meshes.first() else { return };
+        let current_rotation = reference.transform.rotation;
 
         let base = match &mut self.base {
             SurfaceBase::None => UnitQuaternion::identity(),
             SurfaceBase::Fixed(rotation) => *rotation,
-            SurfaceBase::Captured(captured) => UnitQuaternion::from_quaternion(*captured.get_or_insert(mesh.transform.rotation)),
+            SurfaceBase::Captured(captured) => UnitQuaternion::from_quaternion(*captured.get_or_insert(current_rotation)),
         };
 
         let control_value = self.input.value(controls, simulated_elevator);
         let target = base * UnitQuaternion::from_axis_angle(&Unit::new_normalize(self.axis), self.scale * control_value);
-        let new_rotation = lerp_quaternion(mesh.transform.rotation, *target, delta_time * self.lerp_speed);
-        let new_transform = Transform::new(mesh.transform.position, new_rotation, mesh.transform.scale);
-        mesh.change_transform(queue, new_transform);
+        let new_rotation = lerp_quaternion(current_rotation, *target, delta_time * self.lerp_speed);
+        for mesh in meshes.iter_mut() {
+            let new_transform = Transform::new(mesh.transform.position, new_rotation, mesh.transform.scale);
+            mesh.change_transform(queue, new_transform);
+        }
     }
 }

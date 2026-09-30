@@ -1,23 +1,16 @@
 use std::collections::HashMap;
 
-use nalgebra::{vector, Vector3};
+use nalgebra::Vector3;
 use rapier3d::{dynamics::{RigidBodyHandle, RigidBodySet}, geometry::ColliderSet, pipeline::QueryPipeline};
 
 use crate::game::scenes::play::plane::physics::wheels::wheel::WheelData;
 
 use super::wheel::{GroundSurface, SuspensionHit, Wheel};
-
-/// Nose-wheel steering authority, schedule on ground speed: full lock at
-/// taxi speed, tapering to a few degrees by takeoff-roll speed so a full
-/// pedal input at 60 m/s doesn't snap the jet sideways. F-16 NWS is ~±32°.
-const MAX_STEER_DEG: f32 = 32.0;
-const HIGH_SPEED_STEER_DEG: f32 = 4.0;
-const STEER_TAPER_START_MS: f32 = 8.0;
-const STEER_TAPER_END_MS: f32 = 40.0;
+use crate::game::scenes::play::plane::gear_spec::{GearSpec, SteeringSpec};
 
 /// What the pilot is doing to the wheels this step.
 pub struct WheelInputs {
-    /// -1..1, positive = right - scaled by the speed schedule above.
+    /// -1..1, positive = right - scaled by the gear's SteeringSpec.
     pub steering: f32,
     /// 0..1 on every `braked` wheel.
     pub brake: f32,
@@ -26,34 +19,38 @@ pub struct WheelInputs {
 pub struct WheelManager {
     pub wheels: Vec<Wheel>,
     pub renderizable_wheels: HashMap<String, WheelData>,
+    steering: SteeringSpec,
 }
 
 impl WheelManager {
-    pub fn new() -> Self {
-      // Suspension ray origins, in rigidbody-local WORLD units (the body has
-      // no scale). The ray casts DOWN `max_suspension_length` from each; the
-      // wheel mesh is placed at whatever point it returns (contact point, or
-      // the ray's far end when airborne - see GearMeshes::place).
-      //
-      // The REARS must sit behind the rigidbody's centre of mass (z = 0.359,
-      // see the "player" node's RigidBodyData) and the FRONT well ahead of it,
-      // or the upward suspension force tips the airframe onto its tail on the
-      // ground. That's why these don't just mirror the wheel meshes' own
-      // model positions (rears are at z ~= 1.24 there, which is ahead of the
-      // CG) - a small visual offset between the mesh's authored spot and the
-      // ray endpoint is the trade for a stable ground stance.
-      let wheels = vec![
-        Wheel::new("wheel-f".to_string(), vector![0.0, 0.029, 4.801], 2.006, 100000.0, 50000.0).steerable(),
-        Wheel::new("wheel-lb".to_string(), vector![-0.669, 0.029, 0.12], 2.006, 500000.0, 50000.0).braked(),
-        Wheel::new("wheel-rb".to_string(), vector![0.669, 0.029, 0.12], 2.006, 500000.0, 50000.0).braked()
-      ];
-
-      Self {
-        wheels,
-        renderizable_wheels: HashMap::new(),
-      }
+    /// The wheels `gear` (the plane's data.ron) describes.
+    pub fn new(gear: &GearSpec) -> Self {
+        let mut manager = Self { wheels: Vec::new(), renderizable_wheels: HashMap::new(), steering: gear.steering.clone() };
+        manager.set_gear(gear);
+        manager
     }
 
+    /// Swaps in new wheels (data.ron edited mid-flight - see
+    /// messages::AircraftReload). Each suspension ray casts DOWN
+    /// `suspension_length` from its `position` (rigidbody-local meters -
+    /// the body has no scale); the wheel mesh rests on whatever point it
+    /// returns (see GearMeshes::place). The rear wheels must sit behind the
+    /// center of mass and the front one well ahead of it, or the suspension
+    /// tips the jet onto its tail on the ground.
+    pub fn set_gear(&mut self, gear: &GearSpec) {
+        self.steering = gear.steering.clone();
+        self.wheels = gear.wheels.iter().map(|spec| {
+            let mut wheel = Wheel::new(spec.mesh.clone(), spec.position, spec.suspension_length, spec.stiffness, spec.damping);
+            if spec.steerable {
+                wheel = wheel.steerable();
+            }
+            if spec.braked {
+                wheel = wheel.braked();
+            }
+            wheel
+        }).collect();
+        self.renderizable_wheels.clear();
+    }
     /// `deploy` is the landing gear's 0..1 extension (0 = fully retracted,
     /// 1 = down and locked). The raycast ALWAYS runs while `deploy > 0` - the
     /// gear state machine needs the ground-contact result to decide whether
@@ -75,7 +72,7 @@ impl WheelManager {
 
       let force_scale = deploy.clamp(0.0, 1.0);
       let ground_speed = rigidbody_set.get(body).map(|rigidbody| rigidbody.linvel().magnitude()).unwrap_or(0.0);
-      let steer_angle = inputs.steering.clamp(-1.0, 1.0) * max_steer_angle_deg(ground_speed).to_radians();
+      let steer_angle = inputs.steering.clamp(-1.0, 1.0) * self.steering.max_angle_at(ground_speed).to_radians();
 
       for wheel in self.wheels.iter_mut() {
         wheel.steer_angle = if wheel.steerable { steer_angle } else { 0.0 };
@@ -96,14 +93,9 @@ impl WheelManager {
             }
             if let Some(rigidbody) = rigidbody_set.get(body) {
                 let local_position = rigidbody.rotation().inverse() * (wheel_position - rigidbody.translation());
-                self.renderizable_wheels.insert(wheel.mesh_name.clone(), WheelData { local_position, grounded: ground.is_some() });
+                self.renderizable_wheels.insert(wheel.mesh_name.clone(), WheelData { local_position, mount: wheel.offset, grounded: ground.is_some() });
             }
         }
       }
     }
-}
-
-fn max_steer_angle_deg(ground_speed_ms: f32) -> f32 {
-    let t = ((ground_speed_ms - STEER_TAPER_START_MS) / (STEER_TAPER_END_MS - STEER_TAPER_START_MS)).clamp(0.0, 1.0);
-    MAX_STEER_DEG + (HIGH_SPEED_STEER_DEG - MAX_STEER_DEG) * t
 }

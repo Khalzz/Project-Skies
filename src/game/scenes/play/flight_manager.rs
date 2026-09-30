@@ -6,6 +6,7 @@ use nalgebra::{UnitQuaternion, Vector3};
 
 use crate::app::App;
 use crate::engine::game_nodes::game_object::{Camera as GameObjectCamera, Cameras};
+use crate::engine::particles::ParticleEmitters;
 use crate::engine::physics::water_contact::WaterContact;
 use crate::engine::scene_manager::node::Node;
 use crate::engine::scene_manager::properties::{Model, Transform3D};
@@ -76,35 +77,45 @@ impl flight_manager {
                 }
             };
             let Some(node) = scene.content.nodes.get_mut(&plane.node_id) else { continue };
+            // Its emitters, rebuilt where the file now puts them (the plane
+            // switches them on again as needed next frame).
+            if let Some(emitters) = node.get_property_mut::<ParticleEmitters>() {
+                *emitters = effects::plane_emitters(&spec.effects, &spec.gear);
+            }
+            if let Some(plane) = node.get_behavior_mut::<Plane>() {
+                plane.set_effects(&spec.effects);
+            }
             node.push_physics_event(AircraftReload {
                 aero: spec.aero,
                 engine: spec.engine,
+                gear: spec.gear,
+                effects: spec.effects,
                 mass: spec.physics.rigidbody.mass,
                 center_of_mass: spec.physics.rigidbody.center_of_mass,
                 colliders: spec.physics.colliders,
             });
-            println!("Reloaded '{}' from {} - aero, engine and mass applied", plane.name, plane.data_path.display());
+            println!("Reloaded '{}' from {} - aero, engine, gear, effects and mass applied", plane.name, plane.data_path.display());
         }
     }
 
     pub fn add_plane(&mut self, scene: &mut Scene, app: &mut App) {
-      //let aircraft_spec = AircraftSpec::load("mq-9").unwrap();
-      let aircraft_spec = AircraftSpec::load("f16").unwrap();
+        let aircraft_spec = AircraftSpec::load("mq-9").unwrap();
+        //let aircraft_spec = AircraftSpec::load("f16").unwrap();
 
       scene.spawn_node(app,
           Node::new("player")
-              .add_behavior(Plane::new())
+              .add_behavior(Plane::new().with_effects(&aircraft_spec.effects))
               .add_property(Transform3D {
-                  position: Vector3::new(0.0, 100.0, -3400.0),
+                  position: Vector3::new(0.0, 105.0, -3400.0),
                   rotation: UnitQuaternion::identity(),
                   scale: Vector3::new(1.0, 1.0, 1.0),
               })
               .add_property(Model::from_file(&aircraft_spec.model.model)
                   .double_sided(DoubleSidedMeshes::Meshes(aircraft_spec.model.double_sided.clone()))
                   .scaled(aircraft_spec.model.scale))
-              .add_property(effects::plane_emitters())
+              .add_property(effects::plane_emitters(&aircraft_spec.effects, &aircraft_spec.gear))
               .add_property(aircraft_spec.physics.clone())
-              .add_physics_behavior(AircraftPhysics::new(&aircraft_spec.aero, &aircraft_spec.engine))
+              .add_physics_behavior(AircraftPhysics::new(&aircraft_spec.aero, &aircraft_spec.engine, &aircraft_spec.gear, &aircraft_spec.effects))
               .add_physics_behavior(WaterContact::new(app.water.ocean.sea_level()).sinks(WRECK_FLOAT_SECONDS, WRECK_SINK_SECONDS))
       ).expect("play should only spawn 'player' once");
       if let Some(player) = scene.content.renderizable_instances.get_mut("player") {

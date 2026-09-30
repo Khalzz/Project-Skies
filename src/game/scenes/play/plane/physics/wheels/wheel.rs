@@ -61,7 +61,12 @@ pub struct SuspensionHit {
 
 #[derive(Debug, Clone)]
 pub struct WheelData {
+    /// Where the wheel touches (the ray's hit, or its far end when
+    /// airborne), in the rigidbody's frame.
     pub local_position: Vector3<f32>,
+    /// Where its suspension is mounted (the ray's origin), in the
+    /// rigidbody's frame - where the wheel tucks up to when retracted.
+    pub mount: Vector3<f32>,
     /// This wheel's suspension ray hit ground this tick (within
     /// `max_suspension_length`). Read by the landing-gear state machine to
     /// force the gear back down if it's mid-retraction over the runway.

@@ -49,6 +49,9 @@ const PILOT_SEAT_COLOR: [f32; 3] = [0.2, 1.0, 0.4];
 // Nose-wheel heading, drawn from its contact point while on the ground.
 const STEERING_DRAW_LENGTH: f32 = 4.0;
 const STEERING_COLOR: [f32; 3] = [0.2, 0.9, 1.0];
+// Particle emitters (the data.ron's `effects`): a cross with a tick up.
+const EMITTER_COLOR: [f32; 3] = [1.0, 0.55, 0.1];
+const EMITTER_TICK: f32 = 1.2;
 
 /// An aircraft's physics half - its aero, thrust, wheels, landing gear and
 /// instruments, run once per fixed physics step on the physics thread.
@@ -63,24 +66,31 @@ pub struct AircraftPhysics {
     instrumentation: Instrumentation,
     /// See `AircraftEvent::Wreck`.
     wrecked: bool,
+    /// Where the plane's particle emitters sit (its data.ron `effects`,
+    /// jet's frame) - only drawn, for the F1 overlay.
+    effect_positions: Vec<Vector3<f32>>,
 }
 
 impl AircraftPhysics {
-    pub fn new(spec: &AeroSpec, engine: &super::engine::EngineSpec) -> Self {
+    pub fn new(spec: &AeroSpec, engine: &super::engine::EngineSpec, gear: &super::gear_spec::GearSpec, effects: &[super::effects::EffectSpec]) -> Self {
         Self {
             wing_manager: WingManager::new(spec),
-            wheel_manager: WheelManager::new(),
+            wheel_manager: WheelManager::new(gear),
             flight_system: FlightSystem::new(engine.clone()),
             airframe: Airframe::new(),
             instrumentation: Instrumentation::new(spec.pilot_position),
             wrecked: false,
+            effect_positions: effects.iter().map(|effect| effect.position).collect(),
         }
     }
 
-    /// data.ron edited mid-flight: the new wings, engine, pilot seat and mass, on the
-    /// running jet - its motion carries on from wherever it was.
+    /// data.ron edited mid-flight: the new wings, engine, wheels, pilot seat
+    /// and mass, on the running jet - its motion carries on from wherever it
+    /// was.
     fn apply_reload(&mut self, reload: AircraftReload, ctx: &mut PhysicsCtx) {
         self.wing_manager.set_wings(&reload.aero);
+        self.wheel_manager.set_gear(&reload.gear);
+        self.effect_positions = reload.effects.iter().map(|effect| effect.position).collect();
         self.flight_system.engine = reload.engine;
         self.instrumentation.set_pilot_position(reload.aero.pilot_position);
         let inertia = compute_principal_inertia(reload.mass, reload.center_of_mass, &reload.colliders);
@@ -304,6 +314,10 @@ impl PhysicsBehavior for AircraftPhysics {
 
         draw.cross(body.center_of_mass().coords, MARKER_SIZE, CENTER_OF_MASS_COLOR);
         draw.cross(to_world(self.instrumentation.pilot_position()), MARKER_SIZE, PILOT_SEAT_COLOR);
+        for position in &self.effect_positions {
+            draw.cross(to_world(*position), MARKER_SIZE, EMITTER_COLOR);
+            draw.ray(to_world(*position), body.rotation() * Vector3::y() * EMITTER_TICK, EMITTER_COLOR);
+        }
 
         for wheel in &self.wheel_manager.wheels {
             let Some(contact) = self.wheel_manager.renderizable_wheels.get(&wheel.mesh_name) else { continue };

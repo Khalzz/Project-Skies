@@ -23,3 +23,4 @@ pub mod fcs;
 pub mod airframe;
 pub mod aircraft_spec;
 pub mod aero_spec;
+pub mod gear_spec;

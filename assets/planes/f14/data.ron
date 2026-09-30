@@ -98,4 +98,39 @@
     // Where the pilot sits - G at the seat is measured here.
     pilot_position: (0.0, 1.029, 6.485),
   ),
+  // The landing gear: each wheel is a suspension strut casting straight
+  // down from `position` (meters in the jet's frame: +X left, +Y up, +Z
+  // nose) up to `suspension_length`; `mesh` is the model's wheel it moves.
+  // `stiffness` is the spring force at full compression (N), `damping`
+  // resists vertical speed (N per m/s). `steerable` wheels turn with the
+  // pedals, `braked` ones brake. The rear wheels must sit behind the center
+  // of mass and the front one well ahead of it, or the jet tips onto its
+  // tail on the ground. Saved mid-flight, it applies right away.
+  gear: (
+    wheels: [
+      (mesh: "wheel-f", position: (0.0, 0.0, 9.8), suspension_length: 4.2, stiffness: 100000.0, damping: 50000.0, steerable: true),
+      (mesh: "wheel-lb", position: (-1.4, 0.0, 0.0), suspension_length: 4.2, stiffness: 500000.0, damping: 50000.0, braked: true),
+      (mesh: "wheel-rb", position: (1.4, 0.0, 0.0), suspension_length: 4.2, stiffness: 500000.0, damping: 50000.0, braked: true),
+    ],
+    // Nose-wheel steering: full lock at taxi speed, tapering to a few
+    // degrees by takeoff speed (ground speeds in m/s). Optional.
+    steering: (
+      max_angle_deg: 32.0,
+      high_speed_angle_deg: 4.0,
+      taper_start_speed: 8.0,
+      taper_end_speed: 40.0,
+    ),
+  ),
+  // Every particle effect the plane can make, and where it comes from (meters
+  // in the jet's frame: +X left, +Y up, +Z nose). `effect` is what it is:
+  //   WingtipVortex - condensation trailing off a wingtip under G
+  //   WreckSmoke    - smoke off the wreck after a crash
+  // Each wheel in `gear` also gets tyre smoke at touchdown on its own. F1
+  // shows every emitter (orange cross with a tick up). Saved mid-flight, it
+  // applies right away.
+  effects: [
+    (name: "left_vortex", effect: WingtipVortex, position: (4.51, 0.23, 0.36)),
+    (name: "right_vortex", effect: WingtipVortex, position: (-4.51, 0.23, 0.36)),
+    (name: "wreck_smoke", effect: WreckSmoke, position: (0.0, 0.0, 0.0)),
+  ],
 )

@@ -14,19 +14,6 @@ const GEAR_EMERGENCY_RATE_PER_S: f32 = 3.0;
 // At/above this `deploy` the gear counts as down-and-locked.
 const GEAR_LOCKED_THRESHOLD: f32 = 0.999;
 
-struct LandingGearWheel {
-    // Same mesh names `WheelManager` keys its wheel data by.
-    mesh_name: &'static str,
-    // Fully retracted - tucked in near the fuselage centerline. Hand-picked;
-    // eyeball against the model.
-    retracted_position: Vector3<f32>,
-    // Fully deployed pose, used ONLY as a fallback when there's no live
-    // suspension raycast data yet (first frames / physics not running).
-    // Normally the deployed pose is the raycast point, so the wheels track
-    // the ground / bumps.
-    deployed_fallback: Vector3<f32>,
-}
-
 /// Landing-gear state machine - lives on the physics thread (inside
 /// `AircraftPhysics`), since `deploy` directly scales the suspension force.
 /// `deploy` is the whole state: 0.0 = up and stowed, 1.0 = down and locked,
@@ -98,46 +85,70 @@ impl LandingGear {
 
 /// The landing gear's visual half - lives on the main thread (inside
 /// `Plane`), placing the wheel meshes from whatever `LandingGear` last
-/// published in `AircraftState`. Holds no gear state of its own.
+/// published in `AircraftState`.
+///
+/// Works from each wheel's actual geometry (see Mesh::local_bounds), not
+/// its mesh origin - an exporter often leaves a wheel's origin at the
+/// model's, with the wheel baked off to the side - so it fits any model:
+/// - deployed: on its suspension - the tyre resting on the point the
+///   suspension ray returns (its middle one tyre radius above it): the
+///   ground where it touches, or the ray's full length (the suspension's
+///   max extension) when there's nothing under it;
+/// - retracted: tucked straight up to its suspension's mount point;
+/// - in between: blended by `deploy`.
 pub struct GearMeshes {
-    wheels: Vec<LandingGearWheel>,
+    /// Each wheel's suspension mount (model space), by mesh name, from the
+    /// last wheel data that had it - the wheels (the plane's data.ron gear)
+    /// are still known while the gear is up, when there's no data.
+    mounts: HashMap<String, Vector3<f32>>,
 }
 
 impl GearMeshes {
     pub fn new() -> Self {
-        Self {
-            wheels: vec![
-                LandingGearWheel { mesh_name: "wheel-f",  retracted_position: Vector3::new(0.0, 0.0021, 0.2264),     deployed_fallback: Vector3::new(0.0, -0.1312, 0.3697) },
-                LandingGearWheel { mesh_name: "wheel-lb", retracted_position: Vector3::new(-0.0382, 0.0117, 0.1839), deployed_fallback: Vector3::new(-0.0955, -0.1250, 0.0884) },
-                LandingGearWheel { mesh_name: "wheel-rb", retracted_position: Vector3::new(0.0382, 0.0117, 0.1839),  deployed_fallback: Vector3::new(0.0955, -0.1250, 0.0884) },
-            ],
-        }
+        Self { mounts: HashMap::new() }
     }
 
-    /// Positions every wheel mesh, blending each between its retracted pose
-    /// and its live deployed pose (raycast point, or the fallback) by
-    /// `deploy`.
+    /// Positions every wheel mesh (all its materials), for `deploy` (0 =
+    /// up, 1 = down). `instance_scale` maps model space to the world.
     pub fn place(
-        &self,
+        &mut self,
         model: &mut LoadedModel,
         wheel_data: &HashMap<String, WheelData>,
         deploy: f32,
         instance_scale: Vector3<f32>,
         queue: &wgpu::Queue,
     ) {
-        let Some(meshes) = model.mesh_lists.get_mut("opaque") else { return };
-        for lg in &self.wheels {
-            let Some(mesh) = meshes.get_mut(lg.mesh_name) else { continue };
-            let deployed = match wheel_data.get(lg.mesh_name) {
-                Some(d) => Vector3::new(
-                    d.local_position.x / instance_scale.x,
-                    d.local_position.y / instance_scale.y,
-                    d.local_position.z / instance_scale.z,
-                ),
-                None => lg.deployed_fallback,
+        let to_model = |world: Vector3<f32>| world.component_div(&instance_scale);
+        for (name, data) in wheel_data {
+            self.mounts.insert(name.clone(), to_model(data.mount));
+        }
+        for (name, mount) in self.mounts.iter() {
+            let mut meshes: Vec<_> = model.meshes_named_mut("opaque", name).collect();
+            let Some(first) = meshes.first() else { continue };
+            // Where the wheel was modelled (its geometry's middle) - only
+            // until the first suspension data arrives - and its radius, the
+            // biggest of its materials (the tyre).
+            let modelled = first.base_transform.position + first.center_offset();
+            // Measured straight down in the model, whichever way the wheel
+            // mesh is turned - so the tyre's bottom sits exactly on the
+            // ground, with nothing to set by hand.
+            let radius = meshes.iter().map(|mesh| mesh.depth_below_center()).fold(0.0f32, f32::max);
+
+            let retracted = *mount;
+            let deployed = match wheel_data.get(name) {
+                // The tyre's bottom on the suspension's end point - the
+                // ground contact, or the ray's full length in the air.
+                Some(data) => to_model(data.local_position) + Vector3::y() * radius,
+                None => modelled,
             };
-            mesh.transform.position = lerp_vector3(lg.retracted_position, deployed, deploy);
-            mesh.update_transform(queue);
+
+            // The wheel's middle goes there - its mesh position is offset by
+            // wherever the geometry sits relative to its origin.
+            let center = lerp_vector3(retracted, deployed, deploy);
+            for mesh in meshes.iter_mut() {
+                mesh.transform.position = center - mesh.center_offset();
+                mesh.update_transform(queue);
+            }
         }
     }
 }

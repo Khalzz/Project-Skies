@@ -6,6 +6,8 @@ use crate::engine::game_nodes::game_object::Physics;
 
 use super::aero_spec::AeroSpec;
 use super::engine::EngineSpec;
+use super::gear_spec::GearSpec;
+use super::effects::EffectSpec;
 
 /// Where every plane's folder lives - one folder per plane, named after it
 /// (`assets/planes/f16/`), each with its own `data.ron` (see
@@ -36,6 +38,12 @@ pub struct AircraftSpec {
     pub aero: AeroSpec,
     /// Thrust, afterburner and spool times - `data.ron`'s `engine: ( ... )`.
     pub engine: EngineSpec,
+    /// The wheels and their steering - `data.ron`'s `gear: ( ... )`.
+    pub gear: GearSpec,
+    /// Every particle emitter on the plane, and where - `data.ron`'s
+    /// `effects: [ ... ]` (optional). Each wheel in `gear` also gets tyre
+    /// smoke on its own.
+    pub effects: Vec<EffectSpec>,
 }
 
 /// A plane's `data.ron`, as written in the file. Paths in it are relative to
@@ -46,6 +54,9 @@ struct PlaneData {
     physics: Physics,
     aero: AeroSpec,
     engine: EngineSpec,
+    gear: GearSpec,
+    #[serde(default)]
+    effects: Vec<EffectSpec>,
 }
 
 /// `data.ron`'s `model: ( ... )` - mirrors `Model`.
@@ -114,6 +125,8 @@ impl AircraftSpec {
             physics: data.physics,
             aero,
             engine: data.engine,
+            gear: data.gear,
+            effects: data.effects,
         })
     }
 }

@@ -4,16 +4,36 @@
 //! which lives on its own node on the sea (see `spray_emitters`).
 
 use nalgebra::Vector3;
+use serde::Deserialize;
 
-use crate::engine::particles::{Curve, Emitter, Gradient, EmitterKind, EmissionShape, Forces, IntensityScales, ParticleEffect, ParticleEmitters, TrailEffect};
+use crate::engine::particles::{Curve, Emitter, Gradient, EmitterKind, EmissionShape, Facing, Forces, IntensityScales, ParticleEffect, ParticleEmitters, TrailEffect};
 
-/// Wingtips, in the plane's frame (m) - where the vortices come off.
-const LEFT_WINGTIP: Vector3<f32> = Vector3::new(-4.51, 0.23, 0.36);
-const RIGHT_WINGTIP: Vector3<f32> = Vector3::new(4.51, 0.23, 0.36);
+use super::gear_spec::GearSpec;
 
-pub const LEFT_VORTEX: &str = "left_vortex";
-pub const RIGHT_VORTEX: &str = "right_vortex";
-pub const WRECK_SMOKE: &str = "wreck_smoke";
+/// What an emitter in a plane's data.ron makes - each kind is one effect
+/// below, driven by `Plane::update_effects`.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+pub enum EffectKind {
+    /// Condensation off a wingtip under G (see `wingtip_vortex`).
+    WingtipVortex,
+    /// Smoke off the wreck after a crash (see `wreck_smoke`).
+    WreckSmoke,
+}
+
+/// One particle emitter on the plane - `data.ron`'s `effects: [ ... ]`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct EffectSpec {
+    /// Its name on the plane's node (`ParticleEmitters`).
+    pub name: String,
+    pub effect: EffectKind,
+    /// Where it sits, in meters in the jet's frame (+X left, +Y up, +Z nose).
+    pub position: Vector3<f32>,
+}
+
+/// The tyre-smoke emitter every wheel gets (see `tyre_smoke`), by its mesh.
+pub fn tyre_smoke_name(wheel_mesh: &str) -> String {
+    format!("tyre_smoke:{wheel_mesh}")
+}
 
 /// Condensation streaming off a wingtip under G - a thin white wisp left
 /// hanging in the air where the plane passed (barely drifting), slowly
@@ -123,9 +143,49 @@ pub fn update_spray(emitters: &mut ParticleEmitters, strength: f32, plane_speed:
     }
 }
 
-pub fn plane_emitters() -> ParticleEmitters {
-    ParticleEmitters::new()
-        .add(LEFT_VORTEX, Emitter::trail(wingtip_vortex()).at(LEFT_WINGTIP).intensity(0.0).disabled())
-        .add(RIGHT_VORTEX, Emitter::trail(wingtip_vortex()).at(RIGHT_WINGTIP).intensity(0.0).disabled())
-        .add(WRECK_SMOKE, Emitter::particles(wreck_smoke()).disabled())
+/// A puff of tyre smoke where a wheel touches down fast - the tyre
+/// spinning up from still to rolling speed in an instant. A burst the
+/// moment it's switched on, plus a short stream while it stays on (see
+/// `Plane::update_effects`), low-poly like the other smoke, trailing back
+/// off the wheel and fading within a second or two.
+pub fn tyre_smoke() -> ParticleEffect {
+    let mut effect = ParticleEffect::new()
+        .burst(18, None)
+        .rate(70.0)
+        .lifetime(0.8, 1.8)
+        .shape(EmissionShape::Sphere { radius: 0.3 })
+        .world_direction(Vector3::y())
+        .cone(70.0)
+        .speed(1.0, 4.0)
+        // Leaves the wheel with some of its speed, then the air stops it -
+        // the puff streams back off the wheel.
+        .inherit_velocity(0.35)
+        .forces(Forces { gravity: -0.05, drag: 3.0, wind: 1.0, turbulence: 0.6 })
+        .spin(-40.0, 40.0)
+        .faceted(6)
+        .facing(Facing::Camera)
+        .size_over_life(0.6, 5.0)
+        .color_over_life([0.78, 0.78, 0.76, 0.65], [0.85, 0.85, 0.83, 0.0])
+        .lit()
+        .max_particles(200);
+    effect.intensity_scales = IntensityScales { rate: true, alpha: true, size: true, speed: false };
+    effect
+}
+
+/// The plane's emitters: every one its data.ron's `effects` lists, plus a
+/// tyre-smoke one per wheel in its `gear` (placed on the wheel's contact
+/// each frame). All start off - `Plane::update_effects` switches them on.
+pub fn plane_emitters(effects: &[EffectSpec], gear: &GearSpec) -> ParticleEmitters {
+    let mut emitters = ParticleEmitters::new();
+    for spec in effects {
+        let emitter = match spec.effect {
+            EffectKind::WingtipVortex => Emitter::trail(wingtip_vortex()).intensity(0.0),
+            EffectKind::WreckSmoke => Emitter::particles(wreck_smoke()),
+        };
+        emitters.insert(spec.name.clone(), emitter.at(spec.position).disabled());
+    }
+    for wheel in &gear.wheels {
+        emitters.insert(tyre_smoke_name(&wheel.mesh), Emitter::particles(tyre_smoke()).at(wheel.position).intensity(0.0).disabled());
+    }
+    emitters
 }

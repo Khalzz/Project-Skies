@@ -44,6 +44,8 @@ pub enum AircraftEvent {
 pub struct AircraftReload {
     pub aero: AeroSpec,
     pub engine: EngineSpec,
+    pub gear: super::gear_spec::GearSpec,
+    pub effects: Vec<super::effects::EffectSpec>,
     pub mass: f32,
     pub center_of_mass: Vector3<f32>,
     pub colliders: Vec<ColliderType>,

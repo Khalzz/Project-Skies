@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use nalgebra::{UnitQuaternion, Vector3};
 
 use crate::app::App;
@@ -17,7 +19,7 @@ use super::controls::PlaneControls;
 use super::fcs::Fcs;
 use super::landing_gear::GearMeshes;
 use super::messages::{AircraftEvent, AircraftState};
-use super::effects;
+use super::effects::{self, EffectKind, EffectSpec};
 use super::pilot::Pilot;
 use crate::engine::particles::ParticleEmitters;
 use super::quick_list::QuickList;
@@ -37,6 +39,14 @@ pub struct Plane {
     pub pilot: Pilot,
     /// Wingtip vortex strength 0..1, eased - see update_effects.
     vortex_strength: f32,
+    /// The node's emitters from the plane's data.ron, by name - what each
+    /// one is, so update_effects knows how to drive it.
+    effects: Vec<(String, EffectKind)>,
+    /// Each wheel's ground contact last frame, by mesh - for spotting
+    /// touchdowns (tyre smoke).
+    wheels_grounded: HashMap<String, bool>,
+    /// Seconds of tyre smoke left per wheel, by mesh.
+    tyre_smoke: HashMap<String, f32>,
     pub fcs: Fcs,
     control_surfaces: Vec<ControlSurface>,
     afterburner: Afterburner,
@@ -46,6 +56,13 @@ pub struct Plane {
     gear_meshes: GearMeshes,
     quick_menu: QuickList,
 }
+
+/// Tyre smoke: from this ground speed at touchdown (m/s, ~50 kt) - slower
+/// and the tyre spins up without smoking - full by TYRE_SMOKE_FULL_SPEED,
+/// lasting TYRE_SMOKE_SECONDS.
+const TYRE_SMOKE_MIN_SPEED: f32 = 25.0;
+const TYRE_SMOKE_FULL_SPEED: f32 = 75.0;
+const TYRE_SMOKE_SECONDS: f32 = 0.3;
 
 impl Plane {
     // Cap on App::aero_debug_trail/App::wing_lift_trail (see those fields'
@@ -63,6 +80,9 @@ impl Plane {
             wrecked: false,
             pilot: Pilot::new(),
             vortex_strength: 0.0,
+            effects: Vec::new(),
+            wheels_grounded: HashMap::new(),
+            tyre_smoke: HashMap::new(),
             fcs: Fcs::new(),
             control_surfaces: Self::default_control_surfaces(),
             afterburner: Afterburner::new(),
@@ -70,6 +90,17 @@ impl Plane {
             gear_meshes: GearMeshes::new(),
             quick_menu: QuickList::new(),
         }
+    }
+
+    /// What each of the node's emitters is - the plane's data.ron effects.
+    pub fn with_effects(mut self, effects: &[EffectSpec]) -> Self {
+        self.set_effects(effects);
+        self
+    }
+
+    /// See with_effects - also when the data.ron is edited mid-flight.
+    pub fn set_effects(&mut self, effects: &[EffectSpec]) {
+        self.effects = effects.iter().map(|spec| (spec.name.clone(), spec.effect)).collect();
     }
 
     fn default_control_surfaces() -> Vec<ControlSurface> {
@@ -188,27 +219,51 @@ impl Plane {
     }
 
     /// Drives the node's particle emitters (see plane::effects): wingtip
-    /// vortices streaming off under G, smoke off the wreck.
+    /// vortices streaming off under G, smoke off the wreck, and a puff of
+    /// tyre smoke off each wheel that touches down fast.
     fn update_effects(&mut self, node: &mut Node, delta_time: f32) {
         // Condensation shows from ~3.5 G, full by ~7 (either sign); the raw G
         // is spiky, so the strength eases toward it.
-        let g = node.physics_state::<AircraftState>().map(|state| state.flight_data.g_meter.abs()).unwrap_or(1.0);
+        let state = node.physics_state::<AircraftState>();
+        let g = state.map(|state| state.flight_data.g_meter.abs()).unwrap_or(1.0);
         let t = ((g - 3.5) / 3.5).clamp(0.0, 1.0);
         let target = if self.wrecked { 0.0 } else { t * t * (3.0 - 2.0 * t) };
         self.vortex_strength = lerp(self.vortex_strength, target, (delta_time * 5.0).min(1.0));
 
-        let Some(emitters) = node.get_property_mut::<ParticleEmitters>() else { return };
-        for name in [effects::LEFT_VORTEX, effects::RIGHT_VORTEX] {
-            if let Some(vortex) = emitters.get_mut(name) {
-                vortex.intensity = self.vortex_strength;
-                vortex.enabled = self.vortex_strength > 0.02;
+        // Touchdowns: a wheel that wasn't on the ground last frame and is
+        // now, fast enough - the faster, the thicker the smoke.
+        let speed = state.map(|state| Vector3::new(state.flight_data.velocity.x, 0.0, state.flight_data.velocity.z).magnitude()).unwrap_or(0.0);
+        let wheels = state.map(|state| state.wheels.clone()).unwrap_or_default();
+        for (mesh, data) in &wheels {
+            let was_grounded = self.wheels_grounded.insert(mesh.clone(), data.grounded).unwrap_or(true);
+            if data.grounded && !was_grounded && speed > TYRE_SMOKE_MIN_SPEED {
+                self.tyre_smoke.insert(mesh.clone(), TYRE_SMOKE_SECONDS);
             }
         }
-        if let Some(smoke) = emitters.get_mut(effects::WRECK_SMOKE) {
-            smoke.enabled = self.wrecked;
+        let smoke_strength = ((speed - TYRE_SMOKE_MIN_SPEED) / (TYRE_SMOKE_FULL_SPEED - TYRE_SMOKE_MIN_SPEED)).clamp(0.0, 1.0);
+
+        let Some(emitters) = node.get_property_mut::<ParticleEmitters>() else { return };
+        for (name, kind) in &self.effects {
+            let Some(emitter) = emitters.get_mut(name) else { continue };
+            match kind {
+                EffectKind::WingtipVortex => {
+                    emitter.intensity = self.vortex_strength;
+                    emitter.enabled = self.vortex_strength > 0.02;
+                }
+                EffectKind::WreckSmoke => emitter.enabled = self.wrecked,
+            }
+        }
+        for (mesh, left) in self.tyre_smoke.iter_mut() {
+            let Some(emitter) = emitters.get_mut(&effects::tyre_smoke_name(mesh)) else { continue };
+            // On the wheel's contact point, wherever the suspension has it.
+            if let Some(data) = wheels.get(mesh) {
+                emitter.offset = data.local_position;
+            }
+            emitter.enabled = *left > 0.0;
+            emitter.intensity = smoke_strength.max(0.2);
+            *left = (*left - delta_time).max(0.0);
         }
     }
-
     /// The pilot feels the plane's G - frozen while paused, resting during
     /// cinematics (physics is paused, the G is stale), and after a wreck
     /// only the crash itself (see Pilot::recover).

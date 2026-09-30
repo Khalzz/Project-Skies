@@ -8,7 +8,7 @@
     rigidbody: (
       is_static: false,
       mass: 2223.0, // This mass is with full fuel, in the future it should be the mass empty
-      center_of_mass: (0.0, 0.029, 1.0),
+      center_of_mass: (0.0, 0.029, 1.5),
       initial_velocity: (0.0, 0.0, 0.0),
     ),
     colliders: [
@@ -166,4 +166,41 @@
     // Turboprop power falls a little faster with altitude than a turbofan's.
     altitude_lapse_exponent: 0.8,
   ),
+  // The landing gear: each wheel is a suspension strut casting straight
+  // down from `position` (meters in the jet's frame: +X left, +Y up, +Z
+  // nose) up to `suspension_length`; `mesh` is the model's wheel it moves.
+  // `stiffness` is the spring force at full compression (N), `damping`
+  // resists vertical speed (N per m/s). `steerable` wheels turn with the
+  // pedals, `braked` ones brake. The rear wheels must sit behind the center
+  // of mass and the front one well ahead of it, or the jet tips onto its
+  // tail on the ground. Saved mid-flight, it applies right away.
+  gear: (
+    wheels: [
+      // Suspension 1.7 m: the modelled tyres bottom out ~1.66 m below these
+      // mounts, so the jet rests on its modelled wheels.
+      (mesh: "wheel-f", position: (0.0, 0.029, 4.15), suspension_length: 1.7, stiffness: 100000.0, damping: 500.0, steerable: true),
+      (mesh: "wheel-lb", position: (-1.6, 0.029, 1.2), suspension_length: 1.7, stiffness: 200000.0, damping: 500.0, braked: true),
+      (mesh: "wheel-rb", position: (1.6, 0.029, 1.2), suspension_length: 1.7, stiffness: 200000.0, damping: 500.0, braked: true),
+    ],
+    // Nose-wheel steering: full lock at taxi speed, tapering to a few
+    // degrees by takeoff speed (ground speeds in m/s). Optional.
+    steering: (
+      max_angle_deg: 32.0,
+      high_speed_angle_deg: 4.0,
+      taper_start_speed: 8.0,
+      taper_end_speed: 40.0,
+    ),
+  ),
+  // Every particle effect the plane can make, and where it comes from (meters
+  // in the jet's frame: +X left, +Y up, +Z nose). `effect` is what it is:
+  //   WingtipVortex - condensation trailing off a wingtip under G
+  //   WreckSmoke    - smoke off the wreck after a crash
+  // Each wheel in `gear` also gets tyre smoke at touchdown on its own. F1
+  // shows every emitter (orange cross with a tick up). Saved mid-flight, it
+  // applies right away.
+  effects: [
+    (name: "left_vortex", effect: WingtipVortex, position: (9.6, 0.23, 0.5)),
+    (name: "right_vortex", effect: WingtipVortex, position: (-9.6, 0.23, 0.5)),
+    (name: "wreck_smoke", effect: WreckSmoke, position: (0.0, 0.0, 0.0)),
+  ],
 )

@@ -565,6 +565,19 @@ fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::D
             // the `wheel-f` / `left_elevator` / ... name lookups elsewhere
             // still resolve); extras get a "#primN" suffix. Single-primitive
             // meshes - the common case - are completely unchanged.
+            // Local-space AABB of this primitive (kept on the mesh - see
+            // Mesh::local_bounds - and logged below).
+            let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+            for v in &vertices {
+                for a in 0..3 {
+                    lo[a] = lo[a].min(v.position[a]);
+                    hi[a] = hi[a].max(v.position[a]);
+                }
+            }
+            if vertices.is_empty() {
+                (lo, hi) = ([0.0; 3], [0.0; 3]);
+            }
+
             let node_name = node.name().map(str::to_owned).unwrap_or_else(|| format!("node{}", node.index()));
             let key = if primitive.index() == 0 {
                 node_name.clone()
@@ -587,6 +600,7 @@ fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::D
                 // Node name matches all of a node's primitives; the "#primN"
                 // key matches just one.
                 double_sided: double_sided.covers(&node_name) || double_sided.covers(&key),
+                local_bounds: (lo, hi),
             };
 
             let list = if primitive.material().alpha_mode() == gltf::material::AlphaMode::Blend || primitive.material().alpha_mode() == gltf::material::AlphaMode::Mask {
@@ -595,15 +609,8 @@ fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::D
                 "opaque"
             };
 
-            // Local-space AABB of this primitive, and where the node's own
-            // transform (already baked into `transform` above) puts it.
-            let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
-            for v in &vertices {
-                for a in 0..3 {
-                    lo[a] = lo[a].min(v.position[a]);
-                    hi[a] = hi[a].max(v.position[a]);
-                }
-            }
+            // Where the node's own transform (already baked into `transform`
+            // above) puts the primitive's AABB.
             let corner_after = |p: [f32; 3]| {
                 let m = transform.to_matrix_bufferable();
                 // column-major mat * (p, 1)
@@ -1279,6 +1286,7 @@ pub fn register_primitive_model(app: &mut App, name: &str, shape: PrimitiveShape
             parent_transform: None,
             alpha_mode: gltf::material::AlphaMode::Opaque,
             double_sided: false,
+            local_bounds: ([0.0; 3], [0.0; 3]),
         };
         opaque.insert(mesh_name, mesh);
     }

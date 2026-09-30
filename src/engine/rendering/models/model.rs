@@ -2,7 +2,7 @@ use std::{collections::HashMap, default, mem, ops::Range};
 
 
 use gltf::material::AlphaMode;
-use nalgebra::UnitQuaternion;
+use nalgebra::{UnitQuaternion, Vector3};
 use wgpu::{BindGroup, BindGroupLayoutDescriptor, Device};
 
 use crate::transform::Transform;
@@ -73,6 +73,12 @@ pub struct Mesh {
     /// `resources::DoubleSided` (declared per model at registration). The
     /// glTF `doubleSided` material flag is deliberately NOT used.
     pub double_sided: bool,
+    /// The geometry's own box (min, max), in the mesh's local space - before
+    /// its transform. Lets code that moves a mesh work from where its shape
+    /// actually is, whether or not its origin sits on it (an exporter often
+    /// leaves the origin at the model's, with the geometry baked off to the
+    /// side - see `local_center`).
+    pub local_bounds: ([f32; 3], [f32; 3]),
 }
 
 /// # Model
@@ -82,7 +88,62 @@ pub struct Model {
     pub materials: Vec<Material>
 }
 
+impl Model {
+    /// Every mesh of the object named `name` in list `list` ("opaque" /
+    /// "transparent") - ALL of its materials. An object with several
+    /// materials loads as one mesh per material: the first keyed by its
+    /// plain name, the rest as "<name>#prim1", "#prim2"... (see
+    /// resources::traverse_node). Anything animating an object by name has
+    /// to move all of them, or its materials drift apart.
+    pub fn meshes_named_mut<'a>(&'a mut self, list: &str, name: &'a str) -> impl Iterator<Item = &'a mut Mesh> + 'a {
+        let prefix = format!("{name}#prim");
+        self.mesh_lists.get_mut(list).into_iter().flat_map(move |meshes| {
+            let prefix = prefix.clone();
+            meshes.iter_mut().filter(move |(key, _)| key.as_str() == name || key.starts_with(&prefix)).map(|(_, mesh)| mesh)
+        })
+    }
+}
+
 impl Mesh {
+    /// The middle of the geometry, in the mesh's local space.
+    pub fn local_center(&self) -> Vector3<f32> {
+        let (lo, hi) = self.local_bounds;
+        Vector3::new((lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5, (lo[2] + hi[2]) * 0.5)
+    }
+
+    /// Half the geometry's height (local Y) - e.g. a wheel's radius.
+    pub fn local_half_height(&self) -> f32 {
+        let (lo, hi) = self.local_bounds;
+        (hi[1] - lo[1]) * 0.5
+    }
+
+    /// How far the geometry reaches below its middle, straight down in the
+    /// model (not the mesh's own local Y) - under its authored rotation and
+    /// scale. A wheel's radius, whichever way its mesh was modelled (e.g.
+    /// turned 90° with its axle along local Y).
+    pub fn depth_below_center(&self) -> f32 {
+        let (lo, hi) = self.local_bounds;
+        let base = &self.base_transform;
+        let rotation = UnitQuaternion::from_quaternion(base.rotation);
+        let lowest = (0..8).map(|corner| {
+            let local = Vector3::new(
+                if corner & 1 == 0 { lo[0] } else { hi[0] },
+                if corner & 2 == 0 { lo[1] } else { hi[1] },
+                if corner & 4 == 0 { lo[2] } else { hi[2] },
+            );
+            (rotation * base.scale.component_mul(&local)).y
+        }).fold(f32::MAX, f32::min);
+        self.center_offset().y - lowest
+    }
+
+    /// Where the geometry's middle ends up relative to the mesh's position,
+    /// under its authored rotation/scale - add a position to it to get where
+    /// the shape's middle is drawn.
+    pub fn center_offset(&self) -> Vector3<f32> {
+        let base = &self.base_transform;
+        UnitQuaternion::from_quaternion(base.rotation) * base.scale.component_mul(&self.local_center())
+    }
+
     pub fn update_transform(&self, queue: &wgpu::Queue) {
         let transform_data: Transform;
 
