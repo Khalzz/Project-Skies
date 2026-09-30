@@ -25,6 +25,79 @@ pub fn load_binary(file_name: &str) -> anyhow::Result<Vec<u8>> {
     Ok(data)
 }
 
+/// Where a model's file is: in the build-time `res/` copy (`load_binary`) or
+/// anywhere on disk at runtime (e.g. a plane's own folder under
+/// `assets/planes/`). Its buffers/textures are looked up next to it, in the
+/// same place.
+#[derive(Debug, Clone)]
+pub enum ModelFile {
+    Res(String),
+    Asset(std::path::PathBuf),
+}
+
+/// Which of a model's meshes skip backface culling - `DoubleSided`, owned,
+/// so it can be stored with a model's source until it's loaded.
+#[derive(Debug, Clone)]
+pub enum DoubleSidedMeshes {
+    None,
+    All,
+    Meshes(Vec<String>),
+}
+
+/// Everything needed to load a model later - see `declare_model` and
+/// `engine::scene_manager::properties::Model::from_file`.
+#[derive(Debug, Clone)]
+pub struct ModelSource {
+    pub file: ModelFile,
+    pub double_sided: DoubleSidedMeshes,
+}
+
+impl ModelSource {
+    /// A file under the build-time `res/` copy.
+    pub fn res(path: &str) -> Self {
+        Self { file: ModelFile::Res(path.to_owned()), double_sided: DoubleSidedMeshes::None }
+    }
+
+    /// A file anywhere on disk, read at runtime.
+    pub fn asset(path: impl Into<std::path::PathBuf>) -> Self {
+        Self { file: ModelFile::Asset(path.into()), double_sided: DoubleSidedMeshes::None }
+    }
+
+    pub fn double_sided(mut self, double_sided: DoubleSidedMeshes) -> Self {
+        self.double_sided = double_sided;
+        self
+    }
+
+    /// The name a loaded copy is kept under (`App::game_models`) - the file
+    /// itself, so every reference to the same file shares one load.
+    pub fn key(&self) -> String {
+        match &self.file {
+            ModelFile::Res(path) => format!("res/{path}"),
+            ModelFile::Asset(path) => path.to_string_lossy().replace('\\', "/"),
+        }
+    }
+
+    /// Reads the model from disk and uploads it - see `load_model_with`.
+    pub fn load(&self, device: &wgpu::Device, queue: &wgpu::Queue, transform_bind_group_layout: &wgpu::BindGroupLayout) -> anyhow::Result<Model> {
+        let names: Vec<&str> = match &self.double_sided {
+            DoubleSidedMeshes::Meshes(names) => names.iter().map(String::as_str).collect(),
+            _ => Vec::new(),
+        };
+        let double_sided = match &self.double_sided {
+            DoubleSidedMeshes::None => DoubleSided::None,
+            DoubleSidedMeshes::All => DoubleSided::All,
+            DoubleSidedMeshes::Meshes(_) => DoubleSided::Meshes(&names),
+        };
+        match &self.file {
+            ModelFile::Res(path) => load_model_gltf(path, device, queue, transform_bind_group_layout, double_sided),
+            ModelFile::Asset(path) => {
+                let file_name = path.to_string_lossy().into_owned();
+                load_model_with(&file_name, &|file: &Path| Ok(std::fs::read(file)?), device, queue, transform_bind_group_layout, double_sided)
+            }
+        }
+    }
+}
+
 /// Reads a file relative to the project's assets/ directory - unlike load_binary
 /// (which reads from OUT_DIR/res/, a build-time copy baked in at compile time),
 /// this reads directly off the filesystem at runtime, the same convention
@@ -34,6 +107,9 @@ pub fn load_asset_binary(file_name: &str) -> std::io::Result<Vec<u8>> {
     std::fs::read(std::path::Path::new("assets").join(file_name))
 }
 
+/// A texture from the build-time `res/` copy. (Model textures load through
+/// their model's own reader instead - see `load_model_with`.)
+#[allow(dead_code)]
 pub fn load_texture(file_name: &str, device: &wgpu::Device, queue: &wgpu::Queue) -> anyhow::Result<Texture> {
     let data = load_binary(file_name)?;
     Texture::from_bytes(&data, device, queue, file_name)
@@ -50,9 +126,17 @@ pub fn load_texture_cube(file_names: [&str; 6], device: &wgpu::Device, queue: &w
 }
 
 pub fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgpu::Queue, transform_bind_group_layout: &wgpu::BindGroupLayout, double_sided: DoubleSided) -> anyhow::Result<Model> {
+    load_model_with(file_name, &|file: &Path| load_binary(&file.to_string_lossy()), device, queue, transform_bind_group_layout, double_sided)
+}
+
+/// Loads a `.gltf`/`.glb` through `read` - which turns a path (the model's
+/// own `file_name`, or one of its buffers/textures, resolved next to it)
+/// into bytes. `load_model_gltf` reads from the build-time `res/` copy;
+/// `ModelSource::load` reads `Asset` files straight off disk.
+fn load_model_with(file_name: &str, read: &dyn Fn(&Path) -> anyhow::Result<Vec<u8>>, device: &wgpu::Device, queue: &wgpu::Queue, transform_bind_group_layout: &wgpu::BindGroupLayout, double_sided: DoubleSided) -> anyhow::Result<Model> {
     // Gltf::from_slice auto-detects the format from the header, so this handles
     // both text .gltf (JSON) and binary .glb files.
-    let gltf_data = load_binary(file_name)?;
+    let gltf_data = read(Path::new(file_name))?;
     let gltf = Gltf::from_slice(&gltf_data).unwrap();
 
     // Load buffers
@@ -67,7 +151,7 @@ pub fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgpu::Que
             gltf::buffer::Source::Uri(uri) => {
                 let file_dir = Path::new(file_name).parent().unwrap_or(Path::new(""));
                 let full_path = file_dir.join(uri);
-                let bin = load_binary(full_path.to_str().unwrap())?;
+                let bin = read(&full_path)?;
                 buffer_data.push(bin);
             }
         }
@@ -209,7 +293,7 @@ pub fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgpu::Que
                     file_name, mat_index, material.name().unwrap_or("<unnamed>"),
                     full_path.display(),
                 );
-                let diffuse_texture = load_texture(full_path.to_str().unwrap(), device, queue)?;
+                let diffuse_texture = Texture::from_bytes(&read(&full_path)?, device, queue, &full_path.to_string_lossy())?;
 
                 let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     layout: &bind_group_layout,
@@ -784,6 +868,47 @@ impl DoubleSided<'_> {
     }
 }
 
+/// Names a model without loading it - it's read from disk the first time
+/// a scene spawns a node using it (see `load_scene_model`), and dropped
+/// again when that scene ends (see `unload_level_models`), so each level
+/// only ever holds the models it uses. A node refers to it by `name`
+/// (`Model::new(name)`).
+pub fn declare_model(app: &mut App, name: &str, source: ModelSource) {
+    app.model_sources.insert(name.to_owned(), source);
+}
+
+/// The model kept under `source.key()`, loading it now if nothing has yet -
+/// called when a scene spawns a node that uses it. Remembered as a level
+/// model, so `unload_level_models` drops it when the scene ends.
+pub fn load_scene_model(app: &mut App, source: &ModelSource) -> Result<Model, String> {
+    let key = source.key();
+    if let Some(existing) = app.loaded_models.remove(&key) {
+        return Ok(existing);
+    }
+    let bind_group_layout = Mesh::create_bind_group_layout(&app.renderer.device);
+    let model = source.load(&app.renderer.device, &app.renderer.queue, &bind_group_layout)
+        .map_err(|e| format!("failed to load model '{key}': {e}"))?;
+    app.level_model_keys.insert(key);
+    Ok(model)
+}
+
+/// Drops every model a scene loaded from a file (see `load_scene_model`) -
+/// called as the scene ends, so the next one starts from only what it
+/// uses. Models that can't be reloaded from a file (procedural ones, see
+/// `register_primitive_model`) are kept, back as not-yet-instanced.
+pub fn unload_level_models(app: &mut App) {
+    let level_keys = std::mem::take(&mut app.level_model_keys);
+    for (key, instanced) in std::mem::take(&mut app.game_models) {
+        if !level_keys.contains(&key) {
+            app.loaded_models.insert(key, instanced.model);
+        }
+    }
+    app.loaded_models.retain(|key, _| !level_keys.contains(key));
+}
+
+/// Loads a model right away, from the build-time `res/` copy - the eager
+/// alternative to `declare_model`.
+#[allow(dead_code)]
 pub fn register_model(app: &mut App, name: &str, path: &str, double_sided: DoubleSided) -> Result<(), String> {
     if app.loaded_models.contains_key(name) || app.game_models.contains_key(name) {
         return Err(format!("a model named '{name}' is already loaded"));
@@ -806,10 +931,21 @@ pub enum PrimitiveShape {
     /// A unit cube (-0.5..0.5 on each axis) - scale it via a node's own
     /// `Transform3D::scale`, same as every other model.
     Cube,
+    /// An ocean surface as nested square rings of decreasing detail around
+    /// its origin, in real world units (leave its node at scale 1) - see
+    /// `build_water_rings_mesh`. One mesh per `WaterTier` (named by
+    /// `water_tier_mesh_name`); the water pass draws only the tier that
+    /// matches the camera's altitude (see `WaterRenderData::update`). Meant
+    /// to be recentered under the camera every frame and drawn with
+    /// water.wgsl.
+    WaterRings { tiers: &'static [WaterTier] },
     /// A unit square (-0.5..0.5 on X/Z, Y=0, normal +Y) - `subdivisions` is
     /// how many extra cuts per side beyond the base single quad (0 = one
     /// quad/4 vertices, 1 = a 2x2 grid/9 vertices, ...), so a shader driving
     /// per-vertex displacement (waves, ...) has geometry to actually move.
+    /// Nothing uses it right now (the ocean moved to `WaterRings`) - kept as
+    /// a general-purpose shape.
+    #[allow(dead_code)]
     Plane { subdivisions: u32 },
 }
 
@@ -872,6 +1008,157 @@ fn build_plane_mesh(subdivisions: u32) -> (Vec<ModelVertex>, Vec<u32>) {
     (vertices, indices)
 }
 
+/// One level of `PrimitiveShape::WaterRings`: a square ring of `cell`-sized
+/// cells, from the previous ring's outer edge (or the center, for the first)
+/// out to `outer_half_extent` from the center - both in world units.
+#[derive(Clone, Copy, Debug)]
+pub struct WaterRing {
+    pub cell: f32,
+    pub outer_half_extent: f32,
+}
+
+/// One altitude tier of `PrimitiveShape::WaterRings`: the rings drawn while
+/// the camera is at or above `min_altitude` (world Y) - and below the next
+/// tier's. Higher tiers use coarser rings: from higher up, the nearest water
+/// is further away, so bigger cells look just as fine on screen.
+#[derive(Clone, Copy, Debug)]
+pub struct WaterTier {
+    pub min_altitude: f32,
+    pub rings: &'static [WaterRing],
+}
+
+/// How many cells across each culling tile of a WaterRings mesh is - see
+/// `WaterTile`. Bigger tiles mean fewer draw calls but coarser culling.
+const WATER_TILE_CELLS: i32 = 128;
+// How far past its own cells a tile's box reaches, world units - room for
+// everything that can move a vertex after the mesh is built: the waves'
+// height and sideways push, the ocean node's own offset, with a wide margin.
+// (The ring-edge slide onto the next ring's grid is added separately.)
+const WATER_TILE_MARGIN: f32 = 50.0;
+
+/// A block of one WaterRings mesh that's drawn or skipped as a whole, by
+/// whether its box is in the camera's view (see
+/// WaterRenderData::visible_ranges): its triangles are indices
+/// `first_index..first_index + index_count`, and `min`/`max` bound every
+/// vertex in it, relative to the mesh's own origin, however the shader ends
+/// up moving them.
+#[derive(Clone, Copy, Debug)]
+pub struct WaterTile {
+    pub first_index: u32,
+    pub index_count: u32,
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+}
+
+/// The mesh name `register_primitive_model` gives tier `tier` of a
+/// `WaterRings` model called `model` - see `water_tier_of_mesh`.
+pub fn water_tier_mesh_name(model: &str, tier: usize) -> String {
+    format!("{model}#tier{tier}")
+}
+
+/// Which tier a `WaterRings` mesh is, from its name (see
+/// `water_tier_mesh_name`) - `None` for any other mesh.
+pub fn water_tier_of_mesh(mesh_name: &str) -> Option<usize> {
+    mesh_name.rsplit_once("#tier")?.1.parse().ok()
+}
+
+/// A level-of-detail ocean mesh: nested square rings around the origin
+/// (flat, Y=0), one per `rings` entry, innermost first - the first a full
+/// square grid, every one after a square ring around the one before. Dense
+/// near the center (the camera), coarse far away.
+///
+/// Each vertex carries what water.wgsl needs to blend rings together:
+/// `tex_coords` = (its ring's cell size, its ring's outer half-extent), and
+/// `normal.x` = the NEXT ring's cell size (water.wgsl computes its own
+/// normals, so the field is free). The shader uses them to morph each
+/// ring's outer edge onto a coarser grid and to fade out the waves the next
+/// ring can't carry, so rings meet without cracks.
+///
+/// Each ring's cell must be a whole multiple of the one inside it (2x, 4x,
+/// 16x, ...) - water.wgsl slides each ring's outer edge onto the next ring's
+/// grid, so they meet exactly (no cracks), and fades out the waves the next
+/// ring's cells are too coarse to move (see NEXT_RING_FADE_START).
+///
+/// Every edge must land on its ring's own grid (panics otherwise), which
+/// with power-of-two-friendly numbers also keeps positions exact in f32.
+///
+/// Every ring comes split into square `WATER_TILE_CELLS` tiles (in index
+/// order, each tile's triangles together - see `WaterTile`), so the water
+/// pass can skip the ones out of view.
+fn build_water_rings_mesh(rings: &[WaterRing]) -> (Vec<ModelVertex>, Vec<u32>, Vec<WaterTile>) {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    let mut tiles = Vec::new();
+    let mut inner_half_extent = 0.0f32;
+    for (level, ring) in rings.iter().enumerate() {
+        let cell = ring.cell;
+        let half = (ring.outer_half_extent / cell).round() as i32;
+        let inner = (inner_half_extent / cell).round() as i32;
+        assert!((half as f32 * cell - ring.outer_half_extent).abs() < 1e-3, "water ring {level}: outer edge isn't on its grid");
+        assert!((inner as f32 * cell - inner_half_extent).abs() < 1e-3, "water ring {level}: inner edge isn't on its grid");
+        assert!(half > inner, "water ring {level}: must reach further than the one inside it");
+        let next_cell = rings.get(level + 1).map(|next| next.cell).unwrap_or(cell * 2.0);
+        assert!((next_cell / cell).fract() == 0.0, "water ring {}: cell must be a whole multiple of ring {level}'s", level + 1);
+        let side = (half * 2 + 1) as usize;
+
+        // Grid vertex index -> mesh vertex index, only for vertices a kept
+        // cell actually uses.
+        let mut vertex_of = vec![None::<u32>; side * side];
+        let mut vertex = |i: i32, j: i32, vertices: &mut Vec<ModelVertex>| -> u32 {
+            let slot = (j + half) as usize * side + (i + half) as usize;
+            *vertex_of[slot].get_or_insert_with(|| {
+                vertices.push(ModelVertex {
+                    position: [i as f32 * cell, 0.0, j as f32 * cell],
+                    tex_coords: [cell, ring.outer_half_extent],
+                    normal: [next_cell, 0.0, 0.0],
+                });
+                (vertices.len() - 1) as u32
+            })
+        };
+
+        // Same winding as build_plane_mesh (rows along +Z, columns along +X),
+        // leaving out the middle the previous ring already covers - one
+        // WATER_TILE_CELLS square at a time, each becoming a WaterTile.
+        let mut tile_j = -half;
+        while tile_j < half {
+            let tile_j_end = (tile_j + WATER_TILE_CELLS).min(half);
+            let mut tile_i = -half;
+            while tile_i < half {
+                let tile_i_end = (tile_i + WATER_TILE_CELLS).min(half);
+                let first_index = indices.len() as u32;
+                for j in tile_j..tile_j_end {
+                    for i in tile_i..tile_i_end {
+                        if i >= -inner && i < inner && j >= -inner && j < inner {
+                            continue;
+                        }
+                        let top_left = vertex(i, j, &mut vertices);
+                        let top_right = vertex(i + 1, j, &mut vertices);
+                        let bottom_left = vertex(i, j + 1, &mut vertices);
+                        let bottom_right = vertex(i + 1, j + 1, &mut vertices);
+                        indices.extend_from_slice(&[top_left, bottom_left, bottom_right, top_left, bottom_right, top_right]);
+                    }
+                }
+                let index_count = indices.len() as u32 - first_index;
+                if index_count > 0 {
+                    // The ring-edge slide (water.wgsl's morph) moves vertices
+                    // toward lower coordinates by up to one next-ring cell.
+                    let reach_below = next_cell + WATER_TILE_MARGIN;
+                    tiles.push(WaterTile {
+                        first_index,
+                        index_count,
+                        min: [tile_i as f32 * cell - reach_below, -WATER_TILE_MARGIN, tile_j as f32 * cell - reach_below],
+                        max: [tile_i_end as f32 * cell + WATER_TILE_MARGIN, WATER_TILE_MARGIN, tile_j_end as f32 * cell + WATER_TILE_MARGIN],
+                    });
+                }
+                tile_i = tile_i_end;
+            }
+            tile_j = tile_j_end;
+        }
+        inner_half_extent = ring.outer_half_extent;
+    }
+    (vertices, indices, tiles)
+}
+
 /// Registers a procedurally-generated `PrimitiveShape` once under a chosen
 /// `name` - the same registration point/pattern as `register_model`
 /// (`app.loaded_models`, referenced later via a node's `Model { model_ref:
@@ -889,9 +1176,22 @@ pub fn register_primitive_model(app: &mut App, name: &str, shape: PrimitiveShape
     let device = &app.renderer.device;
     let queue = &app.renderer.queue;
 
-    let (vertices, indices) = match shape {
-        PrimitiveShape::Cube => build_cube_mesh(),
-        PrimitiveShape::Plane { subdivisions } => build_plane_mesh(subdivisions),
+    // (mesh name, vertices, indices, culling tiles) - one mesh for most
+    // shapes, one per tier for WaterRings (which also come split into tiles,
+    // see build_water_rings_mesh).
+    let parts: Vec<(String, Vec<ModelVertex>, Vec<u32>, Option<Vec<WaterTile>>)> = match shape {
+        PrimitiveShape::Cube => {
+            let (vertices, indices) = build_cube_mesh();
+            vec![(name.to_owned(), vertices, indices, None)]
+        }
+        PrimitiveShape::Plane { subdivisions } => {
+            let (vertices, indices) = build_plane_mesh(subdivisions);
+            vec![(name.to_owned(), vertices, indices, None)]
+        }
+        PrimitiveShape::WaterRings { tiers } => tiers.iter().enumerate().map(|(tier, water_tier)| {
+            let (vertices, indices, tiles) = build_water_rings_mesh(water_tier.rings);
+            (water_tier_mesh_name(name, tier), vertices, indices, Some(tiles))
+        }).collect(),
     };
 
     let texture_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -934,53 +1234,64 @@ pub fn register_primitive_model(app: &mut App, name: &str, shape: PrimitiveShape
 
     let materials = vec![model::Material { name: "Default Material".to_owned(), diffuse_texture: default_texture, bind_group }];
 
-    let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some(&format!("{name} primitive vertex buffer")),
-        contents: bytemuck::cast_slice(&vertices),
-        usage: wgpu::BufferUsages::VERTEX,
-    });
-    let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some(&format!("{name} primitive index buffer")),
-        contents: bytemuck::cast_slice(&indices),
-        usage: wgpu::BufferUsages::INDEX,
-    });
-
-    // Identity - a primitive's actual placement/size comes from its node's
-    // own Transform3D, same as every mesh loaded via load_model_gltf.
-    let transform = Transform::new(Vector3::zeros(), Quaternion::identity(), Vector3::new(1.0, 1.0, 1.0));
-    let transform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("primitive transform buffer"),
-        contents: bytemuck::cast_slice(&[transform.to_matrix_bufferable()]),
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-    });
-    let transform_bind_group_layout = Mesh::create_bind_group_layout(device);
-    let transform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("primitive transform bind group"),
-        layout: &transform_bind_group_layout,
-        entries: &[wgpu::BindGroupEntry { binding: 0, resource: transform_buffer.as_entire_binding() }],
-    });
-
-    let mesh = model::Mesh {
-        name: name.to_owned(),
-        vertex_buffer,
-        index_buffer,
-        num_elements: indices.len() as u32,
-        material: 0,
-        transform_buffer,
-        transform_bind_group,
-        transform,
-        base_transform: transform,
-        parent_transform: None,
-        alpha_mode: gltf::material::AlphaMode::Opaque,
-        double_sided: false,
-    };
-
     let mut opaque = HashMap::new();
-    opaque.insert(name.to_owned(), mesh);
+    let mut mesh_tiles = Vec::new();
+    for (mesh_name, vertices, indices, tiles) in parts {
+        if let Some(tiles) = tiles {
+            mesh_tiles.push((mesh_name.clone(), tiles));
+        }
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(&format!("{mesh_name} primitive vertex buffer")),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(&format!("{mesh_name} primitive index buffer")),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        // Identity - a primitive's actual placement/size comes from its node's
+        // own Transform3D, same as every mesh loaded via load_model_gltf.
+        let transform = Transform::new(Vector3::zeros(), Quaternion::identity(), Vector3::new(1.0, 1.0, 1.0));
+        let transform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("primitive transform buffer"),
+            contents: bytemuck::cast_slice(&[transform.to_matrix_bufferable()]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let transform_bind_group_layout = Mesh::create_bind_group_layout(device);
+        let transform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("primitive transform bind group"),
+            layout: &transform_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: transform_buffer.as_entire_binding() }],
+        });
+
+        let mesh = model::Mesh {
+            name: mesh_name.clone(),
+            vertex_buffer,
+            index_buffer,
+            num_elements: indices.len() as u32,
+            material: 0,
+            transform_buffer,
+            transform_bind_group,
+            transform,
+            base_transform: transform,
+            parent_transform: None,
+            alpha_mode: gltf::material::AlphaMode::Opaque,
+            double_sided: false,
+        };
+        opaque.insert(mesh_name, mesh);
+    }
+
     let mut mesh_lists = HashMap::new();
     mesh_lists.insert("opaque".to_owned(), opaque);
 
     app.loaded_models.insert(name.to_owned(), model::Model { mesh_lists, materials });
+    // Ocean meshes draw tile by tile, only the tiles in view - see
+    // WaterRenderData::visible_ranges.
+    for (mesh_name, tiles) in mesh_tiles {
+        app.water.set_mesh_tiles(mesh_name, tiles);
+    }
     Ok(())
 }
 

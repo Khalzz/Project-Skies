@@ -35,17 +35,17 @@ impl WheelManager {
       // wheel mesh is placed at whatever point it returns (contact point, or
       // the ray's far end when airborne - see GearMeshes::place).
       //
-      // The REARS must sit behind the rigidbody's centre of mass (z = 0.5,
+      // The REARS must sit behind the rigidbody's centre of mass (z = 0.359,
       // see the "player" node's RigidBodyData) and the FRONT well ahead of it,
       // or the upward suspension force tips the airframe onto its tail on the
       // ground. That's why these don't just mirror the wheel meshes' own
-      // model positions (rears are at z ~= 2.34 there, which is ahead of the
+      // model positions (rears are at z ~= 1.24 there, which is ahead of the
       // CG) - a small visual offset between the mesh's authored spot and the
       // ray endpoint is the trade for a stable ground stance.
       let wheels = vec![
-        Wheel::new("wheel-f".to_string(), vector![0.0, 0.0, 9.8], 4.2, 100000.0, 50000.0).steerable(),
-        Wheel::new("wheel-lb".to_string(), vector![-1.4, 0.0, 0.0], 4.2, 500000.0, 50000.0).braked(),
-        Wheel::new("wheel-rb".to_string(), vector![1.4, 0.0, 0.0], 4.2, 500000.0, 50000.0).braked()
+        Wheel::new("wheel-f".to_string(), vector![0.0, 0.029, 4.801], 2.006, 100000.0, 50000.0).steerable(),
+        Wheel::new("wheel-lb".to_string(), vector![-0.669, 0.029, 0.12], 2.006, 500000.0, 50000.0).braked(),
+        Wheel::new("wheel-rb".to_string(), vector![0.669, 0.029, 0.12], 2.006, 500000.0, 50000.0).braked()
       ];
 
       Self {

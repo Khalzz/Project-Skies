@@ -52,11 +52,14 @@ impl GameLogic {
         scene.spawn_node(app,
             Node::new("sun")
                 .add_property(Transform3D {
-                    position: Vector3::new(1000.0, 1_000_000.0, 1000.0),
+                    // Only its direction from the world origin matters - the
+                    // sun is treated as infinitely far away (see App::run's
+                    // lighting update). 40 degrees above the horizon.
+                    position: Vector3::new(445_200.0, 642_800.0, 623_300.0),
                     rotation: UnitQuaternion::identity(),
                     scale: Vector3::new(1.0, 1.0, 1.0),
                 })
-                .add_property(Model { model_ref: "F16".to_owned() })
+                .add_property(Model::new("F16"))
         ).expect("main_menu should only spawn 'sun' once");
         if let Some(sun) = scene.content.renderizable_instances.get_mut("sun") {
             sun.instance.metadata.lighting = Some(Lighting { intensity: 1.0, color: Vector3::new(0.7, 0.7, 0.8) });
@@ -67,9 +70,11 @@ impl GameLogic {
                 .add_property(Transform3D {
                     position: Vector3::new(-5.0, 20.0, 25.0),
                     rotation: UnitQuaternion::from_euler_angles(0.0f32.to_radians(), 180.0f32.to_radians(), (-45.0f32).to_radians()),
-                    scale: Vector3::new(14.0, 14.0, 14.0),
+                    scale: Vector3::new(1.0, 1.0, 1.0),
                 })
-                .add_property(Model { model_ref: "F16".to_owned() })
+                // The model shrank to real size (x0.4777) - drawn bigger
+                // here so the menu's shot stays framed as before.
+                .add_property(Model::new("F16").scaled(29.3))
         ).expect("main_menu should only spawn 'plane' once");
 
         scene.spawn_node(app,
@@ -77,15 +82,19 @@ impl GameLogic {
                 .add_property(Transform3D {
                     position: Vector3::new(0.0, -10.0, 0.0),
                     rotation: UnitQuaternion::identity(),
-                    scale: Vector3::new(100_000.0, 1.0, 100_000.0),
+                    // The ocean ring mesh is in world units (see main.rs's
+                    // OCEAN_SURFACE_MODEL) - centered here, near the menu's
+                    // slowly drifting camera, its finest rings are in view.
+                    scale: Vector3::new(1.0, 1.0, 1.0),
                 })
-                .add_property(Model { model_ref: "WaterPlane".to_owned() })
+                .add_property(Model::new(crate::OCEAN_SURFACE_MODEL))
         ).expect("main_menu should only spawn 'world' once");
     }
 
     pub fn update(&mut self, scene: &mut Scene, app: &mut App, delta_time: f32) {
         self.drift_camera(scene, delta_time);
         rebind_modal::update(app);
+        ui::update_settings_sliders(app);
 
         app.ui.has_changed = true;
     }

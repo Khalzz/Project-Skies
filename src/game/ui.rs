@@ -70,6 +70,66 @@ pub fn set_toggle_switch(switch: &mut UiNode, on: bool) {
     }
 }
 
+// Slider - a thin bar, lit up to a round knob, faint past it. Same palette
+// as the switch above.
+const SLIDER_WIDTH: f32 = 240.0;
+const SLIDER_KNOB: f32 = 16.0;
+const SLIDER_BAR_HEIGHT: f32 = 4.0;
+
+/// A horizontal slider showing `fraction` (0..1). Purely visual, like
+/// `toggle_switch` - whatever owns it reads the mouse against its rect
+/// (`slider_fraction_at`) and moves it with `set_slider`. The whole node is
+/// the knob's height, so it's easy to grab, not just the thin bar.
+pub fn slider(fraction: f32) -> UiNode {
+    // Sized here rather than via set_slider - `resolve` applies each node's
+    // .set_size(...) once after build, over anything written before it.
+    let (fill, rest) = slider_widths(fraction);
+    UiNode::container()
+        .set_orientation(Horizontal)
+        .set_size(SizeValue::Pixels(SLIDER_WIDTH), SizeValue::Pixels(SLIDER_KNOB))
+        .set_child_anchor(Anchor::Start, Anchor::Center)
+        .set_background_color(UiColor::TRANSPARENT)
+        .set_child("Fill", UiNode::container()
+            .set_size(SizeValue::Pixels(fill), SizeValue::Pixels(SLIDER_BAR_HEIGHT))
+            .set_background_color(SWITCH_TRACK_ON))
+        .set_child("Knob", UiNode::container()
+            .set_size(SizeValue::Pixels(SLIDER_KNOB), SizeValue::Pixels(SLIDER_KNOB))
+            .set_corner_radius(SLIDER_KNOB / 2.0)
+            .set_background_color(SWITCH_KNOB_OFF))
+        .set_child("Rest", UiNode::container()
+            .set_size(SizeValue::Pixels(rest), SizeValue::Pixels(SLIDER_BAR_HEIGHT))
+            .set_background_color(SWITCH_TRACK_OFF))
+}
+
+/// The lit/faint bar widths either side of the knob at `fraction`.
+fn slider_widths(fraction: f32) -> (f32, f32) {
+    let travel = SLIDER_WIDTH - SLIDER_KNOB;
+    let fraction = fraction.clamp(0.0, 1.0);
+    (travel * fraction, travel * (1.0 - fraction))
+}
+
+/// Moves `slider`'s knob to `fraction` (0..1) - `slider` must be a node built
+/// by `slider`. The caller still has to mark the UI changed.
+pub fn set_slider(slider: &mut UiNode, fraction: f32) {
+    let (fill, rest) = slider_widths(fraction);
+    if let Some(children) = slider.get_children_mut() {
+        for (id, child) in children.iter_mut() {
+            match id.as_str() {
+                "Fill" => child.transform.width = fill,
+                "Rest" => child.transform.width = rest,
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Where along `slider` (built by `slider`) the mouse is, 0..1 - the knob's
+/// center follows the cursor, clamped to the ends.
+pub fn slider_fraction_at(slider: &UiNode, mouse_x: f32) -> f32 {
+    let travel = SLIDER_WIDTH - SLIDER_KNOB;
+    ((mouse_x - slider.transform.rect.left - SLIDER_KNOB / 2.0) / travel).clamp(0.0, 1.0)
+}
+
 pub fn card() -> UiNode {
   UiNode::container()
     .set_corner_radius(10.0)

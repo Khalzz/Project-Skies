@@ -36,7 +36,15 @@ use super::scene::Scene;
 pub fn register_static_model(scene: &mut Scene, app: &mut App, id: &str) -> Result<(), String> {
     let node = scene.content.nodes.get(id).ok_or_else(|| format!("no node named '{id}' to register"))?;
     let transform = *node.get_property::<Transform3D>().ok_or_else(|| format!("node '{id}' has no Transform3D property"))?;
-    let model_ref = node.get_property::<Model>().ok_or_else(|| format!("node '{id}' has no Model property"))?.model_ref.clone();
+    let model = node.get_property::<Model>().ok_or_else(|| format!("node '{id}' has no Model property"))?;
+    // Node scale x the model's own - see Model::render_scale.
+    let render_scale = model.render_scale(transform.scale);
+    // Where the model comes from: its own file (Model::from_file), a name
+    // declared with resources::declare_model, or - neither - a model already
+    // resident under that name (a procedural one). Kept under the file's key,
+    // so a name and a file pointing at the same thing share one load.
+    let source = model.source.clone().or_else(|| app.model_sources.get(&model.model_ref).cloned());
+    let model_ref = source.as_ref().map(|source| source.key()).unwrap_or_else(|| model.model_ref.clone());
 
     let game_object = GameObject {
         id: id.to_owned(),
@@ -44,7 +52,7 @@ pub fn register_static_model(scene: &mut Scene, app: &mut App, id: &str) -> Resu
         transform: GameObjectTransform {
             position: transform.position,
             rotation: transform.rotation,
-            scale: transform.scale,
+            scale: render_scale,
         },
         children: vec![],
         metadata: MetaData { physics: None, cameras: None, lighting: None },
@@ -56,8 +64,12 @@ pub fn register_static_model(scene: &mut Scene, app: &mut App, id: &str) -> Resu
     // itself; a model_ref with neither is a "you forgot to preload this" bug.
     let loaded_model = match app.game_models.remove(&model_ref) {
         Some(existing) => existing.model,
-        None => app.loaded_models.remove(&model_ref)
-            .ok_or_else(|| format!("model '{model_ref}' isn't loaded - call resources::register_model first"))?,
+        None => match &source {
+            // First node in this level using it - load it now.
+            Some(source) => resources::load_scene_model(app, source)?,
+            None => app.loaded_models.remove(&model_ref)
+                .ok_or_else(|| format!("model '{model_ref}' isn't loaded or declared - see resources::declare_model"))?,
+        },
     };
 
     scene.content.renderizable_instances.insert(id.to_owned(), InstanceData {

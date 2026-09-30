@@ -42,11 +42,14 @@ impl GameLogic {
                 app,
                 Node::new("sun")
                     .add_property(Transform3D {
-                        position: Vector3::new(1000.0, 1_000_000.0, 1000.0),
+                        // Only its direction from the world origin matters - the
+                        // sun is treated as infinitely far away (see App::run's
+                        // lighting update). 40 degrees above the horizon.
+                        position: Vector3::new(445_200.0, 642_800.0, 623_300.0),
                         rotation: UnitQuaternion::identity(),
                         scale: Vector3::new(1.0, 1.0, 1.0),
                     })
-                    .add_property(Model { model_ref: "F16".to_owned() }),
+                    .add_property(Model::new("F16")),
             )
             .expect("follow_test should only spawn 'sun' once");
         if let Some(sun) = scene.content.renderizable_instances.get_mut("sun") {
@@ -65,7 +68,7 @@ impl GameLogic {
                         rotation: UnitQuaternion::identity(),
                         scale: Vector3::new(60.0, 60.0, 60.0),
                     })
-                    .add_property(Model { model_ref: "Runway".to_owned() }),
+                    .add_property(Model::new("Runway")),
             )
             .expect("follow_test should only spawn 'island' once");
 
@@ -79,7 +82,7 @@ impl GameLogic {
                         rotation: UnitQuaternion::identity(),
                         scale: Vector3::new(30_000.0, 30_000.0, 30_000.0),
                     })
-                    .add_property(Model { model_ref: "Ground".to_owned() }),
+                    .add_property(Model::new("Ground")),
             )
             .expect("follow_test should only spawn 'ground' once");
 
@@ -94,24 +97,11 @@ impl GameLogic {
                     .add_property(Transform3D {
                         position: Vector3::new(0.0, 0.0, 0.0),
                         rotation: UnitQuaternion::identity(),
-                        scale: Vector3::new(2_000.0, 1.0, 2_000.0),
+                        scale: Vector3::new(1.0, 1.0, 1.0),
                     })
-                    .add_property(Model { model_ref: "WaterPlane".to_owned() }),
+                    .add_property(Model::new(crate::OCEAN_SURFACE_MODEL)),
             )
             .expect("follow_test should only spawn 'world' once");
-        scene
-            .spawn_node(
-                app,
-                Node::new("world_far")
-                    .add_property(Transform3D {
-                        position: Vector3::new(0.0, -4.0, 0.0),
-                        rotation: UnitQuaternion::identity(),
-                        scale: Vector3::new(3_000_000.0, 0.03, 3_000_000.0),
-                    })
-                    .add_property(Model { model_ref: "WaterPlaneFar".to_owned() }),
-            )
-            .expect("follow_test should only spawn 'world_far' once");
-
         // The MQ-9 drone - the node the follow camera will track. Static for
         // now, scaled 11x on every axis as requested.
         scene
@@ -123,7 +113,7 @@ impl GameLogic {
                         rotation: UnitQuaternion::identity(),
                         scale: Vector3::new(11.0, 11.0, 11.0),
                     })
-                    .add_property(Model { model_ref: "MQ9".to_owned() }),
+                    .add_property(Model::new("MQ9")),
             )
             .expect("follow_test should only spawn 'mq9' once");
 
@@ -171,16 +161,14 @@ impl GameLogic {
             }
         }
 
-        // Keep both water planes centred on the camera's XZ - the wave field
+        // Keep the ocean surface centred on the camera's XZ - the wave field
         // is analytic (position in, height out), so sliding the mesh causes
         // no shimmer, and it means the water never runs out from under a
         // fast free-fly. Same approach as play::scene::update_water_plane.
         let camera_xz = scene.cameras.active().camera.position().coords;
-        for name in ["world", "world_far"] {
-            if let Some(water) = scene.content.renderizable_instances.get_mut(name) {
-                water.instance.transform.position.x = camera_xz.x;
-                water.instance.transform.position.z = camera_xz.z;
-            }
+        if let Some(water) = scene.content.renderizable_instances.get_mut("world") {
+            water.instance.transform.position.x = camera_xz.x;
+            water.instance.transform.position.z = camera_xz.z;
         }
     }
 }

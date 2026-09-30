@@ -274,8 +274,15 @@ impl Object3DTrack {
                 }
                 let Some(local) = local_time(game_time_ms, *start_time) else { return };
                 let Some(value) = sample(keyframes, local, lerp_vec3) else { return };
+                // The track sets the node's scale - the model's own scale
+                // (Model::scale) still applies on top, same as at spawn.
+                let node_scale = Vector3::new(value.x, value.y, value.z);
+                let render_scale = scene.content.nodes.get(target)
+                    .and_then(|node| node.get_property::<crate::engine::scene_manager::properties::Model>())
+                    .map(|model| model.render_scale(node_scale))
+                    .unwrap_or(node_scale);
                 if let Some(instance) = scene.content.renderizable_instances.get_mut(target) {
-                    instance.instance.transform.scale = Vector3::new(value.x, value.y, value.z);
+                    instance.instance.transform.scale = render_scale;
                 }
             }
         }

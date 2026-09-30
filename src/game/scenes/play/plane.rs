@@ -8,6 +8,8 @@ pub mod messages;
 #[allow(dead_code)]
 pub mod quick_menu;
 pub mod quick_list;
+pub mod pilot;
+pub mod effects;
 pub mod flight_system;
 pub mod engine;
 pub mod utils;
@@ -20,3 +22,4 @@ pub mod instrumentation;
 pub mod fcs;
 pub mod airframe;
 pub mod aircraft_spec;
+pub mod aero_spec;

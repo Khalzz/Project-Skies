@@ -2,7 +2,7 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 
 use nalgebra::Vector3;
-use rapier3d::prelude::{ColliderSet, QueryPipeline, RigidBody, RigidBodyHandle, RigidBodySet};
+use rapier3d::prelude::{Collider, ColliderSet, QueryPipeline, RigidBody, RigidBodyHandle, RigidBodySet};
 
 use crate::engine::physics::physics::DebugPhysicsMessageType;
 use crate::engine::primitive::manual_vertex::ManualVertex;
@@ -68,6 +68,69 @@ impl DebugDraw {
     /// drawn from where it's applied.
     pub fn ray(&mut self, origin: Vector3<f32>, vector: Vector3<f32>, color: [f32; 3]) {
         self.line(origin, origin + vector, color);
+    }
+
+    /// A small 3-axis cross marking a point, `size` meters from end to end.
+    pub fn cross(&mut self, center: Vector3<f32>, size: f32, color: [f32; 3]) {
+        let half = size * 0.5;
+        for axis in [Vector3::x(), Vector3::y(), Vector3::z()] {
+            self.line(center - axis * half, center + axis * half, color);
+        }
+    }
+
+    /// A closed outline through `corners`, in order.
+    pub fn outline(&mut self, corners: &[Vector3<f32>], color: [f32; 3]) {
+        for (index, corner) in corners.iter().enumerate() {
+            self.line(*corner, corners[(index + 1) % corners.len()], color);
+        }
+    }
+
+    /// `collider`'s shape as a wireframe, where it actually is in the world -
+    /// boxes as their 12 edges, balls as 3 circles, cylinders as their two
+    /// end circles and 4 sides. Other shapes aren't drawn.
+    pub fn collider(&mut self, collider: &Collider, color: [f32; 3]) {
+        let pose = collider.position();
+        let world = |local: Vector3<f32>| (pose * nalgebra::Point3::from(local)).coords;
+        let shape = collider.shape();
+
+        if let Some(cuboid) = shape.as_cuboid() {
+            let h = cuboid.half_extents;
+            let corner = |x: f32, y: f32, z: f32| world(Vector3::new(h.x * x, h.y * y, h.z * z));
+            for (sy, sz) in [(-1.0, -1.0), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)] {
+                self.line(corner(-1.0, sy, sz), corner(1.0, sy, sz), color);
+            }
+            for (sx, sz) in [(-1.0, -1.0), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)] {
+                self.line(corner(sx, -1.0, sz), corner(sx, 1.0, sz), color);
+            }
+            for (sx, sy) in [(-1.0, -1.0), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)] {
+                self.line(corner(sx, sy, -1.0), corner(sx, sy, 1.0), color);
+            }
+        } else if let Some(ball) = shape.as_ball() {
+            let r = ball.radius;
+            self.circle(&world, Vector3::zeros(), Vector3::x() * r, Vector3::y() * r, color);
+            self.circle(&world, Vector3::zeros(), Vector3::y() * r, Vector3::z() * r, color);
+            self.circle(&world, Vector3::zeros(), Vector3::z() * r, Vector3::x() * r, color);
+        } else if let Some(cylinder) = shape.as_cylinder() {
+            let (r, h) = (cylinder.radius, cylinder.half_height);
+            for y in [-h, h] {
+                self.circle(&world, Vector3::y() * y, Vector3::x() * r, Vector3::z() * r, color);
+            }
+            for side in [Vector3::x(), -Vector3::x(), Vector3::z(), -Vector3::z()] {
+                self.line(world(side * r - Vector3::y() * h), world(side * r + Vector3::y() * h), color);
+            }
+        }
+    }
+
+    /// A circle in local space (center + cos*a + sin*b), mapped by `world`.
+    fn circle(&mut self, world: &dyn Fn(Vector3<f32>) -> Vector3<f32>, center: Vector3<f32>, a: Vector3<f32>, b: Vector3<f32>, color: [f32; 3]) {
+        const SEGMENTS: usize = 24;
+        let point = |i: usize| {
+            let angle = i as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+            world(center + a * angle.cos() + b * angle.sin())
+        };
+        for i in 0..SEGMENTS {
+            self.line(point(i), point(i + 1), color);
+        }
     }
 
     pub(crate) fn into_lines(self) -> Vec<DebugPhysicsMessageType> {

@@ -25,7 +25,7 @@ todo:
 /// (1,1,1) and scaled up to its real-life size (colliders/positions authored to match)
 /// gets physically appropriate rotational resistance automatically, with no per-plane
 /// hand-tuning of inertia required.
-fn compute_principal_inertia(mass: f32, center_of_mass: Vector3<f32>, colliders: &[game_object::ColliderType]) -> Vector3<f32> {
+pub(crate) fn compute_principal_inertia(mass: f32, center_of_mass: Vector3<f32>, colliders: &[game_object::ColliderType]) -> Vector3<f32> {
     struct BoxPart {
         volume: f32,
         half_extents: (f32, f32, f32),

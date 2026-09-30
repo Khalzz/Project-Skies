@@ -1,25 +1,30 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use nalgebra::Vector3;
 use rapier3d::prelude::RigidBody;
 
 use crate::engine::physics::physics_behavior::{DebugDraw, PhysicsBehavior, PhysicsCtx, PhysicsPayload};
+use crate::game::scenes::play::plane::aero_spec::AeroSpec;
 
-use super::aircraft_spec::AircraftSpec;
 use super::airframe::Airframe;
 use super::controls::PlaneControls;
 use super::flight_system::FlightSystem;
 use super::instrumentation::Instrumentation;
-use super::messages::{AircraftEvent, AircraftState};
+use super::messages::{AircraftEvent, AircraftReload, AircraftState};
+use crate::engine::physics::physics_resources::compute_principal_inertia;
 use super::physics::rolling_rate::{commanded_roll_rate_deg_s, RollRateParams};
 use super::physics::wheels::wheel_manager::{WheelInputs, WheelManager};
 use super::physics::wings::wing_manager::WingManager;
 
 /// TESTING ONLY - the force-based aileron simulation (Wing::physics_force,
-/// via wing_manager.update) still runs untouched; this just overwrites the
-/// roll AXIS COMPONENT of the resulting angular velocity afterward, directly
-/// following rolling_rate::commanded_roll_rate_deg_s (the same curve the F7
-/// debug overlay plots). Pitch/yaw stay fully force-driven. Set to false to
-/// go back to pure force-based roll - nothing else needs to change.
-const USE_KINEMATIC_ROLL: bool = true;
+/// via wing_manager.update) still runs untouched; when on, this just
+/// overwrites the roll AXIS COMPONENT of the resulting angular velocity
+/// afterward, directly following rolling_rate::commanded_roll_rate_deg_s
+/// (the same curve the F7 debug overlay plots). Pitch/yaw stay fully
+/// force-driven. Off = pure force-based roll. Switchable at runtime from the
+/// F7 "Wing Surfaces" window - an atomic since that's on the main thread and
+/// this is read on the physics thread.
+pub static KINEMATIC_ROLL: AtomicBool = AtomicBool::new(false);
 
 // F2 overlay: how long a wing's lift arrow is per newton (m/N) - ~9 m for
 // one main wing's share of level-flight lift, ~100 m at its force clamp.
@@ -31,6 +36,16 @@ const SUSPENSION_AIRBORNE_COLOR: [f32; 3] = [0.5, 0.5, 0.5];
 // the lift arrows, so the two read against each other.
 const TYRE_FORCE_DRAW_SCALE: f32 = LIFT_DRAW_SCALE;
 const TYRE_FORCE_COLOR: [f32; 3] = [1.0, 0.3, 1.0];
+// Wing geometry (F2): each wing's pressure center, its outline, and its
+// hinged surfaces - from the live wings, so a data.ron reload shows at once.
+const PRESSURE_CENTER_COLOR: [f32; 3] = [1.0, 1.0, 1.0];
+const WING_OUTLINE_COLOR: [f32; 3] = [0.6, 0.6, 0.6];
+const SURFACE_COLOR: [f32; 3] = [1.0, 0.9, 0.2];
+const MARKER_SIZE: f32 = 0.6;
+// The rigidbody's center of mass, and the pilot's seat (where seat G is
+// measured).
+const CENTER_OF_MASS_COLOR: [f32; 3] = [1.0, 0.2, 1.0];
+const PILOT_SEAT_COLOR: [f32; 3] = [0.2, 1.0, 0.4];
 // Nose-wheel heading, drawn from its contact point while on the ground.
 const STEERING_DRAW_LENGTH: f32 = 4.0;
 const STEERING_COLOR: [f32; 3] = [0.2, 0.9, 1.0];
@@ -46,25 +61,47 @@ pub struct AircraftPhysics {
     flight_system: FlightSystem,
     airframe: Airframe,
     instrumentation: Instrumentation,
+    /// See `AircraftEvent::Wreck`.
+    wrecked: bool,
 }
 
 impl AircraftPhysics {
-    pub fn new(spec: &AircraftSpec) -> Self {
+    pub fn new(spec: &AeroSpec, engine: &super::engine::EngineSpec) -> Self {
         Self {
             wing_manager: WingManager::new(spec),
             wheel_manager: WheelManager::new(),
-            flight_system: FlightSystem::new(),
+            flight_system: FlightSystem::new(engine.clone()),
             airframe: Airframe::new(),
-            instrumentation: Instrumentation::new(),
+            instrumentation: Instrumentation::new(spec.pilot_position),
+            wrecked: false,
         }
     }
 
-    fn handle_event(&mut self, event: AircraftEvent) {
+    /// data.ron edited mid-flight: the new wings, engine, pilot seat and mass, on the
+    /// running jet - its motion carries on from wherever it was.
+    fn apply_reload(&mut self, reload: AircraftReload, ctx: &mut PhysicsCtx) {
+        self.wing_manager.set_wings(&reload.aero);
+        self.flight_system.engine = reload.engine;
+        self.instrumentation.set_pilot_position(reload.aero.pilot_position);
+        let inertia = compute_principal_inertia(reload.mass, reload.center_of_mass, &reload.colliders);
+        let mass_properties = rapier3d::prelude::MassProperties::new(reload.center_of_mass.into(), reload.mass, inertia);
+        ctx.rigidbody_mut().set_additional_mass_properties(mass_properties, true);
+    }
+
+    fn handle_event(&mut self, event: AircraftEvent, ctx: &mut PhysicsCtx) {
         let landing_gear = &mut self.airframe.landing_gear;
         match event {
             AircraftEvent::ToggleGear => landing_gear.request_toggle(),
             AircraftEvent::GearUp => landing_gear.set_commanded_down(false),
             AircraftEvent::GearDown => landing_gear.set_commanded_down(true),
+            AircraftEvent::Wreck => {
+                self.wrecked = true;
+                // Rapier keeps user forces until reset - drop the last
+                // step's thrust and lift, since nothing will replace them.
+                let rigidbody = ctx.rigidbody_mut();
+                rigidbody.reset_forces(true);
+                rigidbody.reset_torques(true);
+            }
         }
     }
 
@@ -112,12 +149,25 @@ impl AircraftPhysics {
         rigidbody.set_angvel(rotation * local_angvel, true);
     }
 
-    /// See `USE_KINEMATIC_ROLL`. Skipped with weight on wheels: the landing
+    /// Undoes the rigidbody's blanket `angular_damping` on the ROLL axis,
+    /// always - same pre-scaling trick as `cancel_ground_yaw_damping`. That
+    /// damping is a generic stability aid; on roll it stacked on top of the
+    /// wings' own aerodynamic roll damping and held the physics roll to a
+    /// fraction of the roll-rate curve. Pitch/yaw keep it.
+    fn cancel_roll_damping(&self, ctx: &mut PhysicsCtx, dt: f32) {
+        let rigidbody = ctx.rigidbody_mut();
+        let rotation = *rigidbody.rotation();
+        let mut local_angvel = rotation.inverse() * rigidbody.angvel();
+        local_angvel.z *= 1.0 + dt * rigidbody.angular_damping();
+        rigidbody.set_angvel(rotation * local_angvel, true);
+    }
+
+    /// See `KINEMATIC_ROLL`. Skipped with weight on wheels: the landing
     /// gear reacts the rolling moment into the runway, so the jet can't roll
     /// there no matter the aileron input.
     fn apply_kinematic_roll(&self, ctx: &mut PhysicsCtx, controls: &PlaneControls) {
         let on_ground = self.wheel_manager.renderizable_wheels.values().any(|wheel| wheel.grounded);
-        if !USE_KINEMATIC_ROLL || on_ground {
+        if !KINEMATIC_ROLL.load(Ordering::Relaxed) || on_ground {
             return;
         }
 
@@ -150,7 +200,15 @@ impl PhysicsBehavior for AircraftPhysics {
         let controls = ctx.input::<PlaneControls>().cloned().unwrap_or_else(PlaneControls::new);
         let events: Vec<AircraftEvent> = ctx.events::<AircraftEvent>().copied().collect();
         for event in events {
-            self.handle_event(event);
+            self.handle_event(event, ctx);
+        }
+        let reloads: Vec<AircraftReload> = ctx.events::<AircraftReload>().cloned().collect();
+        for reload in reloads {
+            self.apply_reload(reload, ctx);
+        }
+        if self.wrecked {
+            self.instrumentation.update(ctx.rigidbody(), dt);
+            return;
         }
 
         self.airframe.landing_gear.tick(dt);
@@ -169,6 +227,9 @@ impl PhysicsBehavior for AircraftPhysics {
         self.apply_kinematic_roll(ctx, &controls);
 
         self.instrumentation.update(ctx.rigidbody(), dt);
+        // After instrumentation, so it reads the real roll rate, not the
+        // pre-scaled one Rapier's damping will bring back down this step.
+        self.cancel_roll_damping(ctx, dt);
     }
 
     fn publish(&self) -> Option<PhysicsPayload> {
@@ -183,6 +244,7 @@ impl PhysicsBehavior for AircraftPhysics {
             gear_deploy: self.airframe.landing_gear.deploy,
             wheels: self.wheel_manager.renderizable_wheels.clone(),
             elevator_control_input,
+            afterburner: self.flight_system.afterburner_activation(),
             wing_lift_forces: wings.iter().map(|wing| (wing.label.clone(), wing.last_lift_force)).collect(),
         }))
     }
@@ -196,7 +258,52 @@ impl PhysicsBehavior for AircraftPhysics {
 
         for wing in &self.wing_manager.wings {
             draw.ray(to_world(wing.pressure_center), wing.last_lift_force * LIFT_DRAW_SCALE, LIFT_COLOR);
+            draw.cross(to_world(wing.pressure_center), MARKER_SIZE, PRESSURE_CENTER_COLOR);
+
+            // The outline: with a chord, the same geometry the surfaces are
+            // placed on (pressure center = mid-span, quarter chord - see
+            // Wing::surface_center); without one (stabilators, fin), a
+            // square of the wing's area around its pressure center.
+            // A shaped wing: its real planform, surfaces on it.
+            if let Some(shape) = &wing.shape {
+                let corners = shape.corners(&wing.normal).map(|corner| to_world(corner));
+                draw.outline(&corners, WING_OUTLINE_COLOR);
+                for surface in &wing.surfaces {
+                    let hinge = 1.0 - surface.chord_ratio;
+                    draw.outline(&[
+                        to_world(shape.point(&wing.normal, surface.span_start, hinge)),
+                        to_world(shape.point(&wing.normal, surface.span_end, hinge)),
+                        to_world(shape.point(&wing.normal, surface.span_end, 1.0)),
+                        to_world(shape.point(&wing.normal, surface.span_start, 1.0)),
+                    ], SURFACE_COLOR);
+                }
+                continue;
+            }
+
+            let span_axis = wing.tip_direction();
+            let forward = Vector3::z();
+            let (span, leading, trailing) = if wing.chord > 0.0 {
+                (wing.wing_area / wing.chord, 0.25 * wing.chord, 0.75 * wing.chord)
+            } else {
+                let side = wing.wing_area.sqrt();
+                (side, side * 0.5, side * 0.5)
+            };
+            let at = |span_fraction: f32, chord_offset: f32| to_world(wing.pressure_center + span_axis * ((span_fraction - 0.5) * span) + forward * chord_offset);
+            draw.outline(&[at(0.0, leading), at(1.0, leading), at(1.0, -trailing), at(0.0, -trailing)], WING_OUTLINE_COLOR);
+
+            if wing.chord > 0.0 {
+                for surface in &wing.surfaces {
+                    let hinge = -trailing + surface.chord_ratio * wing.chord;
+                    draw.outline(&[
+                        at(surface.span_start, hinge), at(surface.span_end, hinge),
+                        at(surface.span_end, -trailing), at(surface.span_start, -trailing),
+                    ], SURFACE_COLOR);
+                }
+            }
         }
+
+        draw.cross(body.center_of_mass().coords, MARKER_SIZE, CENTER_OF_MASS_COLOR);
+        draw.cross(to_world(self.instrumentation.pilot_position()), MARKER_SIZE, PILOT_SEAT_COLOR);
 
         for wheel in &self.wheel_manager.wheels {
             let Some(contact) = self.wheel_manager.renderizable_wheels.get(&wheel.mesh_name) else { continue };

@@ -6,6 +6,7 @@ use wgpu::{BindGroupLayout, BindGroupLayoutDescriptor, Device, DeviceDescriptor,
 use sdl2::{JoystickSubsystem, GameControllerSubsystem, HapticSubsystem};
 use glyphon::{Cache, Resolution, TextArea, Viewport};
 
+use crate::engine::rendering::render_pipeline::render_pass::{AeroSample, DebugWindows};
 use crate::engine::audio::audio::Audio;
 use crate::engine::physics::physics::{DebugPhysicsMessageType, PhysicsDataTransmission};
 use crate::engine::physics::physics_handler::{RenderMessage, PhysicsCommand};
@@ -14,6 +15,10 @@ use crate::engine::rendering::enviroment::environment;
 use crate::engine::rendering::instance_management::{InstanceData, InstanceRaw, ModelDataInstance};
 use crate::engine::rendering::render_pipeline::depth_renderer::DepthRender;
 use crate::engine::rendering::render_pipeline::water_renderer::WaterRenderData;
+use crate::engine::particles::ParticleEmitters;
+use crate::engine::particles::renderer::{EmitterSource, ParticleFrameInfo, ParticleRenderer};
+use crate::engine::scene_manager::properties::Transform3D;
+use nalgebra::Vector3;
 use crate::engine::rendering::camera::handler::CameraResources;
 use crate::engine::rendering::models::textures::Texture;
 use crate::engine::game_nodes::timing::Timing;
@@ -72,6 +77,9 @@ pub struct App {
     // selection and WaterRenderData's own doc comment.
     pub water: WaterRenderData,
     pub water_shaded_models: HashSet<String>,
+    // GPU particles and trails, fed each frame from every node's
+    // ParticleEmitters property (see App::update_particles).
+    pub particles: ParticleRenderer,
     // Debug view (F6, see settings/input.ron) - when true, render_water_pass
     // skips drawing any model_ref listed in water_debug_hidden_models below.
     // Everything else (terrain, player, the rest of water_shaded_models)
@@ -79,8 +87,8 @@ pub struct App {
     // out of the way while tuning, not an isolate-to-water-only view.
     pub water_debug_view: bool,
     // model_refs to skip in render_water_pass while water_debug_view is on -
-    // see main.rs's own registration of "WaterPlaneFar" for why that's the
-    // one populated here today.
+    // empty today (it used to hide the old far water plane, which the single
+    // ocean ring mesh replaced); fill it to hide a water surface while tuning.
     pub water_debug_hidden_models: HashSet<String>,
     // F7 (see settings/input.ron) - toggles a live in-window debug overlay
     // (see egui_overlay field below, and render_pass.rs's own
@@ -89,14 +97,20 @@ pub struct App {
     // actual measured (airspeed, aoa_y, roll_rate) samples, so the two can
     // be compared visually while actually flying.
     pub show_aero_debug_overlay: bool,
-    // Rolling window of recent (airspeed_kt, aoa_y_deg, roll_rate_deg_s)
-    // samples - see show_aero_debug_overlay above. roll_rate_deg_s is
-    // Plane::flight_data's own actual measured rate, not a re-derived
-    // theoretical value - directly comparable against the chart's curve,
-    // both in deg/s. Bounded (see AERO_DEBUG_TRAIL_CAPACITY), pushed from
-    // play::scene::GameLogic::update only while the overlay is on, so this
-    // stays empty and untouched otherwise.
-    pub aero_debug_trail: std::collections::VecDeque<(f32, f32, f32)>,
+    // F8 (see play::scene::GameLogic::update) - frees the mouse for the
+    // debug overlay: cursor shown, and the play camera ignores mouse look/
+    // scroll so the overlay's buttons can be clicked mid-flight. Also shows
+    // the overlay, same as F7 - see `debug_overlay_visible`.
+    pub debug_mouse_free: bool,
+    // Which of the overlay's windows are open - toggled from its "Debug
+    // Windows" panel or each window's own close button.
+    pub debug_windows: DebugWindows,
+    // Rolling window of recent flight samples (speed, AoA, altitude, the
+    // roll/pitch/yaw/climb rates and the stick) for the F7 "Flight Rates"
+    // window - see AeroSample. Bounded (see AERO_DEBUG_TRAIL_CAPACITY),
+    // pushed by Plane only while the overlay is up, so this stays empty and
+    // untouched otherwise.
+    pub aero_debug_trail: std::collections::VecDeque<AeroSample>,
     // Rolling window of recent (sample_index, main_wing_lift_y_newtons,
     // elevator_wing_lift_y_newtons) samples - same show_aero_debug_overlay
     // gate/cap as aero_debug_trail above, pushed alongside it from
@@ -107,6 +121,12 @@ pub struct App {
     // is a recent-window live view, not meant to correlate against a
     // physical x-axis the way aero_debug_trail's speed axis is.
     pub wing_lift_trail: std::collections::VecDeque<(f32, f32, f32)>,
+    // Rolling window of recent (seconds, pitch_rate_deg_s) samples for the
+    // F7 "Pitch Rate" chart - same gate as aero_debug_trail, but bounded by
+    // time (Plane::PITCH_RATE_TRAIL_SECONDS) rather than sample count, so
+    // the chart's x-axis is real seconds whatever the frame rate. `seconds`
+    // counts up from when recording started.
+    pub pitch_rate_trail: std::collections::VecDeque<(f32, f32)>,
     // Generic egui-in-wgpu plumbing (see that module's own doc comment for
     // why this exists instead of a separate native window) - reused by
     // anything wanting a live debug overlay drawn into the game's own
@@ -150,6 +170,11 @@ pub struct App {
     // ModelDataInstance's buffer can't exist meaningfully with zero instances
     // (wgpu rejects a zero-size buffer).
     pub loaded_models: HashMap<String, Model>,
+    // Models named but not loaded yet - see resources::declare_model.
+    pub model_sources: HashMap<String, resources::ModelSource>,
+    // Keys of the models the current scene loaded from files - dropped when
+    // it ends, see resources::unload_level_models.
+    pub level_model_keys: HashSet<String>,
     // Named images (see resources::register_texture) - no equivalent split to
     // loaded_models/game_models needed, a texture has no per-instance GPU
     // buffer to size/rebuild the way a model's does.
@@ -254,6 +279,8 @@ impl App {
 
         let water = WaterRenderData::new(&renderer.device, &renderer.config, &camera_resources, &light, &renderer.depth_render.foam_depth_copy.view, &renderer.depth_render.foam_depth_copy.sampler);
 
+        let particles = ParticleRenderer::new(&renderer.device, &renderer.queue, renderer.config.format, &camera_resources.bind_group_layout, &renderer.depth_render.foam_depth_copy.view);
+
         let game_models = HashMap::new();
 
         // No environment loaded yet - each scene declares its own via
@@ -279,11 +306,15 @@ impl App {
             render_pipeline_transparent_front_cull,
             water,
             water_shaded_models: HashSet::new(),
+            particles,
             water_debug_view: false,
             water_debug_hidden_models: HashSet::new(),
             show_aero_debug_overlay: false,
+            debug_mouse_free: false,
+            debug_windows: DebugWindows::default(),
             aero_debug_trail: std::collections::VecDeque::new(),
             wing_lift_trail: std::collections::VecDeque::new(),
+            pitch_rate_trail: std::collections::VecDeque::new(),
             egui_overlay,
             should_quit: false,
             water_elapsed: 0.0,
@@ -297,6 +328,8 @@ impl App {
             _haptic_subsystem: haptic_subsystem,
             game_models,
             loaded_models: HashMap::new(),
+            model_sources: HashMap::new(),
+            level_model_keys: HashSet::new(),
             textures: HashMap::new(),
             light,
             time,
@@ -340,6 +373,46 @@ impl App {
         // group has to be rebuilt to match, a bind group is tied to the specific
         // texture view it was created against.
         self.water.rebuild_depth_bind_group(&self.renderer.device, &self.renderer.depth_render.foam_depth_copy.view, &self.renderer.depth_render.foam_depth_copy.sampler);
+        self.particles.rebuild_depth_bind_group(&self.renderer.device, &self.renderer.depth_render.foam_depth_copy.view);
+    }
+
+    /// Feeds every node's `ParticleEmitters` (at wherever the node is being
+    /// drawn this frame) to the particle renderer - see ParticleRenderer::
+    /// update. Once per frame, after the camera has moved.
+    fn update_particles(&mut self) {
+        let Some(cameras) = self.scene_manager.cameras() else { return };
+        if !cameras.has_active_camera() {
+            return;
+        }
+        let active = cameras.active();
+        let camera_position = active.camera.position().coords;
+        let settings = self.water.ocean.settings();
+        let wind = Vector3::new(settings.wind_direction.cos(), 0.0, settings.wind_direction.sin()) * settings.wind_speed;
+        let light = &self.light.uniform;
+        let frame = ParticleFrameInfo {
+            camera_position,
+            camera_view: active.camera.calc_matrix(),
+            near: active.projection.znear,
+            delta_time: if self.is_paused { 0.0 } else { self.time.delta_time },
+            sea_level: self.water.ocean.sea_level(),
+            wind,
+            sun_direction: Vector3::from(light.position),
+            sun_color: Vector3::from(light.color),
+        };
+
+        let Some(content) = self.scene_manager.content() else { return };
+        let sources = content.nodes.iter().flat_map(|node| {
+            let emitters = node.get_property::<ParticleEmitters>();
+            // Where the node is being drawn - its render instance if it has
+            // one (moved by physics), otherwise its own Transform3D.
+            let pose = content.renderizable_instances.get(&node.id)
+                .map(|instance| (instance.instance.transform.position, instance.instance.transform.rotation))
+                .or_else(|| node.get_property::<Transform3D>().map(|transform| (transform.position, transform.rotation)));
+            emitters.zip(pose).into_iter().flat_map(move |(emitters, (position, rotation))| {
+                emitters.iter().map(move |(name, emitter)| EmitterSource { node_id: &node.id, name, emitter, position, rotation })
+            })
+        });
+        self.particles.update(&self.renderer.device, &self.renderer.queue, &frame, sources);
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -404,6 +477,11 @@ impl App {
         label.resolve(screen_width, screen_height);
         self.ui.add_to_ui(Self::NO_CAMERA_MESSAGE_KEY.to_owned(), label);
         self.ui.has_changed = true;
+    }
+
+    /// Whether the F7/F8 debug overlay is up - either key shows it.
+    pub fn debug_overlay_visible(&self) -> bool {
+        self.show_aero_debug_overlay || self.debug_mouse_free
     }
 
     // Rebuilds UI vertex/index/text buffers from the current node tree - only when
@@ -648,6 +726,11 @@ impl App {
                 self.ui.always_on_bottom.clear();
                 self.ui.has_changed = true;
 
+                // Models don't carry over either - each level loads the ones
+                // it uses when it spawns them (see resources::
+                // load_scene_model), and they're dropped here.
+                resources::unload_level_models(&mut self);
+
                 // The code-first entity system's nodes, the renderable
                 // instances they/data.ron put up, AND every camera the scene
                 // registered (SceneCameras, see its own doc comment) now all
@@ -793,6 +876,12 @@ impl App {
                 // Toggle console independently with F3
                 if input::is_action_just_pressed("toggle_console") {
                     crate::engine::tooling::debug_console::toggle_console();
+                }
+
+                // F9 - freeze/unfreeze ocean culling at the current view (see
+                // WaterRenderData::toggle_culling_freeze).
+                if input::is_action_just_pressed("toggle_ocean_cull_freeze") {
+                    self.water.toggle_culling_freeze();
                 }
 
                 // Toggle UI bounds overlay with F2 - force a rebuild on the toggle
@@ -976,10 +1065,21 @@ impl App {
 
                 // lighting update
                 if let Some(sun) = self.scene_manager.content().and_then(|content| content.renderizable_instances.get("sun")) {
-                    // Camera-relative, same as the instance model matrices, since it's
-                    // consumed alongside camera-relative world positions in the shaders.
-                    let relative_light_position = sun.instance.transform.position - camera_position;
+                    // The "sun" node's position is read as a DIRECTION from the
+                    // world origin - the sun is infinitely far away, so where the
+                    // camera is doesn't change where the light comes from (that's
+                    // what used to make the water's sun glint sit under the
+                    // camera and travel with it). Placed that far along it in the
+                    // shaders' camera-relative space, it's one fixed direction
+                    // for every surface on screen. The sky's sun disc follows the
+                    // same direction, so disc, lighting and glint all agree.
+                    const SUN_DISTANCE: f32 = 1.0e9;
+                    let sun_direction = sun.instance.transform.position.try_normalize(1e-6).unwrap_or_else(nalgebra::Vector3::y);
+                    let relative_light_position = sun_direction * SUN_DISTANCE;
                     self.light.uniform.position = (relative_light_position.x, relative_light_position.y, relative_light_position.z).into();
+                    if let Some(skybox) = self.skybox.as_mut() {
+                        skybox.set_sun_direction(&self.renderer.queue, sun_direction);
+                    }
                     match &sun.instance.metadata.lighting {
                         Some(lighting_data) => {
                             self.light.uniform.color = lighting_data.color.into();
@@ -993,6 +1093,7 @@ impl App {
                 self.water_elapsed = (self.water_elapsed + self.time.delta_time) % 10_000.0;
                 self.light.uniform.time = self.water_elapsed;
                 self.light.uniform.camera_position = camera_position.into();
+                self.water.update(&self.renderer.queue, self.time.delta_time, camera_position);
 
                 self.renderer.queue.write_buffer(&self.light.rendering_data.buffer, 0, bytemuck::cast_slice(&[self.light.uniform]));
                 // lighting update
@@ -1003,6 +1104,7 @@ impl App {
                     cameras.update_transition(self.time.delta_time);
                     self.camera_resources.update_buffer(&self.renderer.queue, cameras.active());
                 }
+                self.update_particles();
                 self.renderer.queue.write_buffer(&self.renderer.depth_render.near_far_buffer, 0, bytemuck::cast_slice(&[self.renderer.depth_render.near_far_uniform]));
 
                 // TEMP: debug_text!/F3 messages have nowhere on-screen to render yet

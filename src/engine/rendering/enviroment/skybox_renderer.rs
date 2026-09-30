@@ -1,3 +1,4 @@
+use nalgebra::Vector3;
 use wgpu::{util::DeviceExt, BindGroup, BindGroupLayout, BindGroupLayoutDescriptor, Buffer, Device, RenderPipeline, SurfaceConfiguration};
 
 use crate::engine::rendering::models::textures::Texture;
@@ -55,6 +56,10 @@ pub struct SkyboxRender {
     pub bind_group: BindGroup,
     pub render_pipeline: RenderPipeline,
     pub vertex_buffer: Buffer,
+    // Procedural sky only (see `new_procedural`): its params and the buffer
+    // they live in, so the sun disc can follow the scene's sun (see
+    // `set_sun_direction`).
+    sky: Option<(SkyUniform, Buffer)>,
 }
 
 // Uniform for the procedural sky shader (sky.wgsl). All colours are linear
@@ -66,6 +71,11 @@ struct SkyUniform {
     zenith_color: [f32; 4],
     horizon_color: [f32; 4],
     sun_color: [f32; 4],
+    // The haze band hugging the horizon line.
+    haze_color: [f32; 4],
+    // What the sea turns at the horizon (water.wgsl's SEA_HORIZON_COLOR) -
+    // any sky seen below the water's edge uses it, so it reads as sea.
+    sea_horizon_color: [f32; 4],
 }
 
 impl SkyboxRender {
@@ -116,7 +126,7 @@ impl SkyboxRender {
 
         let render_pipeline = Self::build_pipeline(device, config, &pipeline_layout, &shader);
 
-        Self { texture: Some(texture), bind_group_layout, bind_group, render_pipeline, vertex_buffer }
+        Self { texture: Some(texture), bind_group_layout, bind_group, render_pipeline, vertex_buffer, sky: None }
     }
 
     /// Procedural clear-day sea sky - no cubemap. Group 1 is a small params
@@ -129,11 +139,23 @@ impl SkyboxRender {
             [v[0] * inv, v[1] * inv, v[2] * inv, 0.0]
         };
         let sky_uniform = SkyUniform {
-            // Mid-morning sun, high and off to one side so the disc is visible.
-            sun_direction: normalize3([0.25, 0.80, 0.35]),
-            zenith_color: [0.19, 0.42, 0.78, 1.0],
-            horizon_color: [0.74, 0.83, 0.90, 1.0],
+            // 40 degrees above the horizon - only the starting value: App::run
+            // points it at the scene's own "sun" node every frame (see
+            // `set_sun_direction`).
+            sun_direction: normalize3([0.4452, 0.6428, 0.6233]),
+            // Based on clear-day sea photos (assets/sprites/examples:
+            // sea2.jpg, water.png), in linear: a deep blue overhead
+            // brightening to a pale blue near the horizon, a pale blue-white
+            // haze band right on it, and an open-ocean blue sea that's darker
+            // than the sky just above - that contrast IS the horizon line.
+            // (sea2's own near-horizon water is shallow tropical turquoise -
+            // too green for open ocean, so the sea tone is bluer than it.)
+            zenith_color: [0.014, 0.147, 0.430, 1.0],
+            horizon_color: [0.342, 0.587, 0.711, 1.0],
             sun_color: [1.0, 0.95, 0.85, 1.0],
+            haze_color: [0.448, 0.604, 0.711, 1.0],
+            // Keep in sync with water.wgsl's SEA_HORIZON_COLOR.
+            sea_horizon_color: [0.147, 0.296, 0.477, 1.0],
         };
 
         let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
@@ -184,7 +206,20 @@ impl SkyboxRender {
 
         let render_pipeline = Self::build_pipeline(device, config, &pipeline_layout, &shader);
 
-        Self { texture: None, bind_group_layout, bind_group, render_pipeline, vertex_buffer }
+        Self { texture: None, bind_group_layout, bind_group, render_pipeline, vertex_buffer, sky: Some((sky_uniform, uniform_buffer)) }
+    }
+
+    /// Points the procedural sky's sun disc along `direction` (world space,
+    /// toward the sun) - the same direction the scene is lit from, so the
+    /// disc, the lighting and the water's sun glint all agree. No-op for a
+    /// cubemap skybox (its sun is baked into the texture).
+    pub fn set_sun_direction(&mut self, queue: &wgpu::Queue, direction: Vector3<f32>) {
+        let Some((uniform, buffer)) = &mut self.sky else { return };
+        let direction = [direction.x, direction.y, direction.z, 0.0];
+        if uniform.sun_direction != direction {
+            uniform.sun_direction = direction;
+            queue.write_buffer(buffer, 0, bytemuck::cast_slice(&[*uniform]));
+        }
     }
 
     // Shared pipeline setup for skybox.wgsl / sky.wgsl - both take the same

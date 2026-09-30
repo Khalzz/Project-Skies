@@ -2,11 +2,16 @@ use std::{collections::HashMap, f32::consts::PI, time::{Duration, Instant}};
 
 use glyphon::FontSystem;
 use nalgebra::{vector, Point3, UnitQuaternion, Vector3};
-use crate::{app::App, engine::audio::subtitles::Subtitle, engine::input::input, engine::physics::physics_handler::{PhysicsCommand, RenderMessage}, engine::primitive::manual_vertex::ManualVertex, engine::rendering::{camera::camera::yaw_pitch_rotation, enviroment::environment::Environment, ui::ui::Ui}, engine::scene_manager::{node::Node, properties::{Model, Transform3D}, scene::{FrameContext, Scene, SceneBehaviour}}, transform::Transform, engine::ui::{color::UiColor, ui_node::{UiNode, UiNodeContent}, ui_transform::{Anchor, Orientation, PositionValue, SizeValue}}};
+use crate::{app::App, engine::{audio::subtitles::Subtitle, input::input, physics::physics_handler::{PhysicsCommand, RenderMessage}, primitive::manual_vertex::ManualVertex, rendering::{camera::camera::yaw_pitch_rotation, enviroment::environment::Environment, ui::ui::Ui}, scene_manager::{node::Node, properties::{Model, Transform3D}, scene::{FrameContext, Scene, SceneBehaviour}}, ui::{color::UiColor, ui_node::{UiNode, UiNodeContent}, ui_transform::{Anchor, Orientation, PositionValue, SizeValue}}}, transform::Transform};
 use crate::engine::game_nodes::game_object::{Camera as GameObjectCamera, Cameras, ColliderType, Lighting, Physics as PhysicsProperty, RigidBodyData};
-use super::{camera::camera::Camera, event_handling::EventSystem, plane::{aircraft_physics::AircraftPhysics, aircraft_spec::AircraftSpec, messages::AircraftState, plane::Plane, quick_list}};
+use crate::game::scenes::main_menu::ui as main_menu_ui;
+use super::flight_manager::flight_manager;
+use super::camera::head_motion::HeadInput;
+use super::{camera::camera::Camera, event_handling::EventSystem, plane::{messages::AircraftState, plane::Plane, quick_list}};
 use std::sync::mpsc::Sender;
 use crate::game::selected_level::SELECTED_LEVEL;
+use crate::engine::rendering::render_pipeline::water_renderer::WakeSource;
+use crate::engine::particles::ParticleEmitters;
 use crate::game::ui::label;
 use crate::game::scenes::play::ui as play_ui;
 use crate::resources;
@@ -28,6 +33,13 @@ pub struct GameLogic {
     was_paused: bool,
     esc_hold_time: f32,
     is_dead: bool,
+    // Whether the HUD is hidden because the pilot can't see - see
+    // update_g_vision.
+    hud_hidden_by_g: bool,
+    // Seconds since the plane was wrecked - see check_crash.
+    crash_time: f32,
+    // Every plane in the scene - see flight_manager.
+    flight_manager: flight_manager,
 }
 
 pub struct PreparedPlayAssets {
@@ -55,9 +67,11 @@ impl GameLogic {
         scene.environment.clear_color = prepared.environment.clear_color;
         app.scene_openned = Some("./assets/scenes/test_chamber".to_owned());
 
-        Self::spawn_world(scene, app, prepared.ground_trimesh, prepared.runway_trimesh);
+        let mut flight_manager = flight_manager::new();
+        Self::spawn_world(scene, app, &mut flight_manager, prepared.ground_trimesh, prepared.runway_trimesh);
 
         app.window_manager.context.mouse().set_relative_mouse_mode(true);
+        app.debug_mouse_free = false;
 
         scene.create_camera("main", Transform::new(Vector3::new(0.0, 0.0, 0.0), yaw_pitch_rotation(-90.0, -20.0), Vector3::new(1.0, 1.0, 1.0)), 45.0);
         scene.select_camera("main");
@@ -153,18 +167,24 @@ impl GameLogic {
             was_paused: false,
             esc_hold_time: 0.0,
             is_dead: false,
+            hud_hidden_by_g: false,
+            crash_time: 0.0,
+            flight_manager,
         }
     }
 
-    fn spawn_world(scene: &mut Scene, app: &mut App, ground_trimesh: (Vec<Vector3<f32>>, Vec<[u32; 3]>), runway_trimesh: (Vec<Vector3<f32>>, Vec<[u32; 3]>)) {
+    fn spawn_world(scene: &mut Scene, app: &mut App, flight_manager: &mut flight_manager, ground_trimesh: (Vec<Vector3<f32>>, Vec<[u32; 3]>), runway_trimesh: (Vec<Vector3<f32>>, Vec<[u32; 3]>)) {
         scene.spawn_node(app,
             Node::new("sun")
                 .add_property(Transform3D {
-                    position: Vector3::new(1000.0, 1_000_000.0, 1000.0),
+                    // Only its direction from the world origin matters - the
+                    // sun is treated as infinitely far away (see App::run's
+                    // lighting update). 40 degrees above the horizon.
+                    position: Vector3::new(445_200.0, 642_800.0, 623_300.0),
                     rotation: UnitQuaternion::identity(),
                     scale: Vector3::new(1.0, 1.0, 1.0),
                 })
-                .add_property(Model { model_ref: "F16".to_owned() })
+                .add_property(Model::new("F16"))
         ).expect("play should only spawn 'sun' once");
         if let Some(sun) = scene.content.renderizable_instances.get_mut("sun") {
             sun.instance.metadata.lighting = Some(Lighting { intensity: 1.0, color: Vector3::new(0.7, 0.7, 0.8) });
@@ -183,7 +203,7 @@ impl GameLogic {
                     rotation: UnitQuaternion::identity(),
                     scale: ground_scale,
                 })
-                .add_property(Model { model_ref: "Ground".to_owned() })
+                .add_property(Model::new("Ground"))
                 .add_property(PhysicsProperty {
                     rigidbody: RigidBodyData {
                         is_static: true,
@@ -211,7 +231,7 @@ impl GameLogic {
                     rotation: UnitQuaternion::identity(),
                     scale: runway_scale,
                 })
-                .add_property(Model { model_ref: "Runway".to_owned() })
+                .add_property(Model::new("Runway"))
                 .add_property(PhysicsProperty {
                     rigidbody: RigidBodyData {
                         is_static: true,
@@ -226,41 +246,18 @@ impl GameLogic {
                 })
         ).expect("play should only spawn 'runway' once");
 
+        // The player's jet - see flight_manager::add_plane.
+        flight_manager.add_plane(scene, app);
+
+        // The spray the plane kicks up off the water when flying low and
+        // fast - its own node, kept on the sea under the plane (see
+        // update_water_wake), not on the plane itself: the spray comes off
+        // the water, wherever the plane is and however it's banked.
         scene.spawn_node(app,
-            Node::new("player")
-                .add_behavior(Plane::new())
-                .add_property(Transform3D {
-                    position: Vector3::new(0.0, 100.0, -3400.0),
-                    rotation: UnitQuaternion::identity(),
-                    scale: Vector3::new(14.0, 14.0, 14.0),
-                })
-                .add_property(Model { model_ref: "F16".to_owned() })
-                .add_property(PhysicsProperty {
-                    rigidbody: RigidBodyData {
-                        is_static: false,
-                        mass: 8900.0,
-                        center_of_mass: Vector3::new(0.0, 0.0, 0.5),
-                        initial_velocity: Vector3::new(0.0, 0.0, 0.0),
-                    },
-                    colliders: vec![
-                        ColliderType::Cuboid { half_extents: (1.4, 1.4, 9.8), position: (0.0, 0.0, 2.8) },
-                        ColliderType::Cuboid { half_extents: (4.2, 0.14, 2.8), position: (6.0, 0.42, 2.8) },
-                        ColliderType::Cuboid { half_extents: (4.2, 0.14, 2.8), position: (-6.0, 0.42, 2.8) },
-                    ],
-                })
-                // The plane's physics half - aero, thrust, wheels, gear,
-                // instruments - run on the physics thread at the fixed rate.
-                // Talks to the Plane behavior above only through
-                // plane::messages.
-                .add_physics_behavior(AircraftPhysics::new(&AircraftSpec::f16()))
-        ).expect("play should only spawn 'player' once");
-        if let Some(player) = scene.content.renderizable_instances.get_mut("player") {
-            let mut cameras: Cameras = HashMap::new();
-            cameras.insert("cockpit".to_owned(), GameObjectCamera { position: Vector3::new(0.0, 2.158, 13.324), fov: 70.0 });
-            cameras.insert("cinematic".to_owned(), GameObjectCamera { position: Vector3::new(0.0, 1000.0, 900.0), fov: 60.0 });
-            cameras.insert("frontal".to_owned(), GameObjectCamera { position: Vector3::new(0.0, 6.0, 35.0), fov: 40.0 });
-            player.instance.metadata.cameras = Some(cameras);
-        }
+            Node::new("water_spray")
+                .add_property(Transform3D::default())
+                .add_property(super::plane::effects::spray_emitters())
+        ).expect("play should only spawn 'water_spray' once");
 
         // No Transform3D/Model - a pure logic node, same idea as "player"'s
         // own Plane behavior but with no mesh/physics of its own to carry.
@@ -278,7 +275,7 @@ impl GameLogic {
                     rotation: UnitQuaternion::identity(),
                     scale: Vector3::new(19.0, 19.0, 19.0),
                 })
-                .add_property(Model { model_ref: "F14".to_owned() })
+                .add_property(Model::new("F14"))
                 .add_property(PhysicsProperty {
                     rigidbody: RigidBodyData {
                         is_static: true,
@@ -299,74 +296,26 @@ impl GameLogic {
             fellow_aviator.instance.metadata.cameras = Some(cameras);
         }
 
+        // The whole ocean surface, out past the horizon - a level-of-detail
+        // ring mesh (see main.rs's OCEAN_SURFACE_MODEL), kept centered under
+        // the camera by update_water_plane. Scale 1: the mesh is in world units.
         scene.spawn_node(app,
             Node::new("world")
                 .add_property(Transform3D {
                     position: Vector3::new(0.0, 0.0, 0.0),
                     rotation: UnitQuaternion::identity(),
-                    scale: Vector3::new(2_000.0, 1.0, 2_000.0),
+                    scale: Vector3::new(1.0, 1.0, 1.0),
                 })
-                .add_property(Model { model_ref: "WaterPlane".to_owned() })
+                .add_property(Model::new(crate::OCEAN_SURFACE_MODEL))
         ).expect("play should only spawn 'world' once");
-
-        // Separate "WaterPlaneFar" model (see main.rs's own registration) -
-        // same huge footprint the old single "WaterPlane" had, covers what
-        // "world" above can't (foam/fog/horizon still need a water surface
-        // out that far). Its Y-scale (0.03) isn't a visual size - water.wgsl's
-        // vs_main reads it back as y_scale to force this instance's own waves
-        // down to near-zero amplitude everywhere, i.e. calm by construction
-        // rather than by distance falloff alone. The -4.0 Y offset keeps it
-        // reliably under "world"'s fuller-amplitude surface wherever the two
-        // overlap. Deliberately a distinct model_ref rather than another
-        // "WaterPlane" instance - see App::water_debug_hidden_models for why.
-        scene.spawn_node(app,
-            Node::new("world_far")
-                .add_property(Transform3D {
-                    position: Vector3::new(0.0, -4.0, 0.0),
-                    rotation: UnitQuaternion::identity(),
-                    scale: Vector3::new(3_000_000.0, 0.03, 3_000_000.0),
-                })
-                .add_property(Model { model_ref: "WaterPlaneFar".to_owned() })
-        ).expect("play should only spawn 'world_far' once");
-
-        // Stand-in for a real splash/spray model - see
-        // GameLogic::update_water_splash's own doc comment for why this
-        // exists as a separate node instead of a water.wgsl effect. Starts
-        // parked far below the world (WATER_SPLASH_HIDDEN_Y) - update_water_splash
-        // repositions/reveals it once the player's actually low over water.
-        scene.spawn_node(app,
-            Node::new("water_splash")
-                .add_property(Transform3D {
-                    position: Vector3::new(0.0, Self::WATER_SPLASH_HIDDEN_Y, 0.0),
-                    rotation: UnitQuaternion::identity(),
-                    scale: Vector3::new(15.0, 15.0, 15.0),
-                })
-                .add_property(Model { model_ref: "WaterSplash".to_owned() })
-        ).expect("play should only spawn 'water_splash' once");
-    }
-
-    // Hand-duplicated copy of water.wgsl's wave_height - must stay in sync
-    // with that shader's DIR_*/AMPLITUDE_*/FREQUENCY_*/SPEED_*/PHASE_*
-    // constants whenever they change (this file has no way to share code
-    // with a WGSL shader).
-    fn water_wave_height(x: f32, z: f32, t: f32) -> f32 {
-        let mut h = 0.0;
-        h += 0.242 * ((x * 0.985 + z * 0.174) * 0.3855 + t * 0.11 + 0.0).sin();
-        h += 0.166 * ((x * 0.259 + z * 0.966) * 0.3190 + t * -0.08 + 2.1).sin();
-        h += 0.119 * ((x * -0.643 + z * 0.766) * 0.2663 + t * 0.14 + 4.4).sin();
-        h += 0.076 * ((x * -0.966 + z * -0.259) * 0.2252 + t * -0.10 + 1.3).sin();
-        h += 0.048 * ((x * -0.342 + z * -0.940) * 0.1939 + t * 0.17 + 5.2).sin();
-        h += 0.062 * ((x * 0.766 + z * -0.643) * 0.1624 + t * -0.06 + 3.6).sin();
-        h + 0.713
     }
 
     // Recenters "world"/"world_far" (see spawn_world) under the camera's XZ
     // every frame - continuous, not snapped to a grid: the wave field is an
     // analytic function of position, not a sampled heightmap/texture, and
     // "world"'s ~2-unit cells still comfortably oversample even the shortest
-    // wave term (~16-unit wavelength, see water.wgsl's own FREQUENCY_*
-    // comment), so there's no texel-shimmer/vertex-swimming risk to guard
-    // against at today's constants. Y is left untouched on both - only XZ
+    // geometry wave (OceanSettings::geometry_min_wavelength, 10 units), so
+    // there's no texel-shimmer/vertex-swimming risk to guard against. Y is left untouched on both - only XZ
     // needs to track the camera.
     fn update_water_plane(scene: &mut Scene) {
         let camera_position = scene.cameras.active().camera.position().coords;
@@ -374,81 +323,128 @@ impl GameLogic {
             world.instance.transform.position.x = camera_position.x;
             world.instance.transform.position.z = camera_position.z;
         }
-        if let Some(world_far) = scene.content.renderizable_instances.get_mut("world_far") {
-            world_far.instance.transform.position.x = camera_position.x;
-            world_far.instance.transform.position.z = camera_position.z;
-        }
     }
 
-    fn update_water_splash(scene: &mut Scene, app: &App) {
-        let Some((player_position, player_rotation)) = scene.content.renderizable_instances.get("player").map(|player| (player.instance.transform.position, player.instance.transform.rotation)) else { return };
-        let Some(splash) = scene.content.renderizable_instances.get_mut("water_splash") else { return };
+    // Tells the water where the player's plane is and how fast it's going,
+    // so it can stir up a wake when flying fast and low (see
+    // WaterRenderData::set_wake_source - how strongly is decided there) -
+    // and moves the "water_spray" node onto the sea right under it, turned
+    // to its heading, spraying as hard as the wake is strong.
+    fn update_water_wake(scene: &mut Scene, app: &mut App) {
+        let source = scene.content.renderizable_instances.get("player").map(|player| WakeSource {
+            position: player.instance.transform.position,
+            velocity: scene.content.nodes.get("player")
+                .and_then(|node| node.physics_state::<AircraftState>())
+                .map(|state| state.flight_data.velocity)
+                .unwrap_or_else(Vector3::zeros),
+        });
+        app.water.set_wake_source(source);
 
-        if player_position.y < Self::WATER_SPLASH_ALTITUDE {
-            // True world position, matching water.wgsl's own true_xz fix -
-            // wave_height no longer expects camera-relative input (see
-            // check_water_death's own comment for the amplitude-falloff
-            // simplification this makes too).
-            let water_height = Self::water_wave_height(player_position.x, player_position.z, app.water_time());
-            splash.instance.transform.position = Vector3::new(player_position.x, water_height, player_position.z);
-
-            let forward = player_rotation * Vector3::new(0.0, 0.0, 1.0);
-            let horizontal_forward = Vector3::new(forward.x, 0.0, forward.z);
-            if horizontal_forward.norm() > 0.001 {
-                if let Some(heading) = UnitQuaternion::rotation_between(&Vector3::new(0.0, 0.0, 1.0), &horizontal_forward) {
-                    splash.instance.transform.rotation = heading;
-                }
+        let Some(source) = source else { return };
+        let strength = app.water.wake_strength(&source);
+        let sea_level = app.water.ocean.sea_level();
+        let Some(spray) = scene.content.nodes.get_mut("water_spray") else { return };
+        if let Some(transform) = spray.get_property_mut::<Transform3D>() {
+            transform.position = Vector3::new(source.position.x, sea_level, source.position.z);
+            let heading = Vector3::new(source.velocity.x, 0.0, source.velocity.z);
+            if heading.magnitude() > 1.0 {
+                transform.rotation = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), heading.x.atan2(heading.z));
             }
-        } else {
-            splash.instance.transform.position.y = Self::WATER_SPLASH_HIDDEN_Y;
+        }
+        if let Some(emitters) = spray.get_property_mut::<ParticleEmitters>() {
+            let plane_speed = Vector3::new(source.velocity.x, 0.0, source.velocity.z).magnitude();
+            super::plane::effects::update_spray(emitters, strength, plane_speed);
         }
     }
 
-    fn check_water_death(&mut self, scene: &Scene, app: &mut App, physics_command_tx: Option<&Sender<PhysicsCommand>>) {
+    /// Once the plane has crashed into the water (see Plane::check_wreck -
+    /// the physics keep running: it gets dragged to a stop, floats, sinks),
+    /// the camera backs out into a free orbit around the wreck. No death
+    /// screen for now (play_ui::open_death_screen) - restart from the pause
+    /// menu.
+    ///
+    /// When the crash kills the pilot the view cuts to black first (see
+    /// Pilot's DEATH_*) and the camera switches while it's black, so the
+    /// cut isn't seen. A crash the pilot survives switches after
+    /// WRECK_VIEW_DELAY_SECONDS - long enough to tell whether it was fatal
+    /// (then it waits for the black instead).
+    fn check_crash(&mut self, scene: &mut Scene, app: &App) {
         if self.is_dead {
             return;
         }
-        let Some(player) = scene.content.renderizable_instances.get("player") else { return };
-        let player_position = player.instance.transform.position;
-
-        // True world position (see water.wgsl's true_xz). Deliberately not
-        // applying the shader's own FALLOFF_START/END amplitude falloff here
-        // - the chase cam keeps the player within FALLOFF_START in normal
-        // gameplay (falloff ~= 1.0 whenever this check actually matters), so
-        // it's not worth a second hand-tuned constant to keep in sync with
-        // water.wgsl's.
-        let water_height = Self::water_wave_height(player_position.x, player_position.z, app.water_time());
-
-        if player_position.y > water_height + Self::WATER_DEATH_MARGIN {
+        let Some(plane) = scene.content.nodes.get("player").and_then(|node| node.get_behavior::<Plane>()) else { return };
+        if !plane.wrecked {
             return;
         }
-
-        self.is_dead = true;
-        if let Some(physics_command_tx) = physics_command_tx {
-            let _ = physics_command_tx.send(PhysicsCommand::TogglePause);
+        self.crash_time += app.time.delta_time;
+        let ready = if plane.pilot.is_dead() {
+            plane.pilot.death_view_hidden()
+        } else {
+            self.crash_time >= Self::WRECK_VIEW_DELAY_SECONDS
+        };
+        if !ready {
+            return;
         }
-        play_ui::open_death_screen(app);
+        self.is_dead = true;
+        let sea_level = app.water.ocean.sea_level();
+        if let Some(camera) = scene.content.nodes.get_mut("camera").and_then(|node| node.get_behavior_mut::<Camera>()) {
+            camera.enter_wreck_view(sea_level);
+        }
+    }
+
+    /// Drains the colors, closes in the tunnel or reds out the view as the
+    /// pilot does (see plane::pilot::Pilot::screen_effects) - every frame,
+    /// since screen effects only last one (see BlurRender::write_effects).
+    /// Also decides whether the HUD should be hidden (see hide_hud) - while
+    /// the view is completely gone, and for good once crashed.
+    fn update_g_vision(&mut self, scene: &Scene, app: &mut App) {
+        let Some(plane) = scene.content.nodes.get("player").and_then(|node| node.get_behavior::<Plane>()) else { return };
+        let effects = plane.pilot.screen_effects();
+        app.renderer.blur.effects = effects;
+
+        let hide = effects.tunnel >= 0.97 || plane.wrecked || plane.pilot.is_dead();
+        if !hide && self.hud_hidden_by_g {
+            // Vision's back - the flight HUD returns (the quick menu shows
+            // itself again once the pilot has control, see Plane).
+            for hud in Self::FLIGHT_HUD {
+                if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, hud) {
+                    node.set_active(true);
+                }
+            }
+            app.ui.has_changed = true;
+        }
+        self.hud_hidden_by_g = hide;
+    }
+
+    // The flight HUD: timer, FPS, G, power, altitude, speed, compass (all
+    // under "game_ui") and the flight path marker.
+    const FLIGHT_HUD: [&'static str; 2] = ["game_ui", "velocity_marker"];
+
+    /// Keeps the flight HUD hidden while update_g_vision says so - every
+    /// frame, after the level's UI tracks (EventSystem::apply_tracks) have
+    /// run, since those set "game_ui" active every frame too. The quick
+    /// menu hides itself (see Plane::update_quick_menu).
+    fn hide_hud(&self, app: &mut App) {
+        if !self.hud_hidden_by_g {
+            return;
+        }
+        for hud in Self::FLIGHT_HUD {
+            if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, hud) {
+                if node.is_active {
+                    node.set_active(false);
+                    app.ui.has_changed = true;
+                }
+            }
+        }
     }
 
     // How long ESC has to be held during an EventSystem::input_lock_end
     // window before it counts as a skip - see `update`'s own handling.
     const SKIP_HOLD_SECONDS: f32 = 1.2;
 
-    // Where "water_splash" parks when not in use - far enough below the
-    // world that it's never visible regardless of camera position/fog, see
-    // spawn_world's own comment on it. Not literally required to be exactly
-    // this value, just needs to be well outside anything the camera could
-    // ever see.
-    const WATER_SPLASH_HIDDEN_Y: f32 = -1_000_000.0;
-    // Player altitude (world units above the water's own rest Y=0) below
-    // which "water_splash" shows/follows - see update_water_splash's own
-    // doc comment.
-    const WATER_SPLASH_ALTITUDE: f32 = 60.0;
-    // How far above the water's own real surface height still counts as
-    // "touching" it, for check_water_death - a small allowance for the
-    // plane's own size (its transform origin sits roughly at its center,
-    // not its lowest point), not a difficulty/leniency knob.
-    const WATER_DEATH_MARGIN: f32 = 5.0;
+    // A survivable crash waits this long before the wreck camera - see
+    // check_crash.
+    const WRECK_VIEW_DELAY_SECONDS: f32 = 0.6;
 
     // this is called every frame
     // physics_data is unused now - Plane::fixed_update reacts to physics
@@ -457,6 +453,9 @@ impl GameLogic {
     // since ctx.physics_data still needs somewhere to go through FrameContext
     // and another SceneBehaviour-level consumer may want it later.
     pub fn update(&mut self, scene: &mut Scene, app: &mut App, physics_command_tx: Option<&Sender<PhysicsCommand>>, _physics_data: &HashMap<String, RenderMessage>) {
+        // Planes' data.ron edits, applied live - see flight_manager::update.
+        self.flight_manager.update(scene, app.time.delta_time);
+
         // See play::camera::camera::Camera::set_target's own doc comment -
         // has to run unconditionally, before ANY early return below
         // (app.is_paused, self.is_dead), so the "camera" node's own generic
@@ -468,12 +467,26 @@ impl GameLogic {
             let position = player.instance.transform.position;
             let rotation = player.instance.transform.rotation;
             let named_cameras = player.instance.metadata.cameras.clone();
+            let head_input = scene.content.nodes.get("player")
+                .and_then(|node| node.physics_state::<AircraftState>())
+                .map(|state| HeadInput {
+                    lateral: state.flight_data.lateral_g,
+                    forward: state.flight_data.longitudinal_g,
+                    vertical_g: state.flight_data.body_g.y,
+                });
             if let Some(node) = scene.content.nodes.get_mut("camera") {
                 if let Some(camera) = node.get_behavior_mut::<Camera>() {
                     camera.set_target(position, rotation, named_cameras);
+                    if let Some(head_input) = head_input {
+                        camera.set_head_input(head_input);
+                    }
                 }
             }
         }
+
+        // Every frame, paused or not - the effects only last one frame, and
+        // the view shouldn't pop back to normal behind the pause menu.
+        self.update_g_vision(scene, app);
 
         // F3 debug view - shows/hides in lockstep with the console toggle,
         // same "set_active every frame, no separate dirty-tracking" idiom
@@ -497,6 +510,16 @@ impl GameLogic {
         if input::is_action_just_pressed("toggle_aero_debug_recording") {
             app.show_aero_debug_overlay = !app.show_aero_debug_overlay;
             println!("Aero debug overlay: {}", if app.show_aero_debug_overlay { "ON" } else { "OFF" });
+        }
+
+        // F8 - frees the mouse for the debug overlay (see App::
+        // debug_mouse_free). The pause menu owns the cursor while it's up -
+        // close_pause_menu puts back whichever mode this left.
+        if input::is_action_just_pressed("toggle_debug_mouse") {
+            app.debug_mouse_free = !app.debug_mouse_free;
+            if !app.is_paused {
+                app.window_manager.context.mouse().set_relative_mouse_mode(!app.debug_mouse_free);
+            }
         }
 
         // Whether player input is locked out right now (see EventSystem::
@@ -592,16 +615,9 @@ impl GameLogic {
             // main_menu::scene::GameLogic::update already uses unconditionally
             // every frame, scoped here to just while paused instead.
             app.ui.has_changed = true;
-            return;
-        }
-
-        if self.is_dead {
-            // Same idiom as the app.is_paused block above - freezes
-            // everything else in this fn (game_time, camera follow, flight/
-            // afterburner animation, ...) while still letting the death
-            // screen's own Restart/Back to Main Menu buttons register
-            // clicks (handled independently, see App::fire_ui_click_handlers).
-            app.ui.has_changed = true;
+            // The pause menu's Settings panel is main_menu's own - its
+            // sliders need following while dragged here too.
+            main_menu_ui::update_settings_sliders(app);
             return;
         }
 
@@ -665,8 +681,8 @@ impl GameLogic {
         }
 
         Self::update_water_plane(scene);
-        Self::update_water_splash(scene, app);
-        self.check_water_death(scene, app, physics_command_tx);
+        Self::update_water_wake(scene, app);
+        self.check_crash(scene, app);
 
         if let Some(event_system) = &mut self.event_system {
             event_system.handle_events(self.game_time, app, &mut self.subtitle_data);
@@ -677,6 +693,7 @@ impl GameLogic {
         if let Some(event_system) = &self.event_system {
             event_system.apply_tracks(self.game_time, scene, app);
         }
+        self.hide_hud(app);
 
     }
 
@@ -740,6 +757,16 @@ impl GameLogic {
                 if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "debug_panel/stats_box/position").and_then(|n| n.as_label_mut()) {
                     label.set_text(&mut app.ui.text.font_system, &format!("Player position: ({:.1}, {:.1}, {:.1})", pos.x, pos.y, pos.z), true);
                 }
+            }
+            // Ocean culling results (see WaterRenderData::visible_ranges) -
+            // F8 freezes culling to see it in the world.
+            let ocean = app.water.draw_stats();
+            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "debug_panel/stats_box/ocean").and_then(|n| n.as_label_mut()) {
+                label.set_text(&mut app.ui.text.font_system, &format!(
+                    "Ocean: {}/{} tiles, {:.1}M/{:.1}M triangles",
+                    ocean.tiles_drawn, ocean.tiles_total,
+                    ocean.triangles_drawn as f64 / 1e6, ocean.triangles_total as f64 / 1e6,
+                ), true);
             }
 
             if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/speed").and_then(|n| n.as_label_mut()) {

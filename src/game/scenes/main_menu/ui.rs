@@ -5,11 +5,11 @@ use crate::engine::input::input;
 use crate::engine::rendering::ui::ui::Ui;
 use crate::engine::ui::color::{Fill, UiColor};
 use crate::engine::ui::layer::Layer;
-use crate::game::game_settings::{GameSettings, GAME_SETTINGS};
+use crate::game::game_settings::{GameSettings, COCKPIT_VIEW_PITCH_MAX, GAME_SETTINGS, HEAD_G_REACTION_MAX};
 use crate::engine::ui::ui_node::UiNode;
 use crate::engine::ui::ui_transform::{Anchor, BorderEdges, Orientation, PositionValue, SizeValue};
 use crate::game::selected_level::{SelectedLevel, SELECTED_LEVEL};
-use crate::game::ui::{button, label, main_fade_gradient, set_toggle_switch, toggle_switch, with_left_accent};
+use crate::game::ui::{button, label, main_fade_gradient, set_slider, set_toggle_switch, slider, slider_fraction_at, toggle_switch, with_left_accent};
 use super::rebind_modal;
 
 const SETTINGS_TABS: [&str; 3] = ["Video", "Controller", "Audio"];
@@ -153,6 +153,114 @@ fn video_settings(app: &mut App) -> UiNode {
         .set_child("FreeCameraFollowsPlane", settings_toggle_row(app, "Video", "FreeCameraFollowsPlane", "Free camera follows plane",
             |settings| settings.free_camera_follows_plane,
             |settings| settings.free_camera_follows_plane = !settings.free_camera_follows_plane))
+        .set_child("HeadGReaction", settings_slider_row(app, "Video", "HeadGReaction", "Cockpit head G reaction",
+            SliderRange { min: 0.0, max: HEAD_G_REACTION_MAX, step: 0.01, format: percent_text },
+            |settings| settings.head_g_reaction,
+            |settings, value| settings.head_g_reaction = value))
+        .set_child("CockpitViewPitch", settings_slider_row(app, "Video", "CockpitViewPitch", "Cockpit view angle",
+            SliderRange { min: -COCKPIT_VIEW_PITCH_MAX, max: COCKPIT_VIEW_PITCH_MAX, step: 0.1, format: degrees_text },
+            |settings| settings.cockpit_view_pitch_deg,
+            |settings, value| settings.cockpit_view_pitch_deg = value))
+}
+
+/// A `settings_slider_row`'s values: `min` at the left end, `max` at the
+/// right, snapped to `step`, and shown by `format`.
+#[derive(Clone, Copy)]
+struct SliderRange {
+    min: f32,
+    max: f32,
+    step: f32,
+    format: fn(f32) -> String,
+}
+
+impl SliderRange {
+    fn fraction(&self, value: f32) -> f32 {
+        (value - self.min) / (self.max - self.min)
+    }
+
+    /// The value at `fraction` along the slider, snapped to `step` - so the
+    /// readout and the stored value agree.
+    fn value_at(&self, fraction: f32) -> f32 {
+        let value = self.min + fraction * (self.max - self.min);
+        ((value / self.step).round() * self.step).clamp(self.min, self.max)
+    }
+}
+
+/// A setting a `settings_slider_row` is being dragged on: where its slider
+/// and readout are, its range, and how to store what it's dragged to.
+struct SliderDrag {
+    row_path: String,
+    range: SliderRange,
+    write: fn(&mut GameSettings, f32),
+}
+
+thread_local! {
+    // The slider the mouse went down on, while the button stays held - see
+    // `update_settings_sliders`.
+    static SLIDER_DRAG: std::cell::RefCell<Option<SliderDrag>> = const { std::cell::RefCell::new(None) };
+}
+
+/// One setting over `range`: its name, a `slider`, and the value (as
+/// `range.format` shows it). Pressing on the slider jumps it to the mouse and starts a drag that
+/// `update_settings_sliders` follows every frame until the button's let go.
+/// `tab`/`key` are this row's own place in the tree, as for
+/// `settings_toggle_row`.
+fn settings_slider_row(app: &mut App, tab: &str, key: &str, name: &str, range: SliderRange, read: fn(&GameSettings) -> f32, write: fn(&mut GameSettings, f32)) -> UiNode {
+    let row_path = format!("Settings/Content/{tab}/{key}");
+    let value = read(&GAME_SETTINGS.lock().unwrap());
+
+    UiNode::container()
+        .set_orientation(Orientation::Horizontal)
+        .set_background_color(UiColor::TRANSPARENT)
+        .set_border_edges(BorderEdges::BOTTOM)
+        .set_border_width(1.0)
+        .set_border_color(UiColor::Rgba(255, 255, 255, 25))
+        .set_padding(14.0)
+        .set_size(SizeValue::Grow, SizeValue::Fit)
+        .set_child_anchor(Anchor::Start, Anchor::Center)
+        .set_gap(16.0)
+        .set_child("Name", label(app, name).set_size(SizeValue::Pixels(260.0), SizeValue::Fit).set_text_color(UiColor::Rgb(200, 200, 200)))
+        .set_child("Slider", slider(range.fraction(value)).on_click(move |app| {
+            SLIDER_DRAG.with(|drag| *drag.borrow_mut() = Some(SliderDrag { row_path: row_path.clone(), range, write }));
+            update_settings_sliders(app);
+        }))
+        .set_child("Value", label(app, &(range.format)(value)).set_size(SizeValue::Pixels(80.0), SizeValue::Fit).set_text_color(UiColor::WHITE))
+}
+
+fn percent_text(value: f32) -> String {
+    format!("{:.0}%", value * 100.0)
+}
+
+fn degrees_text(value: f32) -> String {
+    format!("{:+.1} deg", value)
+}
+
+/// Follows a `settings_slider_row` drag: while the click that started it is
+/// held, stores the value under the mouse and moves the slider/readout to
+/// it; once it's let go, the drag ends. Call every frame the settings can be
+/// open (main menu, and the play scene while paused).
+pub(crate) fn update_settings_sliders(app: &mut App) {
+    SLIDER_DRAG.with(|drag| {
+        let mut drag = drag.borrow_mut();
+        let Some(active) = drag.as_ref() else { return };
+        if !input::is_action_pressed("ui_click") {
+            *drag = None;
+            return;
+        }
+
+        let Some(slider_node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &format!("{}/Slider", active.row_path)) else {
+            *drag = None;
+            return;
+        };
+        let value = active.range.value_at(slider_fraction_at(slider_node, input::mouse_x() as f32));
+        set_slider(slider_node, active.range.fraction(value));
+        (active.write)(&mut GAME_SETTINGS.lock().unwrap(), value);
+
+        if let Some(readout) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &format!("{}/Value", active.row_path)).and_then(|n| n.as_label_mut()) {
+            readout.set_text(&mut app.ui.text.font_system, &(active.range.format)(value), true);
+        }
+        app.ui.has_changed = true;
+    });
 }
 
 /// One on/off setting: its name beside a `toggle_switch`, laid out like a

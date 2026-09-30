@@ -26,16 +26,11 @@ const NEAR: f32 = 0.1;
 const FAR: f32 = 4000000.0;
 
 // Darkest tint, at the wave's own lowest point (height_01 = 0 in fs_main) -
-// lightened from an earlier, near-black pass at this (0.0, 0.03, 0.08). That
-// was tuned back when waves were tall enough for a genuinely deep-looking
-// trough to be a rare, dramatic accent; now that AMPLITUDE_* sums to a small
-// 3.0 (see that constant's own comment), what height_01 = 0 actually
-// represents is just an ordinary shallow dip in small chop, not a dramatic
-// trough - the old near-black there read as an abrupt, out-of-place dark
-// spot rather than part of the water. See also COLOR_HEIGHT_SCALE below,
-// which is what actually lets height_01 reach 0 from realistic wave heights
-// in the first place rather than only from a near-impossible in-phase sum of
-// all six terms at once.
+// lightened from an earlier, near-black pass at this (0.0, 0.03, 0.08):
+// height_01 = 0 is an ordinary trough in moderate chop, not a dramatic one,
+// and near-black there read as an abrupt, out-of-place dark spot. height_01
+// is scaled by a TYPICAL crest height (ocean.params.w), not the rare
+// in-phase maximum, so ordinary troughs actually reach this color.
 const DEEP_COLOR: vec3<f32> = vec3<f32>(0.01, 0.12, 0.23);
 // Lightest tint, at the wave's own highest point (height_01 = 1) - classic
 // sea blue (blue clearly dominant over green) - an earlier pass at this
@@ -50,190 +45,137 @@ const WATER_COLOR: vec3<f32> = vec3<f32>(0.02, 0.25, 0.45);
 // this alone is most of what actually reads as "real" here, more than the
 // exact WATER_COLOR/DEEP_COLOR values. Deliberately NOT teal-shifted like
 // WATER_COLOR - this is meant to read as reflected sky, not water itself.
-const SKY_REFLECTION_COLOR: vec3<f32> = vec3<f32>(0.55, 0.7, 0.85);
+// Added to the lit water color, never lit itself (see the final
+// composition in fs_main) - a reflection is sky light already.
+const SKY_REFLECTION_COLOR: vec3<f32> = vec3<f32>(0.42, 0.58, 0.78);
+// Base color of the far open sea - the water eases into it between
+// OPEN_SEA_BLEND_START and OPEN_SEA_BLEND_END (distance from the camera),
+// well out toward the horizon haze, so it reads as part of the sky/sea
+// transition rather than a line. A deep blue, a little darker than the wave
+// colors' middle.
+const OPEN_SEA_COLOR: vec3<f32> = vec3<f32>(0.015, 0.15, 0.28);
+// Once every wave is too small to show at a pixel, the fresnel term treats
+// the surface as if it never faced the viewer at less than this (cosine of
+// the view angle) - a real distant sea is still covered in waves whose
+// faces tilt toward you, so it never turns mirror-like at grazing angles the
+// way a truly flat plane would (that's what made far water read as
+// washed-out sky). Applied in proportion to how much of the waves' slope
+// has faded out at that pixel (see `lost_slope` in fs_main), so it eases in
+// exactly as the visible wave detail eases out - no fixed distance.
+// Caps the sky reflection at roughly (1 - this)^FRESNEL_POWER.
+const FLAT_WATER_MIN_FACING: f32 = 0.3;
+// See OPEN_SEA_COLOR - distance from the camera, world units.
+const OPEN_SEA_BLEND_START: f32 = 4000.0;
+const OPEN_SEA_BLEND_END: f32 = 40000.0;
+// What the sea turns toward the horizon - an open-ocean blue (see
+// SkyboxRender::new_procedural): lighter than the water up close (grazing
+// views mirror more of the bright low sky, and there's more haze in front
+// of it), but darker than the sky's haze just above the horizon, which is
+// what makes the horizon read as a line. The water eases into it over
+// SEA_HAZE_START..SEA_HAZE_END (horizontal distance), and the far fog ends
+// on it too. Keep in sync with the sky's sea_horizon_color.
+const SEA_HORIZON_COLOR: vec3<f32> = vec3<f32>(0.147, 0.296, 0.477);
+const SEA_HAZE_START: f32 = 3000.0;
+const SEA_HAZE_END: f32 = 80000.0;
 
-// Six wave terms instead of three, each traveling in its own (non axis-
-// aligned) direction with its own frequency/speed/phase - a small number of
-// axis-aligned terms sums into an obviously periodic, tiling-looking
-// interference pattern once you're far enough up to see the whole thing at
-// once; more terms at irregular, non-commensurate directions/frequencies (no
-// clean small-integer ratios between them) breaks that symmetry up into
-// something that reads as "random" swell instead. amplitude is in world
-// units (how tall this term's contribution gets), dir is this term's
-// travel direction in the XZ plane (unit length), frequency is in radians
-// per world unit (2*PI / frequency is the wavelength in world units), speed
-// is in radians per second, phase is a constant radian offset (also there
-// purely to decorrelate the terms from each other, same reason dir varies).
+// The water mesh is one set of nested square rings around the camera (see
+// resources::build_water_rings_mesh / main.rs's OCEAN_TIERS): coarser the
+// further out, and every vertex knows its ring's cell size and outer
+// half-extent (tex_coords) and the next ring's cell size (normal.x). A ring
+// only MOVES the waves it's fine enough to draw - a wave needs a few cells
+// per wavelength, or vertices would skip across its crests. The mesh only
+// SHAPES the surface, though: how the water looks (normal, color,
+// whitecaps) is computed per pixel from every wave everywhere (see
+// surface_waves), so nothing changes where the moving rings end.
 //
-// Frequencies (wavelengths roughly 16-39 world units) are tuned for
-// play::scene::spawn_world's "world" node - the small, dense, camera-
-// following plane (see update_water_plane) that's actually meant to be
-// looked at up close now, not the old single giant static plane these used
-// to be sized for. Also checked against the player's F16 model being 13
-// world units long (see AMPLITUDE_*'s own comment) - the shortest term is
-// close to that length, the longest a good 3x it, so single crests read
-// distinctly smaller than the plane at the short end without every term
-// looking the same size. Multiple crests fit inside FALLOFF_END below at
-// this wavelength, which is the point - short enough to read as real chop
-// from a close/low viewpoint, not one huge gentle swell barely curving
-// across the whole visible surface. `water.wgsl`'s constants are global/
-// compiled in, shared by every water-shaded surface in the game, including
-// "world_far" (forced calm via its own Y-scale regardless of this) and
-// main_menu::scene::spawn_world's own pond.
+// A wave is fully moved by the mesh once it spans GEOMETRY_FULL_CELLS
+// cells, and left entirely to the per-pixel normal below GEOMETRY_MIN_CELLS.
+const GEOMETRY_MIN_CELLS: f32 = 3.0;
+const GEOMETRY_FULL_CELLS: f32 = 5.0;
+// Every other vertex slides onto the next ring's coarser grid as its TRUE
+// (circular) distance from the camera goes from this fraction of the ring's
+// half-extent to the full half-extent - so quality changes in circles around
+// the camera, not in the rings' square outlines. The rings' square edges
+// (and their corners, out past the half-extent) are therefore always fully
+// morphed, which is what makes them meet the next ring exactly. Must stay
+// above 1/sqrt(2) (~0.707): a ring's inner corners sit at that fraction of
+// its half-extent, and must not morph at all, to meet the ring inside it.
+const RING_MORPH_START: f32 = 0.72;
+// Over the last part of each ring (this fraction of its half-extent out to
+// the edge), the waves it moves fade down to what the NEXT ring can carry -
+// for a next ring twice as coarse that's what the morph above already does,
+// but where the next ring jumps to much bigger (flat) cells this is what
+// flattens the water right at the edge, so the rings still meet exactly.
+const NEXT_RING_FADE_START: f32 = 0.9;
+
+
+
+// The waves themselves come from `ocean` (group 0, binding 2) - generated on
+// the CPU from a wind-sea spectrum by engine::rendering::enviroment::ocean
+// (see that module's doc comment), which is also what gameplay asks for the
+// surface height, so both always agree. Two groups, in that order in
+// `ocean.waves`:
+// - geometry waves (ocean.params.x of them) - Gerstner waves displacing the
+//   mesh in vs_main: height plus a sideways push toward each crest, which
+//   sharpens crests and flattens troughs;
+// - detail waves (ocean.params.y of them) - too short for the mesh, so they
+//   only bend the per-pixel normal in fs_main (ripples, glints), each fading
+//   out once it would be smaller than a few pixels on screen.
+// Wavelengths are all unrelated to each other, so the pattern never repeats.
 //
-// This still sits against a real geometric floor, not just a taste call:
-// "world" is 1000 subdivisions over 2000 world units (see spawn_world),
-// i.e. ~2-unit mesh cells - a wavelength much under ~8-10 (only a handful
-// of cells) is shorter than the mesh can actually resolve, which reads as
-// broken/faceted geometry rather than "sharper" waves, independent of
-// anything below about motion aliasing. An earlier pass at 1000 world units
-// (~1-unit cells) forced these six terms into a much narrower cluster
-// (14-20) just to all clear that tighter floor - which itself read as
-// repetitive, since near-equal wavelengths beat together into a fairly
-// regular secondary pattern. Growing "world" back out to 2000 relaxed the
-// floor enough to widen this spread again (16-39, a ~2.4x range vs. the
-// previous ~1.4x) without any term coming close to it - DIR_*/PHASE_* were
-// also spread more evenly around the circle/across radian offsets for the
-// same reason. If the repeating look ever comes back, this spread (and
-// DIR_*/PHASE_*) is the lever to reach for again, not wavelength alone.
-//
-// A pass shortening these to ~45-235 once looked "static"/frozen instead of
-// choppy once actually flown over. NOT a SPEED_* problem (t*SPEED_* alone is
-// far too slow on its own to explain that - even the fastest term here only
-// completes a cycle every several seconds) - it's spatial aliasing: at
-// flight speed, a short enough wavelength means the camera crosses a full
-// crest in a small fraction of a second, so the phase sampled at true_xz
-// jumps by more than a cycle between rendered frames and reads as frozen/
-// flickering rather than flowing. This range's shortest wavelength (~16) is
-// well below that failure point, but AMPLITUDE_* is tiny now (well under 1
-// total, see its own comment) - the same aliasing may still technically
-// happen, but on a wave amplitude this small it should read as faint
-// shimmer rather than the dramatic frozen-blob look it caused before. The
-// true fix (subsampling/anti-aliasing the wave phase itself, or capping how
-// much true_xz can move per frame) still hasn't been needed - revisit if
-// this is still visible.
-//
-// SPEED_* used to be slowed specifically to mask a since-fixed bug (camera-
-// relative rendering, see GameObject::to_raw / `true_xz` below), then pushed
-// back up further than actually wanted once that was fixed - now split the
-// difference between those two passes.
-//
-// AMPLITUDE_* is scaled against a concrete reference: the player's F16 model
-// is 13 world units long (see play::scene::spawn_world's "player" node).
-// Halved three times, then cut a further 5% - the huge-static-ocean-era
-// total summed to 40 (read as oversized rounded blobs up close, "goo" was
-// the right word for it), then 3.0, then 1.5, then 0.75 (each still too
-// much) - now sums to ~0.713, i.e. under a 1.5-unit crest-to-trough swing,
-// proportionate small chop rather than dominating the plane's own
-// silhouette. MAX_WAVE_HEIGHT below is computed from these, not hand-set,
-// so it tracks automatically whenever this changes again.
-//
-// Amplitude is in world units (how tall a term's contribution gets) - see
-// the conversation this came out of for why these specific six values.
-const DIR_1: vec2<f32> = vec2<f32>(0.985, 0.174);
-const AMPLITUDE_1: f32 = 0.242;
-const FREQUENCY_1: f32 = 0.3855;
-const SPEED_1: f32 = 0.11;
-const PHASE_1: f32 = 0.0;
+// Each wave's phase at the CAMERA arrives precomputed (in f64, on the CPU);
+// the shader only adds k * (distance from the camera along the wave), using
+// the camera-relative positions it already works in. That keeps every
+// number small, so waves stay crisp arbitrarily far from the world origin.
 
-const DIR_2: vec2<f32> = vec2<f32>(0.259, 0.966);
-const AMPLITUDE_2: f32 = 0.166;
-const FREQUENCY_2: f32 = 0.3190;
-const SPEED_2: f32 = -0.08;
-const PHASE_2: f32 = 2.1;
+// Must match engine::rendering::enviroment::ocean::MAX_WAVES.
+const MAX_WAVES: u32 = 80u;
+// Must match engine::rendering::enviroment::ocean::MAX_WAKE_POINTS.
+const MAX_WAKE_POINTS: u32 = 32u;
 
-const DIR_3: vec2<f32> = vec2<f32>(-0.643, 0.766);
-const AMPLITUDE_3: f32 = 0.119;
-const FREQUENCY_3: f32 = 0.2663;
-const SPEED_3: f32 = 0.14;
-const PHASE_3: f32 = 4.4;
-
-const DIR_4: vec2<f32> = vec2<f32>(-0.966, -0.259);
-const AMPLITUDE_4: f32 = 0.076;
-const FREQUENCY_4: f32 = 0.2252;
-const SPEED_4: f32 = -0.10;
-const PHASE_4: f32 = 1.3;
-
-const DIR_5: vec2<f32> = vec2<f32>(-0.342, -0.940);
-const AMPLITUDE_5: f32 = 0.048;
-const FREQUENCY_5: f32 = 0.1939;
-const SPEED_5: f32 = 0.17;
-const PHASE_5: f32 = 5.2;
-
-const DIR_6: vec2<f32> = vec2<f32>(0.766, -0.643);
-const AMPLITUDE_6: f32 = 0.062;
-const FREQUENCY_6: f32 = 0.1624;
-const SPEED_6: f32 = -0.06;
-const PHASE_6: f32 = 3.6;
-
-// The tallest a crest can ever get (all six terms peaking at once) - used
-// both as a compile-time constant and to normalize height into -1..1 for
-// fs_main's own depth shading (troughs bottom out at -MAX_WAVE_HEIGHT,
-// symmetric with crests).
-const MAX_WAVE_HEIGHT: f32 = AMPLITUDE_1 + AMPLITUDE_2 + AMPLITUDE_3 + AMPLITUDE_4 + AMPLITUDE_5 + AMPLITUDE_6;
-// fs_main's own height_01 normalizes by this instead of MAX_WAVE_HEIGHT
-// directly - a sum of six independent-phase sine terms essentially never
-// actually reaches anywhere near MAX_WAVE_HEIGHT in practice (that needs all
-// six to peak in phase at once), so normalizing color by the true
-// theoretical max left height_01 clustered tightly around 0.5 almost
-// everywhere - DEEP_COLOR/WATER_COLOR's own extremes basically never showed,
-// which read as flat, low-variation coloring (and, combined with a small
-// number of fixed travel directions, like an obviously repeating texture
-// rather than natural-looking chop). Half of MAX_WAVE_HEIGHT is close enough
-// to the sum's *typical* excursion that ordinary wave heights - not just
-// rare in-phase peaks - now drive real color variation. Geometry (the
-// world_position.y offset in vs_main) still uses the true MAX_WAVE_HEIGHT -
-// that one has to cover the actual theoretical extreme to guarantee
-// non-negative height, this is purely a fs_main coloring concern. Pulled
-// back up slightly from an earlier 0.5 to 0.6 - 0.5 fixed the flat/
-// repeating look but was asked to variate "a little less" once seen in
-// motion; 0.6 keeps most of that fix while easing off the sensitivity a bit.
-const COLOR_HEIGHT_SCALE: f32 = MAX_WAVE_HEIGHT * 0.6;
-// Camera-distance (world units, matches dist_from_camera in vs_main) band
-// over which wave amplitude fades from full (at/inside FALLOFF_START) to
-// zero (at/beyond FALLOFF_END) - what actually gives the "detailed near,
-// calm far" look, on top of whatever mesh density happens to be nearby. See
-// play::scene::spawn_world's "world"/"world_far" node pair - "world" is a
-// small, dense plane recentered under the camera every frame for real
-// near-camera resolution, "world_far" is a much bigger, near-flat one (its
-// own per-instance Y-scale read back via y_scale in vs_main, not this
-// falloff) that covers the same huge area the old single plane did, so
-// there's always a water surface out past FALLOFF_END for fog/shore-foam to
-// read against - this constant alone does not create that calm-far surface,
-// it just makes sure "world"'s own waves don't cut off with a visible edge.
-// Pulled in twice, now pushed back out once (1200/2800 -> 400/900 -> this)
-// to match "world" itself (see spawn_world) shrinking twice then growing
-// back to 2000 (half-size 1000) - FALLOFF_END has to stay comfortably
-// inside that half-size or the fade-to-flat zone doesn't finish before the
-// mesh's own edge, and the seam this whole falloff mechanism exists to hide
-// shows up again. See also RADIUS below, just past FALLOFF_END - "world" is
-// already flat by FALLOFF_END, so the hard circular cutoff at RADIUS lands
-// on water that already looks the same as "world_far" underneath it.
-const FALLOFF_START: f32 = 360.0;
-const FALLOFF_END: f32 = 800.0;
-// Hard circular cutoff for "world" specifically (see y_scale's own gating in
-// fs_main - "world_far" is never discarded, it's the permanent backdrop) -
-// past this, "world"'s fragments are discarded outright rather than just
-// faded, so the near-detail patch reads as a clean circle instead of a
-// square with its diagonal corners poking out past FALLOFF_END (a square
-// mesh's corners reach ~1.41x further than its edges at the same "radius").
-// Sits just past FALLOFF_END, inside "world"'s own half-size (1000), so the
-// cutoff always lands on already-flat, already-matching water via the
-// smooth amplitude falloff above - never a visible edge, since by RADIUS
-// there's nothing left for the hard discard to visibly remove. A first-pass
-// value, not derived from anything - revisit if the circle ends up in the
-// wrong place.
-const RADIUS: f32 = 900.0;
-// Same idea as FALLOFF_START/END above but for camera altitude instead of
-// distance - fades "world"'s own amplitude out as the camera climbs, same
-// smoothstep shape, so it goes flat/matching before HEIGHT_FALLOFF_END is
-// ever reached (see fs_main's discard, gated on this same END value). A
-// single hard HEIGHT_CUTOFF discard with no fade leading into it (an
-// earlier pass at this) popped "world" in/out abruptly on approach/climb -
-// exactly the mistake FALLOFF_START/END+RADIUS above were designed to
-// avoid, just missed here the first time.
-const HEIGHT_FALLOFF_START: f32 = 200.0;
-const HEIGHT_FALLOFF_END: f32 = 500.0;
+// A plane flying fast and low stirs up the water (see water_wake, and
+// WaterRenderData's wake for when/how strongly) - shaped by which way it's
+// flying, like a boat's wake, not a round drop:
+// - under it, a small patch flattened and whitened by the blast,
+//   WAKE_PATCH_RADIUS across its width (+ WAKE_PATCH_GROWTH per unit of
+//   height - higher spreads wider), WAKE_PATCH_STRETCH times as long along
+//   the flight path, sitting a little behind the plane;
+// - behind it, a V of ripples spreading out to both sides at
+//   WAKE_V_SLOPE (sideways per unit back - 0.36 is ~20 degrees), fading
+//   out WAKE_V_LENGTH back;
+// - and a foam streak along its trail, WAKE_TRAIL_WIDTH wide when fresh
+//   and WAKE_TRAIL_SPREAD wider per second of age, fading out.
+// The *_FOAM / WAKE_FLATTEN / WAKE_RIPPLE_SLOPE values are its strength.
+const WAKE_PATCH_RADIUS: f32 = 5.0;
+const WAKE_PATCH_GROWTH: f32 = 0.25;
+const WAKE_PATCH_STRETCH: f32 = 2.0;
+const WAKE_PATCH_FOAM: f32 = 0.75;
+const WAKE_FLATTEN: f32 = 0.6;
+const WAKE_V_SLOPE: f32 = 0.36;
+const WAKE_V_LENGTH: f32 = 80.0;
+const WAKE_RIPPLE_WAVELENGTH: f32 = 4.0;
+const WAKE_RIPPLE_SPEED: f32 = 6.0;
+const WAKE_RIPPLE_SLOPE: f32 = 0.2;
+const WAKE_TRAIL_WIDTH: f32 = 5.0;
+const WAKE_TRAIL_SPREAD: f32 = 6.0;
+const WAKE_TRAIL_FOAM: f32 = 0.8;
+// The trail's foam is broken up by noise pinned to the water: dense when
+// fresh, thinning to patches as it ages - WAKE_FOAM_COVERAGE_FRESH/_OLD are
+// how much of it survives (0..1) at those two ends. The noise repeats every
+// WAKE_NOISE_PERIOD meters (ocean.rs's WAKE_NOISE_PERIOD, keep in sync).
+const WAKE_FOAM_COVERAGE_FRESH: f32 = 0.85;
+const WAKE_FOAM_COVERAGE_OLD: f32 = 0.35;
+const WAKE_NOISE_PERIOD: f32 = 4096.0;
+const WAKE_FOAM_COLOR: vec3<f32> = vec3<f32>(0.85, 0.9, 0.95);
+// A detail wave fully shows once its wavelength spans this many pixels, and
+// fades to nothing by half that - shorter than that it would only shimmer.
+const DETAIL_FULL_PIXELS: f32 = 8.0;
+// Whitecap tint - brighter/whiter than FOAM_COLOR's shore foam.
+const WHITECAP_COLOR: vec3<f32> = vec3<f32>(0.85, 0.9, 0.95);
+// Whitecaps show where a crest is pinched by more than this fraction of the
+// maximum (see crest in vs_main), fully by WHITECAP_FULL.
+const WHITECAP_START: f32 = 0.45;
+const WHITECAP_FULL: f32 = 0.85;
 // How tightly the fresnel blend (see fs_main) concentrates toward true
 // grazing angles - higher means only very shallow viewing angles pick up
 // SKY_REFLECTION_COLOR, most of the surface stays true water color; lower
@@ -243,23 +185,19 @@ const FRESNEL_POWER: f32 = 4.0;
 // at a full 90-degree grazing angle - 1.0 would let grazing views go fully
 // sky-colored, this caps it short of that so the surface never completely
 // stops reading as water.
-const FRESNEL_STRENGTH: f32 = 0.75;
+const FRESNEL_STRENGTH: f32 = 0.6;
 
 // Foam tint for shore/object intersections - see shore_foam in fs_main.
 const FOAM_COLOR: vec3<f32> = vec3<f32>(0.55, 0.75, 0.95);
-// How many world units of linear depth separation still counts as "water
-// intersecting solid geometry" - 0 separation (water sitting exactly on/in
-// something solid) is always full foam, this is how far that falls off to
-// nothing. Larger = a wider foam band around every shore/object.
-const SHORE_FOAM_RANGE: f32 = 25.0;
-// Shore / object-collision foam is tied to the SAME visibility envelope as
-// the waves themselves rather than its own distance constants: FALLOFF_START/
-// END over camera XZ-distance, HEIGHT_FALLOFF_START/END over camera altitude,
-// and the "world"-only y_scale gate (see foam_wave_visibility in fs_main).
-// Foam is a near-surface detail - it should appear exactly where the detailed
-// "world" water patch is and fade out on the same schedule, not linger on the
-// flat "world_far" backdrop (which has no waves to collide against anyway) or
-// fringe every coastline when viewed from flight altitude.
+// How deep the water can be (vertically, world units) over solid ground and
+// still foam - 0 (water right at the ground: the shoreline, an object's
+// waterline) is full foam, fading to none at this depth. Measured straight
+// down, not along the view ray, so the band keeps the same width in the
+// world from any distance or viewing angle. Larger = a wider band.
+const SHORE_FOAM_DEPTH: f32 = 1.5;
+// Shore / object-collision foam (and whitecaps) fade out with the same
+// distance blend as the wave colors (wave_visibility in fs_main) - they're
+// near-surface details, so they shouldn't fringe every far coastline.
 
 struct CameraUniform {
     view_proj: mat4x4<f32>,
@@ -287,6 +225,33 @@ struct Light {
 var t_scene_depth: texture_2d<f32>;
 @group(0) @binding(1)
 var s_scene_depth: sampler;
+
+// See engine::rendering::enviroment::ocean::OceanUniform - each wave is two
+// vec4s: (dir.x, dir.z, k, amplitude), (steepness, phase at camera,
+// wavelength, unused).
+struct Ocean {
+    // geometry wave count, detail wave count, base height (added to every
+    // height so troughs stay above Y=0), color height scale (a typical crest)
+    params: vec4<f32>,
+    // choppiness, whitecap strength, detail strength, wind direction (radians)
+    shading: vec4<f32>,
+    waves: array<vec4<f32>, 160>,
+    // The low-flying plane's wake - see engine::rendering::enviroment::
+    // ocean::OceanUniform. All zero when there's none.
+    // plane: camera-relative x, z, height above the water, intensity 0..1
+    wake_head: vec4<f32>,
+    // circle around the whole wake (camera-relative x, z, radius), trail max age
+    wake_bounds: vec4<f32>,
+    // trail point count
+    wake_info: vec4<f32>,
+    // trail, newest first: camera-relative x, z, age, intensity
+    wake_points: array<vec4<f32>, 32>,
+    // camera world x, z wrapped to WAKE_NOISE_PERIOD, unused x2
+    wake_anchor: vec4<f32>,
+};
+
+@group(0) @binding(2)
+var<uniform> ocean: Ocean;
 
 @group(1) @binding(0)
 var<uniform> camera: CameraUniform;
@@ -327,73 +292,267 @@ struct InstanceInput {
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
-    @location(1) world_normal: vec3<f32>,
+    // This point's camera-relative XZ before the waves displace it - fs_main
+    // evaluates every wave's shading here, per pixel (see surface_waves).
+    @location(1) rest_position: vec2<f32>,
     @location(2) world_position: vec3<f32>,
     @location(3) view_depth: f32,
-    // This vertex's own wave_height() result - interpolated across each
-    // triangle and read back in fs_main to blend between DEEP_COLOR and
-    // WATER_COLOR (see height_01). Cheaper than recomputing the wave
-    // function from world_position in the fragment shader, and exactly
-    // matches what the vertex shader actually displaced this point by.
-    @location(4) wave_height: f32,
-    // This instance's own y_scale (see vs_main) - constant across every
-    // vertex of one instance, so interpolation just carries it through
-    // unchanged. Lets fs_main's RADIUS/HEIGHT_FALLOFF_END discard tell
-    // "world" (y_scale near 1.0) apart from "world_far" (y_scale near 0.03)
-    // without a new bind group - see RADIUS's own comment for why only
-    // "world" gets discarded.
-    @location(5) y_scale: f32,
 };
 
-// Sum of six sine waves at different (non axis-aligned) directions/
-// frequencies/speeds/phases (see the DIR_*/AMPLITUDE_*/FREQUENCY_*/SPEED_*/
-// PHASE_* constants above) so the surface doesn't look like one obviously-
-// repeating ripple. Driven by WORLD-space x/z (post instance+mesh transform,
-// see vs_main) rather than the mesh's own local -0.5..0.5 space, so
-// wavelength reads in world units regardless of whatever scale a node
-// applies to size the plane. Each term is A*sin(dot(p, dir)*F + t*S + phase)
-// - a plane wave traveling along `dir` - rather than the axis-aligned
-// x*F/z*F this used to be, so `dir` (any 2D direction, not just X or Z) is
-// what actually breaks the old grid-aligned symmetry.
-fn wave_height(x: f32, z: f32, t: f32) -> f32 {
-    let p = vec2<f32>(x, z);
-    var h = 0.0;
-    h += AMPLITUDE_1 * sin(dot(p, DIR_1) * FREQUENCY_1 + t * SPEED_1 + PHASE_1);
-    h += AMPLITUDE_2 * sin(dot(p, DIR_2) * FREQUENCY_2 + t * SPEED_2 + PHASE_2);
-    h += AMPLITUDE_3 * sin(dot(p, DIR_3) * FREQUENCY_3 + t * SPEED_3 + PHASE_3);
-    h += AMPLITUDE_4 * sin(dot(p, DIR_4) * FREQUENCY_4 + t * SPEED_4 + PHASE_4);
-    h += AMPLITUDE_5 * sin(dot(p, DIR_5) * FREQUENCY_5 + t * SPEED_5 + PHASE_5);
-    h += AMPLITUDE_6 * sin(dot(p, DIR_6) * FREQUENCY_6 + t * SPEED_6 + PHASE_6);
-    return h;
+// How much of a wave of `wavelength` a mesh of `cell`-sized cells moves -
+// see GEOMETRY_MIN_CELLS/GEOMETRY_FULL_CELLS. Only shapes the surface; its
+// look comes from surface_waves, per pixel.
+fn geometry_share(wavelength: f32, cell: f32) -> f32 {
+    return smoothstep(GEOMETRY_MIN_CELLS * cell, GEOMETRY_FULL_CELLS * cell, wavelength);
 }
 
-// Analytic partial derivatives of wave_height, for a lit normal without a
-// second (finite-difference) texture/geometry sample. Each term's own
-// d/dx = A*F*dir.x*cos(...), d/dz = A*F*dir.z*cos(...) - same cos(...)
-// argument as that term's own sin(...) in wave_height above, just scaled by
-// F and this axis's share of `dir`.
-fn wave_height_dx(x: f32, z: f32, t: f32) -> f32 {
-    let p = vec2<f32>(x, z);
-    var d = 0.0;
-    d += AMPLITUDE_1 * FREQUENCY_1 * DIR_1.x * cos(dot(p, DIR_1) * FREQUENCY_1 + t * SPEED_1 + PHASE_1);
-    d += AMPLITUDE_2 * FREQUENCY_2 * DIR_2.x * cos(dot(p, DIR_2) * FREQUENCY_2 + t * SPEED_2 + PHASE_2);
-    d += AMPLITUDE_3 * FREQUENCY_3 * DIR_3.x * cos(dot(p, DIR_3) * FREQUENCY_3 + t * SPEED_3 + PHASE_3);
-    d += AMPLITUDE_4 * FREQUENCY_4 * DIR_4.x * cos(dot(p, DIR_4) * FREQUENCY_4 + t * SPEED_4 + PHASE_4);
-    d += AMPLITUDE_5 * FREQUENCY_5 * DIR_5.x * cos(dot(p, DIR_5) * FREQUENCY_5 + t * SPEED_5 + PHASE_5);
-    d += AMPLITUDE_6 * FREQUENCY_6 * DIR_6.x * cos(dot(p, DIR_6) * FREQUENCY_6 + t * SPEED_6 + PHASE_6);
-    return d;
+// The geometry waves at camera-relative point `p` (XZ), scaled by `amp`,
+// each by its geometry_share for this `cell` size: x/z = sideways push,
+// y = height; plus the surface normal and the crest pinch (see
+// VertexOutput::crest). The
+// standard Gerstner sum - see GPU Gems ch.1 - with each wave's phase taken
+// from the camera (see this file's wave-field comment).
+struct GerstnerSample {
+    offset: vec3<f32>,
+    normal: vec3<f32>,
+    crest: f32,
+};
+
+fn gerstner(p: vec2<f32>, amp: f32, cell: f32) -> GerstnerSample {
+    var offset = vec3<f32>(0.0);
+    var slope = vec2<f32>(0.0);
+    var crest = 0.0;
+    let count = min(u32(ocean.params.x), MAX_WAVES);
+    for (var i = 0u; i < count; i++) {
+        let wave = ocean.waves[i * 2u];
+        let extra = ocean.waves[i * 2u + 1u];
+        let share = geometry_share(extra.z, cell);
+        if (share <= 0.0) {
+            continue;
+        }
+        let dir = wave.xy;
+        let k = wave.z;
+        let a = wave.w * amp * share;
+        let steepness = extra.x;
+        let theta = k * dot(dir, p) + extra.y;
+        let s = sin(theta);
+        let c = cos(theta);
+        offset += vec3<f32>(steepness * a * dir.x * c, a * s, steepness * a * dir.y * c);
+        slope += dir * (k * a * c);
+        crest += steepness * k * a * s;
+    }
+    var out: GerstnerSample;
+    out.offset = offset;
+    out.normal = normalize(vec3<f32>(-slope.x, 1.0 - crest, -slope.y));
+    out.crest = crest;
+    return out;
 }
 
-fn wave_height_dz(x: f32, z: f32, t: f32) -> f32 {
-    let p = vec2<f32>(x, z);
-    var d = 0.0;
-    d += AMPLITUDE_1 * FREQUENCY_1 * DIR_1.y * cos(dot(p, DIR_1) * FREQUENCY_1 + t * SPEED_1 + PHASE_1);
-    d += AMPLITUDE_2 * FREQUENCY_2 * DIR_2.y * cos(dot(p, DIR_2) * FREQUENCY_2 + t * SPEED_2 + PHASE_2);
-    d += AMPLITUDE_3 * FREQUENCY_3 * DIR_3.y * cos(dot(p, DIR_3) * FREQUENCY_3 + t * SPEED_3 + PHASE_3);
-    d += AMPLITUDE_4 * FREQUENCY_4 * DIR_4.y * cos(dot(p, DIR_4) * FREQUENCY_4 + t * SPEED_4 + PHASE_4);
-    d += AMPLITUDE_5 * FREQUENCY_5 * DIR_5.y * cos(dot(p, DIR_5) * FREQUENCY_5 + t * SPEED_5 + PHASE_5);
-    d += AMPLITUDE_6 * FREQUENCY_6 * DIR_6.y * cos(dot(p, DIR_6) * FREQUENCY_6 + t * SPEED_6 + PHASE_6);
-    return d;
+// The geometry waves' look at camera-relative rest point `p`, per pixel -
+// computed the same way everywhere, whether or not a ring is also moving
+// them, so the water looks identical inside and outside the moving rings
+// (the mesh only shapes the surface). Each wave fades out once it's too
+// short for the pixel it's in, instead of shimmering.
+struct SurfaceSample {
+    // d height/dx, d height/dz
+    slope: vec2<f32>,
+    // Height, centered on 0 - drives the deep/light color ramp.
+    height: f32,
+    // How pinched this point is by the Gerstner crests, 0 (flat/trough) up
+    // to ~choppiness at the sharpest peaks - whitecaps, and the normal.
+    crest: f32,
+    // The slope variance that faded out at this pixel - see detail_waves
+    // for the total; their ratio drives FLAT_WATER_MIN_FACING.
+    lost_variance: f32,
+};
+
+fn surface_waves(p: vec2<f32>, pixel_size: f32) -> SurfaceSample {
+    var out: SurfaceSample;
+    out.slope = vec2<f32>(0.0);
+    out.height = 0.0;
+    out.crest = 0.0;
+    out.lost_variance = 0.0;
+    let count = min(u32(ocean.params.x), MAX_WAVES);
+    for (var i = 0u; i < count; i++) {
+        let wave = ocean.waves[i * 2u];
+        let extra = ocean.waves[i * 2u + 1u];
+        let fade = smoothstep(DETAIL_FULL_PIXELS * 0.5, DETAIL_FULL_PIXELS, extra.z / pixel_size);
+        let slope_amplitude = wave.z * wave.w;
+        out.lost_variance += 0.5 * slope_amplitude * slope_amplitude * (1.0 - fade);
+        if (fade <= 0.0) {
+            continue;
+        }
+        let theta = wave.z * dot(wave.xy, p) + extra.y;
+        let s = sin(theta);
+        out.slope += wave.xy * (slope_amplitude * cos(theta) * fade);
+        out.height += wave.w * s * fade;
+        out.crest += extra.x * slope_amplitude * s * fade;
+    }
+    return out;
+}
+
+// Random 0..1 per integer lattice point, repeating every `period` points.
+fn wake_hash(cell: vec2<i32>, period: i32) -> f32 {
+    let wrapped = bitcast<vec2<u32>>(((cell % period) + period) % period);
+    var h = (wrapped.x * 1597334677u) ^ (wrapped.y * 3812015801u);
+    h = h * 747796405u + 2891336453u;
+    h = ((h >> ((h >> 28u) + 4u)) ^ h) * 277803737u;
+    h = (h >> 22u) ^ h;
+    return f32(h) * (1.0 / 4294967296.0);
+}
+
+// Smooth value noise 0..1 with blobs about `cell` meters across, at noise
+// position `q` - repeats every WAKE_NOISE_PERIOD, so it lines up across the
+// wrap in wake_anchor.
+fn wake_value_noise(q: vec2<f32>, cell: f32) -> f32 {
+    let period = i32(WAKE_NOISE_PERIOD / cell);
+    let x = q / cell;
+    let i = vec2<i32>(floor(x));
+    let f = fract(x);
+    let s = f * f * (3.0 - 2.0 * f);
+    let a = wake_hash(i, period);
+    let b = wake_hash(i + vec2<i32>(1, 0), period);
+    let c = wake_hash(i + vec2<i32>(0, 1), period);
+    let d = wake_hash(i + vec2<i32>(1, 1), period);
+    return mix(mix(a, b, s.x), mix(c, d, s.x), s.y);
+}
+
+// Churned-foam pattern at noise position `q`: big clumps with finer
+// breakup inside them. Roughly 0..1, around 0.5 on average.
+fn wake_foam_noise(q: vec2<f32>) -> f32 {
+    return wake_value_noise(q, 16.0) * 0.5 + wake_value_noise(q, 4.0) * 0.3 + wake_value_noise(q, 1.0) * 0.2;
+}
+
+// The low-flying plane's wake at camera-relative point `p` - see the
+// WAKE_* constants. `foam` 0..1 whitens the water, `flatten` 0..1 calms its
+// waves, `ripple_slope` adds the V of ripples spreading out behind it.
+struct WakeSample {
+    foam: f32,
+    flatten: f32,
+    ripple_slope: vec2<f32>,
+};
+
+fn water_wake(p: vec2<f32>) -> WakeSample {
+    var out: WakeSample;
+    out.foam = 0.0;
+    out.flatten = 0.0;
+    out.ripple_slope = vec2<f32>(0.0);
+    let bounds = ocean.wake_bounds;
+    if (bounds.z <= 0.0 || distance(p, bounds.xy) > bounds.z) {
+        return out;
+    }
+
+    // Under and just behind the plane, in its own flight frame: `behind`
+    // is how far back along the flight path, `across` how far to the side.
+    let head = ocean.wake_head;
+    let intensity = head.w;
+    if (intensity > 0.0) {
+        let forward = ocean.wake_info.yz;
+        let side = vec2<f32>(-forward.y, forward.x);
+        let to_point = p - head.xy;
+        let behind = -dot(to_point, forward);
+        let across = dot(to_point, side);
+
+        // The blast: a small patch, stretched along the path and centered a
+        // little behind the plane - flattened and whitened.
+        let radius = WAKE_PATCH_RADIUS + max(head.z, 0.0) * WAKE_PATCH_GROWTH;
+        let ellipse = length(vec2<f32>(across / radius, (behind - radius * 0.5) / (radius * WAKE_PATCH_STRETCH)));
+        let blast = intensity * (1.0 - smoothstep(0.35, 1.0, ellipse));
+        out.foam = blast * WAKE_PATCH_FOAM;
+        out.flatten = blast;
+
+        // The V: two arms of ripples spreading out behind it, each running
+        // parallel to its arm and moving outward. The ripples are one height
+        // field, sin(off_arm), and the slope is its true gradient - so the
+        // crests the lighting sees line up with the arms on both sides.
+        // `side_distance` is a rounded abs(across): a sharp abs (and the
+        // sign() that goes with it) would flip the slope instantly on the
+        // flight path, leaving a visible seam down the middle of the V.
+        if (behind > 0.0) {
+            let arm_width = 2.0 + behind * 0.15;
+            let rounding = arm_width * 0.5;
+            let side_distance = sqrt(across * across + rounding * rounding);
+            let off_arm = side_distance - behind * WAKE_V_SLOPE;
+            let on_arm = exp(-(off_arm * off_arm) / (arm_width * arm_width));
+            // Fades in just behind the plane (no hard edge under it) and out
+            // WAKE_V_LENGTH back.
+            let fade = intensity * smoothstep(0.0, 4.0, behind) * (1.0 - smoothstep(0.0, WAKE_V_LENGTH, behind));
+            let k = 6.2831853 / WAKE_RIPPLE_WAVELENGTH;
+            let phase = (off_arm - light.time * WAKE_RIPPLE_SPEED) * k;
+            // d(off_arm)/dp: outward across the path, plus backward-slope
+            // along it (behind = -dot(to_point, forward)).
+            let off_arm_gradient = side * (across / side_distance) + forward * WAKE_V_SLOPE;
+            out.ripple_slope = off_arm_gradient * (cos(phase) * WAKE_RIPPLE_SLOPE * on_arm * fade);
+        }
+    }
+
+    // Behind it: a foam streak along the trail, widening and fading with age.
+    let max_age = bounds.w;
+    let count = min(u32(ocean.wake_info.x), MAX_WAKE_POINTS);
+    var trail = 0.0;
+    // How old the foam is where `trail` came from, 0 (fresh) .. 1 (max age).
+    var trail_age = 0.0;
+    var previous = vec4<f32>(head.x, head.y, 0.0, intensity);
+    for (var i = 0u; i < count; i++) {
+        let point = ocean.wake_points[i];
+        // Closest spot on the segment previous -> point.
+        let segment = point.xy - previous.xy;
+        let along = clamp(dot(p - previous.xy, segment) / max(dot(segment, segment), 0.0001), 0.0, 1.0);
+        let distance_to_trail = length(p - (previous.xy + segment * along));
+        let age = mix(previous.z, point.z, along);
+        let strength = mix(previous.w, point.w, along) * (1.0 - smoothstep(0.0, max_age, age));
+        let width = WAKE_TRAIL_WIDTH + age * WAKE_TRAIL_SPREAD;
+        let here = strength * (1.0 - smoothstep(width * 0.3, width, distance_to_trail));
+        if (here > trail) {
+            trail = here;
+            trail_age = clamp(age / max(max_age, 0.001), 0.0, 1.0);
+        }
+        previous = point;
+    }
+    // Broken up by noise pinned to the water (not the camera - the trail
+    // stays put as the plane flies on), so it reads as churned foam, not a
+    // painted stripe: nearly solid when fresh, clumps and holes as it ages.
+    if (trail > 0.0) {
+        let noise = wake_foam_noise(ocean.wake_anchor.xy + p);
+        let coverage = mix(WAKE_FOAM_COVERAGE_FRESH, WAKE_FOAM_COVERAGE_OLD, trail_age);
+        // Noise above (1 - coverage) is foam, with a soft edge.
+        let threshold = 1.0 - coverage;
+        let breakup = smoothstep(threshold - 0.12, threshold + 0.12, noise);
+        out.foam = max(out.foam, trail * WAKE_TRAIL_FOAM * breakup);
+    }
+    return out;
+}
+
+// The detail waves at camera-relative point `p`, scaled by `strength` - each
+// faded by how many screen pixels its wavelength spans here (`pixel_size` =
+// world units per pixel), so ones too short to show cleanly drop out
+// instead of shimmering. Returns xy = slope, z = the slope variance that
+// faded out, w = the total slope variance of ALL waves (geometry + detail) -
+// see surface_waves.
+fn detail_waves(p: vec2<f32>, pixel_size: f32, strength: f32) -> vec4<f32> {
+    var result = vec4<f32>(0.0);
+    let geometry_count = min(u32(ocean.params.x), MAX_WAVES);
+    for (var i = 0u; i < geometry_count; i++) {
+        let slope_amplitude = ocean.waves[i * 2u].z * ocean.waves[i * 2u].w;
+        result.w += 0.5 * slope_amplitude * slope_amplitude;
+    }
+    let last = min(geometry_count + u32(ocean.params.y), MAX_WAVES);
+    for (var i = geometry_count; i < last; i++) {
+        let wave = ocean.waves[i * 2u];
+        let extra = ocean.waves[i * 2u + 1u];
+        let slope_amplitude = wave.z * wave.w * strength;
+        let variance = 0.5 * slope_amplitude * slope_amplitude;
+        let fade = smoothstep(DETAIL_FULL_PIXELS * 0.5, DETAIL_FULL_PIXELS, extra.z / pixel_size);
+        result.w += variance;
+        result.z += variance * (1.0 - fade);
+        if (fade <= 0.0) {
+            continue;
+        }
+        let theta = wave.z * dot(wave.xy, p) + extra.y;
+        result.x += wave.x * slope_amplitude * cos(theta) * fade;
+        result.y += wave.y * slope_amplitude * cos(theta) * fade;
+    }
+    return result;
 }
 
 @vertex
@@ -405,88 +564,63 @@ fn vs_main(model: VertexInput, instance: InstanceInput) -> VertexOutput {
         instance.model_matrix_3,
     );
 
-    var world_position: vec4<f32> = model_matrix * transform.model_matrix * vec4<f32>(model.position, 1.0);
+    // Ring morph (see RING_MORPH_START): as this vertex nears its ring's
+    // outer circle, odd grid vertices slide onto the next ring's coarser
+    // grid (every other vertex), so the ring's edge matches the next ring's
+    // exactly. `cell`/`outer` are this ring's cell size and half-extent, and
+    // `next_cell` the next ring's (see resources::build_water_rings_mesh) -
+    // a whole multiple of `cell`; positions are exact multiples of `cell`, so
+    // `snap` is exactly how far each vertex is past the next ring's grid.
+    let cell = model.tex_coords.x;
+    let outer = model.tex_coords.y;
+    let next_cell = model.normal.x;
+    let local = model.position.xz;
+    let ring_position = length(local) / outer;
+    let morph = smoothstep(RING_MORPH_START, 1.0, ring_position);
+    let snap = fract(local / next_cell) * next_cell;
+    let morphed = local - snap * morph;
+    // The cell size this vertex effectively samples at - grows smoothly to
+    // the next ring's by the ring's edge (see NEXT_RING_FADE_START), so the
+    // waves each ring moves (see geometry_share) also match there.
+    let next_ring_fade = smoothstep(NEXT_RING_FADE_START, 1.0, ring_position);
+    let effective_cell = mix(cell * (1.0 + morph), next_cell, next_ring_fade);
 
-    let t = light.time;
+    var world_position: vec4<f32> = model_matrix * transform.model_matrix * vec4<f32>(morphed.x, model.position.y, morphed.y, 1.0);
+
     // world_position.xz here is camera-relative (see GameObject::to_raw) -
-    // adding the camera's own true world position back recovers true world
-    // coordinates for the wave phase, so a given point in the world always
-    // waves the same way regardless of where the camera happens to be. Do
-    // NOT feed this into camera.view_proj / view_depth below - those still
-    // need the camera-relative value for GPU float precision, same as ever.
-    let true_xz = world_position.xz + light.camera_position.xz;
-    // Distance from the camera, in the XZ plane - still camera-relative
-    // world_position on purpose, it's already exactly "distance from
-    // camera" for any instance (that's what to_raw's translation encodes).
-    let dist_from_camera = length(world_position.xz);
-    // Recovers this instance's own Transform3D.scale.y from its model
-    // matrix's Y-basis column (works since rotation here is orthonormal) -
-    // "world_far" (see play::scene::spawn_world) sets this far below 1.0 to
-    // force its own waves calm/flat regardless of distance, "world" leaves
-    // it at 1.0 so only FALLOFF_START/END governs it.
+    // exactly what the wave field wants (see its comment at the top of this
+    // file: each wave's phase at the camera comes precomputed), and what
+    // camera.view_proj / view_depth below need for GPU float precision too.
+    // This instance's own Transform3D.scale.y, recovered from its model
+    // matrix's Y-basis column - scales wave height, 1.0 normally.
     let y_scale = length(instance.model_matrix_1.xyz);
-    let amplitude_falloff = 1.0 - smoothstep(FALLOFF_START, FALLOFF_END, dist_from_camera);
-    // Same shape as amplitude_falloff, over camera altitude instead of
-    // distance - see HEIGHT_FALLOFF_START/END's own comment for why this
-    // exists (fixes "world" popping in/out on approach instead of fading).
-    let camera_height = light.camera_position.y;
-    let height_falloff = 1.0 - smoothstep(HEIGHT_FALLOFF_START, HEIGHT_FALLOFF_END, camera_height);
-    let total_amp = amplitude_falloff * y_scale * height_falloff;
+    let wave = gerstner(world_position.xz, y_scale, effective_cell);
+    let rest_position = world_position.xz;
 
-    // Shifted up by MAX_WAVE_HEIGHT (wave_height's own theoretical minimum
-    // is exactly -MAX_WAVE_HEIGHT, all six terms troughing at once) rather
-    // than clamped - a clamp flattens every point that would've gone
-    // negative into a dead, untilted patch at 0, which reads as the surface
-    // visibly breaking character wherever it happens; an offset keeps the
-    // exact same continuous, organic shape as before, just repositioned so
-    // its lowest point now sits at 0 instead of below it. Derivatives are
-    // untouched by this - a constant offset doesn't change slope anywhere.
-    let raw_height = wave_height(true_xz.x, true_xz.y, t) * total_amp;
-    let height = raw_height + MAX_WAVE_HEIGHT;
-    world_position.y += height;
-
-    let dx = wave_height_dx(true_xz.x, true_xz.y, t) * total_amp;
-    let dz = wave_height_dz(true_xz.x, true_xz.y, t) * total_amp;
-    // Height-field normal, computed directly in world space - assumes the
-    // water plane itself isn't rotated (a reasonable assumption for a flat
-    // sheet of water; skips normal_matrix entirely, unlike depth.wgsl).
-    let world_normal = normalize(vec3<f32>(-dx, 1.0, -dz));
+    // Lifted by the base height (ocean.params.z, ~3 standard deviations of
+    // the wave height) so troughs stay above Y=0 - the same offset
+    // OceanWaves::height_at adds, so gameplay heights line up.
+    world_position.x += wave.offset.x;
+    world_position.z += wave.offset.z;
+    world_position.y += wave.offset.y + ocean.params.z;
 
     var out: VertexOutput;
-    out.world_normal = world_normal;
+    out.rest_position = rest_position;
     out.world_position = world_position.xyz;
     out.clip_position = camera.view_proj * world_position;
     out.view_depth = length(camera.view_pos.xyz - out.world_position);
-    // raw_height (the -MAX_WAVE_HEIGHT..+MAX_WAVE_HEIGHT centered value,
-    // already scaled by total_amp above), not the shifted `height` actually
-    // written to world_position.y above - fs_main's own height_01
-    // normalization expects a value centered on 0, not the offset one, and
-    // needs the falloff/y_scale already applied or flattened-out water would
-    // still show full-contrast color.
-    out.wave_height = raw_height;
-    out.y_scale = y_scale;
     return out;
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // See RADIUS/HEIGHT_FALLOFF_END's own comments - only "world" (y_scale
-    // near 1.0) is ever discarded here; "world_far" (y_scale near 0.03)
-    // always renders, it's what stays visible underneath once "world" cuts
-    // off. Both thresholds sit past where vs_main's own amplitude_falloff/
-    // height_falloff have already smoothly flattened "world" to match
-    // "world_far", so the discard itself is never visible - it's just
-    // removing water that already looks identical to what's underneath.
-    // in.world_position.xz is still camera-relative (the wave-height offset
-    // only touched .y in vs_main), so its length is exactly distance from
-    // camera - same value vs_main's own dist_from_camera computes.
-    if (in.y_scale > 0.5) {
-        let dist_from_camera = length(in.world_position.xz);
-        let camera_height = light.camera_position.y;
-        if (dist_from_camera > RADIUS || camera_height > HEIGHT_FALLOFF_END) {
-            discard;
-        }
-    }
+    // How much sea one screen pixel covers here (the longer side of its
+    // footprint, so nothing shimmers along the view direction) - taken first,
+    // while every pixel is still on the same path: screen-space derivatives
+    // aren't allowed inside branches that differ per pixel.
+    let footprint_x = length(dpdx(in.world_position.xz));
+    let footprint_y = length(dpdy(in.world_position.xz));
+    let pixel_size = max(max(footprint_x, footprint_y), 0.0001);
 
     // Lower than before, and diffuse no longer gets flattened against a
     // single ambient-dominated base - the point is for the normal-driven
@@ -496,27 +630,36 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let ambient_strength = 0.35;
     let ambient_color = light.color * ambient_strength;
 
-    // The "sun" node sits at an absurd altitude (Y=1,000,000 - see
-    // play::scene::spawn_world/main_menu::scene::spawn_world) specifically
-    // so it reads as a fixed, effectively-at-infinity direction rather than
-    // a nearby point light - which means light_dir is very close to
-    // straight up (0,1,0) EVERYWHERE on the water, regardless of where you
-    // are on it. At this wave field's current scale (AMPLITUDE_*/
-    // FREQUENCY_* above - a max slope on the order of ~0.01 radians), the
-    // surface normal barely leaves vertical anywhere, so this plain
-    // dot-product diffuse term stays close to its own max basically
-    // everywhere - a calm, evenly-lit sea, which is the physically honest
-    // result for waves this gentle. (An earlier pass here tried
-    // contrast-stretching this - smoothstep, then a steep pow() exponent -
-    // to manufacture visible per-wave shading anyway; neither actually
-    // creates variation that isn't in the input, so both were removed
-    // rather than tuned further. If real per-pixel wave shading is wanted
-    // again, it needs steeper actual geometry - shorter wavelengths at
-    // comparable amplitude - not a steeper light response curve. Visual
-    // interest at this scale comes from the fresnel reflection below and
-    // the depth-color gradient further down instead.)
+    // The sun is one fixed direction, infinitely far away (App::run places
+    // light.position 1e9 units along the "sun" node's direction, camera-
+    // relative) - so light_dir is the same everywhere on the water, and the
+    // sun glint lines up with the sky's sun disc wherever the camera is.
+    // So this plain dot-product diffuse term only varies as much
+    // as the surface normal actually tilts - the Gerstner crests and the
+    // per-pixel detail waves (below) are what give it real contrast; an
+    // earlier pass contrast-stretching this curve (smoothstep, steep pow())
+    // was removed - it can't create variation that isn't in the normal.
+    // Near water vs far open sea - see OPEN_SEA_COLOR.
+    let wave_visibility = 1.0 - smoothstep(OPEN_SEA_BLEND_START, OPEN_SEA_BLEND_END, in.view_depth);
+
+    // Per-pixel normal, from every wave at this point's rest position - the
+    // geometry waves (surface_waves, with their Gerstner crest pinch) and the
+    // detail waves too short for any mesh (detail_waves) - each faded out
+    // once it's too small for the pixel. The same everywhere, so nothing
+    // changes where the moving rings end.
+    let surface = surface_waves(in.rest_position, pixel_size);
+    let detail = detail_waves(in.rest_position, pixel_size, ocean.shading.z);
+    // The plane's wake, if any: calms the waves under it and adds its ripples.
+    let wake = water_wake(in.rest_position);
+    let calm = 1.0 - wake.flatten * WAKE_FLATTEN;
+    let slope = (surface.slope + detail.xy) * calm + wake.ripple_slope;
+    let normal = normalize(vec3<f32>(-slope.x, 1.0 - surface.crest * calm, -slope.y));
+    // How much of the waves' total slope has faded out at this pixel, 0..1 -
+    // see FLAT_WATER_MIN_FACING.
+    let lost_slope = clamp((surface.lost_variance + detail.z) / max(detail.w, 1e-8), 0.0, 1.0);
+
     let light_dir = normalize(light.position - in.world_position);
-    let diffuse_strength = max(dot(in.world_normal, light_dir), 0.0);
+    let diffuse_strength = max(dot(normal, light_dir), 0.0);
     let diffuse_color = light.color * diffuse_strength;
 
     // Sun-glint - one of the strongest "this is actually water" cues (a
@@ -526,7 +669,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // multiplier below (specular_color * 1.4, not the usual subtle * 0.2-0.5)
     // rather than the tight speck a higher exponent alone would give.
     let view_dir = normalize(camera.view_pos.xyz - in.world_position);
-    let reflect_dir = reflect(-light_dir, in.world_normal);
+    let reflect_dir = reflect(-light_dir, normal);
     let specular_strength = pow(max(dot(view_dir, reflect_dir), 0.0), 48.0);
     let specular_color = specular_strength * light.color;
 
@@ -536,14 +679,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // and lighter at high ones everywhere, not just a rare accent gated to
     // extreme troughs (an earlier pass at this only blended toward
     // DEEP_COLOR near the deepest few percent of the range, via a pow()
-    // curve - correct in theory, but with such a small total height range
-    // now (see AMPLITUDE_* above) it read as barely-there). No crest-based
-    // whitening here (an earlier pass at this used height alone as a foam
-    // proxy) - real foam belongs at actual shoreline/object intersections,
-    // which needs the water to see world geometry it doesn't have access to
-    // yet (see the conversation this came out of for the options there).
-    let height_01 = clamp(in.wave_height / COLOR_HEIGHT_SCALE, -1.0, 1.0) * 0.5 + 0.5;
-    let base_color = mix(DEEP_COLOR, WATER_COLOR, height_01);
+    // curve - correct in theory, but it read as barely-there). No
+    // height-based whitening here - whitecaps come from how pinched a crest
+    // is (surface.crest, below), shore foam from the depth snapshot.
+    // Per pixel too (see surface_waves), so the color ramp is the same inside
+    // and outside the moving rings.
+    let height_01 = clamp(surface.height / ocean.params.w, -1.0, 1.0) * 0.5 + 0.5;
+    // Wave colors where waves are rendered, easing into the open-sea color
+    // as they fade out - see OPEN_SEA_COLOR.
+    let base_color = mix(OPEN_SEA_COLOR, mix(DEEP_COLOR, WATER_COLOR, height_01), wave_visibility);
 
     // Fresnel - blends toward SKY_REFLECTION_COLOR the more edge-on the
     // surface is being viewed (view_dir already computed above, for
@@ -551,8 +695,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // than the exact base tint, is what makes an opaque water shader read
     // as real rather than a flat-colored plane. 1.0 - dot(...) is 0 looking
     // straight down the normal, 1 at a true grazing angle.
-    let fresnel_amount = pow(1.0 - clamp(dot(view_dir, in.world_normal), 0.0, 1.0), FRESNEL_POWER) * FRESNEL_STRENGTH;
-    let fresnel_tinted = mix(base_color, SKY_REFLECTION_COLOR, fresnel_amount);
+    // As wave detail fades out at this pixel, the surface stops counting as
+    // facing away by more than FLAT_WATER_MIN_FACING allows - see it.
+    let facing = max(dot(view_dir, normal), lost_slope * FLAT_WATER_MIN_FACING);
+    let fresnel_amount = pow(1.0 - clamp(facing, 0.0, 1.0), FRESNEL_POWER) * FRESNEL_STRENGTH;
 
     // Shore-intersection foam - samples t_scene_depth (this same screen
     // position's depth, snapshotted right after opaque geometry finished
@@ -567,28 +713,39 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let scene_depth_raw = textureLoad(t_scene_depth, vec2<i32>(in.clip_position.xy), 0).x;
     let scene_z = linearize_depth(scene_depth_raw, NEAR, FAR);
     let water_z = linearize_depth(in.clip_position.z, NEAR, FAR);
-    let shore_distance = abs(scene_z - water_z);
-    // Gate the foam to the exact same envelope the waves use: same camera
-    // XZ-distance fade (FALLOFF_START/END), same camera-altitude fade
-    // (HEIGHT_FALLOFF_START/END), and zeroed on the flat "world_far" backdrop
-    // via the same y_scale > 0.5 "world"-only test the discard at the top of
-    // fs_main uses. in.world_position.xz is still camera-relative, so its
-    // length is distance from camera - identical to vs_main's dist_from_camera.
-    let foam_dist_from_camera = length(in.world_position.xz);
-    let foam_camera_height = light.camera_position.y;
-    let foam_wave_visibility =
-        (1.0 - smoothstep(FALLOFF_START, FALLOFF_END, foam_dist_from_camera))
-        * (1.0 - smoothstep(HEIGHT_FALLOFF_START, HEIGHT_FALLOFF_END, foam_camera_height))
-        * step(0.5, in.y_scale);
-    let shore_foam = (1.0 - smoothstep(0.0, SHORE_FOAM_RANGE, shore_distance)) * foam_wave_visibility;
-    let shore_tinted = mix(fresnel_tinted, FOAM_COLOR, shore_foam);
+    // How far behind the water surface the ground is along the view ray,
+    // turned into water depth straight down: the ray drops view_dir.y per
+    // unit it travels. (Along the ray alone, a steep close-up view reaches
+    // the ground sooner than a grazing far one over the same depth - which
+    // made the foam band grow as the camera approached.)
+    let shore_distance = max(scene_z - water_z, 0.0) * max(view_dir.y, 0.02);
+    // Near water only - see wave_visibility.
+    let foam_wave_visibility = wave_visibility;
+    let shore_foam = (1.0 - smoothstep(0.0, SHORE_FOAM_DEPTH, shore_distance)) * foam_wave_visibility;
+    let shore_tinted = mix(base_color, FOAM_COLOR, shore_foam);
 
-    let result = (ambient_color + diffuse_color) * shore_tinted + specular_color * 1.4;
+    // Whitecaps on the sharpest crests - how pinched this point is relative
+    // to the most any crest can be (the choppiness), over the same
+    // visibility envelope as everything else wave-related.
+    let crest_01 = surface.crest / max(ocean.shading.x, 0.0001);
+    let whitecap = smoothstep(WHITECAP_START, WHITECAP_FULL, crest_01) * ocean.shading.y * wave_visibility;
+    let capped = mix(mix(shore_tinted, WHITECAP_COLOR, whitecap), WAKE_FOAM_COLOR, wake.foam);
 
-    // Long-distance atmospheric haze - fades the water toward a pale hazy
-    // blue so the water/sky seam softens into a band instead of a hard line.
+    // Final composition: light the water (and its foam) first, THEN blend in
+    // the sky reflection - unlit, since reflected sky is already light. (It
+    // used to be blended in before lighting, which multiplied the pale sky
+    // color by ~1.35 and clipped it toward grey-white at every diagonal
+    // view.) Foam isn't a mirror, so it takes no reflection; the sun glint
+    // goes on top of everything.
+    let lit_water = (ambient_color + diffuse_color) * capped;
+    let reflection = fresnel_amount * (1.0 - max(max(shore_foam, whitecap), wake.foam));
+    let result = mix(lit_water, SKY_REFLECTION_COLOR, reflection) + specular_color * 1.4;
+
+    // Long-distance atmospheric haze - fades the water toward the sea's own
+    // horizon blue (SEA_HORIZON_COLOR), which sits just below the sky's
+    // paler haze band - a soft but clear horizon line, like the photos.
     //
-    // "world_far" is ~1.5M half-extent and re-centres on the camera every
+    // The ocean mesh reaches ~2,100 km and re-centres on the camera every
     // frame (GameLogic::update_water_plane), so there's room for a genuinely
     // gradual fade: fully blue for tens of km, then hazing over hundreds
     // more, reaching fog_color well inside the mesh edge so it blends into
@@ -599,15 +756,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // in.view_depth - otherwise climbing makes the depth to the water
     // directly below large enough to fog the ocean out from under the plane.
     //
-    // fog_color / fog_start / fog_end are kept matched to depth.wgsl's model
-    // fog (same three values) so a distant object and the sea under it haze
-    // to the same tone. Retune one -> retune the other.
-    let fog_color = vec3<f32>(0.72, 0.80, 0.88);
+    // fog_start / fog_end are kept matched to depth.wgsl's model fog. Its
+    // color isn't: the sea fogs to its own horizon blue, while objects (seen
+    // against the sky) fog to the sky's haze - see depth.wgsl.
+    let horizon_dist = length(in.world_position.xz);
+    // Aerial perspective: the sea lightens toward its horizon blue with
+    // distance (see SEA_HORIZON_COLOR)...
+    let hazed = mix(result, SEA_HORIZON_COLOR, smoothstep(SEA_HAZE_START, SEA_HAZE_END, horizon_dist));
+    // ...and the far fog settles fully onto it.
     let fog_start = 80000.0;
     let fog_end = 1400000.0;
-    let horizon_dist = length(in.world_position.xz);
     let fog_factor = smoothstep(fog_start, fog_end, horizon_dist);
-    let fogged_color = mix(result, fog_color, fog_factor);
+    let fogged_color = mix(hazed, SEA_HORIZON_COLOR, fog_factor);
 
     return vec4<f32>(fogged_color, 1.0);
 }

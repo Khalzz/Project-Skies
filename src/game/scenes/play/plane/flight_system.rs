@@ -19,10 +19,14 @@ pub struct FlightSystem {
     /// value (see `engine::target_thrust`). This is what's applied to the
     /// rigidbody, not the instantaneous throttle demand.
     pub current_thrust: f32,
+    /// This plane's engine - see `engine::EngineSpec`.
+    pub engine: engine::EngineSpec,
+    /// Throttle at the last `compute_thrust` - for `afterburner_activation`.
+    last_throttle: f32,
 }
 
 impl FlightSystem {
-    pub fn new() -> Self {
+    pub fn new(engine: engine::EngineSpec) -> Self {
         Self {
             velocity: nalgebra::Vector3::new(0.0, 0.0, 0.0),
             local_velocity: nalgebra::Vector3::new(0.0, 0.0, 0.0),
@@ -35,6 +39,8 @@ impl FlightSystem {
             g_force: 0.0,
             input: Vector3::new(0.0, 0.0, 0.0),
             current_thrust: 0.0,
+            engine,
+            last_throttle: 0.0,
         }
     }
 
@@ -46,20 +52,19 @@ impl FlightSystem {
     ///
     /// `dt` is the fixed physics step - this runs exactly once per step, so
     /// the spool lag advances in simulated time, in lockstep with the world.
+    /// How lit the afterburner is right now, 0..1 - see
+    /// `EngineSpec::afterburner_activation`.
+    pub fn afterburner_activation(&self) -> f32 {
+        self.engine.afterburner_activation(self.last_throttle)
+    }
+
     pub fn compute_thrust(&mut self, altitude_m: f32, rotation: nalgebra::UnitQuaternion<f32>, throttle: f32, dt: f32) -> Vector3<f32> {
-        let target = engine::target_thrust(throttle, altitude_m);
+        self.last_throttle = throttle;
+        let target = self.engine.target_thrust(throttle, altitude_m);
 
         // First-order lag toward target. alpha = 1 - e^(-dt/tau) composes
         // correctly for any dt.
-        let tau = if target > self.current_thrust {
-            if throttle >= engine::AB_GATE {
-                engine::SPOOL_TAU_AB
-            } else {
-                engine::SPOOL_TAU_UP
-            }
-        } else {
-            engine::SPOOL_TAU_DOWN
-        };
+        let tau = self.engine.spool_seconds(self.current_thrust, target, throttle).max(1e-3);
         let alpha = 1.0 - (-dt / tau).exp();
         self.current_thrust += (target - self.current_thrust) * alpha;
 

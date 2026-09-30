@@ -19,6 +19,10 @@ struct SkyUniform {
     horizon_color: vec4<f32>,
     // sun disc / glow tint
     sun_color: vec4<f32>,
+    // pale blue-white haze band right on the horizon line
+    haze_color: vec4<f32>,
+    // the sea's own color at the horizon (see water.wgsl's SEA_HORIZON_COLOR)
+    sea_horizon_color: vec4<f32>,
 };
 @group(1) @binding(0)
 var<uniform> sky: SkyUniform;
@@ -48,24 +52,26 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let dir = normalize(in.direction);
     let sun_dir = normalize(sky.sun_direction.xyz);
 
-    // Vertical gradient. pow(up, 0.45) keeps most of the dome the zenith
-    // colour and compresses the pale band down near the horizon, where real
-    // atmospheric haze sits.
+    // Vertical gradient, pale blue at the horizon to deep blue overhead -
+    // blended on square-rooted colors (roughly perceptual) rather than raw
+    // linear ones, so the middle keeps the photos' clear cyan-blue instead of
+    // going grey. pow(up, 0.5) spends most of the brightening in the lower
+    // sky, where the atmosphere is thickest.
     let up = clamp(dir.y, 0.0, 1.0);
-    var sky_color = mix(sky.horizon_color.rgb, sky.zenith_color.rgb, pow(up, 0.45));
+    let t = pow(up, 0.5);
+    let gradient = mix(sqrt(sky.horizon_color.rgb), sqrt(sky.zenith_color.rgb), t);
+    var sky_color = gradient * gradient;
 
-    // Looking BELOW the true horizon (under the water plane's edge at grazing
-    // angles) - settle onto a slightly muted sea-haze. Kept close to the
-    // horizon tone (not dark) so any sliver visible past the water reads as
-    // continuous haze rather than a dark gap.
+    // Haze band right on the horizon line - ~5 degrees tall, pale blue-white,
+    // brighter than the sea just below it: together they make the soft but
+    // clear line the photos show. Lower the 12.0 for a taller band.
+    let horizon_haze = exp(-abs(dir.y) * 12.0);
+    sky_color = mix(sky_color, sky.haze_color.rgb, horizon_haze * 0.6);
+
+    // Looking BELOW the horizon (past the water's edge at grazing angles) -
+    // the sea's own horizon color, so any sliver there reads as sea.
     let below = clamp(-dir.y, 0.0, 1.0);
-    sky_color = mix(sky_color, sky.horizon_color.rgb * 0.82, smoothstep(0.0, 0.10, below));
-
-    // Soft bright haze band hugging the horizon line itself - this is the
-    // band the fogged-out water meets, so keeping it wide and pale makes the
-    // seam disappear. Matches water.wgsl's FOG_COLOR direction (pale, ~white).
-    let horizon_haze = exp(-abs(dir.y) * 9.0);
-    sky_color = mix(sky_color, vec3<f32>(0.86, 0.90, 0.94), horizon_haze * 0.65);
+    sky_color = mix(sky_color, sky.sea_horizon_color.rgb, smoothstep(0.0, 0.02, below));
 
     // Sun: a tight bright disc plus a broad warm glow that lifts the whole
     // quadrant around it.

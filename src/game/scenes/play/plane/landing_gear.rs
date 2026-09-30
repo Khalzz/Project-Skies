@@ -107,9 +107,9 @@ impl GearMeshes {
     pub fn new() -> Self {
         Self {
             wheels: vec![
-                LandingGearWheel { mesh_name: "wheel-f",  retracted_position: Vector3::new(0.0, 0.00, 0.456),  deployed_fallback: Vector3::new(0.0, -0.279, 0.756) },
-                LandingGearWheel { mesh_name: "wheel-lb", retracted_position: Vector3::new(-0.08, 0.02, 0.367), deployed_fallback: Vector3::new(-0.2, -0.266, 0.167) },
-                LandingGearWheel { mesh_name: "wheel-rb", retracted_position: Vector3::new(0.08, 0.02, 0.367),  deployed_fallback: Vector3::new(0.2, -0.266, 0.167) },
+                LandingGearWheel { mesh_name: "wheel-f",  retracted_position: Vector3::new(0.0, 0.0021, 0.2264),     deployed_fallback: Vector3::new(0.0, -0.1312, 0.3697) },
+                LandingGearWheel { mesh_name: "wheel-lb", retracted_position: Vector3::new(-0.0382, 0.0117, 0.1839), deployed_fallback: Vector3::new(-0.0955, -0.1250, 0.0884) },
+                LandingGearWheel { mesh_name: "wheel-rb", retracted_position: Vector3::new(0.0382, 0.0117, 0.1839),  deployed_fallback: Vector3::new(0.0955, -0.1250, 0.0884) },
             ],
         }
     }

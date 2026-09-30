@@ -4,7 +4,7 @@ use crate::engine::game_nodes::game_object::{ColliderType, Physics};
 use crate::engine::physics::physics_resources::PhysicsObjectDef;
 use crate::resources;
 
-use super::properties::Transform3D;
+use super::properties::{Model, Transform3D};
 use super::scene::Scene;
 
 /// Bridges a spawned `Node`'s `Transform3D`+`Physics` properties into
@@ -35,8 +35,13 @@ pub fn register_physics_body(scene: &mut Scene, id: &str) -> Result<(), String> 
     let transform = *node.get_property::<Transform3D>().ok_or_else(|| format!("node '{id}' has no Transform3D property"))?;
     let mut physics = node.get_property::<Physics>().ok_or_else(|| format!("node '{id}' has no Physics property"))?.clone();
 
+    // Geometry read from a model file is scaled the way the model is drawn:
+    // node scale, times the node's Model's own scale when it has one.
+    let geometry_scale = node.get_property::<Model>()
+        .map(|model| model.render_scale(transform.scale))
+        .unwrap_or(transform.scale);
     physics.colliders = physics.colliders.into_iter()
-        .map(|collider| resolve_collider(collider, transform.scale, id))
+        .map(|collider| resolve_collider(collider, geometry_scale, id))
         .collect();
 
     scene.content.physics_bodies.push(PhysicsObjectDef { id: id.to_owned(), position: transform.position, physics });

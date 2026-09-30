@@ -20,7 +20,7 @@ impl GameLogic {
         scene.spawn_node(app,
             Node::new("f16")
                 .add_property(Transform3D { position: Vector3::new(0.0, 0.0, 0.0), ..Default::default() })
-                .add_property(Model { model_ref: "F16".to_owned() })
+                .add_property(Model::new("F16"))
         ).expect("sandbox should only spawn 'f16' once");
 
         Self

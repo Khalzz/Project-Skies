@@ -1,0 +1,169 @@
+(
+  model: (
+    model: "model/mq-9.glb",
+    scale: 11.0,
+    double_sided: ["Afterburner"], // It disables the backface culling of the afterburner mesh
+  ),
+  physics: (
+    rigidbody: (
+      is_static: false,
+      mass: 2223.0, // This mass is with full fuel, in the future it should be the mass empty
+      center_of_mass: (0.0, 0.029, 1.0),
+      initial_velocity: (0.0, 0.0, 0.0),
+    ),
+    colliders: [
+      Cuboid(half_extents: (0.669, 0.669, 4.681), position: (0.0, 0.029, 1.458)),
+      Cuboid(half_extents: (2.006, 0.067, 1.338), position: (2.866, 0.230, 1.458)),
+      Cuboid(half_extents: (2.006, 0.067, 1.338), position: (-2.866, 0.230, 1.458)),
+    ],
+  ),
+  // The flight physics: every lifting surface, and where the pilot sits.
+  // Positions in meters in the jet's own frame (+X left wing, +Y up, +Z
+  // nose); airfoil tables are relative to this folder.
+  aero: (
+    wings: [
+      // Main wings - fixed, rolled by their flaperons (+ = trailing edge up).
+      (
+        label: "Left wing",
+        shape: Trapezoid(
+          root_leading_edge: (0.0, 0.0, 1.7),
+          span: 9.6,
+          root_chord: 1.8,
+          tip_chord: 0.7,
+          sweep_deg: 4.0,
+        ),
+        // The computed lift point would be (span 40%, chord 25%) - z 2.50,
+        // the real aerodynamic center. Held at today's tuned point (z 0.79)
+        // until the center of mass is moved forward to match - lift that
+        // far ahead of the current center of mass would pitch the jet up
+        // harder than the tail can hold. Remove this line once it is.
+        aerodynamic_center: (0.8, 0.5),
+        airfoil_path: "aero/mq9-wing-body.ron",
+        normal: (1.0, 0.0, 0.0),
+        is_roll_axis: true,
+        stable: false,
+        incidence_angle: 0.0,
+        control_surface_area: 0.0,
+        surfaces: [
+          (label: "Left flaperon", kind: Aileron, span_start: 0.35, span_end: 0.97, chord_ratio: 0.25, max_deflection_deg: 21.5),
+        ],
+      ),
+      (
+        label: "Right wing",
+        shape: Trapezoid(
+          root_leading_edge: (0.0, 0.0, 1.7),
+          span: -9.6,
+          root_chord: 1.8,
+          tip_chord: 0.7,
+          sweep_deg: 4.0,
+        ),
+        // The computed lift point would be (span 40%, chord 25%) - z 2.50,
+        // the real aerodynamic center. Held at today's tuned point (z 0.79)
+        // until the center of mass is moved forward to match - lift that
+        // far ahead of the current center of mass would pitch the jet up
+        // harder than the tail can hold. Remove this line once it is.
+        aerodynamic_center: (0.8, 0.5),
+        airfoil_path: "aero/mq9-wing-body.ron",
+        normal: (1.0, 0.0, 0.0),
+        is_roll_axis: true,
+        stable: false,
+        incidence_angle: 0.0,
+        control_surface_area: 0.0,
+        surfaces: [
+          (label: "Left flaperon", kind: Aileron, span_start: 0.35, span_end: 0.97, chord_ratio: 0.25, max_deflection_deg: 21.5),
+        ],
+      ),
+      // All-moving stabilators (their labels are mirrored: "Right" sits at +X).
+      (
+        label: "Right elevator wing",
+        shape: Trapezoid(
+          root_leading_edge: (0.0, 0.2, -1.5),
+          span: 2.9, 
+          root_chord: 1.9,
+          tip_chord: 0.7,
+          sweep_deg: 20.0,
+        ),
+        // The computed lift point would be (span 40%, chord 25%) - z 2.50,
+        // the real aerodynamic center. Held at today's tuned point (z 0.79)
+        // until the center of mass is moved forward to match - lift that
+        // far ahead of the current center of mass would pitch the jet up
+        // harder than the tail can hold. Remove this line once it is.
+        aerodynamic_center: (0.5, 0.5),
+        airfoil_path: "aero/mq9-elevators.ron",
+        normal: (1.0, 0.5, 0.0),
+        is_roll_axis: false,
+        stable: false,
+        incidence_angle: -1.26,
+        control_surface_area: 5.92,
+        surfaces: [],
+      ),
+      (
+        label: "Left elevator wing",
+        shape: Trapezoid(
+          root_leading_edge: (0.0, 0.2, -1.5),
+          span: -2.9, 
+          root_chord: 1.9,
+          tip_chord: 0.7,
+          sweep_deg: 20.0,
+        ),
+        // The computed lift point would be (span 40%, chord 25%) - z 2.50,
+        // the real aerodynamic center. Held at today's tuned point (z 0.79)
+        // until the center of mass is moved forward to match - lift that
+        // far ahead of the current center of mass would pitch the jet up
+        // harder than the tail can hold. Remove this line once it is.
+        aerodynamic_center: (0.5, 0.5),
+        airfoil_path: "aero/mq9-elevators.ron",
+        normal: (1.0, -0.5, 0.0),
+        is_roll_axis: false,
+        stable: false,
+        incidence_angle: -1.26,
+        control_surface_area: 5.92,
+        surfaces: [],
+      ),
+      // The fin and rudder - side-force model (stable).
+      (
+        label: "Rudder wing",
+        shape: Trapezoid(
+          root_leading_edge: (0.0, 0.0, -1.7),
+          span: -1.3,
+          root_chord: 1.2,
+          tip_chord: 0.7,
+          sweep_deg: 20.0,
+        ),
+        // The computed lift point would be (span 40%, chord 25%) - z 2.50,
+        // the real aerodynamic center. Held at today's tuned point (z 0.79)
+        // until the center of mass is moved forward to match - lift that
+        // far ahead of the current center of mass would pitch the jet up
+        // harder than the tail can hold. Remove this line once it is.
+        aerodynamic_center: (0.5, 0.5),
+        airfoil_path: "aero/mq9-elevators.ron",
+        normal: (0.0, 1.0, 0.0),
+        is_roll_axis: false,
+        stable: true,
+        incidence_angle: 0.0,
+        control_surface_area: 1.70,
+        surfaces: [],
+      ),
+    ],
+    // Where the pilot sits - G at the seat is measured here.
+    pilot_position: (0.0, 1.029, 6.485),
+  ),
+  // The engine - a Honeywell TPE331-10 turboprop, ~900 shp (671 kW),
+  // driving a pusher propeller. A propeller's thrust falls as speed rises
+  // (thrust ~ efficiency x power / speed: ~12 kN standing still, ~10.5 kN
+  // at 100 kt, ~6 kN at its ~170 kt cruise) - this model's thrust doesn't
+  // change with speed, so it's set to a value typical of takeoff and climb.
+  engine: (
+    idle_thrust: 600.0,          // flight idle, ~7% of full power
+    military_thrust: 9000.0,     // full power
+    max_thrust: 9000.0,          // no afterburner - same as full power
+    afterburner_gate: 1.0,       // no afterburner: the lever is all dry power
+    // A single-shaft turboprop's core always turns at governed speed, so
+    // power changes are quick - much snappier than a jet spooling its core.
+    spool_up_seconds: 1.0,
+    spool_afterburner_seconds: 1.0, // unused - no afterburner
+    spool_down_seconds: 0.7,
+    // Turboprop power falls a little faster with altitude than a turbofan's.
+    altitude_lapse_exponent: 0.8,
+  ),
+)

@@ -231,6 +231,17 @@ impl Physics {
                     for physics_node in &physics_nodes {
                         physics_node.debug_draw(&self.rigidbody_set, &mut debug_draw);
                     }
+                    // Every collider on a moving body, as it really is - fixed
+                    // bodies (the ground/runway meshes) skipped, they'd bury
+                    // the screen.
+                    const COLLIDER_COLOR: [f32; 3] = [1.0, 0.55, 0.1];
+                    for (_, body) in self.rigidbody_set.iter().filter(|(_, body)| body.is_dynamic()) {
+                        for handle in body.colliders() {
+                            if let Some(collider) = self.collider_set.get(*handle) {
+                                debug_draw.collider(collider, COLLIDER_COLOR);
+                            }
+                        }
+                    }
                 }
                 if let Err(e) = debug_physics_tx.send(debug_draw.into_lines()) {
                     println!("Failed to send debug physics messages: {}", e);

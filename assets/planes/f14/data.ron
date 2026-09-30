@@ -1,0 +1,101 @@
+(
+  model: (
+    model: "model/f14.glb",
+    scale: 19.0,
+    double_sided: ["Afterburner"], // It disables the backface culling of the afterburner mesh
+  ),
+  physics: (
+    rigidbody: (
+      is_static: false,
+      mass: 11900.0, // This mass is with full fuel, in the future it should be the mass empty
+      center_of_mass: (0.0, 0.029, 0.359),
+      initial_velocity: (0.0, 0.0, 0.0),
+    ),
+    colliders: [
+      Cuboid(half_extents: (0.669, 0.669, 4.681), position: (0.0, 0.029, 1.458)),
+      Cuboid(half_extents: (2.006, 0.067, 1.338), position: (2.866, 0.230, 1.458)),
+      Cuboid(half_extents: (2.006, 0.067, 1.338), position: (-2.866, 0.230, 1.458)),
+    ],
+  ),
+  // The flight physics: every lifting surface, and where the pilot sits.
+  // Positions in meters in the jet's own frame (+X left wing, +Y up, +Z
+  // nose); airfoil tables are relative to this folder.
+  aero: (
+    wings: [
+      // Main wings - fixed, rolled by their flaperons (+ = trailing edge up).
+      (
+        label: "Left wing",
+        pressure_center: (2.675, 0.029, 0.789),
+        wing_area: 13.94,
+        chord: 3.45,
+        airfoil_path: "aero/f16-wing-body.ron",
+        normal: (1.0, 0.0, 0.0),
+        is_roll_axis: true,
+        stable: false,
+        incidence_angle: 0.0,
+        control_surface_area: 0.0,
+        surfaces: [
+          (label: "Left flaperon", kind: Aileron, span_start: 0.04, span_end: 0.73, chord_ratio: 0.25, max_deflection_deg: 21.5),
+        ],
+      ),
+      (
+        label: "Right wing",
+        pressure_center: (-2.675, 0.029, 0.789),
+        wing_area: 13.94,
+        chord: 3.45,
+        airfoil_path: "aero/f16-wing-body.ron",
+        normal: (1.0, 0.0, 0.0),
+        is_roll_axis: true,
+        stable: false,
+        incidence_angle: 0.0,
+        control_surface_area: 0.0,
+        surfaces: [
+          (label: "Right flaperon", kind: Aileron, span_start: 0.04, span_end: 0.73, chord_ratio: 0.25, max_deflection_deg: 21.5),
+        ],
+      ),
+      // All-moving stabilators (their labels are mirrored: "Right" sits at +X).
+      (
+        label: "Right elevator wing",
+        pressure_center: (2.006, 0.029, -3.224),
+        wing_area: 5.92,
+        chord: 0.0,
+        airfoil_path: "aero/f16-elevators.ron",
+        normal: (1.0, 0.0, 0.0),
+        is_roll_axis: false,
+        stable: false,
+        incidence_angle: -1.26,
+        control_surface_area: 5.92,
+        surfaces: [],
+      ),
+      (
+        label: "Left elevator wing",
+        pressure_center: (-2.006, 0.029, -3.224),
+        wing_area: 5.92,
+        chord: 0.0,
+        airfoil_path: "aero/f16-elevators.ron",
+        normal: (1.0, 0.0, 0.0),
+        is_roll_axis: false,
+        stable: false,
+        incidence_angle: -1.26,
+        control_surface_area: 5.92,
+        surfaces: [],
+      ),
+      // The fin and rudder - side-force model (stable).
+      (
+        label: "Rudder wing",
+        pressure_center: (0.0, 2.035, -5.230),
+        wing_area: 1.70,
+        chord: 0.0,
+        airfoil_path: "aero/f16-elevators.ron",
+        normal: (0.0, 1.0, 0.0),
+        is_roll_axis: false,
+        stable: true,
+        incidence_angle: 0.0,
+        control_surface_area: 1.70,
+        surfaces: [],
+      ),
+    ],
+    // Where the pilot sits - G at the seat is measured here.
+    pilot_position: (0.0, 1.029, 6.485),
+  ),
+)

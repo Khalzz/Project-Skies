@@ -9,4 +9,5 @@ pub mod splash_screen;
 pub mod tooling;
 pub mod primitive;
 pub mod rendering;
+pub mod particles;
 pub mod utils;

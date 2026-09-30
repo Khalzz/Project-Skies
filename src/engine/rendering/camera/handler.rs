@@ -86,8 +86,8 @@ impl CameraResources {
     pub fn new(device: &Device, config: &wgpu::SurfaceConfiguration) -> Self {
         let near_far_uniform = NearFarUniform {
             near: 0.1,
-            // Pushed way out so the huge "world_far" backdrop water plane (see
-            // play::scene::spawn_world) isn't clipped - reversed-Z keeps
+            // Pushed way out so the ocean surface's outer rings (~2,100 km,
+            // see main.rs's OCEAN_SURFACE_MODEL) aren't clipped - reversed-Z keeps
             // near/mid depth precision fine regardless of how far this goes.
             // Kept in sync with the Projection::new call below and water.wgsl's
             // own `const FAR`.

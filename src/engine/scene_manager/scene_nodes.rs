@@ -80,6 +80,10 @@ impl SceneNodes {
         self.nodes.clear();
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = &Node> {
+        self.nodes.values()
+    }
+
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Node> {
         self.nodes.values_mut()
     }

@@ -184,11 +184,12 @@ pub fn open_pause_menu(app: &mut App) {
 /// explain why, see `App::is_paused`'s own doc comment).
 pub fn close_pause_menu(app: &mut App) {
     app.is_paused = false;
-    // Restores mouse-look. Harmless even for Restart/Back-to-menu (both
-    // call this right before SceneManager::open_scene) - whichever scene
-    // that switches to sets its own correct mode in its own constructor the
-    // very next frame anyway.
-    app.window_manager.context.mouse().set_relative_mouse_mode(true);
+    // Restores mouse-look - unless F8 had the mouse freed for the debug
+    // overlay (App::debug_mouse_free). Harmless even for Restart/Back-to-
+    // menu (both call this right before SceneManager::open_scene) - whichever
+    // scene that switches to sets its own correct mode in its own
+    // constructor the very next frame anyway.
+    app.window_manager.context.mouse().set_relative_mouse_mode(!app.debug_mouse_free);
     if let Some(backdrop) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "PauseBackdrop") {
         backdrop.set_active(false);
     }
@@ -271,6 +272,7 @@ pub fn build_pause_menu(app: &mut App) {
 /// "quite instantly", per the request this came out of) - unlike the pause
 /// menu's own gradient backdrop, which is meant to be a translucent overlay,
 /// not a hard cut.
+#[allow(dead_code)] // not shown for now - see play::scene::GameLogic::check_crash
 pub fn open_death_screen(app: &mut App) {
     // Frees the cursor so Restart/Back to Main Menu are actually clickable -
     // same reasoning as open_pause_menu's own doc comment.
@@ -367,7 +369,8 @@ pub fn build_debug_panel(app: &mut App) -> UiNode {
         .set_background_color(UiColor::Rgba(0, 0, 0, 128))
         .set_background_blur(20.0)
         .set_child("fps", stats_line(app, "0 FPS"))
-        .set_child("position", stats_line(app, "Player position: (0, 0, 0)"));
+        .set_child("position", stats_line(app, "Player position: (0, 0, 0)"))
+        .set_child("ocean", stats_line(app, "Ocean: -"));
 
     UiNode::container()
         .set_size(SizeValue::Percent(100.0), SizeValue::Percent(100.0))

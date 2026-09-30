@@ -116,13 +116,13 @@ fn fs_main(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> @loca
 
     let result = (ambient_color + diffuse_color) * object_color.xyz;
 
-    // Long-distance atmospheric haze - kept matched to water.wgsl's own fog
-    // (same colour + start/end) so a distant object and the sea under it
-    // fade to the same tone instead of the object standing out against it.
+    // Long-distance atmospheric haze - same start/end as water.wgsl's fog,
+    // fading toward the sky's horizon haze (SkyboxRender::new_procedural's
+    // haze_color), since distant objects are seen against the sky.
     let fog_start = 80000.0;
     let fog_end = 1400000.0;
     let fog_factor = smoothstep(fog_start, fog_end, in.view_depth);
-    let fogged_color = mix(result, vec3<f32>(0.72, 0.80, 0.88), fog_factor);
+    let fogged_color = mix(result, vec3<f32>(0.448, 0.604, 0.711), fog_factor);
 
     return vec4<f32>(fogged_color, object_color.a);
 }

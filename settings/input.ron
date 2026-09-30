@@ -11,10 +11,10 @@
         (action: "change_camera", bindings: [Key("v"), ControllerButton("Y")]),
         // Right-stick camera look - deadzone must match LOOK_STICK_DEADZONE
         // in play::camera::camera.
-        (action: "look_left", bindings: [ControllerAxis(axis: "RightX", positive: false, deadzone: 0.15)]),
-        (action: "look_right", bindings: [ControllerAxis(axis: "RightX", positive: true, deadzone: 0.15)]),
-        (action: "look_up", bindings: [ControllerAxis(axis: "RightY", positive: false, deadzone: 0.15)]),
-        (action: "look_down", bindings: [ControllerAxis(axis: "RightY", positive: true, deadzone: 0.15)]),
+        (action: "look_left", bindings: [ControllerAxis(axis: "RightX", positive: false, deadzone: 0.1)]),
+        (action: "look_right", bindings: [ControllerAxis(axis: "RightX", positive: true, deadzone: 0.1)]),
+        (action: "look_up", bindings: [ControllerAxis(axis: "RightY", positive: false, deadzone: 0.1)]),
+        (action: "look_down", bindings: [ControllerAxis(axis: "RightY", positive: true, deadzone: 0.1)]),
         (action: "fix_view", bindings: [Key("space")]),
         (action: "test", bindings: [Key("t")]),
         (action: "up_wheel", bindings: [Key("Right")]),
@@ -39,6 +39,8 @@
         (action: "toggle_camera_offset_debug", bindings: [Key("F5")]),
         (action: "toggle_water_debug_view", bindings: [Key("F6")]),
         (action: "toggle_aero_debug_recording", bindings: [Key("F7")]),
+        (action: "toggle_debug_mouse", bindings: [Key("F8")]),
+        (action: "toggle_ocean_cull_freeze", bindings: [Key("F9")]),
         (action: "debug_cam_forward", bindings: [Key("w")]),
         (action: "debug_cam_back", bindings: [Key("s")]),
         (action: "debug_cam_left", bindings: [Key("a")]),

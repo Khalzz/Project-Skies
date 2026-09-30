@@ -49,36 +49,57 @@ impl AirFoil {
         AirFoil { min_alpha: curve[0].x, max_alpha: curve[curve.len() - 1].x, data: curve }
     }
 
-    // Sample function to get Cl and Cd based on alpha
+    /// Cl and Cd at `alpha` (deg), interpolated between the two rows around
+    /// it by their own alpha values - so rows don't need to be evenly spaced
+    /// (the old row-index mapping assumed they were, and read the wrong row
+    /// on a table that wasn't). Clamped to the first/last row outside the
+    /// table. Rows must be in increasing alpha.
     pub fn sample(&self, alpha: f32) -> (f32, f32) {
         let len = self.data.len();
-        
-        // Get raw float index
-        let float_index = self.alpha_to_float_index(alpha); // see below
-        
-        // Clamp to valid range
-        let float_index = float_index.clamp(0.0, (len - 1) as f32);
-        
-        let lower = float_index.floor() as usize;
-        let upper = (lower + 1).min(len - 1);
-        let t = float_index.fract(); // interpolation factor 0..1
-        
-        let a = &self.data[lower];
+        if len == 0 {
+            return (0.0, 0.0);
+        }
+        if alpha <= self.min_alpha {
+            return (self.data[0].y, self.data[0].z);
+        }
+        if alpha >= self.max_alpha {
+            return (self.data[len - 1].y, self.data[len - 1].z);
+        }
+
+        // First row at or past `alpha` - the one before it is below it.
+        let upper = self.data.partition_point(|row| row.x < alpha).clamp(1, len - 1);
+        let a = &self.data[upper - 1];
         let b = &self.data[upper];
-        
-        let cl = a.y + (b.y - a.y) * t;
-        let cd = a.z + (b.z - a.z) * t;
-        
-        (cl, cd)
+        let span = b.x - a.x;
+        let t = if span > 0.0 { (alpha - a.x) / span } else { 0.0 };
+
+        (a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t)
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn table(rows: &[(f32, f32, f32)]) -> AirFoil {
+        let data: Vec<Vector3<f32>> = rows.iter().map(|&(a, cl, cd)| Vector3::new(a, cl, cd)).collect();
+        AirFoil { min_alpha: data[0].x, max_alpha: data[data.len() - 1].x, data }
     }
 
-    fn alpha_to_float_index(&self, alpha: f32) -> f32 {
-        let range = self.max_alpha - self.min_alpha;
-        if range == 0.0 {
-            return 0.0;
-        }
-        let normalized_alpha = (alpha - self.min_alpha) / range;
-        normalized_alpha * (self.data.len() as f32 - 1.0)
-        // no .round() — keep the fractional part for interpolation
+    #[test]
+    fn interpolates_on_uneven_rows() {
+        // 0.5 deg steps, then a 2 deg one - the old row-index mapping read
+        // the wrong row here.
+        let foil = table(&[(0.0, 0.0, 0.01), (0.5, 0.05, 0.01), (1.0, 0.1, 0.01), (3.0, 0.3, 0.03)]);
+        let (cl, cd) = foil.sample(2.0);
+        assert!((cl - 0.2).abs() < 1e-5 && (cd - 0.02).abs() < 1e-5);
+        let (cl, _) = foil.sample(0.75);
+        assert!((cl - 0.075).abs() < 1e-5);
+    }
+
+    #[test]
+    fn clamps_outside_the_table() {
+        let foil = table(&[(-1.0, -0.1, 0.02), (0.0, 0.0, 0.01), (1.0, 0.1, 0.02)]);
+        assert_eq!(foil.sample(-10.0), (-0.1, 0.02));
+        assert_eq!(foil.sample(10.0), (0.1, 0.02));
     }
 }
