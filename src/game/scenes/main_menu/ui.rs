@@ -161,6 +161,9 @@ fn video_settings(app: &mut App) -> UiNode {
             SliderRange { min: -COCKPIT_VIEW_PITCH_MAX, max: COCKPIT_VIEW_PITCH_MAX, step: 0.1, format: degrees_text },
             |settings| settings.cockpit_view_pitch_deg,
             |settings, value| settings.cockpit_view_pitch_deg = value))
+        .set_child("ShowAircraftNames", settings_toggle_row(app, "Video", "ShowAircraftNames", "Show aircraft names",
+            |settings| settings.show_aircraft_names,
+            |settings| settings.show_aircraft_names = !settings.show_aircraft_names))
 }
 
 /// A `settings_slider_row`'s values: `min` at the left end, `max` at the

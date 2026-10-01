@@ -8,6 +8,9 @@
         (action: "rudder_right", bindings: [Key("e"), ControllerButton("RightShoulder")]),
         (action: "throttle_up", bindings: [Key("Up"), ControllerAxis(axis: "TriggerRight", positive: true)]),
         (action: "throttle_down", bindings: [Key("Down"), ControllerAxis(axis: "TriggerLeft", positive: true)]),
+        // A throttle lever (a HOTAS throttle's axis) - read as a position, not
+        // pressed/not: where the lever is is the throttle (see Plane).
+        (action: "throttle_axis", bindings: []),
         (action: "change_camera", bindings: [Key("v"), ControllerButton("Y")]),
         // Right-stick camera look - deadzone must match LOOK_STICK_DEADZONE
         // in play::camera::camera.
@@ -29,18 +32,20 @@
         (action: "quick_menu_left", bindings: [ControllerButton("DPadLeft")]),
         (action: "landing_gear_up", bindings: []),
         (action: "landing_gear_down", bindings: []),
-        (action: "toggle_debug", bindings: [Key("F1")]),
-        (action: "follow_cam_toggle", bindings: [Key("F1")]),
-        (action: "toggle_ui_debug", bindings: [Key("F2")]),
-        (action: "toggle_console", bindings: [Key("F3")]),
-        (action: "toggle_pause", bindings: [Key("F12")]),
+        // F1-F4: what the camera follows.
+        (action: "camera_player", bindings: [Key("F1")]),
+        (action: "camera_next_aircraft", bindings: [Key("F2")]),
+        (action: "camera_next_ground_unit", bindings: [Key("F3")]),
+        (action: "camera_next_missile", bindings: [Key("F4")]),
+        // F5-F8: debugging and editing the map (F8 free for now).
+        // F10: the tactical map.
+        (action: "toggle_debug", bindings: [Key("F5")]),
+        (action: "toggle_flight_editor", bindings: [Key("F6")]),
+        (action: "toggle_debug_mouse", bindings: [Key("F7")]),
+        (action: "toggle_tactical_map", bindings: [Key("F10")]),
+        // The sandbox camera's orbit toggle - no key.
+        (action: "follow_cam_toggle", bindings: []),
         (action: "toggle_pause_menu", bindings: [Key("Escape")]),
-        (action: "toggle_camera_debug", bindings: [Key("F4")]),
-        (action: "toggle_camera_offset_debug", bindings: [Key("F5")]),
-        (action: "toggle_water_debug_view", bindings: [Key("F6")]),
-        (action: "toggle_aero_debug_recording", bindings: [Key("F7")]),
-        (action: "toggle_debug_mouse", bindings: [Key("F8")]),
-        (action: "toggle_ocean_cull_freeze", bindings: [Key("F9")]),
         (action: "debug_cam_forward", bindings: [Key("w")]),
         (action: "debug_cam_back", bindings: [Key("s")]),
         (action: "debug_cam_left", bindings: [Key("a")]),

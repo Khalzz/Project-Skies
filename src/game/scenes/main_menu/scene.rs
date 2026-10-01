@@ -59,7 +59,7 @@ impl GameLogic {
                     rotation: UnitQuaternion::identity(),
                     scale: Vector3::new(1.0, 1.0, 1.0),
                 })
-                .add_property(Model::new("F16"))
+                .add_property(Model::new(crate::MARKER_MODEL))
         ).expect("main_menu should only spawn 'sun' once");
         if let Some(sun) = scene.content.renderizable_instances.get_mut("sun") {
             sun.instance.metadata.lighting = Some(Lighting { intensity: 1.0, color: Vector3::new(0.7, 0.7, 0.8) });

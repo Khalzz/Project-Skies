@@ -86,7 +86,7 @@ pub struct Wheel {
     /// Steering angle applied last step, radians, positive = right.
     pub steer_angle: f32,
     /// Tyre friction applied last step, world space (N) - zero while
-    /// airborne. Kept for the F2 overlay.
+    /// airborne. Kept for the F5 overlay.
     pub last_tyre_force: Vector3<f32>,
 }
 

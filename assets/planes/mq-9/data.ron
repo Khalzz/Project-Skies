@@ -12,9 +12,14 @@
       initial_velocity: (0.0, 0.0, 0.0),
     ),
     colliders: [
-      Cuboid(half_extents: (0.669, 0.669, 4.681), position: (0.0, 0.029, 1.458)),
-      Cuboid(half_extents: (2.006, 0.067, 1.338), position: (2.866, 0.230, 1.458)),
-      Cuboid(half_extents: (2.006, 0.067, 1.338), position: (-2.866, 0.230, 1.458)),
+      Cuboid(half_extents: (0.469, 0.469, 4.681), position: (0.0, 0.129, 1.458)),
+      // The wings follow their aero shape (taper, sweep, span - see ero),
+      // as thin slabs: they collide where the wings really are.
+      Wing(label: "Left wing", thickness: 0.2),
+      Wing(label: "Left wing", thickness: 0.2),
+      Wing(label: "Right elevator wing", thickness: 0.2),
+      Wing(label: "Left elevator wing", thickness: 0.2),
+      Wing(label: "Rudder wing", thickness: 0.2),
     ],
   ),
   // The flight physics: every lifting surface, and where the pilot sits.
@@ -178,9 +183,9 @@
     wheels: [
       // Suspension 1.7 m: the modelled tyres bottom out ~1.66 m below these
       // mounts, so the jet rests on its modelled wheels.
-      (mesh: "wheel-f", position: (0.0, 0.029, 4.15), suspension_length: 1.7, stiffness: 100000.0, damping: 500.0, steerable: true),
-      (mesh: "wheel-lb", position: (-1.6, 0.029, 1.2), suspension_length: 1.7, stiffness: 200000.0, damping: 500.0, braked: true),
-      (mesh: "wheel-rb", position: (1.6, 0.029, 1.2), suspension_length: 1.7, stiffness: 200000.0, damping: 500.0, braked: true),
+      (mesh: "wheel-f", position: (0.0, 0.029, 4.15), suspension_length: 1.7, stiffness: 100000.0, damping: 1000.0, steerable: true),
+      (mesh: "wheel-lb", position: (-1.6, 0.029, 1.2), suspension_length: 1.7, stiffness: 200000.0, damping: 5000.0, braked: true),
+      (mesh: "wheel-rb", position: (1.6, 0.029, 1.2), suspension_length: 1.7, stiffness: 200000.0, damping: 5000.0, braked: true),
     ],
     // Nose-wheel steering: full lock at taxi speed, tapering to a few
     // degrees by takeoff speed (ground speeds in m/s). Optional.

@@ -42,3 +42,11 @@ anyhow = "*"
 cgmath = "*"
 fs_extra = "*"
 glob = "*"
+
+# Dev builds (plain `cargo run`) still optimize every dependency - our own
+# code stays fast to compile and easy to debug, but libraries like the PNG
+# decoder and glTF parser run 10-50x faster than unoptimized (model loading
+# was mostly spent decoding textures). The first build after this recompiles
+# the dependencies once; later builds are as quick as before.
+[profile.dev.package."*"]
+opt-level = 3

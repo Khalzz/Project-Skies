@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use crate::engine::physics::physics::DebugPhysicsMessageType;
 use crate::engine::physics::physics_behavior::{DebugDraw, PhysicsBehavior, PhysicsInput, PhysicsNode, PhysicsPayload};
+use crate::engine::physics::physics_resources::{load_physics_from_definitions, PhysicsObjectDef};
 
 pub struct RenderMessage {
     pub translation: Vector3<f32>,
@@ -19,10 +20,9 @@ pub struct RenderMessage {
     pub angvel: Vector3<f32>,
 }
 
-#[derive(Debug)]
 pub enum PhysicsCommand {
     // Main thread requests this frame's physics data. `debug_lines` asks for
-    // the F2 overlay's lines too (see PhysicsBehavior::debug_draw) - sent
+    // the F5 overlay's lines too (see PhysicsBehavior::debug_draw) - sent
     // every frame rather than as a separate toggle, so it can never drift
     // out of sync with the render side (e.g. across a scene restart).
     RequestData { debug_lines: bool },
@@ -37,6 +37,27 @@ pub enum PhysicsCommand {
     /// wherever the script left it visually - causing a visible snap the instant
     /// physics starts writing the render transform again.
     SetTransform { name: String, translation: Vector3<f32>, rotation: Quaternion<f32>, linvel: Vector3<f32> },
+    /// A body (and its node's physics halves) for a node spawned after the
+    /// thread started - see `Scene::spawn_node_live`. Replaces any body
+    /// already under that id.
+    AddBody { def: PhysicsObjectDef, behaviors: Vec<Box<dyn PhysicsBehavior>> },
+    /// Removes the body (colliders and physics halves too) of a node that
+    /// was despawned - see `Scene::despawn_node`.
+    RemoveBody { name: String },
+}
+
+// By hand - a physics half (`Box<dyn PhysicsBehavior>`) isn't Debug.
+impl std::fmt::Debug for PhysicsCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PhysicsCommand::RequestData { debug_lines } => write!(f, "RequestData {{ debug_lines: {debug_lines} }}"),
+            PhysicsCommand::Shutdown => write!(f, "Shutdown"),
+            PhysicsCommand::TogglePause => write!(f, "TogglePause"),
+            PhysicsCommand::SetTransform { name, .. } => write!(f, "SetTransform {{ name: {name:?}, .. }}"),
+            PhysicsCommand::AddBody { def, behaviors } => write!(f, "AddBody {{ id: {:?}, behaviors: {} }}", def.id, behaviors.len()),
+            PhysicsCommand::RemoveBody { name } => write!(f, "RemoveBody {{ name: {name:?} }}"),
+        }
+    }
 }
 
 pub struct PhysicsData {
@@ -192,6 +213,24 @@ impl Physics {
                                 rb.set_translation(translation, true);
                                 rb.set_rotation(nalgebra::Unit::new_normalize(rotation), true);
                                 rb.set_linvel(linvel, true);
+                                // A teleport starts the body fresh - no
+                                // leftover spin carried to the new attitude.
+                                rb.set_angvel(Vector3::zeros(), true);
+                            }
+                        }
+                    },
+                    Ok(PhysicsCommand::RemoveBody { name }) => {
+                        self.remove_body(&name, &mut island_manager, &mut impulse_joint_set, &mut multibody_joint_set);
+                        physics_nodes.retain(|physics_node| physics_node.id != name);
+                    },
+                    Ok(PhysicsCommand::AddBody { def, behaviors }) => {
+                        let id = def.id.clone();
+                        self.remove_body(&id, &mut island_manager, &mut impulse_joint_set, &mut multibody_joint_set);
+                        physics_nodes.retain(|physics_node| physics_node.id != id);
+                        load_physics_from_definitions(std::slice::from_ref(&def), &mut self.collider_set, &mut self.rigidbody_set, &mut self.physics_elements);
+                        if !behaviors.is_empty() {
+                            if let Some(Some(physics_data)) = self.physics_elements.get(&id) {
+                                physics_nodes.push(PhysicsNode::new(id, physics_data.rigidbody_handle, behaviors));
                             }
                         }
                     },
@@ -262,6 +301,14 @@ impl Physics {
         }
     }
     
+    /// Drops the body under `name` with its colliders - nothing if there's
+    /// none.
+    fn remove_body(&mut self, name: &str, island_manager: &mut IslandManager, impulse_joint_set: &mut ImpulseJointSet, multibody_joint_set: &mut MultibodyJointSet) {
+        if let Some(Some(physics_data)) = self.physics_elements.remove(name) {
+            self.rigidbody_set.remove(physics_data.rigidbody_handle, island_manager, &mut self.collider_set, impulse_joint_set, multibody_joint_set, true);
+        }
+    }
+
     // Getter method to access delta time from other parts of the code
     pub fn get_delta_time(&self) -> f32 {
         self.delta_time

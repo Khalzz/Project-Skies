@@ -189,7 +189,7 @@ pub fn close_pause_menu(app: &mut App) {
     // menu (both call this right before SceneManager::open_scene) - whichever
     // scene that switches to sets its own correct mode in its own
     // constructor the very next frame anyway.
-    app.window_manager.context.mouse().set_relative_mouse_mode(!app.debug_mouse_free);
+    app.window_manager.context.mouse().set_relative_mouse_mode(!app.mouse_free());
     if let Some(backdrop) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "PauseBackdrop") {
         backdrop.set_active(false);
     }

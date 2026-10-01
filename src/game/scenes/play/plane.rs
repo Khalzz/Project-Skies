@@ -23,4 +23,7 @@ pub mod fcs;
 pub mod airframe;
 pub mod aircraft_spec;
 pub mod aero_spec;
+pub mod autopilot;
+#[cfg(test)]
+mod flight_tests;
 pub mod gear_spec;

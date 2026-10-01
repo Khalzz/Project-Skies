@@ -22,6 +22,9 @@ pub struct GameSettings {
     /// looks up over the nose, negative down at the instruments. Set by a
     /// slider, +-COCKPIT_VIEW_PITCH_MAX.
     pub cockpit_view_pitch_deg: f32,
+    /// Video: each aircraft's name (from the level's map.ron) shown over it
+    /// - see `play::flight_manager::update_name_tags`.
+    pub show_aircraft_names: bool,
 }
 
 /// The ends of the "Cockpit view angle" slider (degrees, either way).
@@ -34,4 +37,5 @@ pub static GAME_SETTINGS: Mutex<GameSettings> = Mutex::new(GameSettings {
     free_camera_follows_plane: false,
     head_g_reaction: 1.0,
     cockpit_view_pitch_deg: -6.0,
+    show_aircraft_names: true,
 });

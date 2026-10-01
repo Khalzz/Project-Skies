@@ -49,7 +49,7 @@ impl GameLogic {
                         rotation: UnitQuaternion::identity(),
                         scale: Vector3::new(1.0, 1.0, 1.0),
                     })
-                    .add_property(Model::new("F16")),
+                    .add_property(Model::new(crate::MARKER_MODEL)),
             )
             .expect("follow_test should only spawn 'sun' once");
         if let Some(sun) = scene.content.renderizable_instances.get_mut("sun") {
@@ -119,7 +119,7 @@ impl GameLogic {
 
         // Camera - the reusable `Camera` behavior with `free: true`. Starts
         // as free-fly (mouse-look + WASD / Space / Left Ctrl, Left Shift to
-        // sprint, scroll to zoom); F1 toggles it to orbit-a-target mode
+        // sprint, scroll to zoom); "follow_cam_toggle" (no key bound) toggles it to orbit-a-target mode
         // centred on the MQ-9 (mouse orbits, scroll reels the boom in/out) -
         // same idea as play's own free camera. The pivot is fed to the
         // behavior every frame by `update` below.
@@ -145,7 +145,7 @@ impl GameLogic {
     }
 
     fn update(&mut self, scene: &mut Scene) {
-        // Feed the camera the MQ-9's position so its orbit mode (F1) has a
+        // Feed the camera the MQ-9's position so its orbit mode has a
         // pivot to swing around - has to run before the "free_camera" node's
         // own Behavior tick (SceneBehaviour::update runs first, see
         // App::run), same ordering play relies on for its follow cam.

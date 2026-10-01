@@ -44,7 +44,7 @@ pub struct Wing {
     pub flap_input: f32,
 }
 
-const AIR_DENSITY: f32 = 1.225;
+pub const AIR_DENSITY: f32 = 1.225;
 
 /// True angle of attack, degrees: + when the nose is above the airflow
 /// (the air hitting the wing from below) - same as FlightData::aoa_y. The

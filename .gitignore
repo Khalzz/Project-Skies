@@ -12,3 +12,6 @@ Cargo.lock
 
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
+
+# Your own control rebinds - written by the game (Settings > Controller)
+settings/bindings.ron

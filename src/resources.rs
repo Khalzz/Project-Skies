@@ -189,14 +189,19 @@ fn load_model_with(file_name: &str, read: &dyn Fn(&Path) -> anyhow::Result<Vec<u
     );
 
     let mut materials = Vec::new();
+    // Every image decoded once, by its index in the file - many materials
+    // share one (the F-16's 64 materials use 10), and decoding a PNG is by
+    // far the slowest part of loading a model. Textures are GPU handles,
+    // so sharing one is just a clone.
+    let mut decoded: HashMap<usize, Texture> = HashMap::new();
     for (mat_index, material) in gltf.materials().enumerate() {
         let pbr = material.pbr_metallic_roughness();
 
         let texture_source = pbr
             .base_color_texture()
-            .map(|tex| tex.texture().source().source());
+            .map(|tex| (tex.texture().source().index(), tex.texture().source().source()));
 
-        let Some(texture_source) = texture_source else {
+        let Some((image_index, texture_source)) = texture_source else {
             // No base color texture assigned (e.g. a flat-color/procedural material) -
             // fall back to a solid-color texture built from the material's base_color_factor.
             let [r, g, b, a] = pbr.base_color_factor();
@@ -254,13 +259,14 @@ fn load_model_with(file_name: &str, read: &dyn Fn(&Path) -> anyhow::Result<Vec<u
                     let buffer = &buffer_data[view.buffer().index()];
                     let start = view.offset();
                     let end = start + view.length();
-                    let diffuse_texture = Texture::from_bytes(
-                        &buffer[start..end],
-                        device,
-                        queue,
-                        file_name,
-                    )
-                    .expect("Couldn't load diffuse");
+                    let diffuse_texture = match decoded.get(&image_index) {
+                        Some(texture) => texture.clone(),
+                        None => {
+                            let texture = Texture::from_bytes(&buffer[start..end], device, queue, file_name).expect("Couldn't load diffuse");
+                            decoded.insert(image_index, texture.clone());
+                            texture
+                        }
+                    };
                     
                     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                         layout: &bind_group_layout,
@@ -293,7 +299,14 @@ fn load_model_with(file_name: &str, read: &dyn Fn(&Path) -> anyhow::Result<Vec<u
                     file_name, mat_index, material.name().unwrap_or("<unnamed>"),
                     full_path.display(),
                 );
-                let diffuse_texture = Texture::from_bytes(&read(&full_path)?, device, queue, &full_path.to_string_lossy())?;
+                let diffuse_texture = match decoded.get(&image_index) {
+                    Some(texture) => texture.clone(),
+                    None => {
+                        let texture = Texture::from_bytes(&read(&full_path)?, device, queue, &full_path.to_string_lossy())?;
+                        decoded.insert(image_index, texture.clone());
+                        texture
+                    }
+                };
 
                 let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     layout: &bind_group_layout,
@@ -899,18 +912,41 @@ pub fn load_scene_model(app: &mut App, source: &ModelSource) -> Result<Model, St
     Ok(model)
 }
 
+/// Takes models a scene's background load already built (see
+/// `SceneManager::preload_models`) as this level's own - kept ready for
+/// `load_scene_model` to hand out, and dropped with the level like any
+/// other. One that failed is reported; spawning it then tries again itself.
+pub fn adopt_level_models(app: &mut App, models: Vec<(String, Result<Model, String>)>) {
+    for (key, model) in models {
+        match model {
+            Ok(model) => {
+                app.loaded_models.insert(key.clone(), model);
+                app.level_model_keys.insert(key);
+            }
+            Err(error) => eprintln!("{error}"),
+        }
+    }
+}
+
 /// Drops every model a scene loaded from a file (see `load_scene_model`) -
 /// called as the scene ends, so the next one starts from only what it
 /// uses. Models that can't be reloaded from a file (procedural ones, see
 /// `register_primitive_model`) are kept, back as not-yet-instanced.
-pub fn unload_level_models(app: &mut App) {
+///
+/// Models in `keep` (keys the next scene uses too - see
+/// `SceneManager::preload_models`) stay loaded, handed over to it: a restart
+/// of the same level reloads nothing.
+pub fn unload_level_models(app: &mut App, keep: &HashSet<String>) {
     let level_keys = std::mem::take(&mut app.level_model_keys);
     for (key, instanced) in std::mem::take(&mut app.game_models) {
-        if !level_keys.contains(&key) {
+        if !level_keys.contains(&key) || keep.contains(&key) {
             app.loaded_models.insert(key, instanced.model);
         }
     }
-    app.loaded_models.retain(|key, _| !level_keys.contains(key));
+    app.loaded_models.retain(|key, _| !level_keys.contains(key) || keep.contains(key));
+    // Kept ones still belong to a level - the next one - and go when it ends
+    // (unless the one after keeps them too).
+    app.level_model_keys = level_keys.into_iter().filter(|key| keep.contains(key)).collect();
 }
 
 /// Loads a model right away, from the build-time `res/` copy - the eager

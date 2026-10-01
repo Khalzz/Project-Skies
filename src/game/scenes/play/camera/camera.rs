@@ -87,6 +87,27 @@ const FREE_DISTANCE_RATE: f32 = 2.0;
 /// holds on the spot where it went down instead of following it under.
 const WRECK_MIN_HEIGHT: f32 = 3.0;
 
+/// F10's tactical map view (see `Camera::update_tactical`): how far out it
+/// starts and how far it zooms (m), how much one wheel notch zooms, the angle
+/// it starts looking down at, its field of view, and how much it turns per
+/// pixel of mouse (deg).
+const TACTICAL_START_DISTANCE: f32 = 6000.0;
+const TACTICAL_MIN_DISTANCE: f32 = 200.0;
+const TACTICAL_MAX_DISTANCE: f32 = 120_000.0;
+const TACTICAL_ZOOM_STEP: f32 = 1.15;
+const TACTICAL_START_PITCH_DEG: f32 = 35.0;
+const TACTICAL_FOV: f32 = 50.0;
+const TACTICAL_TURN_PER_PIXEL_DEG: f32 = 0.25;
+
+/// F10's tactical map view - an orbit round the target.
+struct TacticalOrbit {
+    /// Round the target (deg), and above its level (deg).
+    yaw: f32,
+    pitch: f32,
+    /// From the target (m).
+    distance: f32,
+}
+
 /// The right stick, as look input - both axes -1..1, `x` positive = look
 /// right, `y` positive = look up. `x`/`y` have the actions' small deadzone
 /// removed and rescaled (Cockpit/Free); `raw_x`/`raw_y` are the stick as-is,
@@ -112,7 +133,7 @@ impl LookInput {
 }
 
 /// This frame's mouse look and wheel - all zero while the mouse is freed
-/// for the debug overlay (F8).
+/// for the debug overlay (F7).
 struct MouseLook {
     rel_x: f32,
     rel_y: f32,
@@ -190,6 +211,8 @@ pub struct Camera {
     free_distance: f32,
     // The water's height, once the plane has crashed - see `enter_wreck_view`.
     wreck_sea_level: Option<f32>,
+    // F10's tactical map view, while it's up - see `update_tactical`.
+    tactical: Option<TacticalOrbit>,
 }
 
 impl Camera {
@@ -225,6 +248,7 @@ impl Camera {
             cinematic_return_blend: None,
             free_distance: FREE_DISTANCE,
             wreck_sea_level: None,
+            tactical: None,
         }
     }
 
@@ -263,6 +287,67 @@ impl Camera {
             self.free_yaw = forward.x.atan2(forward.z).to_degrees();
         }
         self.free_pitch = 20.0;
+    }
+
+    /// Back from `enter_wreck_view` - the player has a flying plane again
+    /// (respawned, or switched to another one from the F6 flight editor).
+    /// Into or out of F10's tactical map view (see `update_tactical`) - it
+    /// starts behind the target, looking down on it.
+    pub fn set_tactical_view(&mut self, on: bool) {
+        if !on {
+            self.tactical = None;
+            return;
+        }
+        if self.tactical.is_some() {
+            return;
+        }
+        let yaw = self.target.as_ref().map(|target| {
+            let forward = target.rotation * Vector3::z();
+            // Behind it: the orbit's offset points the other way.
+            (-forward.z).atan2(-forward.x).to_degrees()
+        }).unwrap_or(0.0);
+        self.tactical = Some(TacticalOrbit { yaw, pitch: TACTICAL_START_PITCH_DEG, distance: TACTICAL_START_DISTANCE });
+    }
+
+    /// F10's tactical map view: orbits the target - the mouse turns it round
+    /// (holding the right button while the mouse is a pointer for F6/F7),
+    /// the wheel zooms from TACTICAL_MIN_DISTANCE out to
+    /// TACTICAL_MAX_DISTANCE (not over a debug window, which it scrolls
+    /// instead).
+    fn update_tactical(&mut self, cameras: &mut SceneCameras, app: &mut App) {
+        let Some(orbit) = self.tactical.as_mut() else { return };
+        let Some(target) = self.target.take() else { return };
+
+        let mouse_free = app.mouse_free();
+        let overlay_up = app.flight_editor.open || app.debug_overlay_visible();
+        let over_ui = overlay_up && app.egui_overlay.ctx.is_pointer_over_area();
+        let turning = !app.is_paused && (!mouse_free || (input::mouse_right_button_down() && !over_ui));
+        if turning {
+            orbit.yaw += input::mouse_rel_x() as f32 * TACTICAL_TURN_PER_PIXEL_DEG;
+            orbit.pitch = (orbit.pitch + input::mouse_rel_y() as f32 * TACTICAL_TURN_PER_PIXEL_DEG).clamp(-85.0, 89.0);
+        }
+        let scroll = input::mouse_scroll_y();
+        if scroll != 0.0 && !app.is_paused && !over_ui {
+            orbit.distance = (orbit.distance * TACTICAL_ZOOM_STEP.powf(-scroll)).clamp(TACTICAL_MIN_DISTANCE, TACTICAL_MAX_DISTANCE);
+        }
+
+        let (yaw, pitch) = (orbit.yaw.to_radians(), orbit.pitch.to_radians());
+        let offset = Vector3::new(yaw.cos() * pitch.cos(), pitch.sin(), yaw.sin() * pitch.cos()) * orbit.distance;
+        let active = cameras.active_mut();
+        active.projection.fovy = TACTICAL_FOV;
+        active.projection.znear = 1.0;
+        active.camera.rotation_modifier = UnitQuaternion::identity();
+        active.camera.up = *Vector3::y_axis();
+        active.camera.set_position(Point3::from(target.position + offset));
+        active.camera.look_at(Point3::from(target.position));
+    }
+
+    pub fn leave_wreck_view(&mut self) {
+        if self.wreck_sea_level.take().is_none() {
+            return;
+        }
+        self.state = CameraState::Normal;
+        self.free_distance = FREE_DISTANCE;
     }
 
     pub fn snapshot_cinematic_return(&mut self, cameras: &SceneCameras) {
@@ -371,10 +456,16 @@ impl Camera {
 
 impl Behavior for Camera {
     fn update(&mut self, _node: &mut Node, cameras: &mut SceneCameras, app: &mut App, delta_time: f32) {
+        // F10 - the tactical map view takes over while it's up.
+        if self.tactical.is_some() {
+            self.update_tactical(cameras, app);
+            return;
+        }
+
         let look = LookInput::read();
-        // F8 frees the mouse for the debug overlay - it's clicking buttons
-        // then, not looking around (see App::debug_mouse_free).
-        let mouse = MouseLook::read(app.debug_mouse_free);
+        // F7 (or the F6 flight editor) frees the mouse - it's clicking
+        // buttons then, not looking around (see App::mouse_free).
+        let mouse = MouseLook::read(app.mouse_free());
         // Runs in every mode, so switching into the cockpit picks the head
         // up wherever the G has it rather than snapping from rest.
         self.head_motion.update(self.head_input, delta_time);
@@ -653,12 +744,6 @@ impl Behavior for Camera {
 
         if input::is_action_just_pressed("change_camera") && self.wreck_sea_level.is_none() {
             self.next_camera();
-        }
-        // F5 - offsets whichever named camera is already active (see
-        // final_position above).
-        if input::is_action_just_pressed("toggle_camera_offset_debug") {
-            self.debug_mode_active = !self.debug_mode_active;
-            println!("Camera debug mode: {}", if self.debug_mode_active { "ON" } else { "OFF" });
         }
     }
 }

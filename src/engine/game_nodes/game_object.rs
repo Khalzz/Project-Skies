@@ -43,6 +43,19 @@ pub enum ColliderType {
     // edges) - a good fit for irregular, concave static terrain (mountains,
     // ...) that no primitive shape approximates well.
     Trimesh { vertices: Vec<Vector3<f32>>, indices: Vec<[u32; 3]> },
+    // The smallest convex shape around `points` (in the body's frame) - a
+    // shape that follows an outline more closely than a box, still cheap
+    // and stable for a moving body. What a `Wing` resolves into.
+    ConvexHull { points: Vec<Vector3<f32>> },
+    // A plane's data.ron only: a thin slab following that wing's planform
+    // (its aero `shape` - taper, sweep, span), `thickness` meters thick -
+    // so the wing collides where it really is. Resolved into a `ConvexHull`
+    // when the plane loads (see AircraftSpec::load).
+    Wing { label: String, #[serde(default = "default_wing_thickness")] thickness: f32 },
+}
+
+fn default_wing_thickness() -> f32 {
+    0.25
 }
 
 #[derive(Debug, Deserialize, Clone)]

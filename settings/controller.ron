@@ -13,6 +13,7 @@
     "rudder_right",
     "throttle_up",
     "throttle_down",
+    "throttle_axis",
     "trim_pitch_up",
     "trim_pitch_down",
     "trim_roll_left",

@@ -33,6 +33,20 @@ use super::scene::Scene;
 /// One real gap, not handled here: removing a node doesn't shrink/rebuild the
 /// buffer back down - only growth (a node newly referencing a model) is
 /// covered, matching how far this system's been built out so far.
+/// Takes the node `id`'s instance off the renderer - the reverse of
+/// `register_static_model`. Its model stays loaded; the shared instance
+/// buffer keeps its size (the per-frame write just fills fewer slots), only
+/// the instance count drops.
+pub fn unregister_model(scene: &mut Scene, app: &mut App, id: &str) {
+    let Some(removed) = scene.content.renderizable_instances.remove(id) else { return };
+    let remaining = scene.content.renderizable_instances.values()
+        .filter(|instance| instance.model_ref == removed.model_ref)
+        .count() as u32;
+    if let Some(model) = app.game_models.get_mut(&removed.model_ref) {
+        model.instance_count = remaining;
+    }
+}
+
 pub fn register_static_model(scene: &mut Scene, app: &mut App, id: &str) -> Result<(), String> {
     let node = scene.content.nodes.get(id).ok_or_else(|| format!("no node named '{id}' to register"))?;
     let transform = *node.get_property::<Transform3D>().ok_or_else(|| format!("node '{id}' has no Transform3D property"))?;

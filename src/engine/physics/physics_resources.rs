@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use nalgebra::{vector, Point3, Unit, Vector3};
+use nalgebra::{vector, Point3, Unit, UnitQuaternion, Vector3};
 use rapier3d::prelude::*;
 
 use crate::engine::physics::physics_handler::PhysicsData;
@@ -38,6 +38,13 @@ pub(crate) fn compute_principal_inertia(mass: f32, center_of_mass: Vector3<f32>,
             half_extents: *half_extents,
             position: *position,
         }),
+        // Counted as the box around it - close enough for a thin wing slab.
+        game_object::ColliderType::ConvexHull { points } if !points.is_empty() => {
+            let (low, high) = points.iter().fold((points[0], points[0]), |(low, high), point| (low.inf(point), high.sup(point)));
+            let half = (high - low) * 0.5;
+            let center = (high + low) * 0.5;
+            Some(BoxPart { volume: 8.0 * half.x * half.y * half.z, half_extents: (half.x, half.y, half.z), position: (center.x, center.y, center.z) })
+        }
         _ => None,
     }).collect();
 
@@ -72,7 +79,7 @@ pub(crate) fn compute_principal_inertia(mass: f32, center_of_mass: Vector3<f32>,
 }
 
 /// A node's `Physics` property (see `engine::scene_manager::physics_bridge`)
-/// plus the position it was spawned at - the plain, `Send`-safe data the
+/// plus the position and rotation it was spawned at - the plain, `Send`-safe data the
 /// physics thread actually needs, extracted once at spawn time the same way
 /// `render_bridge::register_static_model` extracts `Transform3D`+`Model` into
 /// a plain `GameObject` for rendering. The physics thread never touches a
@@ -85,6 +92,7 @@ pub(crate) fn compute_principal_inertia(mass: f32, center_of_mass: Vector3<f32>,
 pub struct PhysicsObjectDef {
     pub id: String,
     pub position: Vector3<f32>,
+    pub rotation: UnitQuaternion<f32>,
     pub physics: game_object::Physics,
 }
 
@@ -117,6 +125,7 @@ pub fn load_physics_from_definitions(defs: &[PhysicsObjectDef], collider_set: &m
                 .build()
         };
 
+        rigid_body.set_rotation(def.rotation, true);
         rigid_body.set_linvel(def.physics.rigidbody.initial_velocity, true);
         let rigidbody_handle = rigidbody_set.insert(rigid_body);
 
@@ -130,6 +139,16 @@ pub fn load_physics_from_definitions(defs: &[PhysicsObjectDef], collider_set: &m
                 },
                 game_object::ColliderType::HalfSpace { normal } => {
                     ColliderBuilder::halfspace(Unit::new_normalize(*normal)).build()
+                },
+                game_object::ColliderType::ConvexHull { points } => {
+                    let points: Vec<Point3<f32>> = points.iter().map(|point| Point3::from(*point)).collect();
+                    match ColliderBuilder::convex_hull(&points) {
+                        Some(builder) => builder.build(),
+                        None => {
+                            eprintln!("convex collider for '{}' couldn't be built (its points are flat or too few)", def.id);
+                            continue;
+                        }
+                    }
                 },
                 game_object::ColliderType::Trimesh { vertices, indices } => {
                     let points: Vec<Point3<f32>> = vertices.iter().map(|v| Point3::from(*v)).collect();

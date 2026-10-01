@@ -7,3 +7,4 @@ pub mod ui;
 pub mod vertex;
 pub mod camera;
 pub mod egui_overlay;
+pub mod thick_lines;

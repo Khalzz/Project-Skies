@@ -133,7 +133,7 @@ pub struct Ui {
     // call for a given path, however many nodes end up referencing it.
     pub images: HashMap<String, UiImage>,
     pub image_draws: Vec<ImageDraw>,
-    // Toggled by "toggle_ui_debug" (F2, see App::run) - draws an outline at every
+    // Toggled by "toggle_ui_debug" (no key any more - set it, see App::run) - draws an outline at every
     // node's resolved rect, recursively, so layout bugs (like a hover hit-test not
     // lining up with what's visually drawn) can be seen directly.
     pub debug_bounds: bool,

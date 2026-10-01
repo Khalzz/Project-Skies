@@ -22,6 +22,8 @@ use super::messages::{AircraftEvent, AircraftState};
 use super::effects::{self, EffectKind, EffectSpec};
 use super::pilot::Pilot;
 use crate::engine::particles::ParticleEmitters;
+use crate::engine::physics::physics_handler::RenderMessage;
+use super::autopilot::Autopilot;
 use super::quick_list::QuickList;
 use super::quick_menu::{GearStatus, QuickAction, QuickMenuStatus};
 
@@ -31,6 +33,19 @@ use super::quick_menu::{GearStatus, QuickAction, QuickMenuStatus};
 /// itself - see messages.rs for everything the two halves exchange.
 pub struct Plane {
     pub controls: PlaneControls,
+    /// Flown by the player: reads the stick/keys and drives the quick menu
+    /// and the F7 overlay. A bot (false) does none of that - its controls
+    /// stay wherever they were set (see `bot`, `with_throttle`).
+    pub is_player: bool,
+    /// A bot's pilot - flies its path (see `set_path`). Unused while it's
+    /// the player's.
+    autopilot: Option<Autopilot>,
+    /// Where the throttle lever was when it last set the throttle (see
+    /// read_pilot_input) - `None` without one connected.
+    throttle_lever: Option<f32>,
+    /// Where the aircraft is and how it's turned, as physics last reported
+    /// (see `fixed_update`) - what the autopilot steers from.
+    pose: Option<(Vector3<f32>, UnitQuaternion<f32>)>,
     pub input_locked: bool,
     /// Hit the water - see `check_wreck`. Never cleared (a restart builds
     /// a new plane).
@@ -76,6 +91,10 @@ impl Plane {
     pub fn new() -> Self {
         Self {
             controls: PlaneControls::new(),
+            is_player: true,
+            autopilot: None,
+            throttle_lever: None,
+            pose: None,
             input_locked: false,
             wrecked: false,
             pilot: Pilot::new(),
@@ -90,6 +109,29 @@ impl Plane {
             gear_meshes: GearMeshes::new(),
             quick_menu: QuickList::new(),
         }
+    }
+
+    /// Not flown by the player - see `is_player`.
+    pub fn bot(mut self) -> Self {
+        self.is_player = false;
+        self
+    }
+
+    /// Gives a bot a path to fly (see autopilot) at `cruise_speed` (m/s),
+    /// from its first point - or, empty, none (it flies on as it is).
+    pub fn set_path(&mut self, path: &[(f32, f32, f32)], cruise_speed: f32) {
+        self.autopilot = (!path.is_empty()).then(|| Autopilot::new(path, cruise_speed));
+    }
+
+    /// The point of its path a bot is flying to - an index into its path.
+    pub fn next_path_point(&self) -> Option<usize> {
+        self.autopilot.as_ref().and_then(Autopilot::next_point)
+    }
+
+    /// Starts with the throttle at `throttle` (0..1).
+    pub fn with_throttle(mut self, throttle: f32) -> Self {
+        self.controls.throttle = throttle.clamp(0.0, 1.0);
+        self
     }
 
     /// What each of the node's emitters is - the plane's data.ron effects.
@@ -137,6 +179,18 @@ impl Plane {
 
         const THROTTLE_RATE: f32 = 0.5;
         self.controls.throttle = (self.controls.throttle + input::get_axis("throttle_down", "throttle_up") * THROTTLE_RATE * delta_time).clamp(0.0, 1.0);
+        // A throttle lever (a HOTAS throttle - "throttle_axis") sets the
+        // throttle to where it is whenever it moves; the keys/triggers above
+        // still nudge it while it doesn't.
+        const LEVER_MOVED: f32 = 0.002;
+        if let Some(lever) = input::absolute_value("throttle_axis") {
+            if self.throttle_lever.is_none_or(|last| (last - lever).abs() > LEVER_MOVED) {
+                self.controls.throttle = lever;
+                self.throttle_lever = Some(lever);
+            }
+        } else {
+            self.throttle_lever = None;
+        }
         self.controls.trim.update(delta_time);
 
         if input::is_action_just_pressed("toggle_fbw_pitch") {
@@ -327,6 +381,13 @@ impl Plane {
 }
 
 impl Behavior for Plane {
+    /// Keeps where physics says the aircraft is - for the autopilot.
+    fn fixed_update(&mut self, _node: &mut Node, _cameras: &mut SceneCameras, _app: &mut App, _dt: f32, physics_message: Option<&RenderMessage>) {
+        if let Some(message) = physics_message {
+            self.pose = Some((message.translation, UnitQuaternion::new_normalize(message.rotation)));
+        }
+    }
+
     fn update(&mut self, node: &mut Node, _cameras: &mut SceneCameras, app: &mut App, delta_time: f32) {
         // 1. Input → physics half.
         self.update_pilot(node, app, delta_time);
@@ -334,7 +395,16 @@ impl Behavior for Plane {
         if !app.is_paused {
             self.update_effects(node, delta_time);
         }
-        if !self.input_locked && !self.wrecked && !self.pilot.is_unconscious() {
+        if !self.is_player {
+            // A bot: its autopilot flies its path; without one its controls
+            // are left as they are.
+            let flight_data = node.physics_state::<AircraftState>().map(|state| state.flight_data.clone());
+            if let (Some(autopilot), Some((position, rotation)), Some(flight_data)) = (&mut self.autopilot, self.pose, flight_data) {
+                if !self.wrecked && !app.is_paused {
+                    autopilot.fly(&mut self.controls, position, rotation, &flight_data, delta_time);
+                }
+            }
+        } else if !self.input_locked && !self.wrecked && !self.pilot.is_unconscious() {
             self.read_pilot_input(node, delta_time);
         } else if self.pilot.is_unconscious() {
             // Passed out: stick and pedals straight back to center, held
@@ -347,7 +417,9 @@ impl Behavior for Plane {
             self.controls.aileron = self.controls.trim.roll;
             self.controls.rudder = 0.0;
         }
-        self.update_quick_menu(node, app);
+        if self.is_player {
+            self.update_quick_menu(node, app);
+        }
         self.controls.fly_by_wire_pitch_autotrim = self.fcs.pitch_autotrim;
         node.set_physics_input(self.controls.clone());
 
@@ -381,7 +453,7 @@ impl Behavior for Plane {
         if let Some(state) = state {
             self.gear_meshes.place(model, &state.wheels, state.gear_deploy, scale, &app.renderer.queue);
 
-            if app.debug_overlay_visible() {
+            if self.is_player && app.debug_overlay_visible() {
                 Self::record_aero_debug_trail(app, state, &self.controls, delta_time);
             }
         }

@@ -44,7 +44,7 @@ pub fn register_physics_body(scene: &mut Scene, id: &str) -> Result<(), String> 
         .map(|collider| resolve_collider(collider, geometry_scale, id))
         .collect();
 
-    scene.content.physics_bodies.push(PhysicsObjectDef { id: id.to_owned(), position: transform.position, physics });
+    scene.content.physics_bodies.push(PhysicsObjectDef { id: id.to_owned(), position: transform.position, rotation: transform.rotation, physics });
 
     Ok(())
 }

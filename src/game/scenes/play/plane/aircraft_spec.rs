@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::engine::game_nodes::game_object::Physics;
+use crate::engine::game_nodes::game_object::{ColliderType, Physics};
 
 use super::aero_spec::AeroSpec;
 use super::engine::EngineSpec;
@@ -81,6 +81,26 @@ impl AircraftSpec {
         Path::new(PLANES_DIR).join(name).join("data.ron")
     }
 
+    /// Every plane folder under assets/planes/ that loads, sorted - what a
+    /// map's aircraft can be (see play::flight_editor). Ones that don't load
+    /// are reported and left out.
+    pub fn available() -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(PLANES_DIR) else { return Vec::new() };
+        let mut planes: Vec<String> = entries.filter_map(Result::ok)
+            .filter(|entry| entry.path().join("data.ron").is_file())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| match Self::load(name) {
+                Ok(_) => true,
+                Err(error) => {
+                    eprintln!("{error} - not offered in the flight editor");
+                    false
+                }
+            })
+            .collect();
+        planes.sort();
+        planes
+    }
+
     /// Loads the plane in `assets/planes/<name>/`, from its `data.ron`. Its
     /// model file is looked up inside that same folder: `model: (model:
     /// "model/f16.glb", ...)` in `assets/planes/f16/data.ron` is
@@ -115,6 +135,22 @@ impl AircraftSpec {
             wing.airfoil_path = table.to_string_lossy().into_owned();
         }
 
+        // Wing colliders follow their wing's shape.
+        let mut physics = data.physics;
+        for collider in &mut physics.colliders {
+            let ColliderType::Wing { label, thickness } = collider else { continue };
+            let wing = aero.wings.iter().find(|wing| wing.label == *label)
+                .ok_or_else(|| format!("plane '{name}': collider Wing(label: \"{label}\") - no wing has that label"))?;
+            let shape = wing.shape.as_ref()
+                .ok_or_else(|| format!("plane '{name}': collider Wing(label: \"{label}\") - that wing has no `shape` to follow"))?;
+            // The planform's corners, pushed half the thickness either way
+            // across the wing (perpendicular to its span and to the chord).
+            let across = shape.span_axis(&wing.normal).cross(&nalgebra::Vector3::z()).try_normalize(1e-6).unwrap_or_else(nalgebra::Vector3::y);
+            let half = across * (*thickness * 0.5);
+            let points = shape.corners(&wing.normal).iter().flat_map(|corner| [corner + half, corner - half]).collect();
+            *collider = ColliderType::ConvexHull { points };
+        }
+
         Ok(AircraftSpec {
             name: name.to_owned(),
             model: Model {
@@ -122,7 +158,7 @@ impl AircraftSpec {
                 scale: data.model.scale,
                 double_sided: data.model.double_sided,
             },
-            physics: data.physics,
+            physics,
             aero,
             engine: data.engine,
             gear: data.gear,

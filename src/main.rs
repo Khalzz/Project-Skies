@@ -27,6 +27,10 @@ pub mod game;
 /// resources::PrimitiveShape::WaterRings.
 pub const OCEAN_SURFACE_MODEL: &str = "OceanSurface";
 
+/// A tiny generated cube for nodes that have to be in the render world but
+/// are never drawn (the "sun") - see `main`.
+pub const MARKER_MODEL: &str = "Marker";
+
 /// The ocean surface's altitude tiers (see resources::WaterTier), each 6
 /// rings, innermost first (see resources::build_water_rings_mesh): the
 /// rings fine enough to physically move the water (out to ~8 km below 4 km
@@ -106,15 +110,23 @@ async fn main() -> Result<(), String> {
                 eprintln!("{e}");
             }
             app.water_shaded_models.insert(OCEAN_SURFACE_MODEL.to_owned());
+            // A stand-in model for nodes that need to exist in the render
+            // world but are never drawn - e.g. the "sun" (only its position
+            // is read, see App::run's lighting). Generated, so free to load.
+            if let Err(e) = resources::register_primitive_model(&mut app, MARKER_MODEL, resources::PrimitiveShape::Cube) {
+                eprintln!("{e}");
+            }
             app.water.set_tier_altitudes(OCEAN_TIERS.iter().map(|tier| tier.min_altitude).collect());
             app.scene_manager.create_loaded_scene(
                 "playing",
                 // Play uses the procedural clear-day sea sky (see sky.wgsl)
                 // instead of the cubemap - default_skybox() is still used by
                 // main_menu / sandbox below.
-                |device, queue, layout, config| play::scene::GameLogic::prepare(device, queue, layout, config, Environment::ProceduralSky),
+                |device, queue, layout, config, reporter| play::scene::GameLogic::prepare(device, queue, layout, config, reporter, Environment::ProceduralSky),
                 play::scene::GameLogic::finish,
             );
+            // Its models load under its loading screen, not as it spawns them.
+            app.scene_manager.preload_models("playing", play::scene::GameLogic::models);
             app.scene_manager.create_scene("main_menu", |scene, app| main_menu::scene::GameLogic::new(scene, app, default_skybox()));
             app.scene_manager.create_scene("sandbox", |scene, app| sandbox::scene::GameLogic::new(scene, app, default_skybox()));
             // Follow-point camera testbed - island/water/sky + a static MQ-9

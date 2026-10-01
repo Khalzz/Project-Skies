@@ -25,7 +25,7 @@ use crate::engine::game_nodes::timing::Timing;
 use crate::engine::rendering::enviroment::light::Light;
 use crate::engine::rendering::models::model::{self, Mesh, Model, Vertex};
 use crate::engine::rendering::renderer::Renderer;
-use crate::engine::scene_manager::scene::{FrameContext, PendingSceneLoad, Scene, SceneManager};
+use crate::engine::scene_manager::scene::{FrameContext, LoadReporter, LoadedAssets, PendingSceneLoad, Scene, SceneManager};
 use crate::engine::splash_screen::SplashScreenConfig;
 use crate::engine::input::input;
 use crate::engine::rendering::ui::physics_rendering::RenderPhysics;
@@ -35,6 +35,7 @@ use crate::engine::ui::color::UiColor;
 use crate::engine::ui::ui_node::UiNode;
 use crate::engine::ui::ui_transform::PositionValue;
 use crate::game::scenes::loading::scene::{LoadingScreenScene, FADE_OUT_SECS, PANEL_KEY};
+use crate::game::scenes::play::flight_editor::FlightEditor;
 use crate::resources;
 use crate::engine::window::window::{WindowManager, WindowSettings};
 
@@ -77,10 +78,13 @@ pub struct App {
     // selection and WaterRenderData's own doc comment.
     pub water: WaterRenderData,
     pub water_shaded_models: HashSet<String>,
+    // What a scene's background load is on right now (see LoadReporter) -
+    // shown by the loading screen, None when nothing's loading.
+    pub loading_step: Option<String>,
     // GPU particles and trails, fed each frame from every node's
     // ParticleEmitters property (see App::update_particles).
     pub particles: ParticleRenderer,
-    // Debug view (F6, see settings/input.ron) - when true, render_water_pass
+    // Debug view (no key any more) - when true, render_water_pass
     // skips drawing any model_ref listed in water_debug_hidden_models below.
     // Everything else (terrain, player, the rest of water_shaded_models)
     // keeps drawing normally - this hides specific water surfaces you want
@@ -90,18 +94,39 @@ pub struct App {
     // empty today (it used to hide the old far water plane, which the single
     // ocean ring mesh replaced); fill it to hide a water surface while tuning.
     pub water_debug_hidden_models: HashSet<String>,
-    // F7 (see settings/input.ron) - toggles a live in-window debug overlay
+    // No key any more - toggles a live in-window debug overlay
     // (see egui_overlay field below, and render_pass.rs's own
     // render_aero_debug_overlay_pass) showing rolling_rate's theoretical
     // max-roll-rate curve (deg/s) plus a rolling trail of the player's own
     // actual measured (airspeed, aoa_y, roll_rate) samples, so the two can
     // be compared visually while actually flying.
     pub show_aero_debug_overlay: bool,
-    // F8 (see play::scene::GameLogic::update) - frees the mouse for the
+    // F7 (see play::scene::GameLogic::update) - frees the mouse for the
     // debug overlay: cursor shown, and the play camera ignores mouse look/
     // scroll so the overlay's buttons can be clicked mid-flight. Also shows
-    // the overlay, same as F7 - see `debug_overlay_visible`.
+    // the overlay - see `debug_overlay_visible`.
     pub debug_mouse_free: bool,
+    // F6 (see play::scene::GameLogic::update_flight_editor) - the live map
+    // editor, drawn by the same egui overlay pass. Frees the mouse while
+    // open, like F7 (see `mouse_free`).
+    pub flight_editor: FlightEditor,
+    // F10 (see play::tactical_map) - while set, the world isn't drawn: a
+    // dark screen and `thick_lines` instead (see render_tactical_map_pass).
+    pub tactical_map_active: bool,
+    // Lines a fixed number of pixels thick (see engine::rendering::
+    // thick_lines) - what the tactical map is drawn with.
+    pub thick_lines: crate::engine::rendering::thick_lines::ThickLines,
+    // The mouse buttons (primary, secondary, middle) as last told to egui -
+    // it's only told when one goes down or up (see render_aero_debug_overlay_pass).
+    pub egui_buttons_down: [bool; 3],
+    // Lines the game wants drawn in the world this frame (world-space
+    // endpoints, see ManualVertex) - drawn with the F5 physics lines' pipeline
+    // but whether F5 is on or not, over everything. Whoever fills it clears
+    // it (see play::scene::GameLogic::update_flight_editor's paths).
+    pub world_lines: Vec<[crate::engine::primitive::manual_vertex::ManualVertex; 2]>,
+    // The node id of the aircraft the player flies (see play::map's
+    // `player`) - kept up to date by the play scene, for the F7 windows.
+    pub player_node: String,
     // Which of the overlay's windows are open - toggled from its "Debug
     // Windows" panel or each window's own close button.
     pub debug_windows: DebugWindows,
@@ -290,6 +315,7 @@ impl App {
 
         // physics rendering
         let render_physics = RenderPhysics::new(&renderer.device, &renderer.config, &camera_resources);
+        let thick_lines = crate::engine::rendering::thick_lines::ThickLines::new(&renderer.device, renderer.config.format, &camera_resources);
 
         let egui_overlay = crate::engine::rendering::egui_overlay::EguiOverlay::new(&renderer.device, renderer.config.format);
 
@@ -306,11 +332,18 @@ impl App {
             render_pipeline_transparent_front_cull,
             water,
             water_shaded_models: HashSet::new(),
+            loading_step: None,
             particles,
             water_debug_view: false,
             water_debug_hidden_models: HashSet::new(),
             show_aero_debug_overlay: false,
             debug_mouse_free: false,
+            flight_editor: FlightEditor::default(),
+            tactical_map_active: false,
+            thick_lines,
+            egui_buttons_down: [false; 3],
+            world_lines: Vec::new(),
+            player_node: "player".to_owned(),
             debug_windows: DebugWindows::default(),
             aero_debug_trail: std::collections::VecDeque::new(),
             wing_lift_trail: std::collections::VecDeque::new(),
@@ -479,7 +512,13 @@ impl App {
         self.ui.has_changed = true;
     }
 
-    /// Whether the F7/F8 debug overlay is up - either key shows it.
+    /// Whether the mouse is a pointer for clicking debug windows (F7, or the
+    /// F6 flight editor open) instead of looking around.
+    pub fn mouse_free(&self) -> bool {
+        self.debug_mouse_free || self.flight_editor.open
+    }
+
+    /// Whether the F7 debug overlay is up.
     pub fn debug_overlay_visible(&self) -> bool {
         self.show_aero_debug_overlay || self.debug_mouse_free
     }
@@ -548,7 +587,7 @@ impl App {
         // mouse position) is in. See Label::text_area's own doc comment.
         let dpi_scale = self.window_manager.pixel_size.width as f32 / self.window_manager.size.width as f32;
 
-        // Debug bounds overlay (F2) - has to run before node_content_preparation
+        // Debug bounds overlay (Ui::debug_bounds, no key) - has to run before node_content_preparation
         // below, not after: that call's returned TextAreas keep *ui_node mutably
         // borrowed for as long as they're alive (all the way to text_areas being
         // consumed further down), so nothing else can borrow *ui_node again
@@ -677,7 +716,7 @@ impl App {
         // singleton without partially moving self, which self stays borrowed as a
         // whole for the rest of this function.
         let controller_subsystem = self.window_manager.context.game_controller().unwrap();
-        input::init(include_str!("../settings/input.ron"), controller_subsystem);
+        input::init(include_str!("../settings/input.ron"), controller_subsystem, self.joystick_subsystem.clone());
 
         self.run_splash_screen(&mut event_pump);
 
@@ -729,7 +768,13 @@ impl App {
                 // Models don't carry over either - each level loads the ones
                 // it uses when it spawns them (see resources::
                 // load_scene_model), and they're dropped here.
-                resources::unload_level_models(&mut self);
+                //
+                // Except what the scene opening now uses too (see SceneManager::
+                // preload_models): those stay, and aren't loaded again - a
+                // restart of the same level reloads no models at all.
+                let preload = self.scene_manager.preload_for(&active).map(|models| models(&self)).unwrap_or_default();
+                let keep: HashSet<String> = preload.iter().map(|source| source.key()).collect();
+                resources::unload_level_models(&mut self, &keep);
 
                 // The code-first entity system's nodes, the renderable
                 // instances they/data.ron put up, AND every camera the scene
@@ -801,15 +846,35 @@ impl App {
                     let camera_bind_group_layout = self.camera_resources.bind_group_layout.clone();
                     let config = self.renderer.config.clone();
                     let prepare = spec.prepare.clone();
+                    // The models it spawns (see SceneManager::preload_models)
+                    // load on the same thread, under the loading screen.
+                    // Only the ones not still loaded from the last scene.
+                    let models: Vec<_> = preload.into_iter().filter(|source| !self.loaded_models.contains_key(&source.key())).collect();
 
                     let (tx, rx) = std::sync::mpsc::channel();
+                    let (progress_tx, progress_rx) = std::sync::mpsc::channel();
+                    let scene_name = active.clone();
                     std::thread::spawn(move || {
-                        let prepared = prepare(&device, &queue, &camera_bind_group_layout, &config);
-                        let _ = tx.send(prepared);
+                        // Names each step on the loading screen and times it
+                        // (logged, slowest first, at the end - see LoadReporter).
+                        let reporter = LoadReporter::new(&scene_name, progress_tx);
+                        let prepared = prepare(&device, &queue, &camera_bind_group_layout, &config, &reporter);
+                        let mesh_layout = Mesh::create_bind_group_layout(&device);
+                        let models = models.into_iter()
+                            .map(|source| {
+                                let key = source.key();
+                                reporter.step(format!("Model {key}"));
+                                let model = source.load(&device, &queue, &mesh_layout).map_err(|error| format!("failed to load model '{key}': {error}"));
+                                (key, model)
+                            })
+                            .collect();
+                        reporter.finish();
+                        let _ = tx.send(LoadedAssets { prepared, models });
                     });
+                    self.loading_step = None;
 
                     self.scene_manager.active_scene = Some(Scene::new(&self).set_scene_behaviour(LoadingScreenScene::new(&mut self)));
-                    self.scene_manager.loading = Some(PendingSceneLoad { receiver: rx, finish: spec.finish.clone(), ready: None });
+                    self.scene_manager.loading = Some(PendingSceneLoad { receiver: rx, progress: progress_rx, finish: spec.finish.clone(), ready: None });
                 } else {
                     eprintln!("No scene registered for state '{}'", active);
                 }
@@ -826,6 +891,10 @@ impl App {
                 // LoadingScreenScene the reset branch put there, so this and every
                 // frame in between still renders normally.
                 if let Some(pending) = self.scene_manager.loading.as_mut() {
+                    // What it's on now, for the loading screen to show.
+                    while let Ok(step) = pending.progress.try_recv() {
+                        self.loading_step = Some(step);
+                    }
                     if pending.ready.is_none() {
                         if let Ok(prepared) = pending.receiver.try_recv() {
                             pending.ready = Some((prepared, 0.0));
@@ -836,7 +905,7 @@ impl App {
                 // Request physics data from physics thread, only if the active
                 // scene actually has one running.
                 let physics_data = if let Some(physics) = &physics_data_channel {
-                    // Toggle physics debug lines with F2 - just flips the
+                    // Toggle physics debug lines with F5 - just flips the
                     // render side; the request below asks the physics thread
                     // for lines only while it's on.
                     if input::is_action_just_pressed("toggle_debug") {
@@ -847,12 +916,6 @@ impl App {
                         eprintln!("Failed to send physics command: {}", e);
                     }
 
-                    // Toggle physics pause with F12
-                    if input::is_action_just_pressed("toggle_pause") {
-                        if let Err(e) = physics.request_data_tx.send(PhysicsCommand::TogglePause) {
-                            eprintln!("Failed to send toggle pause command: {}", e);
-                        }
-                    }
 
                     // Recibimos los datos del otro thread
                     let physics_data = match physics.physics_data_rx.try_recv() {
@@ -873,25 +936,9 @@ impl App {
                     HashMap::new()
                 };
 
-                // Toggle console independently with F3
-                if input::is_action_just_pressed("toggle_console") {
-                    crate::engine::tooling::debug_console::toggle_console();
-                }
-
-                // F9 - freeze/unfreeze ocean culling at the current view (see
-                // WaterRenderData::toggle_culling_freeze).
-                if input::is_action_just_pressed("toggle_ocean_cull_freeze") {
-                    self.water.toggle_culling_freeze();
-                }
-
-                // Toggle UI bounds overlay with F2 - force a rebuild on the toggle
-                // frame so it appears/disappears immediately, and every frame after
-                // while it's on, since the overlay has to track wherever nodes
-                // actually are right now, not just whenever something else last
-                // marked the UI dirty.
-                if input::is_action_just_pressed("toggle_ui_debug") {
-                    self.ui.debug_bounds = !self.ui.debug_bounds;
-                }
+                // The UI bounds overlay (no key any more - set Ui::debug_bounds) -
+                // rebuilt every frame while it's on, since it has to track
+                // wherever nodes actually are right now.
                 if self.ui.debug_bounds {
                     self.ui.has_changed = true;
                 }
@@ -1018,8 +1065,15 @@ impl App {
                             self.ui.always_on_bottom.clear();
                             self.ui.has_changed = true;
 
-                            let mut scene = (pending.finish)(&mut self, prepared);
+                            // Its models are loaded already - spawning finds them.
+                            resources::adopt_level_models(&mut self, prepared.models);
+                            // Spawning the scene (its finish) is on this thread
+                            // - timed too, so it's in the load log.
+                            let spawn_started = Instant::now();
+                            let mut scene = (pending.finish)(&mut self, prepared.prepared);
                             scene.run_on_spawn(&mut self);
+                            println!("[load {}] spawning the scene: {:.0} ms", self.scene_manager.active, spawn_started.elapsed().as_secs_f64() * 1000.0);
+                            self.loading_step = None;
 
                             if !scene.cameras.has_active_camera() {
                                 eprintln!("scene didn't create a camera - showing the fallback \"Add a camera to the scene\" screen");

@@ -76,7 +76,7 @@ pub struct WaterContact {
     sinking: Option<(f32, f32)>,
     time_since_impact: f32,
     state: WaterContactState,
-    /// Last step's (point, force) per submerged point, for the F2 overlay.
+    /// Last step's (point, force) per submerged point, for the F5 overlay.
     debug_forces: Vec<(Vector3<f32>, Vector3<f32>)>,
 }
 
@@ -116,6 +116,9 @@ struct ContactPoint {
     /// The box's half extents and rotation, to find its area facing a flow.
     half_extents: Vector3<f32>,
     rotation: nalgebra::UnitQuaternion<f32>,
+    /// Its share of the box, in eighths - 1 for a box's corner; a convex
+    /// shape's box shared among however many corners it has.
+    share: f32,
 }
 
 impl ContactPoint {
@@ -124,19 +127,19 @@ impl ContactPoint {
         let local = self.rotation.inverse() * direction;
         let h = self.half_extents;
         // A box's silhouette along unit `local` is 4(hy·hz|x| + hx·hz|y| + hx·hy|z|).
-        0.5 * (h.y * h.z * local.x.abs() + h.x * h.z * local.y.abs() + h.x * h.y * local.z.abs())
+        0.5 * (h.y * h.z * local.x.abs() + h.x * h.z * local.y.abs() + h.x * h.y * local.z.abs()) * self.share
     }
 
     /// This corner's eighth of the box's whole surface.
     fn skin_area(&self) -> f32 {
         let h = self.half_extents;
-        h.x * h.y + h.y * h.z + h.x * h.z
+        (h.x * h.y + h.y * h.z + h.x * h.z) * self.share
     }
 
     /// This corner's eighth of the box's volume.
     fn volume(&self) -> f32 {
         let h = self.half_extents;
-        h.x * h.y * h.z
+        h.x * h.y * h.z * self.share
     }
 }
 
@@ -167,19 +170,31 @@ impl PhysicsBehavior for WaterContact {
         let mut points = Vec::new();
         for (index, handle) in body.colliders().iter().enumerate() {
             let Some(collider) = ctx.colliders.get(*handle) else { continue };
-            let Some(cuboid) = collider.shape().as_cuboid() else { continue };
             let pose = match collider.position_wrt_parent() {
                 Some(relative) => body_pose * relative,
                 None => *collider.position(),
             };
-            let h = cuboid.half_extents;
-            for corner in 0..8 {
-                let local = Point3::new(
-                    if corner & 1 == 0 { -h.x } else { h.x },
-                    if corner & 2 == 0 { -h.y } else { h.y },
-                    if corner & 4 == 0 { -h.z } else { h.z },
-                );
-                points.push(ContactPoint { position: (pose * local).coords, collider: index, half_extents: h, rotation: pose.rotation });
+            if let Some(cuboid) = collider.shape().as_cuboid() {
+                let h = cuboid.half_extents;
+                for corner in 0..8 {
+                    let local = Point3::new(
+                        if corner & 1 == 0 { -h.x } else { h.x },
+                        if corner & 2 == 0 { -h.y } else { h.y },
+                        if corner & 4 == 0 { -h.z } else { h.z },
+                    );
+                    points.push(ContactPoint { position: (pose * local).coords, collider: index, half_extents: h, rotation: pose.rotation, share: 1.0 });
+                }
+            } else if let Some(hull) = collider.shape().as_convex_polyhedron() {
+                // A convex shape (a wing following its planform): each of its
+                // corners, sharing the box around it.
+                let corners = hull.points();
+                let Some(first) = corners.first() else { continue };
+                let (low, high) = corners.iter().fold((first.coords, first.coords), |(low, high), point| (low.inf(&point.coords), high.sup(&point.coords)));
+                let h = (high - low) * 0.5;
+                let share = 8.0 / corners.len() as f32;
+                for corner in corners {
+                    points.push(ContactPoint { position: (pose * corner).coords, collider: index, half_extents: h, rotation: pose.rotation, share });
+                }
             }
         }
 

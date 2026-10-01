@@ -234,7 +234,7 @@ const RATE_CHART_MAX_MACH: f64 = 2.0;
 
 const ZERO_SAMPLE: AeroSample = AeroSample { speed_kt: 0.0, mach: 0.0, aoa_deg: 0.0, altitude_m: 0.0, roll_rate: 0.0, pitch_rate: 0.0, yaw_rate: 0.0, climb_rate: 0.0, aileron: 0.0, pitch_stick: 0.0, rudder: 0.0, up_alignment: 1.0 };
 
-/// Which of the F7/F8 debug overlay's windows are open (see
+/// Which of the F7 debug overlay's windows are open (see
 /// `App::debug_windows`) - all of them to begin with.
 #[derive(Clone)]
 pub struct DebugWindows {
@@ -269,6 +269,38 @@ impl DebugWindows {
             ("Wing Lift Forces", &mut self.wing_lift),
             ("Wing Surfaces", &mut self.wing_surfaces),
         ]
+    }
+}
+
+/// SDL typing (see input::TypedInput) as egui input - the characters, and
+/// the keys a text field edits with. Anything else is left out.
+fn egui_typing_event(typed: &input::TypedInput) -> Option<egui::Event> {
+    use sdl2::keyboard::Keycode;
+    match typed {
+        input::TypedInput::Text(text) => Some(egui::Event::Text(text.clone())),
+        input::TypedInput::Key { key, pressed, repeat, ctrl, shift } => {
+            let key = match *key {
+                Keycode::Backspace => egui::Key::Backspace,
+                Keycode::Delete => egui::Key::Delete,
+                Keycode::Left => egui::Key::ArrowLeft,
+                Keycode::Right => egui::Key::ArrowRight,
+                Keycode::Up => egui::Key::ArrowUp,
+                Keycode::Down => egui::Key::ArrowDown,
+                Keycode::Home => egui::Key::Home,
+                Keycode::End => egui::Key::End,
+                Keycode::Return | Keycode::KpEnter => egui::Key::Enter,
+                Keycode::Tab => egui::Key::Tab,
+                Keycode::Escape => egui::Key::Escape,
+                Keycode::A => egui::Key::A,
+                Keycode::C => egui::Key::C,
+                Keycode::V => egui::Key::V,
+                Keycode::X => egui::Key::X,
+                Keycode::Z => egui::Key::Z,
+                _ => return None,
+            };
+            let modifiers = egui::Modifiers { ctrl: *ctrl, command: *ctrl, shift: *shift, ..Default::default() };
+            Some(egui::Event::Key { key, physical_key: None, pressed: *pressed, repeat: *repeat, modifiers })
+        }
     }
 }
 
@@ -523,7 +555,7 @@ impl App {
         render_pass.set_bind_group(0, &self.render_physics.bind_group, &[]);
         render_pass.set_bind_group(1, &self.camera_resources.bind_group, &[]);
 
-        if !self.show_depth_map && self.render_physics.visible {
+        if !self.show_depth_map && (self.render_physics.visible || !self.world_lines.is_empty()) {
             self.render_physics_debug_lines(&mut render_pass);
         }
 
@@ -591,8 +623,13 @@ impl App {
     // button + scroll) - just enough for egui_plot's own pan/zoom/hover,
     // not full egui interactivity (no keyboard/text - this is a read-only
     // debug view).
+    //
+    // Also draws the F6 flight editor (see play::flight_editor) - one egui
+    // frame for both, with keyboard typing fed in too while the editor is
+    // open (its text fields need it).
     fn render_aero_debug_overlay_pass(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
-        if !self.debug_overlay_visible() {
+        let show_debug = self.debug_overlay_visible();
+        if !show_debug && !self.flight_editor.open {
             return;
         }
 
@@ -619,16 +656,10 @@ impl App {
         let debug_info_default_x = (logical_size[0] as f32 - 300.0).max(20.0);
         let aero_chart_default_x = (logical_size[0] as f32 - 580.0).max(20.0);
         let pointer_pos = egui::pos2(input::mouse_x() as f32, input::mouse_y() as f32);
-        let raw_input = egui::RawInput {
+        let mut raw_input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(logical_size[0] as f32, logical_size[1] as f32))),
             events: vec![
                 egui::Event::PointerMoved(pointer_pos),
-                egui::Event::PointerButton {
-                    pos: pointer_pos,
-                    button: egui::PointerButton::Primary,
-                    pressed: input::mouse_left_button_down(),
-                    modifiers: egui::Modifiers::default(),
-                },
                 egui::Event::MouseWheel {
                     unit: egui::MouseWheelUnit::Line,
                     delta: egui::vec2(0.0, input::mouse_scroll_y()),
@@ -637,6 +668,26 @@ impl App {
             ],
             ..Default::default()
         };
+        // Held Shift/Ctrl - e.g. the F6 map's faster height step.
+        let (shift, ctrl) = (input::shift_down(), input::ctrl_down());
+        raw_input.modifiers = egui::Modifiers { shift, ctrl, command: ctrl, ..Default::default() };
+
+        // Buttons only when they go down or up - egui takes every "pressed"
+        // as a new press, which would restart a drag every frame.
+        let buttons = [
+            (egui::PointerButton::Primary, input::mouse_left_button_down()),
+            (egui::PointerButton::Secondary, input::mouse_right_button_down()),
+            (egui::PointerButton::Middle, input::mouse_middle_button_down()),
+        ];
+        for (index, (button, down)) in buttons.into_iter().enumerate() {
+            if down != self.egui_buttons_down[index] {
+                self.egui_buttons_down[index] = down;
+                raw_input.events.push(egui::Event::PointerButton { pos: pointer_pos, button, pressed: down, modifiers: egui::Modifiers::default() });
+            }
+        }
+        if self.flight_editor.open {
+            raw_input.events.extend(input::typed_input().iter().filter_map(egui_typing_event));
+        }
 
         // The F7 "Flight Rates" window's samples - copied out for the
         // closure below (it can't borrow `self`).
@@ -658,17 +709,17 @@ impl App {
         // cheap field reads, not a real per-frame cost.
         let fps = self.time.get_fps();
         let player_position = self.scene_manager.content()
-            .and_then(|content| content.renderizable_instances.get("player"))
+            .and_then(|content| content.renderizable_instances.get(self.player_node.as_str()))
             .map(|instance| instance.instance.transform.position);
         let flight_data = self.scene_manager.content()
-            .and_then(|content| content.nodes.get("player"))
+            .and_then(|content| content.nodes.get(self.player_node.as_str()))
             .and_then(|node| Some((node.get_behavior::<Plane>()?, &node.physics_state::<AircraftState>()?.flight_data)))
             .map(|(plane, f)| (plane.controls.throttle, f.speedometer, f.altimeter, f.mach, f.g_meter, f.aoa_x, f.aoa_y, f.aoa, f.roll_rate, f.pitch_rate, f.yaw_rate, f.stall, plane.controls.aileron, plane.controls.elevator, plane.controls.rudder, plane.controls.trim.roll, plane.controls.trim.pitch, plane.controls.trim.yaw));
 
         // G Forces window: (lateral_g, longitudinal_g, body_g) - see
         // FlightData's own.
         let g_forces = self.scene_manager.content()
-            .and_then(|content| content.nodes.get("player"))
+            .and_then(|content| content.nodes.get(self.player_node.as_str()))
             .and_then(|node| node.physics_state::<AircraftState>())
             .map(|state| (state.flight_data.lateral_g, state.flight_data.longitudinal_g, state.flight_data.body_g));
         // Pitch Rate window: x = seconds relative to the newest sample (so
@@ -706,6 +757,8 @@ impl App {
         // How far the editor's held nudge buttons move the camera this frame
         // (units/s - same speed as F5's own keys, see Camera::update).
         let nudge_step = 2.0 * self.time.delta_time;
+        // Taken out for the closure below, put back after render().
+        let mut flight_editor = std::mem::take(&mut self.flight_editor);
 
         self.egui_overlay.render(
             &self.renderer.device,
@@ -716,13 +769,20 @@ impl App {
             pixels_per_point,
             raw_input,
             |ctx| {
+                if flight_editor.open {
+                    flight_editor.draw(ctx);
+                }
+                if !show_debug {
+                    return;
+                }
+
                 // Pinned to the right edge: opens/closes every other window.
                 egui::Window::new("Debug Windows")
                     .anchor(egui::Align2::RIGHT_CENTER, egui::vec2(-10.0, 0.0))
                     .collapsible(false)
                     .resizable(false)
                     .show(ctx, |ui| {
-                        ui.label(if mouse_free { "F8: mouse free (click away)" } else { "F8: free the mouse to click" });
+                        ui.label(if mouse_free { "F7: mouse free (click away)" } else { "F7: free the mouse to click" });
                         ui.separator();
                         for (name, open) in windows.entries() {
                             ui.toggle_value(open, name);
@@ -789,7 +849,7 @@ impl App {
                         ui.separator();
 
                         let mut active_mut = active;
-                        if ui.checkbox(&mut active_mut, "Editor active (also F5)").changed() {
+                        if ui.checkbox(&mut active_mut, "Editor active").changed() {
                             camera_set_active = Some(active_mut);
                         }
                         if ui.button("Reset nudge").clicked() {
@@ -1287,6 +1347,8 @@ impl App {
 
         self.debug_windows = windows;
 
+        self.flight_editor = flight_editor;
+
         if let Some(text) = clipboard_text {
             match self.window_manager.context.video().and_then(|video| video.clipboard().set_clipboard_text(&text)) {
                 Ok(()) => println!("Camera values copied to clipboard:\n{text}"),
@@ -1318,10 +1380,13 @@ impl App {
     }
 
     // Debug lines come from the physics thread in absolute world coordinates,
-    // so make them camera-relative here to match camera.view_proj.
+    // so make them camera-relative here to match camera.view_proj. The
+    // physics thread's only while F5 is on; the game's own (App::world_lines)
+    // always.
     fn render_physics_debug_lines<'rp>(&mut self, render_pass: &mut wgpu::RenderPass<'rp>) {
         let camera_position = self.scene_manager.cameras().map(|c| c.active().camera.position()).unwrap_or_else(nalgebra::Point3::origin);
-        let vertices: Vec<ManualVertex> = self.render_physics.renderizable_lines.iter()
+        let physics_lines: &[[ManualVertex; 2]] = if self.render_physics.visible { &self.render_physics.renderizable_lines } else { &[] };
+        let vertices: Vec<ManualVertex> = physics_lines.iter().chain(&self.world_lines)
             .flat_map(|line| line.to_vec())
             .map(|mut vertex| {
                 vertex.position[0] -= camera_position.x;
@@ -1344,21 +1409,12 @@ impl App {
         self.render_physics.vertex_buffer.slice(..).get_mapped_range_mut().copy_from_slice(bytemuck::cast_slice(&vertices));
         self.render_physics.vertex_buffer.unmap();
 
-        // Each line has two vertices
-        let mut indices = Vec::new();
-        for i in 0..self.render_physics.renderizable_lines.len() {
-            let base_index = (i * 2) as u16;
-            indices.push(base_index);
-            indices.push(base_index + 1);
-        }
-
-        if indices.is_empty() {
-            return;
-        }
+        // Each line has two vertices, one after the other.
+        let indices: Vec<u32> = (0..vertices.len() as u32).collect();
 
         self.render_physics.index_buffer = self.renderer.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Index Buffer"),
-            size: (indices.len() * std::mem::size_of::<u16>()) as u64,
+            size: (indices.len() * std::mem::size_of::<u32>()) as u64,
             usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: true,
         });
@@ -1366,11 +1422,41 @@ impl App {
         self.render_physics.index_buffer.unmap();
 
         render_pass.set_vertex_buffer(0, self.render_physics.vertex_buffer.slice(..));
-        render_pass.set_index_buffer(self.render_physics.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+        render_pass.set_index_buffer(self.render_physics.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         render_pass.draw_indexed(0..(indices.len() as u32), 0, 0..1);
     }
 
+    /// The play scene's F10 tactical map instead of the world: a dark screen
+    /// and the lines the game put in `thick_lines` (terrain contours,
+    /// aircraft, trails...) - the 3D passes are skipped altogether.
+    fn render_tactical_map_pass(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
+        const BACKGROUND: wgpu::Color = wgpu::Color { r: 0.010, g: 0.018, b: 0.030, a: 1.0 };
+        let camera_position = self.scene_manager.cameras().map(|c| c.active().camera.position()).unwrap_or_else(nalgebra::Point3::origin);
+        let screen = [self.window_manager.pixel_size.width as f32, self.window_manager.pixel_size.height as f32];
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Tactical map pass"),
+            color_attachments: &[color_attachment(view, wgpu::LoadOp::Clear(BACKGROUND))],
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
+        });
+        self.thick_lines.draw(
+            &self.renderer.device,
+            &self.renderer.queue,
+            &mut render_pass,
+            &self.camera_resources.bind_group,
+            [camera_position.x, camera_position.y, camera_position.z],
+            screen,
+        );
+    }
+
     pub(crate) fn render_scene_passes(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
+        if self.tactical_map_active {
+            self.render_tactical_map_pass(encoder, view);
+            self.render_ui_pass(encoder, view);
+            self.render_aero_debug_overlay_pass(encoder, view);
+            return;
+        }
         self.render_opaque_pass(encoder);
         self.render_water_pass(encoder);
         self.render_transparent_pass(encoder);

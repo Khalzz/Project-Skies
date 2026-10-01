@@ -26,7 +26,7 @@ use super::physics::wings::wing_manager::WingManager;
 /// this is read on the physics thread.
 pub static KINEMATIC_ROLL: AtomicBool = AtomicBool::new(false);
 
-// F2 overlay: how long a wing's lift arrow is per newton (m/N) - ~9 m for
+// F5 overlay: how long a wing's lift arrow is per newton (m/N) - ~9 m for
 // one main wing's share of level-flight lift, ~100 m at its force clamp.
 const LIFT_DRAW_SCALE: f32 = 1.0 / 5000.0;
 const LIFT_COLOR: [f32; 3] = [0.3, 1.0, 0.3];
@@ -36,7 +36,7 @@ const SUSPENSION_AIRBORNE_COLOR: [f32; 3] = [0.5, 0.5, 0.5];
 // the lift arrows, so the two read against each other.
 const TYRE_FORCE_DRAW_SCALE: f32 = LIFT_DRAW_SCALE;
 const TYRE_FORCE_COLOR: [f32; 3] = [1.0, 0.3, 1.0];
-// Wing geometry (F2): each wing's pressure center, its outline, and its
+// Wing geometry (F5): each wing's pressure center, its outline, and its
 // hinged surfaces - from the live wings, so a data.ron reload shows at once.
 const PRESSURE_CENTER_COLOR: [f32; 3] = [1.0, 1.0, 1.0];
 const WING_OUTLINE_COLOR: [f32; 3] = [0.6, 0.6, 0.6];
@@ -67,7 +67,7 @@ pub struct AircraftPhysics {
     /// See `AircraftEvent::Wreck`.
     wrecked: bool,
     /// Where the plane's particle emitters sit (its data.ron `effects`,
-    /// jet's frame) - only drawn, for the F1 overlay.
+    /// jet's frame) - only drawn, for the F5 overlay.
     effect_positions: Vec<Vector3<f32>>,
 }
 

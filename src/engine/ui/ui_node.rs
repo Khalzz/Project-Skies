@@ -985,14 +985,14 @@ impl UiNode {
     /// text_shader.wgsl) at this node's resolved `rect`, recursing into children.
     /// Call after `node_content_preparation` has already run this frame (needs
     /// `self.transform.rect` to be current) - see `App::prepare_ui_content`, gated
-    /// behind `Ui::debug_bounds` (toggled by "toggle_ui_debug", F2).
+    /// behind `Ui::debug_bounds` (no key any more).
     pub fn debug_bounds_preparation(&self, size: &Size, dpi_scale: f32, ui: &mut UiRendering) {
         if !self.is_active {
             return;
         }
         let outline = Visibility::new(Fill::Solid(UiColor::TRANSPARENT), Fill::Solid(UiColor::Rgb(255, 0, 0)), 0.0, 2.0, BorderEdges::ALL, 0.0);
         // Deliberately unclipped, even for a node inside a scrollable container -
-        // a debug overlay (F2) showing exactly where every node's real rect is,
+        // a debug overlay showing exactly where every node's real rect is,
         // including whatever's currently scrolled out of view, is more useful for
         // debugging than a clipped one would be.
         let (vertices_slice, indice_slice) = Self::compute_quad(&self.transform, &outline, size, dpi_scale, ui.num_vertices, Self::NO_CLIP);

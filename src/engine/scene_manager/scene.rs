@@ -19,6 +19,8 @@ use crate::engine::scene_manager::physics_bridge;
 use crate::engine::scene_manager::properties::Model as NodeModelProperty;
 use crate::engine::scene_manager::render_bridge;
 use crate::engine::scene_manager::scene_nodes::SceneNodes;
+use crate::engine::rendering::models::model::Model as LoadedModel;
+use crate::resources::ModelSource;
 use crate::transform::Transform;
 
 
@@ -142,6 +144,42 @@ impl Scene {
         Ok(())
     }
 
+    /// `spawn_node` for a scene whose physics thread is already running (see
+    /// `start_physics` - a plain `spawn_node` then gets no body): the node's
+    /// body and physics halves are sent to the running thread through
+    /// `physics_command_tx`. Without one (no physics running), the same as
+    /// `spawn_node`.
+    pub fn spawn_node_live(&mut self, app: &mut App, node: Node, physics_command_tx: Option<&Sender<PhysicsCommand>>) -> Result<(), String> {
+        let id = node.id.clone();
+        self.spawn_node(app, node)?;
+        let Some(tx) = physics_command_tx else { return Ok(()) };
+
+        let def = self.content.physics_bodies.iter().rposition(|def| def.id == id)
+            .map(|index| self.content.physics_bodies.remove(index));
+        let behaviors = self.content.nodes.get_mut(&id).map(|node| node.take_physics_behaviors()).unwrap_or_default();
+        if let Some(def) = def {
+            tx.send(PhysicsCommand::AddBody { def, behaviors })
+                .map_err(|error| format!("node '{id}': couldn't reach the physics thread: {error}"))?;
+        }
+        Ok(())
+    }
+
+    /// Removes the node `id` - its behaviors, its instance on the renderer
+    /// (see `render_bridge::unregister_model`) and, with physics running, its
+    /// body (sent through `physics_command_tx`). Nothing happens for an id
+    /// with no node. Like `SceneNodes::clear`, anything its behaviors did
+    /// outside their own node isn't undone.
+    pub fn despawn_node(&mut self, app: &mut App, id: &str, physics_command_tx: Option<&Sender<PhysicsCommand>>) {
+        if self.content.nodes.remove(id).is_none() {
+            return;
+        }
+        render_bridge::unregister_model(self, app, id);
+        self.content.physics_bodies.retain(|def| def.id != id);
+        if let Some(tx) = physics_command_tx {
+            let _ = tx.send(PhysicsCommand::RemoveBody { name: id.to_owned() });
+        }
+    }
+
     /// Creates (or replaces) a named camera directly on this scene, with no
     /// node/behaviour needed - the plain path for a camera that just sits at
     /// a fixed pose (see `SceneCameras::create_camera`). If a camera needs
@@ -205,7 +243,7 @@ impl Scene {
 /// actually gets moved into the background `std::thread::spawn` (see `App::run`'s
 /// reset handling), so it has to be `Send` itself, not just its output.
 pub(crate) struct LoadedSceneSpec {
-    pub(crate) prepare: Arc<dyn Fn(&wgpu::Device, &wgpu::Queue, &wgpu::BindGroupLayout, &wgpu::SurfaceConfiguration) -> Box<dyn Any + Send> + Send + Sync>,
+    pub(crate) prepare: Arc<dyn Fn(&wgpu::Device, &wgpu::Queue, &wgpu::BindGroupLayout, &wgpu::SurfaceConfiguration, &LoadReporter) -> Box<dyn Any + Send> + Send + Sync>,
     pub(crate) finish: Rc<dyn Fn(&mut App, Box<dyn Any + Send>) -> Scene>,
 }
 
@@ -213,14 +251,75 @@ pub(crate) struct LoadedSceneSpec {
 /// handling kicks off a heavy scene's load, cleared once its `receiver` yields,
 /// `LoadingScreenScene` has faded back out, and `finish` has been run. See
 /// `App::run`.
+/// Handed to a heavy scene's background load (its `prepare`, then its
+/// models): each `step` names what's being loaded now - shown on the
+/// loading screen - and times the one before it. `finish` logs every step's
+/// time, slowest first, to find what makes loading slow.
+pub struct LoadReporter {
+    scene: String,
+    progress: std::sync::mpsc::Sender<String>,
+    started: std::time::Instant,
+    current: std::cell::RefCell<Option<(String, std::time::Instant)>>,
+    timings: std::cell::RefCell<Vec<(String, std::time::Duration)>>,
+}
+
+impl LoadReporter {
+    pub(crate) fn new(scene: &str, progress: std::sync::mpsc::Sender<String>) -> Self {
+        Self {
+            scene: scene.to_owned(),
+            progress,
+            started: std::time::Instant::now(),
+            current: std::cell::RefCell::new(None),
+            timings: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    /// Now loading `what` - the previous step, if any, is done.
+    pub fn step(&self, what: impl Into<String>) {
+        self.end_current();
+        let what = what.into();
+        let _ = self.progress.send(what.clone());
+        *self.current.borrow_mut() = Some((what, std::time::Instant::now()));
+    }
+
+    fn end_current(&self) {
+        if let Some((what, started)) = self.current.borrow_mut().take() {
+            let took = started.elapsed();
+            println!("[load {}] {what}: {:.0} ms", self.scene, took.as_secs_f64() * 1000.0);
+            self.timings.borrow_mut().push((what, took));
+        }
+    }
+
+    /// The load's done - logs the total and the slowest steps.
+    pub(crate) fn finish(&self) {
+        self.end_current();
+        let mut timings = self.timings.borrow().clone();
+        timings.sort_by(|a, b| b.1.cmp(&a.1));
+        println!("[load {}] background load done in {:.0} ms - slowest:", self.scene, self.started.elapsed().as_secs_f64() * 1000.0);
+        for (what, took) in timings.iter().take(5) {
+            println!("[load {}]   {:>7.0} ms  {what}", self.scene, took.as_secs_f64() * 1000.0);
+        }
+    }
+}
+
+/// What a heavy scene's background load hands back: its own `prepare`
+/// output, and the models it said it uses (see `SceneManager::
+/// preload_models`), each loaded or the reason it couldn't be, by key.
+pub struct LoadedAssets {
+    pub prepared: Box<dyn Any + Send>,
+    pub models: Vec<(String, Result<LoadedModel, String>)>,
+}
+
 pub struct PendingSceneLoad {
-    pub receiver: Receiver<Box<dyn Any + Send>>,
+    pub receiver: Receiver<LoadedAssets>,
+    /// What the background load is on now (see `LoadReporter::step`).
+    pub progress: Receiver<String>,
     pub finish: Rc<dyn Fn(&mut App, Box<dyn Any + Send>) -> Scene>,
     /// Set once `receiver` has actually yielded a result - holds it (plus how many
     /// seconds we've spent fading LoadingScreenScene's UI back out) until the fade
     /// finishes, at which point App::run does the real clear+finish+swap. None
     /// means still waiting on the background thread.
-    pub ready: Option<(Box<dyn Any + Send>, f32)>,
+    pub ready: Option<(LoadedAssets, f32)>,
 }
 
 /// Owns every registered scene's constructor plus whichever one is currently active -
@@ -235,6 +334,8 @@ pub struct SceneManager {
     // Heavy scenes registered via create_loaded_scene - disjoint from `factories`,
     // a given name is only ever in one of the two maps.
     loaders: HashMap<String, Rc<LoadedSceneSpec>>,
+    // The models each heavy scene uses - see preload_models.
+    preloads: HashMap<String, Rc<dyn Fn(&App) -> Vec<ModelSource>>>,
     // Only one scene is ever meaningfully alive at a time (inactive scenes never
     // tick), so this is a single slot rather than a map of every registered scene's
     // instance - those don't exist until create_scene's factory actually runs for
@@ -251,7 +352,7 @@ pub struct SceneManager {
 
 impl SceneManager {
     pub fn new() -> Self {
-        Self { factories: HashMap::new(), loaders: HashMap::new(), active_scene: None, active: String::new(), reset: false, loading: None }
+        Self { factories: HashMap::new(), loaders: HashMap::new(), preloads: HashMap::new(), active_scene: None, active: String::new(), reset: false, loading: None }
     }
 
     /// Registers a scene's constructor under `name` - nothing runs yet, `factory`
@@ -293,11 +394,11 @@ impl SceneManager {
     pub fn create_loaded_scene<P: Send + 'static, B: SceneBehaviour + 'static>(
         &mut self,
         name: impl Into<String>,
-        prepare: impl Fn(&wgpu::Device, &wgpu::Queue, &wgpu::BindGroupLayout, &wgpu::SurfaceConfiguration) -> P + Send + Sync + 'static,
+        prepare: impl Fn(&wgpu::Device, &wgpu::Queue, &wgpu::BindGroupLayout, &wgpu::SurfaceConfiguration, &LoadReporter) -> P + Send + Sync + 'static,
         finish: impl Fn(&mut Scene, &mut App, P) -> B + 'static,
     ) {
         self.loaders.insert(name.into(), Rc::new(LoadedSceneSpec {
-            prepare: Arc::new(move |device, queue, layout, config| Box::new(prepare(device, queue, layout, config)) as Box<dyn Any + Send>),
+            prepare: Arc::new(move |device, queue, layout, config, reporter| Box::new(prepare(device, queue, layout, config, reporter)) as Box<dyn Any + Send>),
             finish: Rc::new(move |app: &mut App, prepared: Box<dyn Any + Send>| {
                 let prepared = *prepared.downcast::<P>().expect("SceneManager: prepared asset type mismatch for a create_loaded_scene scene");
                 let mut scene = Scene::new(app);
@@ -305,6 +406,22 @@ impl SceneManager {
                 scene.set_scene_behaviour(behaviour)
             }),
         }));
+    }
+
+    /// The models a `create_loaded_scene` scene spawns, so they load on the
+    /// background thread during its loading screen (with its `prepare`)
+    /// instead of one by one on the main thread as its `finish` spawns the
+    /// nodes - which froze the window after the loading screen was gone.
+    /// `models` runs on the main thread when the scene opens (it can read
+    /// `app.model_sources` to turn declared names into files). Anything it
+    /// leaves out still loads the old way, when first spawned.
+    pub fn preload_models(&mut self, name: impl Into<String>, models: impl Fn(&App) -> Vec<ModelSource> + 'static) {
+        self.preloads.insert(name.into(), Rc::new(models));
+    }
+
+    /// See `preload_models` - cloned out for the same reason as `factory_for`.
+    pub(crate) fn preload_for(&self, name: &str) -> Option<Rc<dyn Fn(&App) -> Vec<ModelSource>>> {
+        self.preloads.get(name).cloned()
     }
 
     /// Switches the active scene and requests its `reset` for the next frame - use

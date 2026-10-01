@@ -1,0 +1,68 @@
+// The level's starting setup - its coalitions and every aircraft in each (see
+// play::map::MapSpec). Read each time the level opens, so an edit here shows
+// up on the next restart (pause menu > Restart) - or edit it live in game with
+// the F6 flight editor, which saves back to this file.
+//
+// Each coalition:
+//   name      - its name ("Blue", "Allies"...). Unique.
+//   color     - RGB 0..255 - its aircraft's name tags.
+//   aircraft  - the aircraft in it (below).
+//
+// Each aircraft:
+//   name      - its node id (what level_planning.ron's tracks target) and the
+//               tag shown over it (bots only). Unique across the whole map.
+//   plane     - its folder under assets/planes/ ("f16", "mq-9"...).
+//   player    - true for the one the player flies (exactly one in the whole
+//               map), false or left out for a bot.
+//   position  - meters in the world.
+//   rotation  - optional, degrees about X (pitch), Y (heading), Z (roll).
+//   speed     - optional, starting airspeed along the nose (m/s) - the plane's
+//               data.ron initial_velocity when left out.
+//   throttle  - optional, starting throttle 0..1 (idle when left out).
+//   path      - optional, points (x, y, z) in the world it's meant to fly
+//               through, in order. Nothing follows it yet.
+(
+  coalitions: [
+    (
+      name: "Blue",
+      color: (90, 160, 255),
+      aircraft: [
+        (
+          name: "player",
+          plane: "f16",
+          player: true,
+          position: (-0.0022523552, 101.20036, -3399.8381),
+          rotation: (1.3554895, 0.08444083, 0.000092717186),
+          speed: 0.0,
+        ),
+      ],
+    ),
+    (
+      name: "Red",
+      color: (212, 62, 53),
+      aircraft: [
+        (
+          name: "mq-9",
+          plane: "mq-9",
+          position: (-0.004680638, 1000.0, -3479.564),
+          rotation: (-0.7730326, -0.012066495, 0.058034137),
+          speed: 200.0,
+          path: [
+            (-3.885093, 1719.4663, -962.955),
+            (-8.124583, 1825.5701, 176.01614),
+            (-15.555007, 1964.06, 1529.3239),
+            (-25.514084, 2152.8684, 2819.509),
+            (-838.86084, 2111.7695, 4048.7158),
+            (-1468.0685, 2098.0076, 4093.9192),
+            (-1733.4929, 2113.882, 3299.2415),
+            (-1839.6129, 2137.5566, 2252.7952),
+            (-1910.5498, 2161.5178, 1324.6257),
+            (-1965.8025, 2185.6853, 437.76035),
+            (-1990.0812, 2202.894, -188.30489),
+            (-1998.3395, 2214.7542, -620.03876),
+          ],
+        ),
+      ],
+    ),
+  ],
+)

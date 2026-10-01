@@ -52,6 +52,11 @@ const SAVE_PATH: &str = "RebindModal/Card/Actions/Save";
 
 const CLICK_TO_BIND: &str = "Click here to bind";
 const LISTENING_LABEL: &str = "Press any key, button or axis...";
+const LISTENING_LEVER_LABEL: &str = "Push the lever toward more...";
+
+/// Actions read as a position, not pressed/not (see `input::absolute_value`)
+/// - an axis bound to one becomes a lever: its whole travel, end to end.
+const LEVER_ACTIONS: [&str; 1] = ["throttle_axis"];
 
 struct RebindModalState {
     // Which action this modal is currently capturing a binding for - None means
@@ -216,7 +221,8 @@ fn start_capture(app: &mut App) {
     if let Some(save_button) = Ui::get_ui_node(&mut app.ui.renderizable_elements, SAVE_PATH) {
         save_button.set_active(false);
     }
-    set_bind_display(app, LISTENING_LABEL, UiColor::Rgb(255, 210, 120));
+    let lever = STATE.lock().unwrap().open_action.as_deref().is_some_and(|action| LEVER_ACTIONS.contains(&action));
+    set_bind_display(app, if lever { LISTENING_LEVER_LABEL } else { LISTENING_LABEL }, UiColor::Rgb(255, 210, 120));
 }
 
 /// Polls for a newly captured binding while the modal's open - call every
@@ -237,10 +243,15 @@ pub fn update(app: &mut App) {
     if !capturing {
         return;
     }
-    let Some(binding) = input::captured_binding() else { return };
+    let Some(mut binding) = input::captured_binding() else { return };
 
     {
         let mut state = STATE.lock().unwrap();
+        // A lever action's axis spans its whole travel - pushed toward "more"
+        // while capturing, so that way is positive.
+        if state.open_action.as_deref().is_some_and(|action| LEVER_ACTIONS.contains(&action)) {
+            binding = binding.as_full_range();
+        }
         state.capturing = false;
         state.captured = Some(binding.clone());
     }

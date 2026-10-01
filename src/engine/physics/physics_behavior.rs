@@ -37,7 +37,7 @@ pub trait PhysicsBehavior: Send {
         None
     }
 
-    /// Debug lines for the F2 overlay, in world space. Called on the physics
+    /// Debug lines for the F5 overlay, in world space. Called on the physics
     /// thread once per rendered frame (right alongside `publish`, not once
     /// per step) and only while the overlay is on - so it should just draw
     /// whatever the last `fixed_update` left behind, not compute anything.
