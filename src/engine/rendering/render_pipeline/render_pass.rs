@@ -629,7 +629,12 @@ impl App {
     // open (its text fields need it).
     fn render_aero_debug_overlay_pass(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
         let show_debug = self.debug_overlay_visible();
-        if !show_debug && !self.flight_editor.open {
+        if !show_debug && !self.flight_editor.open && !self.tactical_map_active {
+            // No egui - back to the plain arrow (the pause menu's, say), and
+            // the mouse let go if a drag had it.
+            self.end_infinite_drag();
+            self.egui_overlay.cursor_icon = egui::CursorIcon::Default;
+            self.apply_egui_cursor();
             return;
         }
 
@@ -655,7 +660,17 @@ impl App {
         // enough clearance that they don't start out overlapping.
         let debug_info_default_x = (logical_size[0] as f32 - 300.0).max(20.0);
         let aero_chart_default_x = (logical_size[0] as f32 - 580.0).max(20.0);
-        let pointer_pos = egui::pos2(input::mouse_x() as f32, input::mouse_y() as f32);
+        // Where egui thinks the pointer is: the real cursor - or, while a
+        // drag has the mouse captured, the virtual pointer moved by the
+        // mouse's raw movement (see update_infinite_drag).
+        let pointer_pos = match &mut self.infinite_drag {
+            Some(virtual_pointer) => {
+                *virtual_pointer += egui::vec2(input::mouse_rel_x() as f32, input::mouse_rel_y() as f32);
+                *virtual_pointer
+            }
+            None => egui::pos2(input::mouse_x() as f32, input::mouse_y() as f32),
+        };
+        let capturing = self.infinite_drag.is_some();
         let mut raw_input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(logical_size[0] as f32, logical_size[1] as f32))),
             events: vec![
@@ -672,19 +687,25 @@ impl App {
         let (shift, ctrl) = (input::shift_down(), input::ctrl_down());
         raw_input.modifiers = egui::Modifiers { shift, ctrl, command: ctrl, ..Default::default() };
 
-        // Buttons only when they go down or up - egui takes every "pressed"
-        // as a new press, which would restart a drag every frame.
-        let buttons = [
-            (egui::PointerButton::Primary, input::mouse_left_button_down()),
-            (egui::PointerButton::Secondary, input::mouse_right_button_down()),
-            (egui::PointerButton::Middle, input::mouse_middle_button_down()),
-        ];
-        for (index, (button, down)) in buttons.into_iter().enumerate() {
-            if down != self.egui_buttons_down[index] {
-                self.egui_buttons_down[index] = down;
-                raw_input.events.push(egui::Event::PointerButton { pos: pointer_pos, button, pressed: down, modifiers: egui::Modifiers::default() });
-            }
+        // Every press and release as it happened, where it happened - not
+        // the button's state sampled once a frame, which misses a click
+        // that goes down and up between two frames (and egui takes every
+        // repeated "pressed" as a new press).
+        for event in input::mouse_button_events() {
+            let button = match event.button {
+                sdl2::mouse::MouseButton::Left => egui::PointerButton::Primary,
+                sdl2::mouse::MouseButton::Right => egui::PointerButton::Secondary,
+                sdl2::mouse::MouseButton::Middle => egui::PointerButton::Middle,
+                _ => continue,
+            };
+            // Captured, the real cursor's frozen - it happened at the virtual
+            // pointer.
+            let pos = if capturing { pointer_pos } else { egui::pos2(event.x as f32, event.y as f32) };
+            raw_input.events.push(egui::Event::PointerMoved(pos));
+            raw_input.events.push(egui::Event::PointerButton { pos, button, pressed: event.pressed, modifiers: raw_input.modifiers });
         }
+        // Back to where the pointer is now, after any presses elsewhere.
+        raw_input.events.push(egui::Event::PointerMoved(pointer_pos));
         if self.flight_editor.open {
             raw_input.events.extend(input::typed_input().iter().filter_map(egui_typing_event));
         }
@@ -759,6 +780,8 @@ impl App {
         let nudge_step = 2.0 * self.time.delta_time;
         // Taken out for the closure below, put back after render().
         let mut flight_editor = std::mem::take(&mut self.flight_editor);
+        let mut tactical_ui = std::mem::take(&mut self.tactical_ui);
+        let tactical_map_active = self.tactical_map_active;
 
         self.egui_overlay.render(
             &self.renderer.device,
@@ -769,6 +792,9 @@ impl App {
             pixels_per_point,
             raw_input,
             |ctx| {
+                if tactical_map_active {
+                    tactical_ui.draw(ctx);
+                }
                 if flight_editor.open {
                     flight_editor.draw(ctx);
                 }
@@ -1348,6 +1374,9 @@ impl App {
         self.debug_windows = windows;
 
         self.flight_editor = flight_editor;
+        self.tactical_ui = tactical_ui;
+        self.apply_egui_cursor();
+        self.update_infinite_drag(pointer_pos);
 
         if let Some(text) = clipboard_text {
             match self.window_manager.context.video().and_then(|video| video.clipboard().set_clipboard_text(&text)) {
@@ -1426,6 +1455,63 @@ impl App {
         render_pass.draw_indexed(0..(indices.len() as u32), 0, 0..1);
     }
 
+    /// Captures the mouse while something's dragged in egui - a value, the F10
+    /// map, a flight plan point or row, the map camera orbited - so the drag
+    /// keeps going past the screen's edge: the cursor hides, and egui's
+    /// pointer moves by the mouse's raw movement from `pointer` (where it
+    /// was). Let go, the cursor's put back where the drag ended (inside the
+    /// window).
+    fn update_infinite_drag(&mut self, pointer: egui::Pos2) {
+        let any_button = input::mouse_left_button_down() || input::mouse_right_button_down() || input::mouse_middle_button_down();
+        let dragging = self.egui_overlay.ctx.dragged_id().is_some() || (self.tactical_map_active && self.tactical_ui.is_dragging());
+        if self.infinite_drag.is_none() {
+            if dragging && any_button && self.mouse_free() && !self.is_paused {
+                self.infinite_drag = Some(pointer);
+                self.window_manager.context.mouse().set_relative_mouse_mode(true);
+            }
+        } else if !any_button {
+            self.end_infinite_drag();
+        }
+    }
+
+    /// Lets the mouse go after an infinite drag (see update_infinite_drag) -
+    /// the cursor back, where the drag ended. Nothing if none's going on.
+    fn end_infinite_drag(&mut self) {
+        let Some(pointer) = self.infinite_drag.take() else { return };
+        let mouse = self.window_manager.context.mouse();
+        mouse.set_relative_mouse_mode(!self.mouse_free());
+        let x = pointer.x.clamp(0.0, self.window_manager.size.width.saturating_sub(1) as f32) as i32;
+        let y = pointer.y.clamp(0.0, self.window_manager.size.height.saturating_sub(1) as f32) as i32;
+        mouse.warp_mouse_in_window(self.window_manager.canvas.window(), x, y);
+    }
+
+    /// Shows the mouse cursor egui last asked for (a hand over a clickable
+    /// aircraft on the F10 map, a text beam over a text field...) - only
+    /// re-created when it changes.
+    fn apply_egui_cursor(&mut self) {
+        use sdl2::mouse::SystemCursor;
+        let icon = self.egui_overlay.cursor_icon;
+        if self.egui_cursor.as_ref().is_some_and(|(current, _)| *current == icon) {
+            return;
+        }
+        let system = match icon {
+            egui::CursorIcon::PointingHand => SystemCursor::Hand,
+            egui::CursorIcon::Text | egui::CursorIcon::VerticalText => SystemCursor::IBeam,
+            egui::CursorIcon::Move | egui::CursorIcon::Grab | egui::CursorIcon::Grabbing | egui::CursorIcon::AllScroll => SystemCursor::SizeAll,
+            egui::CursorIcon::ResizeHorizontal | egui::CursorIcon::ResizeEast | egui::CursorIcon::ResizeWest | egui::CursorIcon::ResizeColumn => SystemCursor::SizeWE,
+            egui::CursorIcon::ResizeVertical | egui::CursorIcon::ResizeNorth | egui::CursorIcon::ResizeSouth | egui::CursorIcon::ResizeRow => SystemCursor::SizeNS,
+            egui::CursorIcon::ResizeNeSw | egui::CursorIcon::ResizeNorthEast | egui::CursorIcon::ResizeSouthWest => SystemCursor::SizeNESW,
+            egui::CursorIcon::ResizeNwSe | egui::CursorIcon::ResizeNorthWest | egui::CursorIcon::ResizeSouthEast => SystemCursor::SizeNWSE,
+            egui::CursorIcon::NotAllowed | egui::CursorIcon::NoDrop => SystemCursor::No,
+            egui::CursorIcon::Wait | egui::CursorIcon::Progress => SystemCursor::Wait,
+            _ => SystemCursor::Arrow,
+        };
+        if let Ok(cursor) = sdl2::mouse::Cursor::from_system(system) {
+            cursor.set();
+            self.egui_cursor = Some((icon, cursor));
+        }
+    }
+
     /// The play scene's F10 tactical map instead of the world: a dark screen
     /// and the lines the game put in `thick_lines` (terrain contours,
     /// aircraft, trails...) - the 3D passes are skipped altogether.
@@ -1441,6 +1527,47 @@ impl App {
             timestamp_writes: None,
         });
         self.thick_lines.draw(
+            &self.renderer.device,
+            &self.renderer.queue,
+            &mut render_pass,
+            &self.camera_resources.bind_group,
+            [camera_position.x, camera_position.y, camera_position.z],
+            screen,
+        );
+    }
+
+    /// The HUD's symbols in the world (`hud_lines` - see App::hud_lines),
+    /// over the 3D view - skipped when there are none.
+    fn render_hud_lines_pass(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
+        if self.hud_lines.dynamic.is_empty() && self.hud_horizon_lines.dynamic.is_empty() && self.hud_screen_lines.dynamic.is_empty() {
+            return;
+        }
+        let camera_position = self.scene_manager.cameras().map(|c| c.active().camera.position()).unwrap_or_else(nalgebra::Point3::origin);
+        let screen = [self.window_manager.pixel_size.width as f32, self.window_manager.pixel_size.height as f32];
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("HUD lines pass"),
+            color_attachments: &[color_attachment(view, wgpu::LoadOp::Load)],
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
+        });
+        self.hud_lines.draw(
+            &self.renderer.device,
+            &self.renderer.queue,
+            &mut render_pass,
+            &self.camera_resources.bind_group,
+            [camera_position.x, camera_position.y, camera_position.z],
+            screen,
+        );
+        self.hud_screen_lines.draw(
+            &self.renderer.device,
+            &self.renderer.queue,
+            &mut render_pass,
+            &self.camera_resources.bind_group,
+            [camera_position.x, camera_position.y, camera_position.z],
+            screen,
+        );
+        self.hud_horizon_lines.draw(
             &self.renderer.device,
             &self.renderer.queue,
             &mut render_pass,
@@ -1468,6 +1595,7 @@ impl App {
         // see text_shader.wgsl) for any node with background_blur set.
         self.renderer.blur.write_effects(&self.renderer.queue);
         self.renderer.blur.render(encoder, view);
+        self.render_hud_lines_pass(encoder, view);
         self.render_ui_pass(encoder, view);
         // Drawn last so it's always on top of the game's own HUD too.
         self.render_aero_debug_overlay_pass(encoder, view);

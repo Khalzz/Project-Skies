@@ -172,12 +172,18 @@ impl Wheel {
                 // Calculate compression based on hit distance
                 let compression = 1.0 - (time_of_impact / self.max_suspension_length);
     
-                // Calculate spring force (Hooke's law) and damping force
+                // The spring (Hooke's law) and the damper - against how fast
+                // this strut is closing, its own point's motion along it (the
+                // body pitching and rolling included, not just its center of
+                // mass going up and down: a nose wheel well ahead of the
+                // center of mass is slammed by the pitch).
                 let spring_force = compression * self.stiffness;
-                let damping_force = rigidbody.linvel().y * self.damping;
-    
-                // Apply total force in the upward direction at the wheel position
-                let suspension_force = Vector3::new(0.0, spring_force - damping_force, 0.0);
+                let closing_speed = rigidbody.velocity_at_point(&suspension_origin.into()).dot(&ray_direction);
+                let damping_force = closing_speed * self.damping;
+
+                // Up at the wheel - a strut pushes, it never pulls the jet
+                // down (the damper on a strut springing back out).
+                let suspension_force = Vector3::new(0.0, (spring_force + damping_force).max(0.0), 0.0);
                 let wheel_position = ray.point_at(time_of_impact);
 
                 return Some(SuspensionHit { force: suspension_force, origin: suspension_origin, wheel_position: wheel_position.coords, ground: Some(ground) });

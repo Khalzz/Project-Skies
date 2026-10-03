@@ -48,7 +48,7 @@ const COCKPIT_VIEW_PITCH_EASE_RATE: f32 = 6.0;
 // `LookInput::read` rescales what's past it back to 0..1 so the camera
 // starts moving from zero instead of snapping to the deadzone's angle.
 const LOOK_STICK_DEADZONE: f32 = 0.1;
-/// Fixed modes (Normal/Cinematic/Frontal): full sideways stick orbits this
+/// Fixed modes (ThirdPerson/Front): full sideways stick orbits this
 /// far around the plane - 180 = all the way round to its nose, looking back.
 const LOOK_MAX_YAW_DEG: f32 = 180.0;
 /// Fixed modes: full up/down stick orbits to straight below/above the plane
@@ -93,14 +93,20 @@ const WRECK_MIN_HEIGHT: f32 = 3.0;
 /// pixel of mouse (deg).
 const TACTICAL_START_DISTANCE: f32 = 6000.0;
 const TACTICAL_MIN_DISTANCE: f32 = 200.0;
-const TACTICAL_MAX_DISTANCE: f32 = 120_000.0;
+const TACTICAL_MAX_DISTANCE: f32 = 400_000.0;
 const TACTICAL_ZOOM_STEP: f32 = 1.15;
 const TACTICAL_START_PITCH_DEG: f32 = 35.0;
 const TACTICAL_FOV: f32 = 50.0;
 const TACTICAL_TURN_PER_PIXEL_DEG: f32 = 0.25;
 
-/// F10's tactical map view - an orbit round the target.
+/// F10's tactical map view - an orbit round a point on the map: the
+/// target, while following it, or wherever it's been dragged to.
 struct TacticalOrbit {
+    /// What it orbits - `None` until the first frame (then the target).
+    pivot: Option<Vector3<f32>>,
+    /// Kept on the target (the map's center button) - otherwise it stays
+    /// where it is, moved only by dragging.
+    follow: bool,
     /// Round the target (deg), and above its level (deg).
     yaw: f32,
     pitch: f32,
@@ -149,13 +155,27 @@ impl MouseLook {
     }
 }
 
+/// The views of an aircraft, in the order the camera key steps through
+/// them - the cockpit first.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CameraState {
-    Normal,
     Cockpit,
-    Cinematic,
-    Frontal,
+    ThirdPerson,
     Free,
+    Front,
 }
+
+/// Each view's place on the aircraft - its name among the aircraft's
+/// cameras (`data.ron`'s `cameras`, see play::plane::aircraft_spec), and
+/// where it is when the aircraft doesn't say (m, in its frame; fov).
+pub const COCKPIT_CAMERA: &str = "cockpit";
+pub const THIRD_PERSON_CAMERA: &str = "third_person";
+pub const FREE_CAMERA: &str = "free";
+pub const FRONT_CAMERA: &str = "front";
+pub const DEFAULT_THIRD_PERSON: (Vector3<f32>, f32) = (Vector3::new(0.0, 3.85, -23.77), NORMAL_CAMERA_FOV);
+/// The free camera's: what it orbits round.
+pub const DEFAULT_FREE: (Vector3<f32>, f32) = (Vector3::new(0.0, 0.0, 0.0), 60.0);
+pub const DEFAULT_FRONT: (Vector3<f32>, f32) = (Vector3::new(0.0, 2.895, 16.84), 40.0);
 
 struct CinematicReturnBlend {
     elapsed: f32,
@@ -218,7 +238,7 @@ pub struct Camera {
 impl Camera {
     pub fn new() -> Self {
         Self {
-            state: CameraState::Normal,
+            state: CameraState::Cockpit,
             target: None,
             look_at: None,
             next_look_at: None,
@@ -252,14 +272,47 @@ impl Camera {
         }
     }
 
+    /// Looking out of the cockpit.
+    pub fn is_cockpit(&self) -> bool {
+        matches!(self.state, CameraState::Cockpit)
+    }
+
     pub fn state_name(&self) -> &'static str {
         match self.state {
-            CameraState::Normal => "Normal",
             CameraState::Cockpit => "Cockpit",
-            CameraState::Cinematic => "Cinematic",
-            CameraState::Frontal => "Frontal",
+            CameraState::ThirdPerson => "Third person",
             CameraState::Free => "Free",
+            CameraState::Front => "Front",
         }
+    }
+
+    /// Switches to the view `state` - not after a crash, where the camera
+    /// stays on the wreck (see `enter_wreck_view`).
+    pub fn set_state(&mut self, state: CameraState) {
+        if self.wreck_sea_level.is_none() {
+            self.state = state;
+        }
+    }
+
+    /// On to the next view (see `CameraState`), round to the cockpit again -
+    /// not after a crash.
+    pub fn next_camera(&mut self) {
+        let next = match self.state {
+            CameraState::Cockpit => CameraState::ThirdPerson,
+            CameraState::ThirdPerson => CameraState::Free,
+            CameraState::Free => CameraState::Front,
+            CameraState::Front => CameraState::Cockpit,
+        };
+        self.set_state(next);
+    }
+
+    /// The aircraft's camera `name` - where it is on it (m, its frame) and
+    /// its field of view - or `default` when it doesn't have one.
+    fn named(target: &CameraTarget, name: &str, default: (Vector3<f32>, f32)) -> (Vector3<f32>, f32) {
+        target.cameras.as_ref()
+            .and_then(|cameras| cameras.get(name))
+            .map(|camera| (camera.position, camera.fov))
+            .unwrap_or(default)
     }
 
     pub fn set_target(&mut self, position: Vector3<f32>, rotation: UnitQuaternion<f32>, cameras: Option<Cameras>) {
@@ -306,20 +359,48 @@ impl Camera {
             // Behind it: the orbit's offset points the other way.
             (-forward.z).atan2(-forward.x).to_degrees()
         }).unwrap_or(0.0);
-        self.tactical = Some(TacticalOrbit { yaw, pitch: TACTICAL_START_PITCH_DEG, distance: TACTICAL_START_DISTANCE });
+        self.tactical = Some(TacticalOrbit { pivot: None, follow: false, yaw, pitch: TACTICAL_START_PITCH_DEG, distance: TACTICAL_START_DISTANCE });
     }
 
-    /// F10's tactical map view: orbits the target - the mouse turns it round
-    /// (holding the right button while the mouse is a pointer for F6/F7),
-    /// the wheel zooms from TACTICAL_MIN_DISTANCE out to
-    /// TACTICAL_MAX_DISTANCE (not over a debug window, which it scrolls
-    /// instead).
+    /// The tactical view kept on the target (the map's center button) - or
+    /// left where it is.
+    pub fn set_tactical_follow(&mut self, follow: bool) {
+        if let Some(orbit) = &mut self.tactical {
+            orbit.follow = follow;
+        }
+    }
+
+    /// Drags the tactical view across the map by `delta` screen pixels (x
+    /// right, y down) on a screen `screen_height` pixels tall - the map moves
+    /// with the pointer, like dragging a sheet of paper. Stops following.
+    pub fn pan_tactical(&mut self, delta: (f32, f32), screen_height: f32) {
+        let Some(orbit) = &mut self.tactical else { return };
+        let Some(pivot) = &mut orbit.pivot else { return };
+        orbit.follow = false;
+        // How far a pixel is at the pivot.
+        let meters_per_pixel = 2.0 * orbit.distance * (TACTICAL_FOV.to_radians() * 0.5).tan() / screen_height.max(1.0);
+        let yaw = orbit.yaw.to_radians();
+        // Flat on the map: away from the camera, and to its right.
+        let forward = -Vector3::new(yaw.cos(), 0.0, yaw.sin());
+        let right = forward.cross(&Vector3::y());
+        // Looking along the ground, a pixel up the screen covers more of it.
+        let foreshortening = orbit.pitch.to_radians().sin().abs().max(0.3);
+        *pivot -= right * delta.0 * meters_per_pixel;
+        *pivot += forward * delta.1 * meters_per_pixel / foreshortening;
+    }
+
+    /// F10's tactical map view: orbits its pivot - the target while
+    /// following it, otherwise wherever it was dragged to (see
+    /// `pan_tactical`). The right mouse button turns it round, the wheel
+    /// zooms from TACTICAL_MIN_DISTANCE out to TACTICAL_MAX_DISTANCE (not
+    /// over a window, which they're for).
     fn update_tactical(&mut self, cameras: &mut SceneCameras, app: &mut App) {
         let Some(orbit) = self.tactical.as_mut() else { return };
         let Some(target) = self.target.take() else { return };
 
         let mouse_free = app.mouse_free();
-        let overlay_up = app.flight_editor.open || app.debug_overlay_visible();
+        // Its own bar and flight plan window are egui too.
+        let overlay_up = app.flight_editor.open || app.debug_overlay_visible() || app.tactical_map_active;
         let over_ui = overlay_up && app.egui_overlay.ctx.is_pointer_over_area();
         let turning = !app.is_paused && (!mouse_free || (input::mouse_right_button_down() && !over_ui));
         if turning {
@@ -331,6 +412,12 @@ impl Camera {
             orbit.distance = (orbit.distance * TACTICAL_ZOOM_STEP.powf(-scroll)).clamp(TACTICAL_MIN_DISTANCE, TACTICAL_MAX_DISTANCE);
         }
 
+        let pivot = if orbit.follow {
+            *orbit.pivot.insert(target.position)
+        } else {
+            *orbit.pivot.get_or_insert(target.position)
+        };
+
         let (yaw, pitch) = (orbit.yaw.to_radians(), orbit.pitch.to_radians());
         let offset = Vector3::new(yaw.cos() * pitch.cos(), pitch.sin(), yaw.sin() * pitch.cos()) * orbit.distance;
         let active = cameras.active_mut();
@@ -338,15 +425,15 @@ impl Camera {
         active.projection.znear = 1.0;
         active.camera.rotation_modifier = UnitQuaternion::identity();
         active.camera.up = *Vector3::y_axis();
-        active.camera.set_position(Point3::from(target.position + offset));
-        active.camera.look_at(Point3::from(target.position));
+        active.camera.set_position(Point3::from(pivot + offset));
+        active.camera.look_at(Point3::from(pivot));
     }
 
     pub fn leave_wreck_view(&mut self) {
         if self.wreck_sea_level.take().is_none() {
             return;
         }
-        self.state = CameraState::Normal;
+        self.state = CameraState::Cockpit;
         self.free_distance = FREE_DISTANCE;
     }
 
@@ -441,17 +528,6 @@ impl Camera {
         magnitude * value.signum()
     }
 
-    fn next_camera(&mut self) {
-        match self.state {
-            CameraState::Normal => {
-                self.state = CameraState::Free;
-            },
-            CameraState::Cockpit => self.state = CameraState::Cinematic,
-            CameraState::Cinematic => self.state = CameraState::Frontal,
-            CameraState::Frontal => self.state = CameraState::Normal,
-            CameraState::Free => self.state = CameraState::Cockpit,
-        }
-    }
 }
 
 impl Behavior for Camera {
@@ -473,24 +549,17 @@ impl Behavior for Camera {
         if let Some(target) = self.target.take() {
             // Calculate target camera position and look-at point
             let (target_position, target_look_at, target_up) = match self.state {
-                CameraState::Normal => {
+                CameraState::ThirdPerson => {
+                    let (position, fov) = Self::named(&target, THIRD_PERSON_CAMERA, DEFAULT_THIRD_PERSON);
                     let active = cameras.active_mut();
                     active.projection.znear = 0.1;
-                    active.projection.fovy = NORMAL_CAMERA_FOV;
-                    let target_pos = target.position + (target.rotation * Vector3::new(0.0, 3.85, -23.77));
+                    active.projection.fovy = fov;
+                    let target_pos = target.position + (target.rotation * position);
                     let look_at = target.position + (target.rotation * Vector3::new(0.0, 0.0, 47.8));
                     (target_pos, look_at, target.rotation * *Vector3::y_axis())
                 },
                 CameraState::Cockpit => {
-                    let (base_pos, _default_fov) = if let Some(named_cameras) = &target.cameras {
-                        if let Some(cam) = named_cameras.get("cockpit") {
-                            (target.rotation * cam.position, cam.fov)
-                        } else {
-                            (target.rotation * Vector3::new(0.0, 0.2, 1.3), 70.0)
-                        }
-                    } else {
-                        (target.rotation * Vector3::new(0.0, 0.2, 1.3), 70.0)
-                    };
+                    let base_pos = target.rotation * Self::named(&target, COCKPIT_CAMERA, (Vector3::new(0.0, 0.2, 1.3), 70.0)).0;
                     cameras.active_mut().projection.znear = 0.01;
 
                     // Mouse wheel adjusts target FOV
@@ -558,31 +627,12 @@ impl Behavior for Camera {
                     let look_at = target_pos + look_dir;
                     (target_pos, look_at, head_rotation * *Vector3::y_axis())
                 },
-                CameraState::Cinematic => {
-                    let (target_pos, fov) = if let Some(named_cameras) = &target.cameras {
-                        if let Some(cam) = named_cameras.get("cinematic") {
-                            (target.position + (target.rotation * cam.position), cam.fov)
-                        } else {
-                            (target.position + (target.rotation * Vector3::new(-1.0, 3.0, -1.0)), 60.0)
-                        }
-                    } else {
-                        (target.position + (target.rotation * Vector3::new(-1.0, 3.0, -1.0)), 60.0)
-                    };
-                    cameras.active_mut().projection.fovy = fov;
-                    let look_at = target.position + (target.rotation * Vector3::new(30.0, 0.0, 100.0));
-                    (target_pos, look_at, target.rotation * *Vector3::y_axis())
-                },
-                CameraState::Frontal => {
-                    let (target_pos, fov) = if let Some(named_cameras) = &target.cameras {
-                        if let Some(cam) = named_cameras.get("frontal") {
-                            (target.position + (target.rotation * cam.position), cam.fov)
-                        } else {
-                            (target.position + (target.rotation * Vector3::new(0.0, 2.0, 3.0)), 60.0)
-                        }
-                    } else {
-                        (target.position + (target.rotation * Vector3::new(0.0, 2.0, 3.0)), 60.0)
-                    };
-                    cameras.active_mut().projection.fovy = fov;
+                CameraState::Front => {
+                    let (position, fov) = Self::named(&target, FRONT_CAMERA, DEFAULT_FRONT);
+                    let active = cameras.active_mut();
+                    active.projection.znear = 0.1;
+                    active.projection.fovy = fov;
+                    let target_pos = target.position + (target.rotation * position);
                     let look_at = target.position;
                     (target_pos, look_at, target.rotation * *Vector3::y_axis())
                 },
@@ -634,7 +684,8 @@ impl Behavior for Camera {
                     let distance_target = if self.wreck_sea_level.is_some() { WRECK_DISTANCE } else { FREE_DISTANCE };
                     self.free_distance = lerp(self.free_distance, distance_target, (delta_time * FREE_DISTANCE_RATE).clamp(0.0, 1.0));
 
-                    let mut look_at = target.position;
+                    // Round the aircraft's free camera point.
+                    let mut look_at = target.position + target.rotation * Self::named(&target, FREE_CAMERA, DEFAULT_FREE).0;
                     let mut target_pos = look_at + orbit * Vector3::new(0.0, 0.0, -self.free_distance);
                     if let Some(sea_level) = self.wreck_sea_level {
                         look_at.y = look_at.y.max(sea_level);
@@ -648,7 +699,7 @@ impl Behavior for Camera {
             // Fixed modes' right-stick orbit - applied further down, after
             // the F7 editor has read this state's base offset, so its
             // readout doesn't spin with the stick.
-            let orbits = matches!(self.state, CameraState::Normal | CameraState::Cinematic | CameraState::Frontal);
+            let orbits = matches!(self.state, CameraState::ThirdPerson | CameraState::Front);
 
             // Plane-relative offset of whatever the current state chose - for
             // the F7 Camera Editor's "base" readout.
@@ -745,5 +796,32 @@ impl Behavior for Camera {
         if input::is_action_just_pressed("change_camera") && self.wreck_sea_level.is_none() {
             self.next_camera();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The tactical view orbiting the origin from straight behind it along
+    /// -Z (so looking toward +Z, where +X is to the left).
+    fn camera_looking_along_plus_z() -> Camera {
+        let mut camera = Camera::new();
+        camera.tactical = Some(TacticalOrbit { pivot: Some(Vector3::zeros()), follow: true, yaw: -90.0, pitch: 45.0, distance: 1000.0 });
+        camera
+    }
+
+    #[test]
+    fn dragging_the_map_moves_it_with_the_pointer() {
+        let mut camera = camera_looking_along_plus_z();
+        // Drag right: the map moves right, so the view moves left - +X.
+        camera.pan_tactical((100.0, 0.0), 720.0);
+        let pivot = camera.tactical.as_ref().unwrap().pivot.unwrap();
+        assert!(pivot.x > 0.0 && pivot.z.abs() < 1e-3, "{pivot:?}");
+        // Drag down: the map comes toward the camera, so the view moves away - +Z.
+        camera.pan_tactical((0.0, 100.0), 720.0);
+        let pivot = camera.tactical.as_ref().unwrap().pivot.unwrap();
+        assert!(pivot.z > 0.0, "{pivot:?}");
+        assert!(!camera.tactical.as_ref().unwrap().follow, "dragging stops following");
     }
 }

@@ -22,6 +22,16 @@ struct InputSettings {
     mouse: MouseSettings,
 }
 
+/// A mouse button going down or up this frame, and where (window pixels) -
+/// see `mouse_button_events`.
+#[derive(Clone, Copy, Debug)]
+pub struct MouseButtonEvent {
+    pub button: sdl2::mouse::MouseButton,
+    pub pressed: bool,
+    pub x: i32,
+    pub y: i32,
+}
+
 /// Raw keyboard typing this frame, in order - for text fields (see
 /// `typed_input`), which need the characters typed and the editing keys
 /// (backspace, arrows...) rather than game actions.
@@ -125,6 +135,9 @@ pub struct InputSubsystem {
     capture_baseline: HashMap<(String, u32), f32>,
     // This frame's typing - see TypedInput.
     typed: Vec<TypedInput>,
+    // This frame's mouse button presses/releases, in order - see
+    // `mouse_button_events`.
+    mouse_button_events: Vec<MouseButtonEvent>,
 }
 
 impl InputSubsystem {
@@ -159,6 +172,7 @@ impl InputSubsystem {
             capture_baseline: HashMap::new(),
             default_bindings,
             typed: Vec::new(),
+            mouse_button_events: Vec::new(),
         }
     }
 
@@ -172,6 +186,7 @@ impl InputSubsystem {
         self.mouse.reset_rel_y();
         self.mouse.reset_scroll_y();
         self.typed.clear();
+        self.mouse_button_events.clear();
 
         let mut quit_requested = false;
 
@@ -198,11 +213,13 @@ impl InputSubsystem {
                 Event::TextInput { text, .. } => {
                     self.typed.push(TypedInput::Text(text));
                 }
-                Event::MouseButtonDown { mouse_btn, .. } => {
+                Event::MouseButtonDown { mouse_btn, x, y, .. } => {
                     self.raw.mouse_buttons_down.insert(mouse_btn);
+                    self.mouse_button_events.push(MouseButtonEvent { button: mouse_btn, pressed: true, x, y });
                 }
-                Event::MouseButtonUp { mouse_btn, .. } => {
+                Event::MouseButtonUp { mouse_btn, x, y, .. } => {
                     self.raw.mouse_buttons_down.remove(&mouse_btn);
+                    self.mouse_button_events.push(MouseButtonEvent { button: mouse_btn, pressed: false, x, y });
                 }
                 Event::MouseMotion { xrel, yrel, x, y, .. } => {
                     self.mouse.add_rel_x(xrel);
@@ -608,6 +625,14 @@ pub fn mouse_middle_button_down() -> bool {
 /// This frame's raw typing, in order - see `TypedInput`.
 pub fn typed_input() -> Vec<TypedInput> {
     with_input(|input| input.typed.clone())
+}
+
+/// This frame's mouse button presses and releases, in order, with where
+/// each happened - every one of them, even a click quick enough to go down
+/// and up between two frames (which `mouse_left_button_down` never sees).
+/// For feeding egui (see render_pass.rs).
+pub fn mouse_button_events() -> Vec<MouseButtonEvent> {
+    with_input(|input| input.mouse_button_events.clone())
 }
 
 pub fn mouse_sensitivity() -> (f32, f32) {

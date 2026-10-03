@@ -34,7 +34,7 @@ use crate::engine::rendering::ui::ui::Ui;
 use crate::engine::ui::color::UiColor;
 use crate::engine::ui::ui_node::UiNode;
 use crate::engine::ui::ui_transform::PositionValue;
-use crate::game::scenes::loading::scene::{LoadingScreenScene, FADE_OUT_SECS, PANEL_KEY};
+use crate::game::scenes::loading::scene::{LoadingScreenScene, FADE_OUT_SECS, PANEL_KEY, STEP_KEY};
 use crate::game::scenes::play::flight_editor::FlightEditor;
 use crate::resources;
 use crate::engine::window::window::{WindowManager, WindowSettings};
@@ -113,17 +113,39 @@ pub struct App {
     // F10 (see play::tactical_map) - while set, the world isn't drawn: a
     // dark screen and `thick_lines` instead (see render_tactical_map_pass).
     pub tactical_map_active: bool,
+    // The tactical map's buttons, selection and flight plan window (see
+    // play::tactical_ui) - drawn by the egui overlay pass while it's up.
+    pub tactical_ui: crate::game::scenes::play::tactical_ui::TacticalUi,
     // Lines a fixed number of pixels thick (see engine::rendering::
     // thick_lines) - what the tactical map is drawn with.
     pub thick_lines: crate::engine::rendering::thick_lines::ThickLines,
-    // The mouse buttons (primary, secondary, middle) as last told to egui -
-    // it's only told when one goes down or up (see render_aero_debug_overlay_pass).
-    pub egui_buttons_down: [bool; 3],
+    // The flight HUD's symbols drawn in the world - the seeker's diamond,
+    // the radar's target box (see play::scene::update_weapons_hud). Over the
+    // 3D view, under the UI; refilled every frame (`dynamic`).
+    pub hud_lines: crate::engine::rendering::thick_lines::ThickLines,
+    // The HUD's horizon and pitch ladder - like `hud_lines`, but only seen
+    // inside the HUD's box (its `mask`, set with them every frame).
+    pub hud_horizon_lines: crate::engine::rendering::thick_lines::ThickLines,
+    // HUD lines in screen pixels (the speed/altitude tapes, the range
+    // scale) - see ThickLines::screen_space.
+    pub hud_screen_lines: crate::engine::rendering::thick_lines::ThickLines,
+    // The SDL cursor showing for egui's cursor request, and which one it is
+    // - kept alive while it's set (see render_pass.rs's apply_egui_cursor).
+    pub egui_cursor: Option<(egui::CursorIcon, sdl2::mouse::Cursor)>,
+    // While something's dragged in egui (a value, the F10 map, a point...):
+    // the mouse is captured, hidden, and this is the pointer egui sees -
+    // moved by the mouse's raw movement, so a drag never stops at the
+    // screen's edge (see render_pass.rs's update_infinite_drag).
+    pub infinite_drag: Option<egui::Pos2>,
     // Lines the game wants drawn in the world this frame (world-space
     // endpoints, see ManualVertex) - drawn with the F5 physics lines' pipeline
     // but whether F5 is on or not, over everything. Whoever fills it clears
     // it (see play::scene::GameLogic::update_flight_editor's paths).
     pub world_lines: Vec<[crate::engine::primitive::manual_vertex::ManualVertex; 2]>,
+    // Every physics body's latest pose from the physics thread - kept, so a
+    // frame where no new one has arrived still draws each body where it is
+    // by now (see `physics_pose_now`) instead of freezing it for a frame.
+    pub physics_poses: HashMap<String, RenderMessage>,
     // The node id of the aircraft the player flies (see play::map's
     // `player`) - kept up to date by the play scene, for the F7 windows.
     pub player_node: String,
@@ -316,6 +338,10 @@ impl App {
         // physics rendering
         let render_physics = RenderPhysics::new(&renderer.device, &renderer.config, &camera_resources);
         let thick_lines = crate::engine::rendering::thick_lines::ThickLines::new(&renderer.device, renderer.config.format, &camera_resources);
+        let hud_lines = crate::engine::rendering::thick_lines::ThickLines::new(&renderer.device, renderer.config.format, &camera_resources);
+        let hud_horizon_lines = crate::engine::rendering::thick_lines::ThickLines::new(&renderer.device, renderer.config.format, &camera_resources);
+        let mut hud_screen_lines = crate::engine::rendering::thick_lines::ThickLines::new(&renderer.device, renderer.config.format, &camera_resources);
+        hud_screen_lines.screen_space = true;
 
         let egui_overlay = crate::engine::rendering::egui_overlay::EguiOverlay::new(&renderer.device, renderer.config.format);
 
@@ -340,9 +366,15 @@ impl App {
             debug_mouse_free: false,
             flight_editor: FlightEditor::default(),
             tactical_map_active: false,
+            tactical_ui: Default::default(),
             thick_lines,
-            egui_buttons_down: [false; 3],
+            hud_lines,
+            hud_horizon_lines,
+            hud_screen_lines,
+            egui_cursor: None,
+            infinite_drag: None,
             world_lines: Vec::new(),
+            physics_poses: HashMap::new(),
             player_node: "player".to_owned(),
             debug_windows: DebugWindows::default(),
             aero_debug_trail: std::collections::VecDeque::new(),
@@ -512,10 +544,10 @@ impl App {
         self.ui.has_changed = true;
     }
 
-    /// Whether the mouse is a pointer for clicking debug windows (F7, or the
-    /// F6 flight editor open) instead of looking around.
+    /// Whether the mouse is a pointer for clicking debug windows (F7, the F6
+    /// flight editor or the F10 tactical map open) instead of looking around.
     pub fn mouse_free(&self) -> bool {
-        self.debug_mouse_free || self.flight_editor.open
+        self.debug_mouse_free || self.flight_editor.open || self.tactical_map_active
     }
 
     /// Whether the F7 debug overlay is up.
@@ -796,6 +828,10 @@ impl App {
                 if let Some(old_physics) = physics_data_channel.take() {
                     let _ = old_physics.request_data_tx.send(PhysicsCommand::Shutdown);
                 }
+                // Nor does the flight HUD's symbology.
+                self.hud_lines.dynamic.clear();
+                self.hud_horizon_lines.dynamic.clear();
+                self.hud_screen_lines.dynamic.clear();
 
                 // The scene doesn't exist yet at this point - SceneManager::create_scene/
                 // create_loaded_scene only registered its constructor. Clone it out first
@@ -917,11 +953,15 @@ impl App {
                     }
 
 
-                    // Recibimos los datos del otro thread
-                    let physics_data = match physics.physics_data_rx.try_recv() {
-                        Ok(data) => data,
-                        Err(_) => HashMap::new(),
-                    };
+                    // The physics thread's latest - every batch waiting, only
+                    // the newest kept (older ones would lag behind).
+                    let mut physics_data = HashMap::new();
+                    while let Ok(data) = physics.physics_data_rx.try_recv() {
+                        physics_data = data;
+                    }
+                    if !physics_data.is_empty() {
+                        self.physics_poses = physics_data.clone();
+                    }
 
                     // Drain all queued debug physics messages, keep only the
                     // latest - and keep showing it on a frame where none
@@ -933,6 +973,7 @@ impl App {
                     physics_data
                 } else {
                     debug_physics.clear();
+                    self.physics_poses.clear();
                     HashMap::new()
                 };
 
@@ -972,10 +1013,11 @@ impl App {
                 // began, matching the camera exactly.
                 if !self.is_paused {
                     if let Some(content) = self.scene_manager.content_mut() {
-                        for (_key, renderizable) in &mut content.renderizable_instances {
-                            if let Some(physics_data) = physics_data.get(&_key.to_string()) {
-                                renderizable.instance.transform.position = physics_data.translation;
-                                renderizable.instance.transform.rotation = nalgebra::Unit::new_normalize(physics_data.rotation);
+                        let now = std::time::Instant::now();
+                        for (key, renderizable) in &mut content.renderizable_instances {
+                            if let Some((position, rotation)) = self.physics_poses.get(key).and_then(|pose| physics_pose_now(pose, now)) {
+                                renderizable.instance.transform.position = position;
+                                renderizable.instance.transform.rotation = rotation;
                             }
                         }
                     }
@@ -1049,6 +1091,9 @@ impl App {
                         // backdrop (see play::scene::GameLogic::finish) reads as
                         // seamless instead of the background itself visibly fading.
                         if let Some(node) = Ui::get_ui_node(&mut self.ui.renderizable_elements, &format!("{PANEL_KEY}/label")) {
+                            node.set_alpha(1.0 - t);
+                        }
+                        if let Some(node) = Ui::get_ui_node(&mut self.ui.renderizable_elements, STEP_KEY) {
                             node.set_alpha(1.0 - t);
                         }
                         self.ui.has_changed = true;
@@ -1189,4 +1234,23 @@ impl App {
 
     
 
+}
+
+/// Where a physics body is at `now`, from its last reported `pose`: carried
+/// on along its velocity and spin for the time since that pose was true -
+/// `None` when it's stale (see MAX_LEAD).
+/// The physics thread steps at a fixed 120 Hz, out of step with the frames,
+/// so a raw pose is anywhere from 0 to ~2 steps old - drawn as is, a fast
+/// jet stutters next to anything moved smoothly every frame (a missile, the
+/// world around it). Past MAX_LEAD the pose is stale (a hitch, a level
+/// that's just restarted) and the body is left where it's drawn.
+fn physics_pose_now(pose: &RenderMessage, now: std::time::Instant) -> Option<(nalgebra::Vector3<f32>, nalgebra::UnitQuaternion<f32>)> {
+    const MAX_LEAD: f32 = 0.05;
+    let rotation = nalgebra::Unit::new_normalize(pose.rotation);
+    let lead = now.saturating_duration_since(pose.sampled_at).as_secs_f32();
+    if lead > MAX_LEAD {
+        return None;
+    }
+    let spin = nalgebra::UnitQuaternion::from_scaled_axis(pose.angvel * lead);
+    Some((pose.translation + pose.linvel * lead, spin * rotation))
 }

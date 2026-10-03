@@ -66,6 +66,9 @@ pub struct AircraftPhysics {
     instrumentation: Instrumentation,
     /// See `AircraftEvent::Wreck`.
     wrecked: bool,
+    /// See `AircraftEvent::ShotDown` - the stick roll its jammed surfaces
+    /// hold (which way it rolls off).
+    shot_down: Option<f32>,
     /// Where the plane's particle emitters sit (its data.ron `effects`,
     /// jet's frame) - only drawn, for the F5 overlay.
     effect_positions: Vec<Vector3<f32>>,
@@ -80,6 +83,7 @@ impl AircraftPhysics {
             airframe: Airframe::new(),
             instrumentation: Instrumentation::new(spec.pilot_position),
             wrecked: false,
+            shot_down: None,
             effect_positions: effects.iter().map(|effect| effect.position).collect(),
         }
     }
@@ -111,6 +115,12 @@ impl AircraftPhysics {
                 let rigidbody = ctx.rigidbody_mut();
                 rigidbody.reset_forces(true);
                 rigidbody.reset_torques(true);
+            }
+            AircraftEvent::ShotDown => {
+                // Rolls off the way it was already rolling (left if level).
+                let rigidbody = ctx.rigidbody();
+                let roll_rate = (rigidbody.rotation().inverse() * rigidbody.angvel()).z;
+                self.shot_down = Some(if roll_rate < 0.0 { -SHOT_DOWN_ROLL } else { SHOT_DOWN_ROLL });
             }
         }
     }
@@ -203,6 +213,12 @@ impl AircraftPhysics {
     }
 }
 
+/// A shot-down jet's jammed surfaces: the stick roll they hold (either way
+/// - see `AircraftEvent::ShotDown`) and pitch (+ is stick forward) - a
+/// rolling dive.
+const SHOT_DOWN_ROLL: f32 = 0.45;
+const SHOT_DOWN_PITCH: f32 = 0.15;
+
 impl PhysicsBehavior for AircraftPhysics {
     fn fixed_update(&mut self, ctx: &mut PhysicsCtx, dt: f32) {
         // Default (throttle idle, stick centred) until the main half has sent
@@ -220,6 +236,19 @@ impl PhysicsBehavior for AircraftPhysics {
             self.instrumentation.update(ctx.rigidbody(), dt);
             return;
         }
+        // Shot down: whatever the pilot does, nothing answers - engine off,
+        // no fly-by-wire, the surfaces jammed.
+        let controls = match self.shot_down {
+            Some(roll) => PlaneControls {
+                throttle: 0.0,
+                elevator: SHOT_DOWN_PITCH,
+                aileron: roll,
+                rudder: 0.0,
+                fly_by_wire_pitch_autotrim: false,
+                ..PlaneControls::new()
+            },
+            None => controls,
+        };
 
         self.airframe.landing_gear.tick(dt);
         self.apply_body_forces(ctx, &controls, dt);

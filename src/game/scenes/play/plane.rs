@@ -27,3 +27,4 @@ pub mod autopilot;
 #[cfg(test)]
 mod flight_tests;
 pub mod gear_spec;
+pub mod pylon_spec;

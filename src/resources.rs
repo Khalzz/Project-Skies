@@ -50,17 +50,23 @@ pub enum DoubleSidedMeshes {
 pub struct ModelSource {
     pub file: ModelFile,
     pub double_sided: DoubleSidedMeshes,
+    /// A separate copy of the same file, kept under its own key - for when
+    /// two uses of one model need its meshes animated differently (mesh
+    /// transforms are the model's, shared by every instance): a missile on a
+    /// pylon (plume off) and one in flight (plume lit). `None`: the shared
+    /// copy.
+    pub variant: Option<String>,
 }
 
 impl ModelSource {
     /// A file under the build-time `res/` copy.
     pub fn res(path: &str) -> Self {
-        Self { file: ModelFile::Res(path.to_owned()), double_sided: DoubleSidedMeshes::None }
+        Self { file: ModelFile::Res(path.to_owned()), double_sided: DoubleSidedMeshes::None, variant: None }
     }
 
     /// A file anywhere on disk, read at runtime.
     pub fn asset(path: impl Into<std::path::PathBuf>) -> Self {
-        Self { file: ModelFile::Asset(path.into()), double_sided: DoubleSidedMeshes::None }
+        Self { file: ModelFile::Asset(path.into()), double_sided: DoubleSidedMeshes::None, variant: None }
     }
 
     pub fn double_sided(mut self, double_sided: DoubleSidedMeshes) -> Self {
@@ -68,12 +74,23 @@ impl ModelSource {
         self
     }
 
+    /// A separate copy of the model, `name`d - see `variant`.
+    pub fn variant(mut self, name: impl Into<String>) -> Self {
+        self.variant = Some(name.into());
+        self
+    }
+
     /// The name a loaded copy is kept under (`App::game_models`) - the file
-    /// itself, so every reference to the same file shares one load.
+    /// itself, so every reference to the same file shares one load - plus
+    /// `#variant` for a separate copy (see `variant`).
     pub fn key(&self) -> String {
-        match &self.file {
+        let file = match &self.file {
             ModelFile::Res(path) => format!("res/{path}"),
             ModelFile::Asset(path) => path.to_string_lossy().replace('\\', "/"),
+        };
+        match &self.variant {
+            Some(variant) => format!("{file}#{variant}"),
+            None => file,
         }
     }
 
@@ -416,6 +433,51 @@ pub fn load_trimesh_geometry(file_name: &str) -> anyhow::Result<(Vec<Vector3<f32
     }
 
     Ok((vertices, indices))
+}
+
+/// Every point of the mesh on the node named `node_name` in the model file
+/// at `path` (as `ModelSource::asset` takes it) - in the model's own space,
+/// placed by its node (and parents) like it's drawn.
+pub fn load_mesh_points(path: &Path, node_name: &str) -> anyhow::Result<Vec<Vector3<f32>>> {
+    let data = std::fs::read(path)?;
+    let gltf = Gltf::from_slice(&data)?;
+    let buffer_data = gltf.buffers().map(|buffer| match buffer.source() {
+        gltf::buffer::Source::Bin => Ok(gltf.blob.clone().unwrap_or_default()),
+        gltf::buffer::Source::Uri(uri) => Ok(std::fs::read(path.parent().unwrap_or(Path::new("")).join(uri))?),
+    }).collect::<anyhow::Result<Vec<Vec<u8>>>>()?;
+
+    fn find(node: gltf::Node<'_>, node_name: &str, buffer_data: &[Vec<u8>], parent: Option<(Vector3<f32>, UnitQuaternion<f32>, Vector3<f32>)>, points: &mut Vec<Vector3<f32>>) {
+        if node.name() == Some(node_name) {
+            collect_trimesh_geometry(node, buffer_data, parent, points, &mut Vec::new());
+            return;
+        }
+        // Its children are placed by it - the same composition as
+        // collect_trimesh_geometry's.
+        let (translation, rotation, scale) = node.transform().decomposed();
+        let (translation, rotation, scale) = (Vector3::from(translation), UnitQuaternion::from_quaternion(Quaternion::from(rotation)), Vector3::from(scale));
+        let placed = match parent {
+            Some((parent_translation, parent_rotation, parent_scale)) => (
+                parent_translation + parent_rotation * parent_scale.component_mul(&translation),
+                parent_rotation * rotation,
+                parent_scale.component_mul(&scale),
+            ),
+            None => (translation, rotation, scale),
+        };
+        for child in node.children() {
+            find(child, node_name, buffer_data, Some(placed), points);
+        }
+    }
+
+    let mut points = Vec::new();
+    for scene in gltf.scenes() {
+        for node in scene.nodes() {
+            find(node, node_name, &buffer_data, None, &mut points);
+        }
+    }
+    if points.is_empty() {
+        anyhow::bail!("{} has no mesh named '{node_name}'", path.display());
+    }
+    Ok(points)
 }
 
 // Recurses the same way traverse_node does (child transforms compose with

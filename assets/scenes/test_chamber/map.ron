@@ -20,7 +20,14 @@
 //               data.ron initial_velocity when left out.
 //   throttle  - optional, starting throttle 0..1 (idle when left out).
 //   path      - optional, points (x, y, z) in the world it's meant to fly
-//               through, in order. Nothing follows it yet.
+//               through, in order - a bot flies them.
+//   loadout   - optional, what it carries: { "<pylon name>": "<weapon>" } -
+//               the pylons are its plane's (data.ron `pylons`), the weapons
+//               folders under assets/weapons ("missiles/aim-9x").
+//   flares, chaff - optional, how many it's loaded with - as many as its
+//               plane's data.ron `countermeasures` says when left out.
+//   difficulty - optional, a bot's skill: Beginner, Medium (when left out) or
+//               Ace - how quickly it reacts to a missile with flares.
 (
   coalitions: [
     (
@@ -31,9 +38,20 @@
           name: "player",
           plane: "f16",
           player: true,
-          position: (-0.0022523552, 101.20036, -3399.8381),
-          rotation: (1.3554895, 0.08444083, 0.000092717186),
-          speed: 0.0,
+          position: (-0.0022523552, 1000.0, -3399.8381),
+          rotation: (1.3554895, 0.0, 0.000092717186),
+          speed: 205.7776,
+          loadout: {
+            "1 Left wingtip": "missiles/aim-9x",
+            "2 Left outer": "missiles/aim-9x",
+            "3 Left middle": "missiles/aim-9x",
+            "4 Left inner": "missiles/aim-9x",
+            "5 Centerline": "missiles/aim-9x",
+            "6 Right inner": "missiles/aim-9x",
+            "7 Right middle": "missiles/aim-9x",
+            "8 Right outer": "missiles/aim-9x",
+            "9 Right wingtip": "missiles/aim-9x",
+          },
         ),
       ],
     ),
@@ -43,23 +61,21 @@
       aircraft: [
         (
           name: "mq-9",
-          plane: "mq-9",
-          position: (-0.004680638, 1000.0, -3479.564),
+          plane: "f16",
+          position: (8663.0, 1000.0, -3479.564),
           rotation: (-0.7730326, -0.012066495, 0.058034137),
           speed: 200.0,
           path: [
-            (-3.885093, 1719.4663, -962.955),
-            (-8.124583, 1825.5701, 176.01614),
-            (-15.555007, 1964.06, 1529.3239),
-            (-25.514084, 2152.8684, 2819.509),
-            (-838.86084, 2111.7695, 4048.7158),
-            (-1468.0685, 2098.0076, 4093.9192),
-            (-1733.4929, 2113.882, 3299.2415),
-            (-1839.6129, 2137.5566, 2252.7952),
-            (-1910.5498, 2161.5178, 1324.6257),
-            (-1965.8025, 2185.6853, 437.76035),
-            (-1990.0812, 2202.894, -188.30489),
-            (-1998.3395, 2214.7542, -620.03876),
+            (8593.775, 1719.4663, -93.86719),
+            (6243.958, 2152.8684, 3678.8047),
+            (2868.496, 2098.0076, 7066.2407),
+            (711.74316, 2113.882, 7604.8716),
+            (-2378.1055, 2137.5566, 7337.786),
+            (-5306.475, 2161.5178, 3734.3018),
+            (-7364.869, 2185.6853, -97.134766),
+            (-6071.296, 2202.894, -4769.8623),
+            (-108.53198, 2214.7542, -5710.8223),
+            (4435.4297, 2216.7268, -6294.6797),
           ],
         ),
       ],

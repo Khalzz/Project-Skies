@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use nalgebra::{UnitQuaternion, Vector3};
@@ -52,10 +52,51 @@ pub struct AircraftPlacement {
     #[serde(default, skip_serializing_if = "is_zero")]
     pub throttle: f32,
     /// Points it's meant to fly through, in order - meters in the world.
-    /// Optional. Nothing follows it yet - it's set up and shown in the F2
-    /// flight editor.
+    /// Optional. A bot flies it (see plane::autopilot).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub path: Vec<(f32, f32, f32)>,
+    /// What it carries: a weapon on each of its plane's pylons, by pylon
+    /// name - `{ "1 Left wingtip": "missiles/aim-9x" }`. Optional: nothing
+    /// when left out. The pylons themselves are the plane's (its data.ron's
+    /// `pylons`); this is how this aircraft is armed for the mission.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub loadout: BTreeMap<String, String>,
+    /// How many flares and chaff it's loaded with. Optional: as many as its
+    /// plane's data.ron `countermeasures` says when left out.
+    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "plain_some")]
+    pub flares: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "plain_some")]
+    pub chaff: Option<u32>,
+    /// How good a pilot a bot is - how quickly it reacts (see
+    /// play::ai_defense). Optional: Medium when left out. Nothing for the
+    /// player's.
+    #[serde(default, skip_serializing_if = "is_default_difficulty")]
+    pub difficulty: Difficulty,
+}
+
+/// A bot's skill - see `AircraftPlacement::difficulty`.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Difficulty {
+    Beginner,
+    #[default]
+    Medium,
+    Ace,
+}
+
+impl Difficulty {
+    pub const ALL: [Difficulty; 3] = [Difficulty::Beginner, Difficulty::Medium, Difficulty::Ace];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Difficulty::Beginner => "Beginner",
+            Difficulty::Medium => "Medium",
+            Difficulty::Ace => "Ace",
+        }
+    }
+}
+
+fn is_default_difficulty(value: &Difficulty) -> bool {
+    *value == Difficulty::default()
 }
 
 fn is_false(value: &bool) -> bool {
@@ -72,9 +113,9 @@ fn is_zero_rotation(value: &(f32, f32, f32)) -> bool {
 
 /// An optional field written plainly (`speed: 120.0`), the way the file is
 /// read - without RON's `Some( ... )` around it.
-fn plain_some<S: serde::Serializer>(value: &Option<f32>, serializer: S) -> Result<S::Ok, S::Error> {
+fn plain_some<T: Serialize, S: serde::Serializer>(value: &Option<T>, serializer: S) -> Result<S::Ok, S::Error> {
     match value {
-        Some(value) => serializer.serialize_f32(*value),
+        Some(value) => value.serialize(serializer),
         None => serializer.serialize_none(),
     }
 }
@@ -104,7 +145,14 @@ const FILE_HEADER: &str = "\
 //               data.ron initial_velocity when left out.
 //   throttle  - optional, starting throttle 0..1 (idle when left out).
 //   path      - optional, points (x, y, z) in the world it's meant to fly
-//               through, in order. Nothing follows it yet.
+//               through, in order - a bot flies them.
+//   loadout   - optional, what it carries: { \"<pylon name>\": \"<weapon>\" } -
+//               the pylons are its plane's (data.ron `pylons`), the weapons
+//               folders under assets/weapons (\"missiles/aim-9x\").
+//   flares, chaff - optional, how many it's loaded with - as many as its
+//               plane's data.ron `countermeasures` says when left out.
+//   difficulty - optional, a bot's skill: Beginner, Medium (when left out) or
+//               Ace - how quickly it reacts to a missile with flares.
 ";
 
 impl AircraftPlacement {
@@ -226,6 +274,10 @@ mod tests {
         aircraft.speed = Some(120.0);
         aircraft.throttle = 0.5;
         aircraft.path = vec![(0.0, 500.0, 1000.0), (1000.0, 600.0, 2000.0)];
+        aircraft.loadout = BTreeMap::from([
+            ("1 Left wingtip".to_owned(), "missiles/aim-9x".to_owned()),
+            ("9 Right wingtip".to_owned(), "missiles/aim-9x".to_owned()),
+        ]);
 
         let folder = std::env::temp_dir().join("project_skies_map_round_trip");
         std::fs::create_dir_all(&folder).unwrap();

@@ -188,6 +188,28 @@ impl CameraResources {
             None
         }
     }
+
+    /// The reverse of `world_to_screen`: the ray from the camera through
+    /// screen pixel (x, y) - its start (the camera, world space) and
+    /// direction (unit length). `None` if the projection can't be inverted.
+    pub fn screen_ray(&self, active: &CameraInstance, x: f32, y: f32, screen_width: u32, screen_height: u32) -> Option<(Point3<f32>, Vector3<f32>)> {
+        let inverse = Matrix4::from(self.uniform.view_proj).try_inverse()?;
+        let ndc_x = x / screen_width.max(1) as f32 * 2.0 - 1.0;
+        let ndc_y = 1.0 - y / screen_height.max(1) as f32 * 2.0;
+        // Two points along the pixel's ray (depths inside the view either
+        // way round) - camera-relative, like view_proj.
+        let unproject = |depth: f32| {
+            let point = inverse * nalgebra::Vector4::new(ndc_x, ndc_y, depth, 1.0);
+            (point.w.abs() > 1e-12).then(|| point.xyz() / point.w)
+        };
+        let (near, far) = (unproject(0.25)?, unproject(0.75)?);
+        let mut direction = (far - near).try_normalize(1e-9)?;
+        // Pointing away from the camera, whichever way the depth runs.
+        if direction.dot(&active.camera.calc_forward_direction()) < 0.0 {
+            direction = -direction;
+        }
+        Some((active.camera.position(), direction))
+    }
 }
 
 /// The scene-scoped half of the camera system - every camera the currently

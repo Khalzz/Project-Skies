@@ -76,6 +76,33 @@ pub fn wreck_smoke() -> ParticleEffect {
         .max_particles(300)
 }
 
+/// The fire emitter that goes with a wreck-smoke one (see `wreck_fire`), by
+/// the smoke's name.
+pub fn wreck_fire_name(smoke_name: &str) -> String {
+    format!("{smoke_name}:fire")
+}
+
+/// Flames off a wreck - small, quick, flickering tongues of orange that
+/// rise a few meters and die (falling, left streaming behind it), low-poly
+/// like the smoke with them. `intensity` scales how many.
+pub fn wreck_fire() -> ParticleEffect {
+    ParticleEffect::new()
+        .rate(45.0)
+        .lifetime(0.4, 0.9)
+        .shape(EmissionShape::Sphere { radius: 1.5 })
+        .world_direction(Vector3::y())
+        .cone(20.0)
+        .speed(2.0, 4.5)
+        .forces(Forces { gravity: -0.3, drag: 1.5, wind: 0.3, turbulence: 2.0 })
+        .spin(-60.0, 60.0)
+        .faceted(5)
+        .size_over_life(1.6, 0.4)
+        .color_over_life([1.0, 0.75, 0.3, 0.95], [0.9, 0.25, 0.05, 0.0])
+        .brightness(5.0)
+        .additive()
+        .max_particles(60)
+}
+
 /// Where the spray starts, in the spray node's frame (+Z = the plane's
 /// heading) - the V's tip, just behind the point under the plane.
 const SPRAY_ORIGIN: Vector3<f32> = Vector3::new(0.0, 0.0, -3.82);
@@ -180,7 +207,11 @@ pub fn plane_emitters(effects: &[EffectSpec], gear: &GearSpec) -> ParticleEmitte
     for spec in effects {
         let emitter = match spec.effect {
             EffectKind::WingtipVortex => Emitter::trail(wingtip_vortex()).intensity(0.0),
-            EffectKind::WreckSmoke => Emitter::particles(wreck_smoke()),
+            EffectKind::WreckSmoke => {
+                // And its fire, once the wreck's at rest.
+                emitters.insert(wreck_fire_name(&spec.name), Emitter::particles(wreck_fire()).at(spec.position).intensity(0.0).disabled());
+                Emitter::particles(wreck_smoke())
+            }
         };
         emitters.insert(spec.name.clone(), emitter.at(spec.position).disabled());
     }

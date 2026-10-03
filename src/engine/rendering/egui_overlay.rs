@@ -17,6 +17,14 @@
 pub struct EguiOverlay {
     pub ctx: egui::Context,
     renderer: egui_wgpu::Renderer,
+    /// The mouse cursor the last frame asked for (a hand over something
+    /// clickable, a text beam over a text field...) - for the window to show
+    /// (see render_pass.rs's apply_egui_cursor).
+    pub cursor_icon: egui::CursorIcon,
+    /// When it started, and when it last ran - egui gets the real time and
+    /// frame length from these (see `render`).
+    started: std::time::Instant,
+    last_frame: Option<std::time::Instant>,
 }
 
 impl EguiOverlay {
@@ -24,6 +32,9 @@ impl EguiOverlay {
         Self {
             ctx: egui::Context::default(),
             renderer: egui_wgpu::Renderer::new(device, output_color_format, None, 1, false),
+            cursor_icon: egui::CursorIcon::Default,
+            started: std::time::Instant::now(),
+            last_frame: None,
         }
     }
 
@@ -54,7 +65,19 @@ impl EguiOverlay {
         build_ui: impl FnMut(&egui::Context),
     ) {
         self.ctx.set_pixels_per_point(pixels_per_point);
+        // The real time and frame length. Without them egui assumes 1/60 s a
+        // frame - at a few hundred frames a second its clock runs several
+        // times too fast, and a normal click looks held far longer than the
+        // 0.8 s a click can last, so it's dropped.
+        let mut raw_input = raw_input;
+        let now = std::time::Instant::now();
+        raw_input.time = Some(now.duration_since(self.started).as_secs_f64());
+        if let Some(last) = self.last_frame {
+            raw_input.predicted_dt = now.duration_since(last).as_secs_f32().clamp(1.0 / 1000.0, 0.25);
+        }
+        self.last_frame = Some(now);
         let full_output = self.ctx.run(raw_input, build_ui);
+        self.cursor_icon = full_output.platform_output.cursor_icon;
         let clipped_primitives = self.ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
 
         for (id, image_delta) in &full_output.textures_delta.set {

@@ -49,6 +49,15 @@ const PLAYER_COLOR: [f32; 3] = [1.0, 0.82, 0.30];
 /// color once that aircraft is gone from the map (deleted).
 const WRECK_MARK_SIZE_PX: f32 = 14.0;
 const WRECK_MARK_FALLBACK: [f32; 3] = [1.0, 0.35, 0.30];
+/// The selected aircraft: the ring round it (px), its flight plan's color,
+/// its points' markers (px), and the point it's flying to's color.
+const SELECTED_RING_RADIUS_PX: f32 = 15.0;
+/// The ring round an aircraft under the pointer (px) - a bit bigger than the
+/// selected one's, so both show when it's both.
+const HOVER_RING_RADIUS_PX: f32 = 19.0;
+const FLIGHT_PLAN_COLOR: [f32; 3] = [0.95, 0.95, 1.0];
+const PLAN_MARKER_SIZE_PX: f32 = 9.0;
+const NEXT_POINT_COLOR: [f32; 3] = [1.0, 0.80, 0.16];
 
 /// Where an aircraft was destroyed - see `TacticalMap::record`.
 struct WreckMark {
@@ -174,7 +183,10 @@ impl TacticalMap {
 
     /// This frame's moving lines - the sea grid, then for every aircraft its
     /// trail, its drop line and sea ring, and its triangle.
-    pub fn lines(&self, map: &MapSpec, live: &HashMap<String, LiveAircraft>, player: &str, view: &View, sea_level: f32) -> Vec<LineInstance> {
+    /// The `selected` aircraft gets a ring round it and its flight plan drawn
+    /// - see `flight_plan`.
+    /// The `hovered` one (under the pointer) gets a fainter, wider ring.
+    pub fn lines(&self, map: &MapSpec, live: &HashMap<String, LiveAircraft>, player: &str, selected: Option<&str>, hovered: Option<&str>, view: &View, sea_level: f32) -> Vec<LineInstance> {
         let mut lines = Vec::new();
         self.grid(&mut lines, view, sea_level);
         for (coalition, placement) in map.aircraft() {
@@ -198,6 +210,16 @@ impl TacticalMap {
                 None => WRECK_MARK_FALLBACK,
             };
             cross(&mut lines, mark.position, rgb, view);
+        }
+        if let Some((_, placement)) = selected.and_then(|name| map.find(name)) {
+            let now = live.get(&placement.name);
+            flight_plan(&mut lines, &placement.path, now, sea_level, view);
+            if let Some(aircraft) = now {
+                ring(&mut lines, aircraft.position, SELECTED_RING_RADIUS_PX, [1.0, 1.0, 1.0, 0.9], view);
+            }
+        }
+        if let Some(aircraft) = hovered.and_then(|name| live.get(name)).filter(|aircraft| !aircraft.wrecked) {
+            ring(&mut lines, aircraft.position, HOVER_RING_RADIUS_PX, [1.0, 1.0, 1.0, 0.45], view);
         }
         lines
     }
@@ -241,12 +263,73 @@ fn drop_line(lines: &mut Vec<LineInstance>, position: Vector3<f32>, sea_level: f
     }
 }
 
+/// Two directions square to the line of sight at `position` (right, up) -
+/// for drawing something flat facing the camera.
+fn facing_camera(position: Vector3<f32>, view: &View) -> (Vector3<f32>, Vector3<f32>) {
+    let toward_camera = (view.camera_position - position).try_normalize(1e-6).unwrap_or_else(Vector3::z);
+    let right = Vector3::y().cross(&toward_camera).try_normalize(1e-6).unwrap_or_else(Vector3::x);
+    (right, toward_camera.cross(&right))
+}
+
+/// A circle `radius_px` round `position`, facing the camera.
+fn ring(lines: &mut Vec<LineInstance>, position: Vector3<f32>, radius_px: f32, color: [f32; 4], view: &View) {
+    const SEGMENTS: usize = 24;
+    let radius = radius_px * view.meters_per_pixel(position);
+    let (right, up) = facing_camera(position, view);
+    let point = |i: usize| {
+        let angle = i as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+        position + (right * angle.cos() + up * angle.sin()) * radius
+    };
+    for i in 0..SEGMENTS {
+        lines.push(LineInstance { start: point(i).into(), end: point(i + 1).into(), color, width: LINE_WIDTH });
+    }
+}
+
+/// A diamond `size_px` across at `position`, facing the camera.
+fn diamond(lines: &mut Vec<LineInstance>, position: Vector3<f32>, size_px: f32, color: [f32; 4], view: &View) {
+    let half = size_px * 0.5 * view.meters_per_pixel(position);
+    let (right, up) = facing_camera(position, view);
+    let corners = [position + up * half, position + right * half, position - up * half, position - right * half];
+    for i in 0..4 {
+        lines.push(LineInstance { start: corners[i].into(), end: corners[(i + 1) % 4].into(), color, width: LINE_WIDTH });
+    }
+}
+
+/// The selected aircraft's flight plan: its path's points joined in order
+/// (and the last back to the first - it loops), a diamond on each with a
+/// faint line down to the sea (their heights), and a line from the aircraft
+/// to the point it's flying to - that point's diamond in gold.
+fn flight_plan(lines: &mut Vec<LineInstance>, path: &[(f32, f32, f32)], aircraft: Option<&LiveAircraft>, sea_level: f32, view: &View) {
+    if path.is_empty() {
+        return;
+    }
+    let points: Vec<Vector3<f32>> = path.iter().map(|&(x, y, z)| Vector3::new(x, y, z)).collect();
+    let plan = |alpha: f32| [FLIGHT_PLAN_COLOR[0], FLIGHT_PLAN_COLOR[1], FLIGHT_PLAN_COLOR[2], alpha];
+    for pair in points.windows(2) {
+        lines.push(LineInstance { start: pair[0].into(), end: pair[1].into(), color: plan(0.9), width: LINE_WIDTH });
+    }
+    if points.len() > 2 {
+        // Back round to the start - dimmer, it's the loop.
+        lines.push(LineInstance { start: points[points.len() - 1].into(), end: points[0].into(), color: plan(0.35), width: LINE_WIDTH });
+    }
+    let next = aircraft.and_then(|aircraft| aircraft.next_path_point).filter(|next| *next < points.len());
+    for (index, point) in points.iter().enumerate() {
+        let foot = Vector3::new(point.x, sea_level, point.z);
+        lines.push(LineInstance { start: (*point).into(), end: foot.into(), color: plan(0.2), width: LINE_WIDTH });
+        let color = if Some(index) == next { [NEXT_POINT_COLOR[0], NEXT_POINT_COLOR[1], NEXT_POINT_COLOR[2], 1.0] } else { plan(1.0) };
+        diamond(lines, *point, PLAN_MARKER_SIZE_PX, color, view);
+    }
+    if let (Some(aircraft), Some(next)) = (aircraft, next) {
+        if !aircraft.wrecked {
+            lines.push(LineInstance { start: aircraft.position.into(), end: points[next].into(), color: [NEXT_POINT_COLOR[0], NEXT_POINT_COLOR[1], NEXT_POINT_COLOR[2], 0.6], width: LINE_WIDTH });
+        }
+    }
+}
+
 /// An X at `position`, facing the camera - where an aircraft was destroyed.
 fn cross(lines: &mut Vec<LineInstance>, position: Vector3<f32>, rgb: [f32; 3], view: &View) {
     let half = WRECK_MARK_SIZE_PX * 0.5 * view.meters_per_pixel(position);
-    let toward_camera = (view.camera_position - position).try_normalize(1e-6).unwrap_or_else(Vector3::z);
-    let right = Vector3::y().cross(&toward_camera).try_normalize(1e-6).unwrap_or_else(Vector3::x);
-    let up = toward_camera.cross(&right);
+    let (right, up) = facing_camera(position, view);
     let color = [rgb[0], rgb[1], rgb[2], 1.0];
     for diagonal in [right + up, right - up] {
         let arm = diagonal * (half / std::f32::consts::SQRT_2);

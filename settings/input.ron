@@ -32,16 +32,30 @@
         (action: "quick_menu_left", bindings: [ControllerButton("DPadLeft")]),
         (action: "landing_gear_up", bindings: []),
         (action: "landing_gear_down", bindings: []),
-        // F1-F4: what the camera follows.
+        // Weapons: the next one in the HUD's weapon list (round to OFF), and
+        // the trigger.
+        (action: "next_weapon", bindings: [Key("Tab"), ControllerButton("B")]),
+        (action: "fire_weapon", bindings: [Key("Return"), ControllerButton("A")]),
+        // Locks the seeker on what's in the diamond - again lets it go.
+        (action: "toggle_lock", bindings: [Key("r"), ControllerButton("X")]),
+        // Countermeasures: one release, a quick burst, and what they release
+        // (flares, chaff, both).
+        (action: "countermeasure_single", bindings: [Key("f")]),
+        (action: "countermeasure_program", bindings: [Key("c")]),
+        (action: "countermeasure_mode", bindings: [Key("z")]),
+        // F1-F4: what the camera follows. F1: your jet, in the cockpit - again
+        // steps through its views; F2: the next other aircraft, free view.
         (action: "camera_player", bindings: [Key("F1")]),
         (action: "camera_next_aircraft", bindings: [Key("F2")]),
         (action: "camera_next_ground_unit", bindings: [Key("F3")]),
         (action: "camera_next_missile", bindings: [Key("F4")]),
-        // F5-F8: debugging and editing the map (F8 free for now).
+        // F5-F8: debugging and editing the map.
         // F10: the tactical map.
         (action: "toggle_debug", bindings: [Key("F5")]),
         (action: "toggle_flight_editor", bindings: [Key("F6")]),
         (action: "toggle_debug_mouse", bindings: [Key("F7")]),
+        // F8: the heat view - what an IR seeker sees.
+        (action: "toggle_heat_view", bindings: [Key("F8")]),
         (action: "toggle_tactical_map", bindings: [Key("F10")]),
         // The sandbox camera's orbit toggle - no key.
         (action: "follow_cam_toggle", bindings: []),

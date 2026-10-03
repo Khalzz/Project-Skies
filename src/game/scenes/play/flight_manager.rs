@@ -21,8 +21,13 @@ use crate::resources::{DoubleSidedMeshes, ModelSource};
 use crate::engine::scene_manager::scene::Scene;
 use crate::game::game_settings::GAME_SETTINGS;
 use crate::game::ui::label;
+use crate::game::scenes::play::camera::camera;
 use crate::game::scenes::play::map::{AircraftPlacement, Coalition, MapSpec};
 use crate::game::scenes::play::plane::aircraft_spec::AircraftSpec;
+use crate::game::scenes::play::weapon::weapon_spec::WeaponSpec;
+use crate::game::scenes::play::weapon::countermeasures::CountermeasureSet;
+use crate::game::scenes::play::plane::pylon_spec::PylonSpec;
+use std::collections::{BTreeMap, BTreeSet};
 use crate::game::scenes::play::plane::{aircraft_physics::AircraftPhysics, effects, messages::{AircraftReload, AircraftState}, plane::Plane};
 
 // After crashing into the water: how long the wreck floats, then how long it
@@ -32,6 +37,15 @@ const WRECK_SINK_SECONDS: f32 = 6.0;
 
 /// The level's map.ron, or - when it's missing or broken (reported) - just
 /// the player in an F-16 on the runway, so the level still opens.
+/// The flares and chaff `placement` is loaded with - as many as the map
+/// says, or as its plane's data.ron does - none without dispensers.
+fn loaded_countermeasures(spec: &AircraftSpec, placement: &AircraftPlacement) -> Option<CountermeasureSet> {
+    let mut countermeasures = spec.countermeasures.clone()?;
+    countermeasures.flares = placement.flares.unwrap_or(countermeasures.flares);
+    countermeasures.chaff = placement.chaff.unwrap_or(countermeasures.chaff);
+    Some(CountermeasureSet::new(countermeasures))
+}
+
 fn load_map(scene_folder: &str) -> MapSpec {
     MapSpec::load(scene_folder).unwrap_or_else(|error| {
         eprintln!("{error} - spawning only the player's F-16");
@@ -48,24 +62,92 @@ fn load_map(scene_folder: &str) -> MapSpec {
                     speed: None,
                     throttle: 0.0,
                     path: Vec::new(),
+                    loadout: Default::default(),
+                    flares: None,
+                    chaff: None,
+                    difficulty: Default::default(),
                 }],
             }],
         }
     })
 }
 
-/// The model file of every plane the level's map.ron puts in it - for the
-/// play scene to load them under its loading screen (see
-/// SceneManager::preload_models).
+/// The model file of every plane the level's map.ron puts in it, and of every
+/// weapon their loadouts hang on them - for the play scene to load them under
+/// its loading screen (see SceneManager::preload_models).
 pub fn models(scene_folder: &str) -> Vec<ModelSource> {
     let map = load_map(scene_folder);
     let mut planes: Vec<&str> = map.aircraft().map(|(_, aircraft)| aircraft.plane.as_str()).collect();
     planes.sort_unstable();
     planes.dedup();
-    planes.into_iter()
+    let mut weapons: Vec<&str> = map.aircraft().flat_map(|(_, aircraft)| aircraft.loadout.values().map(String::as_str)).collect();
+    weapons.sort_unstable();
+    weapons.dedup();
+    let plane_models = planes.into_iter()
         .filter_map(|plane| AircraftSpec::load(plane).ok())
-        .map(|spec| ModelSource::asset(&spec.model.model).double_sided(DoubleSidedMeshes::Meshes(spec.model.double_sided)))
-        .collect()
+        .map(|spec| ModelSource::asset(&spec.model.model).double_sided(DoubleSidedMeshes::Meshes(spec.model.double_sided)));
+    let weapon_models = weapons.into_iter()
+        .filter_map(|weapon| WeaponSpec::load(weapon).ok())
+        .flat_map(|spec| {
+            let source = ModelSource::asset(&spec.model.model).double_sided(DoubleSidedMeshes::Meshes(spec.model.double_sided));
+            // Plus the copy flying missiles use - see play::weapon::missiles.
+            [source.clone().variant(crate::game::scenes::play::weapon::missiles::FLYING_VARIANT), source]
+        });
+    plane_models.chain(weapon_models).collect()
+}
+
+/// A plane's mass and center of mass with a loadout on (kg, the jet's frame)
+/// - its own, plus every weapon hung on it at its pylon. Weapons the loadout
+/// can't hang (see `loadout_problems`) don't count.
+pub fn loaded_mass(spec: &AircraftSpec, loadout: &BTreeMap<String, String>) -> (f32, Vector3<f32>) {
+    let mut mass = spec.physics.rigidbody.mass;
+    let mut moment = spec.physics.rigidbody.center_of_mass * mass;
+    for (pylon, weapon) in loaded_stores(spec, loadout) {
+        let weapon_mass = weapon.physics.rigidbody.mass;
+        mass += weapon_mass;
+        moment += pylon.position * weapon_mass;
+    }
+    (mass, moment / mass)
+}
+
+/// The weapons a loadout hangs on a plane: each with the pylon it's on -
+/// only the ones that can be (the pylon's there, takes its kind, the weapon
+/// loads).
+fn loaded_stores<'a>(spec: &'a AircraftSpec, loadout: &BTreeMap<String, String>) -> Vec<(&'a PylonSpec, WeaponSpec)> {
+    loadout.iter().filter_map(|(pylon_name, weapon)| {
+        let pylon = spec.pylons.iter().find(|pylon| pylon.name == *pylon_name)?;
+        let weapon = WeaponSpec::read(weapon).ok()?;
+        pylon.accepts(weapon.category).then_some((pylon, weapon))
+    }).collect()
+}
+
+/// The event that gives a running jet its plane's data (`spec`) - with its
+/// loadout's mass on (see `loaded_mass`).
+fn reload_event(spec: AircraftSpec, loadout: &BTreeMap<String, String>) -> AircraftReload {
+    let (mass, center_of_mass) = loaded_mass(&spec, loadout);
+    AircraftReload {
+        aero: spec.aero,
+        engine: spec.engine,
+        gear: spec.gear,
+        effects: spec.effects,
+        mass,
+        center_of_mass,
+        colliders: spec.physics.colliders,
+    }
+}
+
+/// A weapon hung on an aircraft - a model of its own (node `node_id`),
+/// carried along at its pylon every frame (see `update_stores`).
+struct Store {
+    node_id: String,
+    /// The pylon it's on, and what it is (a weapon id).
+    pylon: String,
+    weapon: String,
+    /// Where it hangs, meters in the jet's frame - its pylon's position.
+    offset: Vector3<f32>,
+    /// How its model is turned to face the jet's way (its `model:`
+    /// `rotation`).
+    model_rotation: UnitQuaternion<f32>,
 }
 
 /// How often (s) each plane's data.ron is checked for edits - see `update`.
@@ -104,6 +186,10 @@ struct SpawnedAircraft {
     /// Its data.ron's `initial_velocity` - what a teleport without a map
     /// `speed` sets it going at (see `teleport`).
     data_initial_velocity: Vector3<f32>,
+    /// Its HUD glass's points (m, the jet's frame) - see `hud_glass`.
+    hud_glass: Option<Vec<Vector3<f32>>>,
+    /// Its flares and chaff - full again when it's respawned or rearmed.
+    countermeasures: Option<CountermeasureSet>,
 }
 
 /// An aircraft as it is right now in the scene - for the F6 flight editor.
@@ -131,11 +217,17 @@ pub struct flight_manager {
     applied: MapSpec,
     /// Every aircraft in the scene, by node id.
     spawned: HashMap<String, SpawnedAircraft>,
+    /// The weapons hung on each aircraft, by its node id - see `Store`.
+    stores: HashMap<String, Vec<Store>>,
+    /// The pylons each aircraft has fired off since it spawned, by its node
+    /// id - empty again when it's respawned or rearmed. The map's loadout
+    /// stays as it is: it's what the aircraft takes off with.
+    fired: HashMap<String, BTreeSet<String>>,
 }
 
 impl flight_manager {
     pub fn new() -> Self {
-        flight_manager { watched: Vec::new(), since_last_check: 0.0, player_id: "player".to_owned(), applied: MapSpec::default(), spawned: HashMap::new() }
+        flight_manager { watched: Vec::new(), since_last_check: 0.0, player_id: "player".to_owned(), applied: MapSpec::default(), spawned: HashMap::new(), stores: HashMap::new(), fired: HashMap::new() }
     }
 
     /// The node id of the aircraft the player flies - its `name` in map.ron.
@@ -162,6 +254,7 @@ impl flight_manager {
     /// values. Model, scale and colliders still need a restart. Call once a
     /// frame.
     pub fn update(&mut self, scene: &mut Scene, delta_time: f32) {
+        self.update_stores(scene);
         self.since_last_check += delta_time;
         if self.since_last_check < WATCH_INTERVAL_SECONDS {
             return;
@@ -194,15 +287,9 @@ impl flight_manager {
             if let Some(plane) = node.get_behavior_mut::<Plane>() {
                 plane.set_effects(&spec.effects);
             }
-            node.push_physics_event(AircraftReload {
-                aero: spec.aero,
-                engine: spec.engine,
-                gear: spec.gear,
-                effects: spec.effects,
-                mass: spec.physics.rigidbody.mass,
-                center_of_mass: spec.physics.rigidbody.center_of_mass,
-                colliders: spec.physics.colliders,
-            });
+            // What's left of its loadout's weight stays on.
+            let loadout = remaining_loadout(&self.applied, &self.fired, &plane.node_id);
+            node.push_physics_event(reload_event(spec, &loadout));
             println!("Reloaded '{}' ({}) from {} - aero, engine, gear, effects and mass applied", plane.node_id, plane.name, plane.data_path.display());
         }
     }
@@ -274,6 +361,9 @@ impl flight_manager {
             if old_coalition.color != coalition.color {
                 Self::color_name_tag(app, &after.name, coalition);
             }
+            if before.loadout != after.loadout || before.flares != after.flares || before.chaff != after.chaff {
+                self.rearm(scene, app, after);
+            }
         }
         self.player_id = edited.player().name.clone();
 
@@ -337,8 +427,14 @@ impl flight_manager {
         let aircraft_spec = AircraftSpec::load(&placement.plane)
             .map_err(|error| format!("map aircraft '{}': {error}", placement.name))?;
 
+        for problem in loadout_problems(placement, &aircraft_spec) {
+            eprintln!("map aircraft '{}': loadout - {problem}", placement.name);
+        }
+
         let rotation = placement.rotation();
         let mut physics = aircraft_spec.physics.clone();
+        // Its loadout's weight on, where it hangs.
+        (physics.rigidbody.mass, physics.rigidbody.center_of_mass) = loaded_mass(&aircraft_spec, &placement.loadout);
         let data_initial_velocity = physics.rigidbody.initial_velocity;
         if let Some(speed) = placement.speed {
             physics.rigidbody.initial_velocity = rotation * Vector3::new(0.0, 0.0, speed);
@@ -365,10 +461,12 @@ impl flight_manager {
             physics_command_tx,
         ).map_err(|error| format!("map aircraft '{}': {error}", placement.name))?;
         if let Some(instance) = scene.content.renderizable_instances.get_mut(&placement.name) {
-            let mut cameras: Cameras = HashMap::new();
-            cameras.insert("cockpit".to_owned(), GameObjectCamera { position: aircraft_spec.aero.pilot_position, fov: 70.0 });
-            cameras.insert("cinematic".to_owned(), GameObjectCamera { position: Vector3::new(0.0, 1000.0, 900.0), fov: 60.0 });
-            cameras.insert("frontal".to_owned(), GameObjectCamera { position: Vector3::new(0.0, 2.895, 16.84), fov: 40.0 });
+            // Its views as its data.ron places them - the cockpit at the
+            // pilot's seat unless it says otherwise; the rest, the camera's
+            // own defaults (see play::camera::camera).
+            let mut cameras: Cameras = aircraft_spec.cameras.clone();
+            cameras.entry(camera::COCKPIT_CAMERA.to_owned())
+                .or_insert(GameObjectCamera { position: aircraft_spec.aero.pilot_position, fov: 70.0 });
             instance.instance.metadata.cameras = Some(cameras);
         }
 
@@ -383,7 +481,20 @@ impl flight_manager {
         tag.resolve(app.window_manager.size.width as f32, app.window_manager.size.height as f32);
         app.ui.add_to_ui(name_tag_key(&placement.name), tag);
 
-        self.spawned.insert(placement.name.clone(), SpawnedAircraft { data_initial_velocity });
+        // Its HUD glass, from its model - sized like the model's drawn.
+        let hud_glass = aircraft_spec.model.hud_glass.as_ref().and_then(|mesh| {
+            match crate::resources::load_mesh_points(Path::new(&aircraft_spec.model.model), mesh) {
+                Ok(points) => Some(points.into_iter().map(|point| point * aircraft_spec.model.scale).collect()),
+                Err(error) => {
+                    eprintln!("map aircraft '{}': HUD glass - {error}", placement.name);
+                    None
+                }
+            }
+        });
+        let countermeasures = loaded_countermeasures(&aircraft_spec, placement);
+        self.spawned.insert(placement.name.clone(), SpawnedAircraft { data_initial_velocity, hud_glass, countermeasures });
+        self.fired.remove(&placement.name);
+        self.hang_stores(scene, app, placement, &aircraft_spec);
 
         // Its data.ron is live from here on - see update.
         let data_path = AircraftSpec::data_path(&aircraft_spec.name);
@@ -396,13 +507,137 @@ impl flight_manager {
         Ok(())
     }
 
-    /// Takes the aircraft `name` out of the scene - node, body, name tag.
+    /// Hangs `placement`'s loadout on its aircraft: a model for each weapon,
+    /// at its pylon - carried along from then on (see `update_stores`).
+    fn hang_stores(&mut self, scene: &mut Scene, app: &mut App, placement: &AircraftPlacement, spec: &AircraftSpec) {
+        let (position, rotation) = (placement.position(), placement.rotation());
+        let mut stores = Vec::new();
+        for (pylon, weapon) in loaded_stores(spec, &placement.loadout) {
+            if !Path::new(&weapon.model.model).is_file() {
+                eprintln!("map aircraft '{}': {} on '{}' has no model ({}) - not shown", placement.name, weapon.id, pylon.name, weapon.model.model);
+                continue;
+            }
+            let node_id = format!("{}:{}", placement.name, pylon.name);
+            let spawned = scene.spawn_node(app,
+                Node::new(&node_id)
+                    .add_property(Transform3D {
+                        position: position + rotation * pylon.position,
+                        rotation: rotation * weapon.model.rotation(),
+                        scale: Vector3::new(1.0, 1.0, 1.0),
+                    })
+                    .add_property(Model::from_file(&weapon.model.model)
+                        .double_sided(DoubleSidedMeshes::Meshes(weapon.model.double_sided.clone()))
+                        .scaled(weapon.model.scale)),
+            );
+            match spawned {
+                Ok(()) => stores.push(Store { node_id, pylon: pylon.name.clone(), weapon: weapon.id.clone(), offset: pylon.position, model_rotation: weapon.model.rotation() }),
+                Err(error) => eprintln!("map aircraft '{}': couldn't hang {} on '{}': {error}", placement.name, weapon.id, pylon.name),
+            }
+        }
+        self.stores.insert(placement.name.clone(), stores);
+    }
+
+    /// Takes the weapons hung on aircraft `name` off.
+    fn remove_stores(&mut self, scene: &mut Scene, app: &mut App, name: &str) {
+        for store in self.stores.remove(name).unwrap_or_default() {
+            scene.despawn_node(app, &store.node_id, None);
+        }
+    }
+
+    /// The aircraft `name` loaded again as the map has it, where it is -
+    /// every weapon back on its pylon, flares and chaff full (the F6
+    /// editor's reset).
+    pub fn reset_loadout(&mut self, scene: &mut Scene, app: &mut App, name: &str) {
+        let Some((_, placement)) = self.applied.find(name) else { return };
+        let placement = placement.clone();
+        self.rearm(scene, app, &placement);
+    }
+
+    /// `placement`'s loadout changed: its weapons swapped for the new ones,
+    /// and its mass with them - flares and chaff full again.
+    fn rearm(&mut self, scene: &mut Scene, app: &mut App, placement: &AircraftPlacement) {
+        self.remove_stores(scene, app, &placement.name);
+        self.fired.remove(&placement.name);
+        let Ok(spec) = AircraftSpec::load(&placement.plane) else { return };
+        for problem in loadout_problems(placement, &spec) {
+            eprintln!("map aircraft '{}': loadout - {problem}", placement.name);
+        }
+        // Its flares and chaff, full again.
+        if let Some(spawned) = self.spawned.get_mut(&placement.name) {
+            spawned.countermeasures = loaded_countermeasures(&spec, placement);
+        }
+        self.hang_stores(scene, app, placement, &spec);
+        if let Some(node) = scene.content.nodes.get_mut(&placement.name) {
+            node.push_physics_event(reload_event(spec, &placement.loadout));
+        }
+        // Where it really is now, not where it spawned.
+        self.update_stores(scene);
+    }
+
+    /// Carries every hung weapon along with its aircraft - at its pylon,
+    /// turned with it. Call every frame, after anything that moves the
+    /// aircraft (physics, a scripted track).
+    pub fn update_stores(&self, scene: &mut Scene) {
+        for (aircraft, stores) in &self.stores {
+            let Some(transform) = scene.content.renderizable_instances.get(aircraft).map(|instance| instance.instance.transform) else { continue };
+            for store in stores {
+                if let Some(instance) = scene.content.renderizable_instances.get_mut(&store.node_id) {
+                    instance.instance.transform.position = transform.position + transform.rotation * store.offset;
+                    instance.instance.transform.rotation = transform.rotation * store.model_rotation;
+                }
+            }
+        }
+    }
+
+    /// Takes the aircraft `name` out of the scene - node, body, name tag,
+    /// the weapons hung on it.
     fn remove_plane(&mut self, scene: &mut Scene, app: &mut App, physics_command_tx: Option<&Sender<PhysicsCommand>>, name: &str) {
+        self.remove_stores(scene, app, name);
         scene.despawn_node(app, name, physics_command_tx);
         app.ui.renderizable_elements.remove(&name_tag_key(name));
         app.ui.has_changed = true;
         self.watched.retain(|plane| plane.node_id != name);
         self.spawned.remove(name);
+        self.fired.remove(name);
+    }
+
+    /// The points of the aircraft `name`'s HUD glass (m, the jet's frame) -
+    /// `None` without one (see its data.ron `model: hud_glass`).
+    pub fn hud_glass(&self, name: &str) -> Option<&[Vector3<f32>]> {
+        self.spawned.get(name).and_then(|spawned| spawned.hud_glass.as_deref())
+    }
+
+    /// The aircraft `name`'s flares and chaff - `None` without any (see its
+    /// data.ron `countermeasures`).
+    pub fn countermeasures_mut(&mut self, name: &str) -> Option<&mut CountermeasureSet> {
+        self.spawned.get_mut(name).and_then(|spawned| spawned.countermeasures.as_mut())
+    }
+
+    /// The weapons still hanging on the aircraft `name`: each one's pylon,
+    /// weapon id and where the pylon is (m, the jet's frame).
+    pub fn hung_weapons(&self, name: &str) -> Vec<(String, String, Vector3<f32>)> {
+        self.stores.get(name).map(|stores| stores.iter()
+            .map(|store| (store.pylon.clone(), store.weapon.clone(), store.offset))
+            .collect()).unwrap_or_default()
+    }
+
+    /// Lets go of the weapon on `pylon` of the aircraft `name`: its model
+    /// comes off and its weight with it. Returns where it was in the world
+    /// - position, and the aircraft's rotation - to launch it from; `None`
+    /// with nothing there.
+    pub fn release(&mut self, scene: &mut Scene, app: &mut App, name: &str, pylon: &str) -> Option<(Vector3<f32>, UnitQuaternion<f32>)> {
+        let transform = scene.content.renderizable_instances.get(name)?.instance.transform;
+        let stores = self.stores.get_mut(name)?;
+        let index = stores.iter().position(|store| store.pylon == pylon)?;
+        let store = stores.remove(index);
+        scene.despawn_node(app, &store.node_id, None);
+        self.fired.entry(name.to_owned()).or_default().insert(pylon.to_owned());
+
+        let plane = self.applied.find(name).map(|(_, placement)| placement.plane.clone());
+        if let (Some(spec), Some(node)) = (plane.and_then(|plane| AircraftSpec::load(&plane).ok()), scene.content.nodes.get_mut(name)) {
+            node.push_physics_event(reload_event(spec, &remaining_loadout(&self.applied, &self.fired, name)));
+        }
+        Some((transform.position + transform.rotation * store.offset, transform.rotation))
     }
 
     /// Puts the aircraft at its place in the map, at its map `speed` along
@@ -468,6 +703,31 @@ impl flight_manager {
     }
 }
 
+/// The aircraft `name`'s loadout in `map` without the pylons it's `fired`.
+fn remaining_loadout(map: &MapSpec, fired: &HashMap<String, BTreeSet<String>>, name: &str) -> BTreeMap<String, String> {
+    let mut loadout = map.find(name).map(|(_, placement)| placement.loadout.clone()).unwrap_or_default();
+    if let Some(fired) = fired.get(name) {
+        loadout.retain(|pylon, _| !fired.contains(pylon));
+    }
+    loadout
+}
+
+/// What's wrong with `placement`'s loadout on its plane (`spec`): weapons on
+/// pylons the plane doesn't have, weapons that don't exist, weapons on a
+/// pylon that doesn't take their kind. Empty when it's all right.
+pub fn loadout_problems(placement: &AircraftPlacement, spec: &AircraftSpec) -> Vec<String> {
+    placement.loadout.iter().filter_map(|(pylon_name, weapon)| {
+        let Some(pylon) = spec.pylons.iter().find(|pylon| pylon.name == *pylon_name) else {
+            return Some(format!("the {} has no pylon '{pylon_name}'", spec.name));
+        };
+        match WeaponSpec::read(weapon) {
+            Err(error) => Some(error),
+            Ok(weapon_spec) if !pylon.accepts(weapon_spec.category) => Some(format!("'{pylon_name}' doesn't take a {:?} ({weapon})", weapon_spec.category)),
+            Ok(_) => None,
+        }
+    }).collect()
+}
+
 /// The airspeed a bot holds flying its path (m/s) - its map `speed`, or
 /// DEFAULT_CRUISE_SPEED without one.
 fn cruise_speed(placement: &AircraftPlacement) -> f32 {
@@ -479,4 +739,77 @@ const DEFAULT_CRUISE_SPEED: f32 = 150.0;
 
 fn coalition_color(coalition: &Coalition) -> UiColor {
     UiColor::Rgb(coalition.color.0, coalition.color.1, coalition.color.2)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn f16_with(loadout: &[(&str, &str)]) -> AircraftPlacement {
+        AircraftPlacement {
+            name: "test".to_owned(),
+            plane: "f16".to_owned(),
+            player: false,
+            position: (0.0, 1000.0, 0.0),
+            rotation: (0.0, 0.0, 0.0),
+            speed: None,
+            throttle: 0.0,
+            path: Vec::new(),
+            loadout: loadout.iter().map(|(pylon, weapon)| (pylon.to_string(), weapon.to_string())).collect(),
+            flares: None,
+            chaff: None,
+            difficulty: Default::default(),
+        }
+    }
+
+    #[test]
+    fn a_good_loadout_has_no_problems() {
+        let spec = AircraftSpec::load("f16").unwrap();
+        let placement = f16_with(&[("1 Left wingtip", "missiles/aim-9x"), ("9 Right wingtip", "missiles/aim-9x")]);
+        assert!(loadout_problems(&placement, &spec).is_empty(), "{:?}", loadout_problems(&placement, &spec));
+    }
+
+    #[test]
+    fn the_loadout_adds_its_weight_where_it_hangs() {
+        let spec = AircraftSpec::load("f16").unwrap();
+        let missile = WeaponSpec::read("missiles/aim-9x").unwrap().physics.rigidbody.mass;
+        let (empty_mass, empty_center) = loaded_mass(&spec, &BTreeMap::new());
+        assert_eq!(empty_mass, spec.physics.rigidbody.mass);
+        assert!((empty_center - spec.physics.rigidbody.center_of_mass).norm() < 1e-4, "{empty_center:?}");
+
+        // One on each wingtip: two missiles heavier, still balanced side to side.
+        let both = f16_with(&[("1 Left wingtip", "missiles/aim-9x"), ("9 Right wingtip", "missiles/aim-9x")]);
+        let (mass, center) = loaded_mass(&spec, &both.loadout);
+        assert!((mass - (empty_mass + 2.0 * missile)).abs() < 1e-3, "{mass}");
+        assert!((center.x - empty_center.x).abs() < 1e-4, "balanced: {center:?}");
+
+        // Only the left one: the center moves a little toward it (+X).
+        let left = f16_with(&[("1 Left wingtip", "missiles/aim-9x")]);
+        let (_, center) = loaded_mass(&spec, &left.loadout);
+        assert!(center.x > empty_center.x && center.x < empty_center.x + 0.1, "{center:?}");
+
+        // A weapon on a pylon it doesn't have weighs nothing.
+        let nowhere = f16_with(&[("10 Nowhere", "missiles/aim-9x")]);
+        assert_eq!(loaded_mass(&spec, &nowhere.loadout).0, empty_mass);
+    }
+
+    #[test]
+    fn the_f16s_hud_glass_is_in_front_of_the_pilot() {
+        let spec = AircraftSpec::load("f16").unwrap();
+        let mesh = spec.model.hud_glass.as_deref().expect("the F-16 has a HUD glass");
+        let points = crate::resources::load_mesh_points(Path::new(&spec.model.model), mesh).unwrap();
+        let eye = spec.aero.pilot_position;
+        for point in points.iter().map(|point| point * spec.model.scale) {
+            // Under a meter ahead of the eye, about level with it, centered.
+            assert!(point.z > eye.z && point.z < eye.z + 1.0, "{point:?}");
+            assert!((point.y - eye.y).abs() < 0.3 && point.x.abs() < 0.2, "{point:?}");
+        }
+    }
+
+    #[test]
+    fn unknown_pylons_and_weapons_are_problems() {
+        let spec = AircraftSpec::load("f16").unwrap();
+        let placement = f16_with(&[("10 Nowhere", "missiles/aim-9x"), ("5 Centerline", "missiles/no-such-missile")]);
+        assert_eq!(loadout_problems(&placement, &spec).len(), 2);
+    }
 }

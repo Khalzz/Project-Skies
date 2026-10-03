@@ -17,7 +17,7 @@ use crate::engine::ui::layer::Layer;
 use crate::engine::ui::ui_node::UiNode;
 use crate::engine::ui::ui_transform::{Orientation, PositionValue, SizeValue};
 use crate::game::scenes::main_menu::ui as main_menu_ui;
-use crate::game::ui::{button, label, with_left_accent};
+use crate::game::ui::{button, label, with_left_accent, HUD_FONT};
 
 // Small green HUD readout - the shape data_box's own children and compass/
 // speed all share (matches what assets/ui/game_ui.ron used to declare for
@@ -27,6 +27,7 @@ use crate::game::ui::{button, label, with_left_accent};
 fn hud_label(app: &mut App, text: &str, width: f32, height: f32) -> UiNode {
     label(app, text)
         .set_size(SizeValue::Pixels(width), SizeValue::Pixels(height))
+        .set_font(&mut app.ui.text.font_system, HUD_FONT)
         .set_font_size(&mut app.ui.text.font_system, 10.0)
         .set_text_color(UiColor::Rgb(0, 255, 0))
         .set_border_color(UiColor::Rgb(0, 255, 0))
@@ -42,6 +43,88 @@ fn hud_label(app: &mut App, text: &str, width: f32, height: f32) -> UiNode {
 /// "velocity_marker" is deliberately NOT included here despite being part of
 /// the same HUD reveal - see `build_velocity_marker`'s own doc comment for
 /// why it has to stay independent instead.
+/// The HUD's speed and altitude, and their captions - each its own top-level
+/// node (like the velocity marker), placed every frame inside the HUD's
+/// frame (see GameLogic::update_hud): (key, text, font size).
+pub const HUD_READOUTS: [(&str, &str, f32); 6] = [
+    ("hud_speed", "0", 12.0),
+    ("hud_altitude", "0", 12.0),
+    ("hud_speed_caption", "SPD KT", 9.0),
+    ("hud_altitude_caption", "ALT M", 9.0),
+    // The heading, in the middle of the heading tape.
+    ("hud_heading", "0", 16.0),
+    // The G, bottom left - in the Fox-2 mode only.
+    ("hud_g", "1.0G", 12.0),
+];
+/// A HUD readout's box (px).
+pub const HUD_READOUT_SIZE: (f32, f32) = (64.0, 20.0);
+
+/// One of `HUD_READOUTS` - built hidden. The HUD's text is the regular
+/// weight, a touch heavier than the thin default.
+pub fn build_hud_readout(app: &mut App, text: &str, font_size: f32) -> UiNode {
+    label(app, text)
+        .set_size(SizeValue::Pixels(HUD_READOUT_SIZE.0), SizeValue::Pixels(HUD_READOUT_SIZE.1))
+        .set_font(&mut app.ui.text.font_system, HUD_FONT)
+        .set_font_size(&mut app.ui.text.font_system, font_size)
+        .set_text_color(UiColor::Rgb(0, 255, 77))
+        .set_background_color(UiColor::TRANSPARENT)
+        .set_align(Align::Center)
+        .active(false)
+}
+
+/// How many pitch ladder numbers there can be on screen at once - each its
+/// own top-level node like the readouts, placed (and given its number) every
+/// frame by GameLogic::update_hud. Enough for every one: two per line, a
+/// line every 5° from -90° to 90° but the horizon.
+pub const HUD_PITCH_LABELS: usize = 2 * 36;
+/// The same for the heading tape's numbers - it shows 60°, a number every
+/// 10°.
+pub const HUD_HEADING_LABELS: usize = 8;
+/// A pitch ladder or heading tape number's box (px).
+pub const HUD_SMALL_LABEL_SIZE: (f32, f32) = (28.0, 14.0);
+
+pub fn hud_pitch_label_key(index: usize) -> String {
+    format!("hud_pitch_{index}")
+}
+
+pub fn hud_heading_label_key(index: usize) -> String {
+    format!("hud_heading_{index}")
+}
+
+/// How many heat sources the F8 heat view can label at once (see
+/// GameLogic::update_heat_view), and a label's box (px).
+pub const HEAT_LABELS: usize = 16;
+pub const HEAT_LABEL_SIZE: (f32, f32) = (110.0, 14.0);
+
+pub fn heat_label_key(index: usize) -> String {
+    format!("heat_view_{index}")
+}
+
+/// One of the `HEAT_LABELS` - built hidden, white so it reads over the
+/// heat colors.
+pub fn build_heat_label(app: &mut App) -> UiNode {
+    label(app, "0")
+        .set_size(SizeValue::Pixels(HEAT_LABEL_SIZE.0), SizeValue::Pixels(HEAT_LABEL_SIZE.1))
+        .set_font(&mut app.ui.text.font_system, HUD_FONT)
+        .set_font_size(&mut app.ui.text.font_system, 10.0)
+        .set_text_color(UiColor::Rgb(255, 255, 255))
+        .set_background_color(UiColor::TRANSPARENT)
+        .set_align(Align::Center)
+        .active(false)
+}
+
+/// One of the `HUD_PITCH_LABELS` or `HUD_HEADING_LABELS` - built hidden.
+pub fn build_hud_small_label(app: &mut App) -> UiNode {
+    label(app, "0")
+        .set_size(SizeValue::Pixels(HUD_SMALL_LABEL_SIZE.0), SizeValue::Pixels(HUD_SMALL_LABEL_SIZE.1))
+        .set_font(&mut app.ui.text.font_system, HUD_FONT)
+        .set_font_size(&mut app.ui.text.font_system, 10.0)
+        .set_text_color(UiColor::Rgb(0, 255, 77))
+        .set_background_color(UiColor::TRANSPARENT)
+        .set_align(Align::Center)
+        .active(false)
+}
+
 pub fn build_game_ui(app: &mut App) -> UiNode {
     let data_box = UiNode::container()
         .set_size(SizeValue::Fit, SizeValue::Fit)
@@ -52,28 +135,69 @@ pub fn build_game_ui(app: &mut App) -> UiNode {
         .set_child("timer", hud_label(app, "00:00:00:00", 250.0, 35.0))
         .set_child("framerate", hud_label(app, "100fps", 250.0, 35.0))
         .set_child("g", hud_label(app, "1g", 250.0, 35.0))
-        .set_child("power", hud_label(app, "0%", 250.0, 35.0));
+        .set_child("power", hud_label(app, "0%", 250.0, 35.0))
+        // The selected weapon and its lock - see GameLogic::update_weapons.
+        .set_child("weapons", hud_label(app, "WPN OFF", 250.0, 35.0))
+        // Flares and chaff left, and what's released - see
+        // GameLogic::update_weapons.
+        .set_child("countermeasures", hud_label(app, "", 250.0, 35.0));
 
     let compass = hud_label(app, "90°", 100.0, 35.0)
         .set_position(PositionValue::Center(0.0), PositionValue::Start(10.0));
-    let speed = hud_label(app, "SPD", 100.0, 35.0)
-        .set_position(PositionValue::Center(0.0), PositionValue::Start(50.0));
-    // "altitude" - matches the key ui_control's own Ui::get_ui_node lookup
-    // already expects (see scene.rs's own stale-reference comment at the top
-    // of that file) - that formatting/update logic was already there, this
-    // node just never existed for it to actually find.
-    let altitude = hud_label(app, "ALT", 100.0, 35.0)
-        .set_position(PositionValue::Center(0.0), PositionValue::Start(90.0));
-
     UiNode::container()
         .set_size(SizeValue::Percent(100.0), SizeValue::Percent(100.0))
         .set_position(PositionValue::Start(0.0), PositionValue::Start(0.0))
         .set_background_color(UiColor::TRANSPARENT)
         .set_child("data_box", data_box)
         .set_child("compass", compass)
-        .set_child("speed", speed)
-        .set_child("altitude", altitude)
+        .set_child("weapon_list", build_weapon_list(app))
         .active(false)
+}
+
+/// How many entries the weapon list has room for - OFF and up to this
+/// many kinds of weapon, less one.
+const WEAPON_LIST_ROWS: usize = 8;
+
+/// The weapon list, bottom right: OFF, then each kind of weapon on the jet
+/// with how many are left - the selected one bright (see
+/// `update_weapon_list`).
+fn build_weapon_list(app: &mut App) -> UiNode {
+    let mut list = UiNode::container()
+        .set_orientation(Orientation::Vertical)
+        .set_size(SizeValue::Fit, SizeValue::Fit)
+        .set_position(PositionValue::End(-20.0), PositionValue::End(-20.0))
+        .set_padding(10.0)
+        .set_gap(2.0)
+        .set_background_color(UiColor::Rgba(0, 0, 0, 128))
+        .set_child("title", hud_label(app, "WEAPONS", 180.0, 22.0));
+    for row in 0..WEAPON_LIST_ROWS {
+        let entry = hud_label(app, "", 180.0, 22.0)
+            .set_border_color(UiColor::TRANSPARENT)
+            .active(false);
+        list = list.set_child(format!("row{row}"), entry);
+    }
+    list
+}
+
+/// Fills the weapon list from `entries` - each one's text and whether it's
+/// selected. Rows past the last entry are hidden.
+pub fn update_weapon_list(app: &mut App, entries: &[(String, bool)]) {
+    for row in 0..WEAPON_LIST_ROWS {
+        let key = format!("game_ui/weapon_list/row{row}");
+        let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &key) else { continue };
+        match entries.get(row) {
+            Some((text, selected)) => {
+                node.set_active(true);
+                let color = if *selected { UiColor::Rgb(0, 255, 0) } else { UiColor::Rgb(0, 120, 0) };
+                node.update_style(|style| style.set_text_color(color));
+                if let Some(label) = node.as_label_mut() {
+                    let text = if *selected { format!("> {text}") } else { text.clone() };
+                    label.set_text(&mut app.ui.text.font_system, &text, true);
+                }
+            }
+            None => node.set_active(false),
+        }
+    }
 }
 
 /// Stays a fully independent top-level node rather than nested inside
@@ -370,6 +494,7 @@ pub fn build_debug_panel(app: &mut App) -> UiNode {
         .set_background_blur(20.0)
         .set_child("fps", stats_line(app, "0 FPS"))
         .set_child("position", stats_line(app, "Player position: (0, 0, 0)"))
+        .set_child("bank", stats_line(app, "Bank: 0°"))
         .set_child("ocean", stats_line(app, "Ocean: -"));
 
     UiNode::container()

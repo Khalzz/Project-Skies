@@ -13,6 +13,12 @@ struct LineUniform {
     camera_position: vec4<f32>,
     // Screen size in pixels (x, y).
     screen: vec4<f32>,
+    // x: how many of `mask`'s edges are used - 0, no mask. y: 1 when the
+    // lines are in screen pixels (from the top left), not the world.
+    mask_info: vec4<f32>,
+    // A convex outline on screen to draw inside: each edge (a, b, c) keeps a
+    // pixel (x, y) while a*x + b*y + c >= 0.
+    mask: array<vec4<f32>, 32>,
 };
 
 @group(0) @binding(0)
@@ -31,6 +37,10 @@ struct LineInstance {
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) color: vec4<f32>,
+    // How far across the line this is from its middle, and half its width
+    // (pixels) - for the soft edge, so fractional widths read as such.
+    @location(1) across_pixels: f32,
+    @location(2) half_width: f32,
 };
 
 // Moves `a` along to `b` until it's in front of the camera (clip w > NEAR) -
@@ -44,6 +54,11 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, line: LineInstance) -> Vert
 
     var a = camera.view_proj * vec4<f32>(line.start - lines.camera_position.xyz, 1.0);
     var b = camera.view_proj * vec4<f32>(line.end - lines.camera_position.xyz, 1.0);
+    if (lines.mask_info.y > 0.5) {
+        // Screen pixels straight to clip space.
+        a = vec4<f32>(line.start.x / lines.screen.x * 2.0 - 1.0, 1.0 - line.start.y / lines.screen.y * 2.0, 0.5, 1.0);
+        b = vec4<f32>(line.end.x / lines.screen.x * 2.0 - 1.0, 1.0 - line.end.y / lines.screen.y * 2.0, 0.5, 1.0);
+    }
     if (a.w < NEAR && b.w < NEAR) {
         // All behind the camera - nothing to draw.
         output.position = vec4<f32>(0.0, 0.0, 0.0, 0.0);
@@ -79,13 +94,27 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, line: LineInstance) -> Vert
         base = b;
         along = 1.0;
     }
-    // Half the width either side, and half past each end so joints meet.
-    let offset_pixels = across * side * line.width * 0.5 + direction * along * line.width * 0.5;
+    // Half the width either side (and a pixel more, for the soft edge), and
+    // half past each end so joints meet.
+    let half_width = line.width * 0.5;
+    let reach = half_width + 1.0;
+    let offset_pixels = across * side * reach + direction * along * half_width;
     output.position = vec4<f32>(base.xy + offset_pixels / half_screen * base.w, base.z, base.w);
+    output.across_pixels = side * reach;
+    output.half_width = half_width;
     return output;
 }
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    return input.color;
+    let edges = u32(lines.mask_info.x);
+    for (var i = 0u; i < edges; i = i + 1u) {
+        let edge = lines.mask[i];
+        if (dot(edge.xy, input.position.xy) + edge.z < 0.0) {
+            discard;
+        }
+    }
+    // How much of this pixel the line covers, across it.
+    let coverage = clamp(input.half_width + 0.5 - abs(input.across_pixels), 0.0, 1.0);
+    return vec4<f32>(input.color.rgb, input.color.a * coverage);
 }

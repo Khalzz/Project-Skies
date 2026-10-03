@@ -2,12 +2,14 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::engine::game_nodes::game_object::{ColliderType, Physics};
+use crate::engine::game_nodes::game_object::{Cameras, ColliderType, Physics};
 
 use super::aero_spec::AeroSpec;
 use super::engine::EngineSpec;
 use super::gear_spec::GearSpec;
 use super::effects::EffectSpec;
+use super::pylon_spec::{self, PylonSpec};
+use crate::game::scenes::play::weapon::countermeasures::CountermeasureSpec;
 
 /// Where every plane's folder lives - one folder per plane, named after it
 /// (`assets/planes/f16/`), each with its own `data.ron` (see
@@ -22,6 +24,9 @@ pub struct Model {
     /// Meshes drawn two-sided (no backface culling) - e.g. the F-16's
     /// afterburner flame, seen from inside.
     pub double_sided: Vec<String>,
+    /// The mesh that's the HUD's glass - in the cockpit view the HUD's
+    /// horizon and pitch ladder only show through it. None: no glass.
+    pub hud_glass: Option<String>,
 }
 
 pub struct AircraftSpec {
@@ -44,6 +49,19 @@ pub struct AircraftSpec {
     /// `effects: [ ... ]` (optional). Each wheel in `gear` also gets tyre
     /// smoke on its own.
     pub effects: Vec<EffectSpec>,
+    /// Where weapons can hang, and what each takes - `data.ron`'s
+    /// `pylons: [ ... ]` (optional). What's hung on them is the aircraft's
+    /// loadout, in the flight management (play::map).
+    pub pylons: Vec<PylonSpec>,
+    /// Where its views sit on it, by name - `data.ron`'s `cameras: { ... }`
+    /// (optional, each one too): "cockpit" (default: the pilot's seat),
+    /// "third_person", "free" (the point it orbits) and "front", each a
+    /// `position` (m, the plane's frame) and a `fov` - see
+    /// play::camera::camera's defaults for the ones left out.
+    pub cameras: Cameras,
+    /// Its flares and chaff, and the dispensers they come out of -
+    /// `data.ron`'s `countermeasures: ( ... )` (optional: none).
+    pub countermeasures: Option<CountermeasureSpec>,
 }
 
 /// A plane's `data.ron`, as written in the file. Paths in it are relative to
@@ -57,6 +75,12 @@ struct PlaneData {
     gear: GearSpec,
     #[serde(default)]
     effects: Vec<EffectSpec>,
+    #[serde(default)]
+    pylons: Vec<PylonSpec>,
+    #[serde(default)]
+    cameras: Cameras,
+    #[serde(default)]
+    countermeasures: Option<CountermeasureSpec>,
 }
 
 /// `data.ron`'s `model: ( ... )` - mirrors `Model`.
@@ -69,6 +93,9 @@ struct ModelData {
     /// Optional - mesh names drawn two-sided.
     #[serde(default)]
     double_sided: Vec<String>,
+    /// Optional - the HUD glass's mesh name.
+    #[serde(default)]
+    hud_glass: Option<String>,
 }
 
 fn default_scale() -> f32 {
@@ -151,18 +178,24 @@ impl AircraftSpec {
             *collider = ColliderType::ConvexHull { points };
         }
 
+        pylon_spec::check(&data.pylons).map_err(|error| format!("plane '{name}': {error}"))?;
+
         Ok(AircraftSpec {
             name: name.to_owned(),
             model: Model {
                 model: model_path.to_string_lossy().into_owned(),
                 scale: data.model.scale,
                 double_sided: data.model.double_sided,
+                hud_glass: data.model.hud_glass,
             },
             physics,
             aero,
             engine: data.engine,
             gear: data.gear,
             effects: data.effects,
+            pylons: data.pylons,
+            cameras: data.cameras,
+            countermeasures: data.countermeasures,
         })
     }
 }

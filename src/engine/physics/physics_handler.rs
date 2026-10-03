@@ -10,6 +10,7 @@ use crate::engine::physics::physics::DebugPhysicsMessageType;
 use crate::engine::physics::physics_behavior::{DebugDraw, PhysicsBehavior, PhysicsInput, PhysicsNode, PhysicsPayload};
 use crate::engine::physics::physics_resources::{load_physics_from_definitions, PhysicsObjectDef};
 
+#[derive(Clone, Copy)]
 pub struct RenderMessage {
     pub translation: Vector3<f32>,
     pub rotation: Quaternion<f32>,
@@ -18,6 +19,10 @@ pub struct RenderMessage {
     // straight through with no conversion. See Instrumentation::update
     // for the body-frame rotation that turns this into pitch/yaw/roll rate.
     pub angvel: Vector3<f32>,
+    /// When (wall clock) the body was where this says - the physics steps at
+    /// a fixed 120 Hz on its own thread, so by the time a frame draws it
+    /// it's moved on; see App's `physics_poses`.
+    pub sampled_at: Instant,
 }
 
 pub enum PhysicsCommand {
@@ -246,13 +251,16 @@ impl Physics {
 
             if should_send_data {
                 let mut new_render_messages: HashMap<String, RenderMessage> = HashMap::new();
+                // The state is the last step's: `accumulator` seconds of real
+                // time have passed since the moment it stands for.
+                let sampled_at = Instant::now().checked_sub(std::time::Duration::from_secs_f32(accumulator.max(0.0))).unwrap_or_else(Instant::now);
 
                 for (key, physics_data) in &self.physics_elements {
                     match physics_data {
                         Some(physics_data) => {
                             let rb = self.rigidbody_set.get(physics_data.rigidbody_handle).unwrap();
 
-                            new_render_messages.insert(key.clone(), RenderMessage { translation: *rb.translation(), rotation: rb.rotation().into_inner(), linvel: *rb.linvel(), angvel: *rb.angvel() });
+                            new_render_messages.insert(key.clone(), RenderMessage { translation: *rb.translation(), rotation: rb.rotation().into_inner(), linvel: *rb.linvel(), angvel: *rb.angvel(), sampled_at });
                         },
                         None => {},
                     }

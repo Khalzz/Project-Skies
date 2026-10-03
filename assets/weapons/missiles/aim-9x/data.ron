@@ -1,0 +1,70 @@
+(
+  model: (
+    model: "model/aim-9.glb", // Exported from model/aim-9.blend - the engine loads .glb
+    scale: 3.02, // The model is 1 m long - the real missile is 3.02 m (the F-16's model is ~1.08 m, scaled 14x)
+    double_sided: ["fire"], // Meshes drawn without backface culling - the plume, like the F-16's afterburner
+    // The game's nose is +Z; Blender's +Y exports as -Z, so a model built
+    // pointing +Y comes out backwards - this turns it round (degrees about
+    // X, Y, Z).
+    rotation: (0.0, 180.0, 0.0),
+  ),
+  physics: (
+    rigidbody: (
+      is_static: false,
+      mass: 85.3, // At launch, propellant included - it gets lighter as the motor burns
+      center_of_mass: (0.0, 0.0, 0.0),
+      initial_velocity: (0.0, 0.0, 0.0), // Launched at its aircraft's velocity
+    ),
+    colliders: [
+      // The body tube: 127 mm across, 3.02 m nose to tail.
+      Cuboid(half_extents: (0.0635, 0.0635, 1.51), position: (0.0, 0.0, 0.0)),
+    ],
+  ),
+  // The rocket motor - the weapon's "engine": thrust phases one after another
+  // from launch (boost, then sustain...), propellant burnt off evenly over
+  // them. Mk 36 solid motor: one ~5 s burn, ~60 kN·s.
+  motor: (
+    phases: [
+      (duration: 5.2, thrust: 11500.0), // seconds, newtons
+    ],
+    propellant_mass: 26.6, // kg
+  ),
+  // How it flies: drag on the body tube by Mach, and the G it can pull -
+  // max_g from max_g_speed (m/s) up; slower, it falls with speed².
+  aero: (
+    diameter: 0.127, // meters - the cross-section drag acts on
+    drag: [
+      (mach: 0.0, cd: 0.35),
+      (mach: 0.8, cd: 0.38),
+      (mach: 1.1, cd: 0.62), // peaks through the sound barrier
+      (mach: 1.5, cd: 0.55),
+      (mach: 2.5, cd: 0.42),
+      (mach: 4.0, cd: 0.32),
+    ],
+    max_g: 60.0, // thrust-vectored - very agile
+    max_g_speed: 600.0,
+  ),
+  // How it homes: InfraRed, ActiveRadar, SemiActiveRadar or None (unguided).
+  guidance: (
+    seeker: InfraRed,
+    lock_range: 18000.0, // meters
+    gimbal_limit_deg: 90.0, // how far off its nose it can look
+    navigation_constant: 4.0, // proportional navigation gain - 3 to 5
+    guidance_delay: 0.3, // seconds before it turns - clearing the aircraft
+    // Chance (0..1) it ignores each flare that would pull it off - its
+    // imaging seeker tells a flare's point of light from a jet's shape well.
+    flare_resistance: 0.9,
+  ),
+  // When it goes off: this close to the target (active laser proximity
+  // fuze), armed after arm_delay, self-destructs after max_flight_time (s).
+  fuze: (
+    proximity_radius: 8.0,
+    arm_delay: 0.6,
+    max_flight_time: 60.0,
+  ),
+  // WDU-17/B annular blast-fragmentation warhead.
+  warhead: (
+    mass: 9.4, // kg
+    lethal_radius: 10.0, // meters - an aircraft this close is destroyed
+  ),
+)

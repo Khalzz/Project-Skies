@@ -18,7 +18,9 @@ use nalgebra::Vector3;
 
 use crate::engine::primitive::manual_vertex::ManualVertex;
 use crate::game::scenes::play::flight_manager::LiveAircraft;
-use crate::game::scenes::play::map::{AircraftPlacement, Coalition, MapSpec};
+use crate::game::scenes::play::map::{AircraftPlacement, Coalition, Difficulty, MapSpec};
+use crate::game::scenes::play::plane::pylon_spec::PylonSpec;
+use crate::game::scenes::play::weapon::weapon_spec::WeaponCategory;
 use crate::game::scenes::play::map_view::{MapAction, MapView, TerrainTriangle};
 
 /// Something the editor was asked to do beyond editing the map - for the
@@ -34,6 +36,9 @@ pub enum EditorRequest {
     Respawn(String),
     /// Make where this aircraft is right now its place in the map.
     CaptureCurrent(String),
+    /// Load this aircraft again as the map has it, where it is: every
+    /// weapon back on, flares and chaff full.
+    ResetLoadout(String),
 }
 
 /// What the hierarchy has selected - shown in the inspector.
@@ -56,6 +61,14 @@ pub struct FlightEditor {
     /// Every plane folder under assets/planes/ that loads - what an
     /// aircraft's `plane` can be.
     pub planes: Vec<String>,
+    /// Each plane's pylons, by plane - what an aircraft's loadout can fill.
+    pub pylons: HashMap<String, Vec<PylonSpec>>,
+    /// How many flares and chaff each plane carries by its data.ron, by
+    /// plane - none for one without dispensers.
+    pub countermeasures: HashMap<String, (u32, u32)>,
+    /// Every weapon that loads, by id, with its category - what a pylon can
+    /// carry (see `PylonSpec::accepts`).
+    pub weapons: Vec<(String, WeaponCategory)>,
     /// Each aircraft as it is right now, by name - filled every frame.
     pub live: HashMap<String, LiveAircraft>,
     /// The last thing done, or what's wrong with the map - `true` for an
@@ -498,6 +511,10 @@ impl FlightEditor {
             .find_map(|(coalition_index, coalition)| coalition.aircraft.iter().position(|aircraft| aircraft.name == name).map(|index| (coalition_index, index)))
         else { return };
         let planes = self.planes.clone();
+        let weapons = self.weapons.clone();
+        let plane_of_aircraft = &self.map.coalitions[coalition_index].aircraft[index].plane;
+        let pylons = self.pylons.get(plane_of_aircraft).cloned().unwrap_or_default();
+        let plane_countermeasures = self.countermeasures.get(plane_of_aircraft).copied();
         let coalitions: Vec<(String, Color32)> = self.map.coalitions.iter().map(|coalition| (coalition.name.clone(), coalition_color(coalition))).collect();
         let live = self.live.get(name).copied();
         let aircraft = &mut self.map.coalitions[coalition_index].aircraft[index];
@@ -547,6 +564,23 @@ impl FlightEditor {
                 }
             });
         });
+
+        if !aircraft.player {
+            section(ui, "Pilot", |ui| {
+                property(ui, "Difficulty", |ui| {
+                    egui::ComboBox::from_id_salt("difficulty")
+                        .width(ui.available_width())
+                        .selected_text(aircraft.difficulty.label())
+                        .show_ui(ui, |ui| {
+                            for difficulty in Difficulty::ALL {
+                                ui.selectable_value(&mut aircraft.difficulty, difficulty, difficulty.label());
+                            }
+                        })
+                        .response
+                        .on_hover_text("How quickly it reacts to a missile fired at it - with flares");
+                });
+            });
+        }
 
         section(ui, "Team", |ui| {
             property(ui, "Coalition", |ui| {
@@ -658,6 +692,87 @@ impl FlightEditor {
             });
         });
 
+        section(ui, "Loadout", |ui| {
+            if pylons.is_empty() {
+                property(ui, "", |ui| {
+                    ui.label(RichText::new(format!("The {} has no pylons - add them to its data.ron", aircraft.plane)).weak());
+                });
+            }
+            // A weapon (or Empty) on each of its plane's pylons - only the
+            // kinds the pylon takes.
+            for pylon in &pylons {
+                property(ui, &pylon.name, |ui| {
+                    let current = aircraft.loadout.get(&pylon.name).cloned();
+                    let mut choice = current.clone();
+                    egui::ComboBox::from_id_salt(("pylon", pylon.name.as_str()))
+                        .width(ui.available_width())
+                        .selected_text(current.as_deref().map(weapon_label).unwrap_or_else(|| "Empty".to_owned()))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut choice, None, "Empty");
+                            for (id, category) in &weapons {
+                                if pylon.accepts(*category) {
+                                    ui.selectable_value(&mut choice, Some(id.clone()), weapon_label(id));
+                                }
+                            }
+                        });
+                    if choice != current {
+                        match choice {
+                            Some(id) => { aircraft.loadout.insert(pylon.name.clone(), id); }
+                            None => { aircraft.loadout.remove(&pylon.name); }
+                        }
+                    }
+                });
+            }
+            // Weapons on pylons its plane doesn't have (another plane was
+            // picked) - shown so they can go.
+            let stale: Vec<String> = aircraft.loadout.keys().filter(|name| !pylons.iter().any(|pylon| pylon.name == **name)).cloned().collect();
+            for pylon_name in stale {
+                property(ui, &pylon_name, |ui| {
+                    ui.label(RichText::new("no such pylon on this plane").color(ERROR_COLOR));
+                    if ui.small_button("×").on_hover_text("Remove it from the loadout").clicked() {
+                        aircraft.loadout.remove(&pylon_name);
+                    }
+                });
+            }
+            if !aircraft.loadout.is_empty() {
+                property(ui, "", |ui| {
+                    if ui.add(egui::Button::new("Clear loadout").min_size(egui::vec2(ui.available_width(), 0.0))).clicked() {
+                        aircraft.loadout.clear();
+                    }
+                });
+            }
+
+            // Flares and chaff - as many as its plane carries unless set
+            // here (left at that, it's left out of the map file).
+            match plane_countermeasures {
+                Some((plane_flares, plane_chaff)) => {
+                    for (label, count, plane_count) in [("Flares", &mut aircraft.flares, plane_flares), ("Chaff", &mut aircraft.chaff, plane_chaff)] {
+                        property(ui, label, |ui| {
+                            let mut value = count.unwrap_or(plane_count);
+                            let response = ui.add_sized([ui.available_width(), 20.0], egui::DragValue::new(&mut value).speed(1.0).range(0..=999))
+                                .on_hover_text(format!("Its plane carries {plane_count} by its data.ron"));
+                            if response.changed() {
+                                *count = (value != plane_count).then_some(value);
+                            }
+                        });
+                    }
+                }
+                None => {
+                    property(ui, "", |ui| {
+                        ui.label(RichText::new(format!("The {} has no flares or chaff - add `countermeasures` to its data.ron", aircraft.plane)).weak());
+                    });
+                }
+            }
+
+            property(ui, "", |ui| {
+                let reset = ui.add_enabled(live.is_some(), egui::Button::new("Reset loadout").min_size(egui::vec2(ui.available_width(), 0.0)))
+                    .on_hover_text("Load it again where it is: every weapon back on, flares and chaff full");
+                if reset.clicked() {
+                    requests.push(EditorRequest::ResetLoadout(name.to_owned()));
+                }
+            });
+        });
+
         section(ui, "Status", |ui| {
             match live {
                 Some(live) => {
@@ -762,7 +877,7 @@ impl FlightEditor {
             (None, Some(player)) => ((player.position.0 - 60.0, player.position.1, player.position.2), player.rotation, player.speed),
             (None, None) => ((0.0, 105.0, 0.0), (0.0, 0.0, 0.0), None),
         };
-        AircraftPlacement { name, plane, player: false, position, rotation, speed, throttle: if speed.is_some() { 0.8 } else { 0.0 }, path: Vec::new() }
+        AircraftPlacement { name, plane, player: false, position, rotation, speed, throttle: if speed.is_some() { 0.8 } else { 0.0 }, path: Vec::new(), loadout: Default::default(), flares: None, chaff: None, difficulty: Default::default() }
     }
 }
 
@@ -951,6 +1066,11 @@ fn vector_field_labelled(ui: &mut egui::Ui, values: [&mut f32; 3], letters: [&st
     }
 }
 
+/// A weapon's name to show, from its id: "missiles/aim-9x" -> "AIM-9X".
+fn weapon_label(id: &str) -> String {
+    id.rsplit('/').next().unwrap_or(id).to_uppercase()
+}
+
 /// A line in the world from `from` to `to` - see App::world_lines.
 fn line(from: Vector3<f32>, to: Vector3<f32>, color: [f32; 3]) -> [ManualVertex; 2] {
     [
@@ -963,7 +1083,7 @@ fn line(from: Vector3<f32>, to: Vector3<f32>, color: [f32; 3]) -> [ManualVertex;
 /// on from the last point, carrying on the way the path was going - or, for
 /// the first point, PATH_STEP ahead of the aircraft's nose (where it is now,
 /// or its place in the map when it isn't in the scene).
-fn next_path_point(aircraft: &AircraftPlacement, live: Option<LiveAircraft>) -> (f32, f32, f32) {
+pub(crate) fn next_path_point(aircraft: &AircraftPlacement, live: Option<LiveAircraft>) -> (f32, f32, f32) {
     let (position, rotation) = live.map(|live| (live.position, live.rotation)).unwrap_or_else(|| (aircraft.position(), aircraft.rotation()));
     let nose = rotation * Vector3::z();
     let points: Vec<Vector3<f32>> = aircraft.path.iter().map(|&(x, y, z)| Vector3::new(x, y, z)).collect();

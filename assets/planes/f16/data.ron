@@ -3,6 +3,7 @@
     model: "model/f16.glb",
     scale: 14.0,
     double_sided: ["Afterburner"], // It disables the backface culling of the afterburner mesh
+    hud_glass: "Glass", // The HUD's glass - in the cockpit, the horizon and pitch ladder only show through it
   ),
   physics: (
     rigidbody: (
@@ -180,15 +181,23 @@
   // down from `position` (meters in the jet's frame: +X left, +Y up, +Z
   // nose) up to `suspension_length`; `mesh` is the model's wheel it moves.
   // `stiffness` is the spring force at full compression (N), `damping`
-  // resists vertical speed (N per m/s). `steerable` wheels turn with the
-  // pedals, `braked` ones brake. The rear wheels must sit behind the center
-  // of mass and the front one well ahead of it, or the jet tips onto its
-  // tail on the ground. Saved mid-flight, it applies right away.
+  // resists how fast the strut is closing (N per m/s). `steerable` wheels
+  // turn with the pedals, `braked` ones brake. The rear wheels must sit
+  // behind the center of mass and the front one well ahead of it, or the
+  // jet tips onto its tail on the ground. Saved mid-flight, it applies right
+  // away.
+  //
+  // Tuning: a strut's spring rate is stiffness / suspension_length (N/m),
+  // the weight it carries sets how far it sinks, and damping about 0.7 of
+  // "critical" - 2 * sqrt(rate * load / 9.81) - stops it bouncing without
+  // making it rock hard (lower bounces, higher jars). With the center of
+  // mass at z 1.459 the nose carries ~7,600 N (critical ~11,900) and each
+  // main ~54,600 N (critical ~100,600).
   gear: (
     wheels: [
-      (mesh: "wheel-f", position: (0.0, 0.0, 5.2), suspension_length: 2.2, stiffness: 100000.0, damping: 10000.0, steerable: true),
-      (mesh: "wheel-lb", position: (-1.4, 0.0, 1.2), suspension_length: 2.2, stiffness: 1000000.0, damping: 20000.0, braked: true),
-      (mesh: "wheel-rb", position: (1.4, 0.0, 1.2), suspension_length: 2.2, stiffness: 1000000.0, damping: 20000.0, braked: true),
+      (mesh: "wheel-f", position: (0.0, 0.0, 5.2), suspension_length: 2.2, stiffness: 100000.0, damping: 8500.0, steerable: true),
+      (mesh: "wheel-lb", position: (-1.4, 0.0, 1.2), suspension_length: 2.2, stiffness: 1000000.0, damping: 70000.0, braked: true),
+      (mesh: "wheel-rb", position: (1.4, 0.0, 1.2), suspension_length: 2.2, stiffness: 1000000.0, damping: 70000.0, braked: true),
     ],
     // Nose-wheel steering: full lock at taxi speed, tapering to a few
     // degrees by takeoff speed (ground speeds in m/s). Optional.
@@ -211,4 +220,49 @@
     (name: "right_vortex", effect: WingtipVortex, position: (-4.51, 0.23, 0.36)),
     (name: "wreck_smoke", effect: WreckSmoke, position: (0.0, 0.0, 0.0)),
   ],
+  // Where weapons can hang - the F-16's nine stations, numbered like the
+  // real jet's (1 the left wingtip, 9 the right). `position` is the
+  // weapon's center, meters in the jet's frame (+X left wing, +Y up, +Z
+  // nose) - placed off the wing's shape (sweep, chord); check them with F5
+  // and nudge to the model. `accepts`: Missile, Bomb, Gun - every kind when
+  // left out. What's loaded on them is each aircraft's loadout, in the
+  // flight management (F6 editor / map.ron), not here.
+  pylons: [
+    (name: "1 Left wingtip", position: (4.55, 0.25, 0.6), accepts: [Missile]),
+    (name: "2 Left outer", position: (3.6, 0.05, 1.0), accepts: [Missile]),
+    (name: "3 Left middle", position: (2.7, -0.05, 1.3)),
+    (name: "4 Left inner", position: (1.8, -0.1, 1.7)),
+    (name: "5 Centerline", position: (0.0, -0.85, 1.5)),
+    (name: "6 Right inner", position: (-1.8, -0.1, 1.7)),
+    (name: "7 Right middle", position: (-2.7, -0.05, 1.3)),
+    (name: "8 Right outer", position: (-3.6, 0.05, 1.0), accepts: [Missile]),
+    (name: "9 Right wingtip", position: (-4.55, 0.25, 0.6), accepts: [Missile]),
+  ],
+  // The camera views (V / F1 step through them, the cockpit first), each
+  // where it sits - meters in the jet's frame (+X left, +Y up, +Z nose) -
+  // and its field of view (deg). All optional: left out, the cockpit sits at
+  // the pilot's seat and the others where the camera puts them by default.
+  //   cockpit      - the pilot's eyes
+  //   third_person - behind, looking ahead past the jet
+  //   free         - the point the free (mouse) view orbits round
+  //   front        - ahead of the nose, looking back at the jet
+  cameras: {
+    "third_person": (position: (0.0, 3.85, -23.77), fov: 45.0),
+    "free": (position: (0.0, 0.0, 0.0), fov: 80.0),
+    "front": (position: (0.0, 2.895, 16.84), fov: 40.0),
+  },
+  // Flares and chaff: how many it carries, and the dispensers they come out
+  // of - each `position` (meters in the jet's frame: +X left, +Y up, +Z
+  // nose), the `direction` it throws them (any length), how fast (m/s on top
+  // of the jet's speed, 25 when left out) and what it `carries` ([Flare,
+  // Chaff] when left out). Releases take turns between the dispensers that
+  // carry that kind. F single release, C burst, Z flares/chaff/both.
+  countermeasures: (
+    flares: 60,
+    chaff: 60,
+    dispensers: [
+      (position: (0.6, -0.5, -4.5), direction: (0.4, -1.0, -0.2), speed: 25.0),
+      (position: (-0.6, -0.5, -4.5), direction: (-0.4, -1.0, -0.2), speed: 25.0),
+    ],
+  ),
 )

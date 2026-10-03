@@ -11,6 +11,7 @@ use crate::engine::scene_manager::behavior::Behavior;
 use crate::engine::scene_manager::node::Node;
 use crate::engine::scene_manager::properties::{Model as ModelProperty, Transform3D};
 use crate::engine::utils::lerps::lerp;
+use crate::game::scenes::play::crash_effects::Crash;
 use crate::transform::Transform;
 
 use super::afterburner::Afterburner;
@@ -50,6 +51,19 @@ pub struct Plane {
     /// Hit the water - see `check_wreck`. Never cleared (a restart builds
     /// a new plane).
     pub wrecked: bool,
+    /// Hit by a missile - wrecked on its next update (see `check_wreck`).
+    pub shot_down: bool,
+    /// Shot down and still in the air - its wings flying it down until it
+    /// hits the water or the ground.
+    going_down: bool,
+    /// In the sea - its wreck no longer smokes.
+    in_water: bool,
+    /// How settled the wreck is: 0 still moving .. 1 at rest - eased, see
+    /// `update_effects`. At rest it smokes less.
+    wreck_rest: f32,
+    /// How it just ended, for the scene to show (see play::crash_effects) -
+    /// taken from here once it has.
+    pub crash: Option<Crash>,
     /// The pilot's G tolerance - grey/black/red-out, passing out.
     pub pilot: Pilot,
     /// Wingtip vortex strength 0..1, eased - see update_effects.
@@ -78,6 +92,12 @@ pub struct Plane {
 const TYRE_SMOKE_MIN_SPEED: f32 = 25.0;
 const TYRE_SMOKE_FULL_SPEED: f32 = 75.0;
 const TYRE_SMOKE_SECONDS: f32 = 0.3;
+/// A wreck slower than this (m/s) has come to rest - it smokes at
+/// WRECK_REST_SMOKE of the rate it did moving. Eased in and out at
+/// WRECK_REST_RATE (per second).
+const WRECK_REST_SPEED: f32 = 2.0;
+const WRECK_REST_SMOKE: f32 = 0.35;
+const WRECK_REST_RATE: f32 = 1.5;
 
 impl Plane {
     // Cap on App::aero_debug_trail/App::wing_lift_trail (see those fields'
@@ -88,6 +108,16 @@ impl Plane {
     // How much history App::pitch_rate_trail keeps (s).
     const PITCH_RATE_TRAIL_SECONDS: f32 = 10.0;
 
+    /// Wrecked in the sea - see `in_water`.
+    pub fn in_water(&self) -> bool {
+        self.in_water
+    }
+
+    /// Shot down and still in the air - see `going_down`.
+    pub fn going_down(&self) -> bool {
+        self.going_down
+    }
+
     pub fn new() -> Self {
         Self {
             controls: PlaneControls::new(),
@@ -97,6 +127,11 @@ impl Plane {
             pose: None,
             input_locked: false,
             wrecked: false,
+            shot_down: false,
+            going_down: false,
+            in_water: false,
+            wreck_rest: 0.0,
+            crash: None,
             pilot: Pilot::new(),
             vortex_strength: 0.0,
             effects: Vec::new(),
@@ -253,22 +288,53 @@ impl Plane {
     }
 
     /// Any part of the plane touching the water (see the node's
-    /// `WaterContact`), or a crash that kills the pilot anywhere (see
+    /// `WaterContact`), a missile (`shot_down`), or a crash that kills the pilot anywhere (see
     /// `Pilot`), wrecks it: the physics half stops flying it, and the
-    /// controls go neutral with the throttle closed and stay that way.
+    /// controls go neutral with the throttle closed and stay that way. The
+    /// water ends it in a splash, the ground in an explosion (`crash`).
     fn check_wreck(&mut self, node: &mut Node) {
+        let water_impact = node.physics_state::<WaterContactState>().and_then(|state| state.impact);
+        // Going down after a missile hit: still flying until the water - or
+        // the ground, hit hard enough to kill the pilot.
+        if self.wrecked && self.going_down {
+            if let Some(impact) = water_impact {
+                println!("Went into the water at {:.0} m/s", impact.speed);
+                self.end(node, Crash::Water);
+            } else if self.pilot.is_dead() {
+                println!("Went into the ground");
+                self.end(node, Crash::Ground);
+            }
+            return;
+        }
         if self.wrecked {
             return;
         }
-        let water_impact = node.physics_state::<WaterContactState>().and_then(|state| state.impact);
-        if let Some(impact) = water_impact {
+        let event = if let Some(impact) = water_impact {
             println!("Crashed into the water at {:.0} m/s (collider {})", impact.speed, impact.collider);
-        } else if !self.pilot.is_dead() {
+            self.in_water = true;
+            self.crash = Some(Crash::Water);
+            AircraftEvent::Wreck
+        } else if self.shot_down {
+            println!("Shot down");
+            self.going_down = true;
+            AircraftEvent::ShotDown
+        } else if self.pilot.is_dead() {
+            self.crash = Some(Crash::Ground);
+            AircraftEvent::Wreck
+        } else {
             return;
-        }
+        };
         self.wrecked = true;
         self.controls = PlaneControls { parking_brake: self.controls.parking_brake, ..PlaneControls::new() };
         self.controls.throttle = 0.0;
+        node.push_physics_event(event);
+    }
+
+    /// A plane going down after a missile hit reaching the end: `crash`.
+    fn end(&mut self, node: &mut Node, crash: Crash) {
+        self.going_down = false;
+        self.in_water = crash == Crash::Water;
+        self.crash = Some(crash);
         node.push_physics_event(AircraftEvent::Wreck);
     }
 
@@ -296,6 +362,13 @@ impl Plane {
         }
         let smoke_strength = ((speed - TYRE_SMOKE_MIN_SPEED) / (TYRE_SMOKE_FULL_SPEED - TYRE_SMOKE_MIN_SPEED)).clamp(0.0, 1.0);
 
+        // A wreck come to rest smokes less - eased in over a couple of
+        // seconds, so it doesn't flick on and off as it settles.
+        let moving = state.map(|state| state.flight_data.velocity.magnitude()).unwrap_or(0.0);
+        let resting = self.wrecked && moving < WRECK_REST_SPEED;
+        self.wreck_rest = lerp(self.wreck_rest, if resting { 1.0 } else { 0.0 }, (delta_time * WRECK_REST_RATE).min(1.0));
+        let burning = self.wrecked && !self.in_water;
+
         let Some(emitters) = node.get_property_mut::<ParticleEmitters>() else { return };
         for (name, kind) in &self.effects {
             let Some(emitter) = emitters.get_mut(name) else { continue };
@@ -304,7 +377,16 @@ impl Plane {
                     emitter.intensity = self.vortex_strength;
                     emitter.enabled = self.vortex_strength > 0.02;
                 }
-                EffectKind::WreckSmoke => emitter.enabled = self.wrecked,
+                EffectKind::WreckSmoke => {
+                    emitter.enabled = burning;
+                    emitter.intensity = lerp(1.0, WRECK_REST_SMOKE, self.wreck_rest);
+                    // In flames from the moment it's done for - falling
+                    // and on the ground.
+                    if let Some(fire) = emitters.get_mut(&effects::wreck_fire_name(name)) {
+                        fire.intensity = 1.0;
+                        fire.enabled = burning;
+                    }
+                }
             }
         }
         for (mesh, left) in self.tyre_smoke.iter_mut() {

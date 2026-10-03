@@ -78,6 +78,18 @@ impl Model {
         self
     }
 
+    /// A separate copy of the model, `name`d - its meshes animated apart
+    /// from the shared copy's (see `ModelSource::variant`). Only for
+    /// `from_file`/`from_source` models.
+    pub fn variant(mut self, name: impl Into<String>) -> Self {
+        if let Some(source) = self.source.take() {
+            let source = source.variant(name);
+            self.model_ref = source.key();
+            self.source = Some(source);
+        }
+        self
+    }
+
     /// Drawn `scale` times its file size, the same on every axis.
     pub fn scaled(self, scale: f32) -> Self {
         self.with_scale(Vector3::new(scale, scale, scale))

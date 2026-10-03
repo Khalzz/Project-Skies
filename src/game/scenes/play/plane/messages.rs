@@ -33,6 +33,11 @@ pub enum AircraftEvent {
     /// thrust, lift, wheels or flight controls, only whatever else acts on
     /// the body (gravity, the water - see engine::physics::water_contact).
     Wreck,
+    /// Hit by a missile in the air - the engine's dead and the controls
+    /// gone (the surfaces jammed into a roll), but the airframe still
+    /// flies: its wings keep lifting and dragging as it goes down. A
+    /// `Wreck` follows when it hits the water.
+    ShotDown,
 }
 
 /// The plane's data.ron was edited while flying - new wings/surfaces/pilot

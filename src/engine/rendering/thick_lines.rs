@@ -6,7 +6,8 @@
 //! every frame (`dynamic`).
 //!
 //! Drawn over whatever's there with alpha blending and no depth test - what's
-//! drawn last is on top.
+//! drawn last is on top. Optionally only inside a convex outline on screen
+//! (`mask` - see `convex_mask`), e.g. the cockpit's HUD glass.
 
 use wgpu::util::DeviceExt;
 
@@ -35,12 +36,21 @@ impl LineInstance {
     }
 }
 
+/// The most edges a mask's outline can have - see `convex_mask`.
+pub const MAX_MASK_EDGES: usize = 32;
+
 /// The shader's own uniform - see thick_lines.wgsl's LineUniform.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct LineUniform {
     camera_position: [f32; 4],
     screen: [f32; 4],
+    /// x: how many of `mask`'s edges are used (0: no mask); y: 1 when the
+    /// lines are in screen pixels (see `ThickLines::screen_space`).
+    mask_info: [f32; 4],
+    /// Each edge of the mask's outline: (a, b, c) - a pixel (x, y) is inside
+    /// it while a*x + b*y + c >= 0.
+    mask: [[f32; 4]; MAX_MASK_EDGES],
 }
 
 pub struct ThickLines {
@@ -53,20 +63,66 @@ pub struct ThickLines {
     /// static set, in order.
     pub dynamic: Vec<LineInstance>,
     dynamic_buffer: Option<(wgpu::Buffer, usize)>,
+    /// Only drawn inside this outline - its edges, in screen pixels (see
+    /// `convex_mask`). None: everywhere.
+    pub mask: Option<Vec<[f32; 3]>>,
+    /// The lines are in screen pixels (x, y; z unused - from the top left),
+    /// not the world - drawn where they're put, whatever the camera does.
+    pub screen_space: bool,
+}
+
+/// The edges of the smallest convex outline around `points` (screen
+/// pixels), as `ThickLines::mask` wants them - each one facing in, moved
+/// `inset` pixels inward (a margin inside the outline). None when they
+/// don't make an outline (fewer than 3 apart) or it has more than
+/// MAX_MASK_EDGES edges.
+pub fn convex_mask(points: &[[f32; 2]], inset: f32) -> Option<Vec<[f32; 3]>> {
+    // Andrew's monotone chain.
+    let mut sorted = points.to_vec();
+    sorted.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
+    sorted.dedup();
+    let cross = |o: [f32; 2], a: [f32; 2], b: [f32; 2]| (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+    let mut hull: Vec<[f32; 2]> = Vec::new();
+    for pass in 0..2 {
+        let start = hull.len();
+        let ordered: Box<dyn Iterator<Item = &[f32; 2]>> = if pass == 0 { Box::new(sorted.iter()) } else { Box::new(sorted.iter().rev()) };
+        for &point in ordered {
+            while hull.len() >= start + 2 && cross(hull[hull.len() - 2], hull[hull.len() - 1], point) <= 0.0 {
+                hull.pop();
+            }
+            hull.push(point);
+        }
+        hull.pop();
+    }
+    if hull.len() < 3 || hull.len() > MAX_MASK_EDGES {
+        return None;
+    }
+    let center = hull.iter().fold([0.0, 0.0], |sum, p| [sum[0] + p[0], sum[1] + p[1]]);
+    let center = [center[0] / hull.len() as f32, center[1] / hull.len() as f32];
+    Some((0..hull.len()).map(|index| {
+        let (p, q) = (hull[index], hull[(index + 1) % hull.len()]);
+        // Normalized, so `c` is in pixels.
+        let length = ((q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2)).sqrt().max(1e-6);
+        let (a, b) = ((p[1] - q[1]) / length, (q[0] - p[0]) / length);
+        let c = -(a * p[0] + b * p[1]);
+        // Facing in: the middle is inside.
+        let [a, b, c] = if a * center[0] + b * center[1] + c < 0.0 { [-a, -b, -c] } else { [a, b, c] };
+        [a, b, c - inset]
+    }).collect())
 }
 
 impl ThickLines {
     pub fn new(device: &wgpu::Device, color_format: wgpu::TextureFormat, camera: &CameraResources) -> Self {
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Thick lines uniform"),
-            contents: bytemuck::cast_slice(&[LineUniform { camera_position: [0.0; 4], screen: [1.0; 4] }]),
+            contents: bytemuck::cast_slice(&[LineUniform { camera_position: [0.0; 4], screen: [1.0; 4], mask_info: [0.0; 4], mask: [[0.0; 4]; MAX_MASK_EDGES] }]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Thick lines uniform layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
                 count: None,
             }],
@@ -117,7 +173,7 @@ impl ThickLines {
             cache: None,
         });
 
-        Self { pipeline, uniform_buffer, uniform_bind_group, static_buffer: None, dynamic: Vec::new(), dynamic_buffer: None }
+        Self { pipeline, uniform_buffer, uniform_bind_group, static_buffer: None, dynamic: Vec::new(), dynamic_buffer: None, mask: None, screen_space: false }
     }
 
     /// Replaces the static set - drawn every time, under `dynamic`. Empty
@@ -137,7 +193,17 @@ impl ThickLines {
     /// the camera at world `camera_position` whose view_proj is bound in
     /// `camera_bind_group`, on a screen `screen` pixels big.
     pub fn draw<'pass>(&'pass mut self, device: &wgpu::Device, queue: &wgpu::Queue, render_pass: &mut wgpu::RenderPass<'pass>, camera_bind_group: &'pass wgpu::BindGroup, camera_position: [f32; 3], screen: [f32; 2]) {
-        let uniform = LineUniform { camera_position: [camera_position[0], camera_position[1], camera_position[2], 1.0], screen: [screen[0], screen[1], 0.0, 0.0] };
+        let mut mask = [[0.0; 4]; MAX_MASK_EDGES];
+        let edges = self.mask.as_deref().unwrap_or_default();
+        for (slot, edge) in mask.iter_mut().zip(edges) {
+            *slot = [edge[0], edge[1], edge[2], 0.0];
+        }
+        let uniform = LineUniform {
+            camera_position: [camera_position[0], camera_position[1], camera_position[2], 1.0],
+            screen: [screen[0], screen[1], 0.0, 0.0],
+            mask_info: [edges.len().min(MAX_MASK_EDGES) as f32, if self.screen_space { 1.0 } else { 0.0 }, 0.0, 0.0],
+            mask,
+        };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniform]));
 
         // The dynamic set's buffer, grown when it's outgrown.
@@ -174,6 +240,26 @@ impl ThickLines {
 
 #[cfg(test)]
 mod tests {
+    use super::convex_mask;
+
+    #[test]
+    fn a_mask_holds_what_is_inside_its_outline() {
+        // A square, with a point inside it that's no corner.
+        let square = [[10.0, 10.0], [110.0, 10.0], [110.0, 110.0], [10.0, 110.0], [50.0, 60.0]];
+        let edges = convex_mask(&square, 0.0).expect("an outline");
+        assert_eq!(edges.len(), 4);
+        let inside = |edges: &[[f32; 3]], x: f32, y: f32| edges.iter().all(|e| e[0] * x + e[1] * y + e[2] >= 0.0);
+        assert!(inside(&edges, 60.0, 60.0));
+        assert!(inside(&edges, 12.0, 60.0));
+        assert!(!inside(&edges, 5.0, 60.0));
+        assert!(!inside(&edges, 60.0, 120.0));
+        // With a 10 px margin, near the edge is out.
+        let padded = convex_mask(&square, 10.0).unwrap();
+        assert!(inside(&padded, 60.0, 60.0));
+        assert!(!inside(&padded, 15.0, 60.0));
+        assert_eq!(convex_mask(&[[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]], 0.0), None, "all in a line");
+    }
+
     #[test]
     fn the_shader_is_valid_wgsl() {
         let source = include_str!("../shaders/thick_lines.wgsl");
