@@ -40,6 +40,25 @@ struct FlyingMissile {
     flight: MissileFlight,
     /// Still drawn with the burning copy (see the module doc).
     burning_model: bool,
+    /// The aircraft that fired it, by name.
+    shooter: String,
+}
+
+/// An aircraft a missile's warhead got - who it was, who fired it, with
+/// what (the weapon's id).
+#[derive(Clone, Debug)]
+pub struct Kill {
+    pub victim: String,
+    pub shooter: String,
+    pub weapon: String,
+}
+
+/// A missile in flight, as F10's map shows it.
+pub struct MissileTrack {
+    pub position: Vector3<f32>,
+    pub velocity: Vector3<f32>,
+    /// The aircraft that fired it, by name.
+    pub shooter: String,
 }
 
 /// A node left behind to finish - a trail fading out, an explosion - and
@@ -52,8 +71,9 @@ struct Leftover {
 /// What happened to the missiles this frame.
 #[derive(Default)]
 pub struct MissileEvents {
-    /// Aircraft inside a warhead's lethal radius when it went off, by name.
-    pub destroyed: Vec<String>,
+    /// What was inside a warhead's lethal radius when it went off - by
+    /// name: aircraft, and flares (which the scene leaves be).
+    pub destroyed: Vec<Kill>,
 }
 
 #[derive(Default)]
@@ -82,6 +102,13 @@ impl Missiles {
         Some((missile.flight.position, flight_rotation(&missile.flight)))
     }
 
+    /// Every missile in flight - where, how it's moving, who fired it.
+    pub fn in_flight(&self) -> Vec<MissileTrack> {
+        self.flying.iter()
+            .map(|missile| MissileTrack { position: missile.flight.position, velocity: missile.flight.velocity, shooter: missile.shooter.clone() })
+            .collect()
+    }
+
     /// Every heat-seeking missile in flight homing on an aircraft: its id,
     /// and the aircraft's name - for the bots to react to.
     pub fn heat_seekers_homing(&self) -> Vec<(String, String)> {
@@ -96,10 +123,11 @@ impl Missiles {
         self.flying.len()
     }
 
-    /// Fires `spec` from `position`, moving with its aircraft (`velocity`),
-    /// pointing along the aircraft's nose (`rotation`) - homing on `target`
-    /// if it has one.
-    pub fn launch(&mut self, scene: &mut Scene, app: &mut App, spec: WeaponSpec, position: Vector3<f32>, rotation: UnitQuaternion<f32>, velocity: Vector3<f32>, target: Option<String>) {
+    /// Fires `spec` off the aircraft `shooter`, from `position`, moving with
+    /// it (`velocity`), pointing along its nose (`rotation`) - homing on
+    /// `target` if it has one.
+    #[allow(clippy::too_many_arguments)]
+    pub fn launch(&mut self, scene: &mut Scene, app: &mut App, shooter: &str, spec: WeaponSpec, position: Vector3<f32>, rotation: UnitQuaternion<f32>, velocity: Vector3<f32>, target: Option<String>) {
         self.launched += 1;
         let node_id = format!("missile:{}", self.launched);
         let smoke_id = format!("{node_id}:smoke");
@@ -116,7 +144,7 @@ impl Missiles {
                 .add_property(ParticleEmitters::new().add("smoke", Emitter::particles(smoke_puffs()))),
         );
         println!("Fox 2 - {} away{}", spec.id, flight.target_aircraft().map(|target| format!(" at {target}")).unwrap_or_default());
-        self.flying.push(FlyingMissile { node_id, smoke_id, spec, flight, burning_model: true });
+        self.flying.push(FlyingMissile { node_id, smoke_id, spec, flight, burning_model: true, shooter: shooter.to_owned() });
     }
 
     /// Flies every missile `delta_time` seconds - `aircraft`: every aircraft
@@ -179,10 +207,11 @@ impl Missiles {
                 }
             };
             // What set the fuze off, and anything else inside the blast.
-            events.destroyed.extend(fuzed_by.clone());
+            let kill = |victim: String| Kill { victim, shooter: missile.shooter.clone(), weapon: missile.spec.id.clone() };
+            events.destroyed.extend(fuzed_by.clone().map(kill));
             events.destroyed.extend(aircraft.iter()
                 .filter(|track| Some(&track.name) != fuzed_by.as_ref() && (track.position - at).magnitude() <= missile.spec.warhead.lethal_radius)
-                .map(|track| track.name.clone()));
+                .map(|track| kill(track.name.clone())));
             ended.push((index, Some(at)));
         }
 

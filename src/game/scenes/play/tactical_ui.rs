@@ -131,6 +131,10 @@ pub struct TacticalUi {
     pub roster: Vec<RosterCoalition>,
     /// The selected aircraft's flight plan - filled by the scene every frame.
     pub plan: Option<FlightPlan>,
+    /// The editor view switched off - just the map, with its own Aircraft
+    /// window. Off (so the editor view's on) to start with; later set by
+    /// whether the player's in edit mode (the mission/campaign editor).
+    pub plain_view: bool,
 }
 
 impl TacticalUi {
@@ -142,14 +146,24 @@ impl TacticalUi {
         self.dragging_map || self.dragging_point.is_some() || self.dragging_row.is_some() || self.orbiting
     }
 
+    /// The editor view's layout around the map (see FlightEditor::
+    /// draw_docked) - on unless switched off.
+    pub fn editor_view(&self) -> bool {
+        !self.plain_view
+    }
+
     /// Draws it all and takes a click on the map - call inside the egui
-    /// frame while the tactical map is up.
-    pub fn draw(&mut self, ctx: &egui::Context) {
-        self.pick(ctx);
-        self.top_bar(ctx);
+    /// frame while the tactical map is up. `map`: where the map is, in the
+    /// editor view (between its panels - which list the aircraft, so this
+    /// doesn't); `None`: the whole screen.
+    pub fn draw(&mut self, ctx: &egui::Context, map: Option<egui::Rect>) {
+        self.pick(ctx, map);
+        self.top_bar(ctx, map);
         self.point_labels(ctx);
-        self.roster_window(ctx);
-        self.plan_window(ctx);
+        if map.is_none() {
+            self.roster_window(ctx);
+        }
+        self.plan_window(ctx, map);
     }
 
     /// The aircraft under the pointer (nearest within PICK_RADIUS, not over a
@@ -158,9 +172,11 @@ impl TacticalUi {
     /// press anywhere on the map, then moving, drags it (the camera goes
     /// free - see `pan_delta`). Every press on the map says on the console
     /// what it hit.
-    fn pick(&mut self, ctx: &egui::Context) {
+    fn pick(&mut self, ctx: &egui::Context, map: Option<egui::Rect>) {
         let (clicked, down, delta, at, shift) = ctx.input(|input| (input.pointer.primary_pressed(), input.pointer.primary_down(), input.pointer.delta(), input.pointer.hover_pos(), input.modifiers.shift));
-        let over_window = ctx.is_pointer_over_area();
+        // Off the map's part of the screen counts as over a window.
+        let off_map = map.is_some_and(|map| at.is_none_or(|at| !map.contains(at)));
+        let over_window = ctx.is_pointer_over_area() || off_map;
         let (orbit_pressed, orbit_down) = ctx.input(|input| (input.pointer.secondary_pressed(), input.pointer.secondary_down()));
         if orbit_pressed && !over_window {
             self.orbiting = true;
@@ -230,12 +246,20 @@ impl TacticalUi {
         }
     }
 
-    fn top_bar(&mut self, ctx: &egui::Context) {
+    fn top_bar(&mut self, ctx: &egui::Context, map: Option<egui::Rect>) {
+        // Over the middle of the map, wherever it is.
+        let map = map.unwrap_or_else(|| ctx.screen_rect());
         egui::Area::new(egui::Id::new("tactical_top_bar"))
-            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 12.0))
+            .pivot(egui::Align2::CENTER_TOP)
+            .fixed_pos(egui::pos2(map.center().x, map.top() + 12.0))
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.horizontal(|ui| {
+                        let mut editor_view = self.editor_view();
+                        if ui.toggle_value(&mut editor_view, "Editor view").on_hover_text("The map with the editor around it: aircraft, properties, timeline").changed() {
+                            self.plain_view = !editor_view;
+                        }
+                        ui.separator();
                         let can_center = self.selected.is_some();
                         let hint = match (can_center, self.following) {
                             (false, _) => "Select an aircraft first",
@@ -337,19 +361,23 @@ impl TacticalUi {
     /// The selected aircraft: what and how it is, and its flight plan - each
     /// point's position editable, points inserted or deleted. A change goes
     /// to `path_edit`.
-    fn plan_window(&mut self, ctx: &egui::Context) {
+    fn plan_window(&mut self, ctx: &egui::Context, map: Option<egui::Rect>) {
         let Some(plan) = &self.plan else { return };
         let mut open = true;
         let mut points = plan.points.clone();
         let mut changed = false;
-        egui::Window::new("Flight plan")
+        let window = egui::Window::new("Flight plan")
             .id(egui::Id::new("tactical_flight_plan"))
             .open(&mut open)
-            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 60.0))
             .default_width(420.0)
             .resizable(false)
-            .collapsible(true)
-            .show(ctx, |ui| {
+            .collapsible(true);
+        // Floating over the map's top right - movable in the editor view.
+        let window = match map {
+            Some(map) => window.pivot(egui::Align2::RIGHT_TOP).default_pos(egui::pos2(map.right() - 12.0, map.top() + 60.0)),
+            None => window.anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 60.0)),
+        };
+        window.show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(&plan.name).color(plan.color).strong().size(15.0));
                     ui.label(RichText::new(if plan.is_player { "player" } else { "bot" }).small().weak());
@@ -558,7 +586,7 @@ mod tests {
             events,
             ..Default::default()
         };
-        let _ = ctx.run(input, |ctx| ui.draw(ctx));
+        let _ = ctx.run(input, |ctx| ui.draw(ctx, None));
     }
 
     fn plan(name: &str, points: Vec<(f32, f32, f32)>) -> FlightPlan {
@@ -632,9 +660,9 @@ mod tests {
             events: vec![egui::Event::PointerMoved(at), egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default() }],
             ..Default::default()
         };
-        let _ = ctx.run(right(true), |ctx| ui.draw(ctx));
+        let _ = ctx.run(right(true), |ctx| ui.draw(ctx, None));
         assert!(ui.is_dragging(), "orbiting");
-        let _ = ctx.run(right(false), |ctx| ui.draw(ctx));
+        let _ = ctx.run(right(false), |ctx| ui.draw(ctx, None));
         assert!(!ui.is_dragging());
     }
 
@@ -699,7 +727,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let _ = ctx.run(input, |ctx| ui.draw(ctx));
+        let _ = ctx.run(input, |ctx| ui.draw(ctx, None));
         assert_eq!(ui.selected.as_deref(), Some("bot"));
     }
 

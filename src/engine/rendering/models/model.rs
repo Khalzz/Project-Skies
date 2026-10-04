@@ -51,6 +51,7 @@ impl Vertex for ModelVertex {
     }
 }
 
+#[derive(Clone)]
 pub struct Material {
     pub name: String,
     pub diffuse_texture: Texture,
@@ -102,9 +103,56 @@ impl Model {
             meshes.iter_mut().filter(move |(key, _)| key.as_str() == name || key.starts_with(&prefix)).map(|(_, mesh)| mesh)
         })
     }
+
+    /// A copy whose meshes move on their own - each with its own transform
+    /// (buffer and bind group, 64 bytes) - but that shares everything else
+    /// with this one: vertices, indices, textures, materials (wgpu's handles
+    /// are reference-counted, so nothing's uploaded again). For giving each
+    /// aircraft its own control surfaces, gear and afterburner without a
+    /// whole second load of its model - see `ModelSource::variant`.
+    pub fn share(&self, device: &Device, queue: &wgpu::Queue) -> Model {
+        let layout = Mesh::create_bind_group_layout(device);
+        let mesh_lists = self.mesh_lists.iter()
+            .map(|(list, meshes)| (list.clone(), meshes.iter().map(|(key, mesh)| (key.clone(), mesh.share(device, queue, &layout))).collect()))
+            .collect();
+        Model { mesh_lists, materials: self.materials.clone() }
+    }
 }
 
 impl Mesh {
+    /// This mesh with a transform of its own, starting where this one is -
+    /// see `Model::share`.
+    fn share(&self, device: &Device, queue: &wgpu::Queue, layout: &wgpu::BindGroupLayout) -> Mesh {
+        let transform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Shared mesh transform buffer"),
+            size: mem::size_of::<[[f32; 4]; 4]>() as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let transform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shared mesh transform bind group"),
+            layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: transform_buffer.as_entire_binding() }],
+        });
+        let mesh = Mesh {
+            name: self.name.clone(),
+            vertex_buffer: self.vertex_buffer.clone(),
+            index_buffer: self.index_buffer.clone(),
+            num_elements: self.num_elements,
+            material: self.material,
+            transform_buffer,
+            transform_bind_group,
+            transform: self.transform,
+            base_transform: self.base_transform,
+            parent_transform: self.parent_transform,
+            alpha_mode: self.alpha_mode,
+            double_sided: self.double_sided,
+            local_bounds: self.local_bounds,
+        };
+        mesh.update_transform(queue);
+        mesh
+    }
+
     /// The middle of the geometry, in the mesh's local space.
     pub fn local_center(&self) -> Vector3<f32> {
         let (lo, hi) = self.local_bounds;

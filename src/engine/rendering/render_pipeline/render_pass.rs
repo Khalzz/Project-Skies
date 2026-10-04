@@ -624,12 +624,12 @@ impl App {
     // not full egui interactivity (no keyboard/text - this is a read-only
     // debug view).
     //
-    // Also draws the F6 flight editor (see play::flight_editor) - one egui
+    // Also draws the flight editor (F10's editor view) (see play::flight_editor) - one egui
     // frame for both, with keyboard typing fed in too while the editor is
     // open (its text fields need it).
     fn render_aero_debug_overlay_pass(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
         let show_debug = self.debug_overlay_visible();
-        if !show_debug && !self.flight_editor.open && !self.tactical_map_active {
+        if !show_debug && !self.tactical_map_active {
             // No egui - back to the plain arrow (the pause menu's, say), and
             // the mouse let go if a drag had it.
             self.end_infinite_drag();
@@ -683,7 +683,7 @@ impl App {
             ],
             ..Default::default()
         };
-        // Held Shift/Ctrl - e.g. the F6 map's faster height step.
+        // Held Shift/Ctrl - e.g. a faster drag step in the editor.
         let (shift, ctrl) = (input::shift_down(), input::ctrl_down());
         raw_input.modifiers = egui::Modifiers { shift, ctrl, command: ctrl, ..Default::default() };
 
@@ -706,7 +706,8 @@ impl App {
         }
         // Back to where the pointer is now, after any presses elsewhere.
         raw_input.events.push(egui::Event::PointerMoved(pointer_pos));
-        if self.flight_editor.open {
+        // Typing for the editor's text fields - docked in F10's editor view.
+        if self.tactical_map_active && self.tactical_ui.editor_view() {
             raw_input.events.extend(input::typed_input().iter().filter_map(egui_typing_event));
         }
 
@@ -782,6 +783,10 @@ impl App {
         let mut flight_editor = std::mem::take(&mut self.flight_editor);
         let mut tactical_ui = std::mem::take(&mut self.tactical_ui);
         let tactical_map_active = self.tactical_map_active;
+        // F10's editor view: the editor docked round the map - which then
+        // draws only in the middle (see render_tactical_map_pass).
+        let editor_view = tactical_map_active && tactical_ui.editor_view();
+        let mut tactical_viewport = None;
 
         self.egui_overlay.render(
             &self.renderer.device,
@@ -792,11 +797,12 @@ impl App {
             pixels_per_point,
             raw_input,
             |ctx| {
-                if tactical_map_active {
-                    tactical_ui.draw(ctx);
-                }
-                if flight_editor.open {
-                    flight_editor.draw(ctx);
+                if editor_view {
+                    let map = flight_editor.draw_docked(ctx, &mut tactical_ui);
+                    tactical_viewport = Some([map.left(), map.top(), map.width(), map.height()]);
+                    tactical_ui.draw(ctx, Some(map));
+                } else if tactical_map_active {
+                    tactical_ui.draw(ctx, None);
                 }
                 if !show_debug {
                     return;
@@ -1375,6 +1381,7 @@ impl App {
 
         self.flight_editor = flight_editor;
         self.tactical_ui = tactical_ui;
+        self.tactical_viewport = tactical_viewport;
         self.apply_egui_cursor();
         self.update_infinite_drag(pointer_pos);
 
@@ -1518,7 +1525,15 @@ impl App {
     fn render_tactical_map_pass(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
         const BACKGROUND: wgpu::Color = wgpu::Color { r: 0.010, g: 0.018, b: 0.030, a: 1.0 };
         let camera_position = self.scene_manager.cameras().map(|c| c.active().camera.position()).unwrap_or_else(nalgebra::Point3::origin);
-        let screen = [self.window_manager.pixel_size.width as f32, self.window_manager.pixel_size.height as f32];
+        let full = [self.window_manager.pixel_size.width as f32, self.window_manager.pixel_size.height as f32];
+        // Only in the editor view's middle, when its panels are up - in the
+        // drawable's pixels, kept inside it.
+        let to_pixels = full[0] / (self.window_manager.size.width as f32).max(1.0);
+        let viewport = self.tactical_viewport.map(|[x, y, width, height]| {
+            let (x, y) = ((x * to_pixels).clamp(0.0, full[0] - 1.0), (y * to_pixels).clamp(0.0, full[1] - 1.0));
+            [x, y, (width * to_pixels).clamp(1.0, full[0] - x), (height * to_pixels).clamp(1.0, full[1] - y)]
+        });
+        let screen = viewport.map(|[_, _, width, height]| [width, height]).unwrap_or(full);
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Tactical map pass"),
             color_attachments: &[color_attachment(view, wgpu::LoadOp::Clear(BACKGROUND))],
@@ -1526,6 +1541,9 @@ impl App {
             occlusion_query_set: None,
             timestamp_writes: None,
         });
+        if let Some([x, y, width, height]) = viewport {
+            render_pass.set_viewport(x, y, width, height, 0.0, 1.0);
+        }
         self.thick_lines.draw(
             &self.renderer.device,
             &self.renderer.queue,

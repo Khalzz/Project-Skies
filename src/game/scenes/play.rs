@@ -6,7 +6,6 @@ pub mod event_handling;
 pub mod flight_editor;
 pub mod flight_manager;
 pub mod map;
-pub mod map_view;
 pub mod plane;
 pub mod scene;
 pub mod tactical_map;

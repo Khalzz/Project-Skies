@@ -163,7 +163,7 @@
       ),
     ],
     // Where the pilot sits - G at the seat is measured here.
-    pilot_position: (0.0, 1.029, 6.485),
+    pilot_position: (0.0, 0.97, 6.485),
   ),
   // The engine - a GE F110-GE-129. Thrust in newtons at sea level (it falls
   // with altitude); spool times in seconds.

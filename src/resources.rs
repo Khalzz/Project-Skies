@@ -50,11 +50,13 @@ pub enum DoubleSidedMeshes {
 pub struct ModelSource {
     pub file: ModelFile,
     pub double_sided: DoubleSidedMeshes,
-    /// A separate copy of the same file, kept under its own key - for when
-    /// two uses of one model need its meshes animated differently (mesh
-    /// transforms are the model's, shared by every instance): a missile on a
-    /// pylon (plume off) and one in flight (plume lit). `None`: the shared
-    /// copy.
+    /// A copy of the same file, kept under its own key - for when two uses
+    /// of one model need its meshes animated differently (mesh transforms
+    /// are the model's, shared by every instance): a missile on a pylon
+    /// (plume off) and one in flight (plume lit), each aircraft's control
+    /// surfaces. A light copy - its own mesh transforms, the base model's
+    /// geometry and textures (see `load_scene_model`, `Model::share`).
+    /// `None`: the shared copy.
     pub variant: Option<String>,
 }
 
@@ -142,6 +144,17 @@ pub fn load_texture_cube(file_names: [&str; 6], device: &wgpu::Device, queue: &w
     Texture::from_cube_bytes(face_slices, device, queue, "skybox_cube_texture")
 }
 
+/// A linear color channel (0..1) encoded to sRGB (0..1) - the standard
+/// transfer curve.
+fn linear_to_srgb(linear: f32) -> f32 {
+    let linear = linear.clamp(0.0, 1.0);
+    if linear <= 0.003_130_8 {
+        linear * 12.92
+    } else {
+        1.055 * linear.powf(1.0 / 2.4) - 0.055
+    }
+}
+
 pub fn load_model_gltf(file_name: &str, device: &wgpu::Device, queue: &wgpu::Queue, transform_bind_group_layout: &wgpu::BindGroupLayout, double_sided: DoubleSided) -> anyhow::Result<Model> {
     load_model_with(file_name, &|file: &Path| load_binary(&file.to_string_lossy()), device, queue, transform_bind_group_layout, double_sided)
 }
@@ -226,15 +239,20 @@ fn load_model_with(file_name: &str, read: &dyn Fn(&Path) -> anyhow::Result<Vec<u
                 "[model {}]   material {} \"{}\": no base-color texture -> solid color rgba({:.2}, {:.2}, {:.2}, {:.2})",
                 file_name, mat_index, material.name().unwrap_or("<unnamed>"), r, g, b, a,
             );
+            // glTF's factor is linear, but the texture is sRGB (the GPU
+            // decodes it to linear when sampling) - so it's encoded to sRGB
+            // first, or the curve would be applied twice (darker, more
+            // saturated than the color picked). Alpha is linear either way.
+            let srgb = |channel: f32| (linear_to_srgb(channel) * 255.0).round() as u8;
             let solid_texture = Texture::from_image(
                 &::image::DynamicImage::ImageRgba8(::image::RgbaImage::from_pixel(
                     1,
                     1,
                     ::image::Rgba([
-                        (r * 255.0) as u8,
-                        (g * 255.0) as u8,
-                        (b * 255.0) as u8,
-                        (a * 255.0) as u8,
+                        srgb(r),
+                        srgb(g),
+                        srgb(b),
+                        (a.clamp(0.0, 1.0) * 255.0).round() as u8,
                     ]),
                 )),
                 device,
@@ -962,10 +980,32 @@ pub fn declare_model(app: &mut App, name: &str, source: ModelSource) {
 /// The model kept under `source.key()`, loading it now if nothing has yet -
 /// called when a scene spawns a node that uses it. Remembered as a level
 /// model, so `unload_level_models` drops it when the scene ends.
+///
+/// A variant (see `ModelSource::variant`) is a light copy of its base model
+/// (see `Model::share`): its own mesh transforms, the base's geometry and
+/// textures - the base loaded first if it isn't yet, and kept for whatever
+/// uses it plainly.
 pub fn load_scene_model(app: &mut App, source: &ModelSource) -> Result<Model, String> {
     let key = source.key();
     if let Some(existing) = app.loaded_models.remove(&key) {
         return Ok(existing);
+    }
+    if source.variant.is_some() {
+        let base = ModelSource { variant: None, ..source.clone() };
+        let base_key = base.key();
+        if !app.game_models.contains_key(&base_key) && !app.loaded_models.contains_key(&base_key) {
+            let bind_group_layout = Mesh::create_bind_group_layout(&app.renderer.device);
+            let model = base.load(&app.renderer.device, &app.renderer.queue, &bind_group_layout)
+                .map_err(|e| format!("failed to load model '{base_key}': {e}"))?;
+            app.loaded_models.insert(base_key.clone(), model);
+            app.level_model_keys.insert(base_key.clone());
+        }
+        let base_model = app.game_models.get(&base_key).map(|instanced| &instanced.model)
+            .or_else(|| app.loaded_models.get(&base_key))
+            .ok_or_else(|| format!("model '{base_key}' vanished while sharing it"))?;
+        let model = base_model.share(&app.renderer.device, &app.renderer.queue);
+        app.level_model_keys.insert(key);
+        return Ok(model);
     }
     let bind_group_layout = Mesh::create_bind_group_layout(&app.renderer.device);
     let model = source.load(&app.renderer.device, &app.renderer.queue, &bind_group_layout)
@@ -1417,4 +1457,17 @@ pub fn register_texture(app: &mut App, name: &str, path: &str) -> Result<(), Str
 
     app.textures.insert(name.to_owned(), texture);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::linear_to_srgb;
+
+    #[test]
+    fn a_flat_color_is_encoded_to_srgb_once() {
+        // Black, white, and linear 0.214 - what Blender shows as 0.5 grey.
+        assert_eq!(linear_to_srgb(0.0), 0.0);
+        assert!((linear_to_srgb(1.0) - 1.0).abs() < 1e-5);
+        assert!((linear_to_srgb(0.214) - 0.5).abs() < 0.005);
+    }
 }

@@ -37,6 +37,16 @@ const WRECK_SINK_SECONDS: f32 = 6.0;
 
 /// The level's map.ron, or - when it's missing or broken (reported) - just
 /// the player in an F-16 on the runway, so the level still opens.
+/// A plane's views as its data.ron places them - the cockpit at the pilot's
+/// seat (`aero.pilot_position`) unless `cameras` says otherwise; the rest,
+/// the camera's own defaults (see play::camera::camera).
+fn plane_cameras(spec: &AircraftSpec) -> Cameras {
+    let mut cameras: Cameras = spec.cameras.clone();
+    cameras.entry(camera::COCKPIT_CAMERA.to_owned())
+        .or_insert(GameObjectCamera { position: spec.aero.pilot_position, fov: 70.0 });
+    cameras
+}
+
 /// The flares and chaff `placement` is loaded with - as many as the map
 /// says, or as its plane's data.ron does - none without dispensers.
 fn loaded_countermeasures(spec: &AircraftSpec, placement: &AircraftPlacement) -> Option<CountermeasureSet> {
@@ -88,11 +98,10 @@ pub fn models(scene_folder: &str) -> Vec<ModelSource> {
         .map(|spec| ModelSource::asset(&spec.model.model).double_sided(DoubleSidedMeshes::Meshes(spec.model.double_sided)));
     let weapon_models = weapons.into_iter()
         .filter_map(|weapon| WeaponSpec::load(weapon).ok())
-        .flat_map(|spec| {
-            let source = ModelSource::asset(&spec.model.model).double_sided(DoubleSidedMeshes::Meshes(spec.model.double_sided));
-            // Plus the copy flying missiles use - see play::weapon::missiles.
-            [source.clone().variant(crate::game::scenes::play::weapon::missiles::FLYING_VARIANT), source]
-        });
+        // The copy flying missiles use (see play::weapon::missiles) is a
+        // light one, shared off this when it's first needed - nothing more
+        // to load up front.
+        .map(|spec| ModelSource::asset(&spec.model.model).double_sided(DoubleSidedMeshes::Meshes(spec.model.double_sided)));
     plane_models.chain(weapon_models).collect()
 }
 
@@ -192,7 +201,7 @@ struct SpawnedAircraft {
     countermeasures: Option<CountermeasureSet>,
 }
 
-/// An aircraft as it is right now in the scene - for the F6 flight editor.
+/// An aircraft as it is right now in the scene - for the flight editor (F10's editor view).
 #[derive(Clone, Copy)]
 pub struct LiveAircraft {
     pub position: Vector3<f32>,
@@ -277,6 +286,16 @@ impl flight_manager {
             };
             if let Some(spawned) = self.spawned.get_mut(&plane.node_id) {
                 spawned.data_initial_velocity = spec.physics.rigidbody.initial_velocity;
+                // Its dispensers where the file now puts them - what's left
+                // in them stays.
+                if let (Some(set), Some(countermeasures)) = (spawned.countermeasures.as_mut(), spec.countermeasures.as_ref()) {
+                    set.spec.dispensers = countermeasures.dispensers.clone();
+                }
+            }
+            // Its views - the cockpit at the pilot's seat - where the file
+            // now puts them.
+            if let Some(instance) = scene.content.renderizable_instances.get_mut(&plane.node_id) {
+                instance.instance.metadata.cameras = Some(plane_cameras(&spec));
             }
             let Some(node) = scene.content.nodes.get_mut(&plane.node_id) else { continue };
             // Its emitters, rebuilt where the file now puts them (the plane
@@ -290,7 +309,7 @@ impl flight_manager {
             // What's left of its loadout's weight stays on.
             let loadout = remaining_loadout(&self.applied, &self.fired, &plane.node_id);
             node.push_physics_event(reload_event(spec, &loadout));
-            println!("Reloaded '{}' ({}) from {} - aero, engine, gear, effects and mass applied", plane.node_id, plane.name, plane.data_path.display());
+            println!("Reloaded '{}' ({}) from {} - aero (pilot's seat included), engine, gear, effects, cameras, dispensers and mass applied", plane.node_id, plane.name, plane.data_path.display());
         }
     }
 
@@ -311,7 +330,7 @@ impl flight_manager {
         self.applied = map;
     }
 
-    /// Brings the scene in line with `edited` (the F6 flight editor's copy of
+    /// Brings the scene in line with `edited` (the flight editor (F10's editor view)'s copy of
     /// the map), right away - only what changed:
     /// - an aircraft gone from it (or renamed) is removed; a new one (or the
     ///   new name) spawned; one whose `plane` changed is spawned again;
@@ -451,8 +470,12 @@ impl flight_manager {
                     rotation,
                     scale: Vector3::new(1.0, 1.0, 1.0),
                 })
+                // Its own copy of the model (light - see Model::share), so
+                // its control surfaces, gear and afterburner move apart from
+                // every other aircraft of the same plane's.
                 .add_property(Model::from_file(&aircraft_spec.model.model)
                     .double_sided(DoubleSidedMeshes::Meshes(aircraft_spec.model.double_sided.clone()))
+                    .variant(placement.name.clone())
                     .scaled(aircraft_spec.model.scale))
                 .add_property(effects::plane_emitters(&aircraft_spec.effects, &aircraft_spec.gear))
                 .add_property(physics)
@@ -461,13 +484,7 @@ impl flight_manager {
             physics_command_tx,
         ).map_err(|error| format!("map aircraft '{}': {error}", placement.name))?;
         if let Some(instance) = scene.content.renderizable_instances.get_mut(&placement.name) {
-            // Its views as its data.ron places them - the cockpit at the
-            // pilot's seat unless it says otherwise; the rest, the camera's
-            // own defaults (see play::camera::camera).
-            let mut cameras: Cameras = aircraft_spec.cameras.clone();
-            cameras.entry(camera::COCKPIT_CAMERA.to_owned())
-                .or_insert(GameObjectCamera { position: aircraft_spec.aero.pilot_position, fov: 70.0 });
-            instance.instance.metadata.cameras = Some(cameras);
+            instance.instance.metadata.cameras = Some(plane_cameras(&aircraft_spec));
         }
 
         // Its name over it - placed every frame by update_name_tags (which
@@ -545,8 +562,8 @@ impl flight_manager {
     }
 
     /// The aircraft `name` loaded again as the map has it, where it is -
-    /// every weapon back on its pylon, flares and chaff full (the F6
-    /// editor's reset).
+    /// every weapon back on its pylon, flares and chaff full (the editor's
+    /// reset).
     pub fn reset_loadout(&mut self, scene: &mut Scene, app: &mut App, name: &str) {
         let Some((_, placement)) = self.applied.find(name) else { return };
         let placement = placement.clone();

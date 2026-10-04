@@ -52,7 +52,6 @@
         // F5-F8: debugging and editing the map.
         // F10: the tactical map.
         (action: "toggle_debug", bindings: [Key("F5")]),
-        (action: "toggle_flight_editor", bindings: [Key("F6")]),
         (action: "toggle_debug_mouse", bindings: [Key("F7")]),
         // F8: the heat view - what an IR seeker sees.
         (action: "toggle_heat_view", bindings: [Key("F8")]),

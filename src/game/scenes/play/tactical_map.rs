@@ -337,6 +337,19 @@ fn cross(lines: &mut Vec<LineInstance>, position: Vector3<f32>, rgb: [f32; 3], v
     }
 }
 
+/// A missile in flight: a streak back along where it came from, in its
+/// shooter's color, and a bright little head where it is - a set size on
+/// screen, like the aircraft.
+pub fn missile_marker(lines: &mut Vec<LineInstance>, position: Vector3<f32>, velocity: Vector3<f32>, rgb: [f32; 3], view: &View) {
+    const STREAK_PX: f32 = 18.0;
+    const HEAD_PX: f32 = 5.0;
+    let meters_per_pixel = view.meters_per_pixel(position);
+    let back = -velocity.try_normalize(1e-3).unwrap_or_else(Vector3::z);
+    let tail = position + back * STREAK_PX * meters_per_pixel;
+    lines.push(LineInstance { start: tail.into(), end: position.into(), color: [rgb[0], rgb[1], rgb[2], 0.9], width: LINE_WIDTH });
+    diamond(lines, position, HEAD_PX, [1.0, 0.95, 0.85, 1.0], view);
+}
+
 /// The aircraft as a triangle in its own wings' plane - nose ahead, a wing
 /// tip either side - so it shows its heading, climb and bank.
 fn triangle(lines: &mut Vec<LineInstance>, position: Vector3<f32>, rotation: UnitQuaternion<f32>, rgb: [f32; 3], view: &View) {

@@ -1,9 +1,10 @@
-//! The F6 flight editor - an egui window over the level's map (see
-//! play::map::MapSpec), editable while flying. Laid out like an engine's
-//! editor (Godot's Scene dock + Inspector): on the left a hierarchy - every
-//! coalition, each with its aircraft beneath it; on the right, past a divider,
-//! an inspector for whatever is selected, in collapsible sections of
-//! label/value rows.
+//! The flight editor - the level's map (see play::map::MapSpec), editable
+//! while flying, docked around F10's map in its editor view (see
+//! `draw_docked`). Laid out like an engine's editor: on the left a hierarchy
+//! - every coalition, each with its aircraft beneath it; on the right an
+//! inspector for whatever is selected, in collapsible sections of
+//! label/value rows; along the bottom, the timeline. An aircraft's loadout
+//! has a window of its own; its path is F10's Flight plan window.
 //!
 //! It only edits its own copy of the map (`map`) and lists what else it was
 //! asked to do (`requests`); the play scene applies both every frame (see
@@ -16,12 +17,11 @@ use std::collections::{HashMap, HashSet};
 use egui::{Color32, RichText};
 use nalgebra::Vector3;
 
-use crate::engine::primitive::manual_vertex::ManualVertex;
 use crate::game::scenes::play::flight_manager::LiveAircraft;
 use crate::game::scenes::play::map::{AircraftPlacement, Coalition, Difficulty, MapSpec};
 use crate::game::scenes::play::plane::pylon_spec::PylonSpec;
 use crate::game::scenes::play::weapon::weapon_spec::WeaponCategory;
-use crate::game::scenes::play::map_view::{MapAction, MapView, TerrainTriangle};
+use crate::game::scenes::play::tactical_ui::TacticalUi;
 
 /// Something the editor was asked to do beyond editing the map - for the
 /// play scene to carry out (see GameLogic::update_flight_editor).
@@ -55,7 +55,6 @@ enum Selection {
 
 #[derive(Default)]
 pub struct FlightEditor {
-    pub open: bool,
     /// The map being edited - applied to the world every frame.
     pub map: MapSpec,
     /// Every plane folder under assets/planes/ that loads - what an
@@ -85,13 +84,12 @@ pub struct FlightEditor {
     name_edit: Option<String>,
     /// Coalitions folded shut in the hierarchy, by index.
     folded: HashSet<usize>,
-    /// The level's land and runway, seen from above - the Map window's
-    /// background (see map_view::terrain_triangles). Set as the level opens.
-    pub terrain: Vec<TerrainTriangle>,
-    /// The Map window (see map_view) - where it's looking.
-    map_view: MapView,
-    /// The Map window is closed (it opens with the editor until it is).
-    map_hidden: bool,
+    /// The Loadout window is up (see `loadout_window`).
+    loadout_open: bool,
+    /// The aircraft F10's map and this agreed was selected, last frame - so
+    /// a new pick on either side carries over to the other (see
+    /// `draw_docked`).
+    synced_selection: Option<String>,
 }
 
 /// A change to the map's structure, made after drawing it (the map can't
@@ -111,27 +109,11 @@ const KT_TO_MS: f32 = 0.514_444;
 
 /// How far "+ Add point" puts a new path point past the last one (m).
 const PATH_STEP: f32 = 1000.0;
-/// A path point row's remove button, with its spacing (points).
-const REMOVE_BUTTON_WIDTH: f32 = 26.0;
-/// The size of the cross marking each path point in the world (m).
-const PATH_MARKER_SIZE: f32 = 15.0;
-/// Path lines' colors: the selected aircraft's, and how bright the others'
-/// (their coalition's color) and the aircraft-to-first-point link are.
-const SELECTED_PATH_COLOR: [f32; 3] = [1.0, 0.8, 0.15];
-const OTHER_PATH_BRIGHTNESS: f32 = 0.55;
-const PATH_LINK_BRIGHTNESS: f32 = 0.5;
-
-/// The hierarchy's and the inspector's widths (points) - fixed, so the
-/// inspector's rows always line up the same.
-const HIERARCHY_WIDTH: f32 = 210.0;
-/// The inspector fills whatever width the window has past the hierarchy -
-/// this is the narrowest it gets (and its width when the window opens).
-const INSPECTOR_MIN_WIDTH: f32 = 360.0;
-/// The padding inside each part of the window (points) - the toolbar, the
-/// hierarchy's buttons, each of the inspector's blocks. The window and the
-/// columns themselves have none, so their lines run edge to edge.
+/// The padding inside each part of the panels (points) - the toolbar, the
+/// hierarchy's buttons, each of the inspector's blocks. The panels
+/// themselves have none, so their lines run edge to edge.
 const PAD: i8 = 8;
-/// The "Properties" header bar's height (points).
+/// A panel's header bar's height (points).
 const PANEL_HEADER_HEIGHT: f32 = 20.0;
 /// An inspector row's label column (points).
 const LABEL_WIDTH: f32 = 110.0;
@@ -178,61 +160,121 @@ fn row_line(ui: &mut egui::Ui) {
 }
 
 impl FlightEditor {
-    /// Draws the window - call inside the egui frame, while `open`.
-    pub fn draw(&mut self, ctx: &egui::Context) {
-        let mut open = self.open;
-        egui::Window::new("Flight Editor (F6)")
-            .open(&mut open)
-            // No padding around the whole window - each part pads itself
-            // (see `padded`), so the lines and the hierarchy's table reach
-            // the window's edges.
-            .frame(egui::Frame::window(&ctx.style()).inner_margin(egui::Margin::ZERO))
-            .default_pos(egui::pos2(20.0, 60.0))
-            // Resizable both ways - the inspector widens with it.
+    /// The editor docked around F10's map - its editor view, laid out like
+    /// an engine's editor: the hierarchy (every coalition and its aircraft,
+    /// adding either) down the left, the selected thing's properties down
+    /// the right, the timeline (for the animations, to come) along the
+    /// bottom, each under its own header; the map in the middle. The map's
+    /// and the hierarchy's selection are one (`tactical`'s Flight plan
+    /// window shows the selected aircraft's path). Returns where the map
+    /// goes - what the panels leave.
+    pub fn draw_docked(&mut self, ctx: &egui::Context, tactical: &mut TacticalUi) -> egui::Rect {
+        const HIERARCHY_PANEL_WIDTH: f32 = 260.0;
+        const PROPERTIES_PANEL_WIDTH: f32 = 380.0;
+        const TIMELINE_HEIGHT: f32 = 160.0;
+
+        // Picked on the map since last frame: picked here too.
+        if tactical.selected != self.synced_selection {
+            self.synced_selection = tactical.selected.clone();
+            let selection = match &tactical.selected {
+                Some(name) => Selection::Aircraft(name.clone()),
+                None => Selection::None,
+            };
+            if selection != self.selection {
+                self.select(selection);
+            }
+        }
+        self.drop_stale_selection();
+
+        // Edge to edge - each part pads itself, under its header.
+        let frame = egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin::ZERO);
+        let mut changes = Vec::new();
+        egui::SidePanel::left("editor_hierarchy")
+            .frame(frame)
             .resizable(true)
-            .default_size(egui::vec2(HIERARCHY_WIDTH + INSPECTOR_MIN_WIDTH, 560.0))
-            .min_width(HIERARCHY_WIDTH + INSPECTOR_MIN_WIDTH)
-            .show(ctx, |ui| self.contents(ui));
-        self.open = open;
-        if self.open && !self.map_hidden {
-            self.draw_map(ctx);
+            .default_width(HIERARCHY_PANEL_WIDTH)
+            .min_width(200.0)
+            .show(ctx, |ui| {
+                panel_header(ui, "Hierarchy");
+                padded(ui, |ui| self.toolbar(ui));
+                self.hierarchy(ui, &mut changes);
+            });
+        egui::SidePanel::right("editor_properties")
+            .frame(frame)
+            .resizable(true)
+            .default_width(PROPERTIES_PANEL_WIDTH)
+            .min_width(320.0)
+            .show(ctx, |ui| {
+                panel_header(ui, "Properties");
+                self.inspector(ui, &mut changes);
+            });
+        egui::TopBottomPanel::bottom("editor_timeline")
+            .frame(frame)
+            .resizable(true)
+            .default_height(TIMELINE_HEIGHT)
+            .min_height(60.0)
+            .show(ctx, |ui| {
+                panel_header(ui, "Timeline");
+                ui.centered_and_justified(|ui| {
+                    ui.label(RichText::new("The animation timeline goes here").weak());
+                });
+            });
+        for change in changes {
+            self.apply(change);
+        }
+        let map = ctx.available_rect();
+        self.loadout_window(ctx, map);
+
+        // Picked here: picked on the map too (its Flight plan window).
+        let selected = self.selected_aircraft().map(str::to_owned);
+        if selected != self.synced_selection {
+            self.synced_selection = selected.clone();
+            tactical.selected = selected;
         }
         self.typing = ctx.wants_keyboard_input();
+        map
     }
 
-    /// The Map window: the world from above, to lay the selected aircraft's
-    /// path out on (see map_view::MapView::show).
-    fn draw_map(&mut self, ctx: &egui::Context) {
-        let selected = self.selected_aircraft().map(str::to_owned);
-        // Where to center it first: the selected aircraft, or the player.
-        let focus_name = selected.clone().or_else(|| self.map.aircraft().find(|(_, aircraft)| aircraft.player).map(|(_, aircraft)| aircraft.name.clone()));
-        let focus = focus_name.as_deref().and_then(|name| {
-            let placement = self.map.find(name)?.1;
-            Some(self.live.get(name).map(|live| [live.position.x, live.position.z]).unwrap_or([placement.position.0, placement.position.2]))
-        });
+    /// The selected aircraft's loadout in a window of its own, floating
+    /// (over `area`'s top left to start with), while `loadout_open` - see
+    /// `loadout_editor`.
+    fn loadout_window(&mut self, ctx: &egui::Context, area: egui::Rect) {
+        if !self.loadout_open {
+            return;
+        }
+        let Some(name) = self.selected_aircraft().map(str::to_owned) else { return };
+        let Some((coalition_index, index)) = self.map.coalitions.iter().enumerate()
+            .find_map(|(coalition_index, coalition)| coalition.aircraft.iter().position(|aircraft| aircraft.name == name).map(|index| (coalition_index, index)))
+        else { return };
+        let plane = self.map.coalitions[coalition_index].aircraft[index].plane.clone();
+        let pylons = self.pylons.get(&plane).cloned().unwrap_or_default();
+        let plane_countermeasures = self.countermeasures.get(&plane).copied();
+        let live = self.live.get(&name).copied();
+        let aircraft = &mut self.map.coalitions[coalition_index].aircraft[index];
+        let (weapons, requests) = (&self.weapons, &mut self.requests);
 
-        let mut shown = true;
-        let mut action = MapAction::None;
-        let (map_view, terrain, map, live) = (&mut self.map_view, &self.terrain, &mut self.map, &self.live);
-        egui::Window::new("Map (F6)")
-            .open(&mut shown)
-            .default_pos(egui::pos2(HIERARCHY_WIDTH + INSPECTOR_MIN_WIDTH + 40.0, 60.0))
-            .default_size(egui::vec2(560.0, 560.0))
-            .resizable(true)
+        let mut open = true;
+        egui::Window::new(format!("Loadout - {name}"))
+            .id(egui::Id::new("editor_loadout"))
+            .open(&mut open)
+            .default_pos(area.left_top() + egui::vec2(16.0, 56.0))
+            .default_width(360.0)
+            .resizable(false)
+            .collapsible(true)
             .show(ctx, |ui| {
-                action = map_view.show(ui, terrain, map, live, selected.as_deref(), focus);
+                ui.spacing_mut().item_spacing.y = 4.0;
+                ui.label(RichText::new(format!("{} · {}", aircraft.plane, if aircraft.player { "player" } else { "bot" })).weak());
+                ui.add_space(4.0);
+                loadout_editor(ui, &name, aircraft, &pylons, weapons, plane_countermeasures, live, requests);
             });
-        if !shown {
-            self.map_hidden = true;
-        }
-        if let MapAction::Select(name) = action {
-            self.select(Selection::Aircraft(name));
+        if !open {
+            self.loadout_open = false;
         }
     }
 
-    fn contents(&mut self, ui: &mut egui::Ui) {
-        // The map can change between frames (a reload, a coalition deleted)
-        // - keep the selection pointing at something real.
+    /// The map can change between frames (a reload, a coalition deleted) -
+    /// keeps the selection pointing at something real.
+    fn drop_stale_selection(&mut self) {
         let stale = match &self.selection {
             Selection::None => false,
             Selection::Coalition(index) => *index >= self.map.coalitions.len(),
@@ -241,93 +283,22 @@ impl FlightEditor {
         if stale {
             self.select(Selection::None);
         }
-
-        // The toolbar, its line and the columns sit right against each
-        // other - no spacing between them (each part keeps the normal
-        // spacing inside).
-        let item_spacing = ui.spacing().item_spacing;
-        ui.spacing_mut().item_spacing.y = 0.0;
-        padded(ui, |ui| {
-            ui.spacing_mut().item_spacing = item_spacing;
-            self.toolbar(ui);
-        });
-        ui.add(egui::Separator::default().spacing(1.0));
-
-        let mut changes = Vec::new();
-        let top = ui.cursor().top();
-        let row = ui.horizontal_top(|ui| {
-            // No spacing between the columns themselves - the table meets
-            // the divider; each column keeps the normal spacing inside.
-            ui.spacing_mut().item_spacing.x = 0.0;
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing = item_spacing;
-                ui.set_width(HIERARCHY_WIDTH);
-                self.hierarchy(ui, &mut changes);
-            });
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing = item_spacing;
-                ui.set_width(ui.available_width().max(INSPECTOR_MIN_WIDTH));
-                panel_header(ui, "Properties");
-                egui::ScrollArea::vertical().id_salt("inspector").auto_shrink([false, false]).show(ui, |ui| {
-                    match self.selection.clone() {
-                        Selection::None => padded(ui, |ui| {
-                            ui.label(RichText::new("Select a coalition or an aircraft in the hierarchy").weak());
-                        }),
-                        Selection::Coalition(index) => self.coalition_inspector(ui, index, &mut changes),
-                        Selection::Aircraft(name) => self.aircraft_inspector(ui, &name, &mut changes),
-                    }
-                });
-            });
-        });
-        // The divider between the hierarchy and the inspector, all the way
-        // down.
-        let x = row.response.rect.left() + HIERARCHY_WIDTH;
-        let bottom = row.response.rect.bottom().max(ui.max_rect().bottom());
-        ui.painter().vline(x, top..=bottom, ui.visuals().widgets.noninteractive.bg_stroke);
-
-        for change in changes {
-            self.apply(change);
-        }
     }
 
-    /// Every aircraft's path as lines in the world (see App::world_lines):
-    /// point to point, a cross on each point, and a line from the aircraft
-    /// (where it is now, or its place in the map when it isn't in the scene)
-    /// to its first point. The selected aircraft's path in gold, the others
-    /// in their coalition's color, dimmer.
-    pub fn path_lines(&self) -> Vec<[ManualVertex; 2]> {
-        let mut lines = Vec::new();
-        for (coalition, aircraft) in self.map.aircraft() {
-            if aircraft.path.is_empty() {
-                continue;
+    /// The selected thing's properties, scrolling under the "Properties"
+    /// header.
+    fn inspector(&mut self, ui: &mut egui::Ui, changes: &mut Vec<Change>) {
+        egui::ScrollArea::vertical().id_salt("inspector").auto_shrink([false, false]).show(ui, |ui| {
+            match self.selection.clone() {
+                Selection::None => padded(ui, |ui| {
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("Select a coalition or an aircraft in the hierarchy").weak());
+                }),
+                Selection::Coalition(index) => self.coalition_inspector(ui, index, changes),
+                Selection::Aircraft(name) => self.aircraft_inspector(ui, &name, changes),
             }
-            let selected = self.selection == Selection::Aircraft(aircraft.name.clone());
-            let color = if selected {
-                SELECTED_PATH_COLOR
-            } else {
-                let (r, g, b) = coalition.color;
-                [r as f32 / 255.0 * OTHER_PATH_BRIGHTNESS, g as f32 / 255.0 * OTHER_PATH_BRIGHTNESS, b as f32 / 255.0 * OTHER_PATH_BRIGHTNESS]
-            };
-            let link_color = color.map(|channel| channel * PATH_LINK_BRIGHTNESS);
-            let points: Vec<Vector3<f32>> = aircraft.path.iter().map(|&(x, y, z)| Vector3::new(x, y, z)).collect();
-
-            // To the point its autopilot is flying to (the first, until it's
-            // flying).
-            let live = self.live.get(&aircraft.name);
-            let start = live.map(|live| live.position).unwrap_or_else(|| aircraft.position());
-            let next = live.and_then(|live| live.next_path_point).filter(|next| *next < points.len()).unwrap_or(0);
-            lines.push(line(start, points[next], link_color));
-            for pair in points.windows(2) {
-                lines.push(line(pair[0], pair[1], color));
-            }
-            for point in &points {
-                for axis in [Vector3::x(), Vector3::y(), Vector3::z()] {
-                    let half = axis * (PATH_MARKER_SIZE * 0.5);
-                    lines.push(line(point - half, point + half, color));
-                }
-            }
-        }
-        lines
+            ui.add_space(8.0);
+        });
     }
 
     /// The aircraft selected in the hierarchy, by name - the one the camera
@@ -366,10 +337,6 @@ impl FlightEditor {
             }
             if ui.button("Respawn all").on_hover_text("Every aircraft back at its place, fresh").clicked() {
                 self.requests.push(EditorRequest::RespawnAll);
-            }
-            let mut map_shown = !self.map_hidden;
-            if ui.toggle_value(&mut map_shown, "Map").on_hover_text("The world from above, to lay paths out on").changed() {
-                self.map_hidden = !map_shown;
             }
         });
         if let Some((message, error)) = &self.status {
@@ -511,7 +478,6 @@ impl FlightEditor {
             .find_map(|(coalition_index, coalition)| coalition.aircraft.iter().position(|aircraft| aircraft.name == name).map(|index| (coalition_index, index)))
         else { return };
         let planes = self.planes.clone();
-        let weapons = self.weapons.clone();
         let plane_of_aircraft = &self.map.coalitions[coalition_index].aircraft[index].plane;
         let pylons = self.pylons.get(plane_of_aircraft).cloned().unwrap_or_default();
         let plane_countermeasures = self.countermeasures.get(plane_of_aircraft).copied();
@@ -519,6 +485,7 @@ impl FlightEditor {
         let live = self.live.get(name).copied();
         let aircraft = &mut self.map.coalitions[coalition_index].aircraft[index];
         let requests = &mut self.requests;
+        let loadout_open = &mut self.loadout_open;
 
         let icon_color = if aircraft.player { PLAYER_COLOR } else { ui.visuals().text_color() };
         inspector_header(ui, Icon::Aircraft, icon_color, &aircraft.name, |ui| status_line(ui, live), |ui| {
@@ -615,51 +582,6 @@ impl FlightEditor {
             });
         });
 
-        section(ui, "Path", |ui| {
-            let mut remove = None;
-            for (point_index, point) in aircraft.path.iter_mut().enumerate() {
-                property(ui, &format!("Point {}", point_index + 1), |ui| {
-                    vector_field_labelled(ui, [&mut point.0, &mut point.1, &mut point.2], ["x", "alt", "z"], 5.0, " m", REMOVE_BUTTON_WIDTH);
-                    let button = egui::Button::new("×").min_size(egui::vec2(REMOVE_BUTTON_WIDTH - ui.spacing().item_spacing.x, 20.0));
-                    if ui.add(button).on_hover_text("Remove this point").clicked() {
-                        remove = Some(point_index);
-                    }
-                });
-            }
-            if let Some(point_index) = remove {
-                aircraft.path.remove(point_index);
-            }
-            if aircraft.path.is_empty() {
-                property(ui, "", |ui| {
-                    ui.label(RichText::new("No points - it has no path").weak());
-                });
-            }
-            property(ui, "", |ui| {
-                let half = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
-                if ui.add(egui::Button::new("+ Add point").min_size(egui::vec2(half, 0.0)))
-                    .on_hover_text(format!("{PATH_STEP:.0} m on from the last point (from the aircraft's nose for the first)"))
-                    .clicked()
-                {
-                    let point = next_path_point(aircraft, live);
-                    aircraft.path.push(point);
-                }
-                let at_aircraft = ui.add_enabled(live.is_some(), egui::Button::new("+ At aircraft").min_size(egui::vec2(half, 0.0)))
-                    .on_hover_text("A point where the aircraft is right now");
-                if at_aircraft.clicked() {
-                    if let Some(live) = live {
-                        aircraft.path.push((live.position.x, live.position.y, live.position.z));
-                    }
-                }
-            });
-            if !aircraft.path.is_empty() {
-                property(ui, "", |ui| {
-                    if ui.add(egui::Button::new("Clear path").min_size(egui::vec2(ui.available_width(), 0.0))).clicked() {
-                        aircraft.path.clear();
-                    }
-                });
-            }
-        });
-
         section(ui, "Flight", |ui| {
             property(ui, "Set speed", |ui| {
                 let mut has_speed = aircraft.speed.is_some();
@@ -693,82 +615,23 @@ impl FlightEditor {
         });
 
         section(ui, "Loadout", |ui| {
-            if pylons.is_empty() {
-                property(ui, "", |ui| {
-                    ui.label(RichText::new(format!("The {} has no pylons - add them to its data.ron", aircraft.plane)).weak());
+            property(ui, "Weapons", |ui| {
+                let text = match (aircraft.loadout.len(), pylons.len()) {
+                    (_, 0) => "No pylons".to_owned(),
+                    (0, pylons) => format!("Empty - {pylons} pylons"),
+                    (hung, pylons) => format!("{hung} on {pylons} pylons"),
+                };
+                ui.label(text);
+            });
+            if let Some((plane_flares, plane_chaff)) = plane_countermeasures {
+                property(ui, "Flares / chaff", |ui| {
+                    ui.label(format!("{} / {}", aircraft.flares.unwrap_or(plane_flares), aircraft.chaff.unwrap_or(plane_chaff)));
                 });
             }
-            // A weapon (or Empty) on each of its plane's pylons - only the
-            // kinds the pylon takes.
-            for pylon in &pylons {
-                property(ui, &pylon.name, |ui| {
-                    let current = aircraft.loadout.get(&pylon.name).cloned();
-                    let mut choice = current.clone();
-                    egui::ComboBox::from_id_salt(("pylon", pylon.name.as_str()))
-                        .width(ui.available_width())
-                        .selected_text(current.as_deref().map(weapon_label).unwrap_or_else(|| "Empty".to_owned()))
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut choice, None, "Empty");
-                            for (id, category) in &weapons {
-                                if pylon.accepts(*category) {
-                                    ui.selectable_value(&mut choice, Some(id.clone()), weapon_label(id));
-                                }
-                            }
-                        });
-                    if choice != current {
-                        match choice {
-                            Some(id) => { aircraft.loadout.insert(pylon.name.clone(), id); }
-                            None => { aircraft.loadout.remove(&pylon.name); }
-                        }
-                    }
-                });
-            }
-            // Weapons on pylons its plane doesn't have (another plane was
-            // picked) - shown so they can go.
-            let stale: Vec<String> = aircraft.loadout.keys().filter(|name| !pylons.iter().any(|pylon| pylon.name == **name)).cloned().collect();
-            for pylon_name in stale {
-                property(ui, &pylon_name, |ui| {
-                    ui.label(RichText::new("no such pylon on this plane").color(ERROR_COLOR));
-                    if ui.small_button("×").on_hover_text("Remove it from the loadout").clicked() {
-                        aircraft.loadout.remove(&pylon_name);
-                    }
-                });
-            }
-            if !aircraft.loadout.is_empty() {
-                property(ui, "", |ui| {
-                    if ui.add(egui::Button::new("Clear loadout").min_size(egui::vec2(ui.available_width(), 0.0))).clicked() {
-                        aircraft.loadout.clear();
-                    }
-                });
-            }
-
-            // Flares and chaff - as many as its plane carries unless set
-            // here (left at that, it's left out of the map file).
-            match plane_countermeasures {
-                Some((plane_flares, plane_chaff)) => {
-                    for (label, count, plane_count) in [("Flares", &mut aircraft.flares, plane_flares), ("Chaff", &mut aircraft.chaff, plane_chaff)] {
-                        property(ui, label, |ui| {
-                            let mut value = count.unwrap_or(plane_count);
-                            let response = ui.add_sized([ui.available_width(), 20.0], egui::DragValue::new(&mut value).speed(1.0).range(0..=999))
-                                .on_hover_text(format!("Its plane carries {plane_count} by its data.ron"));
-                            if response.changed() {
-                                *count = (value != plane_count).then_some(value);
-                            }
-                        });
-                    }
-                }
-                None => {
-                    property(ui, "", |ui| {
-                        ui.label(RichText::new(format!("The {} has no flares or chaff - add `countermeasures` to its data.ron", aircraft.plane)).weak());
-                    });
-                }
-            }
-
             property(ui, "", |ui| {
-                let reset = ui.add_enabled(live.is_some(), egui::Button::new("Reset loadout").min_size(egui::vec2(ui.available_width(), 0.0)))
-                    .on_hover_text("Load it again where it is: every weapon back on, flares and chaff full");
-                if reset.clicked() {
-                    requests.push(EditorRequest::ResetLoadout(name.to_owned()));
+                let text = if *loadout_open { "Hide loadout window" } else { "Edit loadout…" };
+                if ui.add(egui::Button::new(text).min_size(egui::vec2(ui.available_width(), 0.0))).on_hover_text("Its weapons, flares and chaff - in a window of their own").clicked() {
+                    *loadout_open = !*loadout_open;
                 }
             });
         });
@@ -881,6 +744,93 @@ impl FlightEditor {
     }
 }
 
+
+/// The aircraft's loadout, editable: a weapon (or Empty) on each of its
+/// plane's pylons - only the kinds each takes - weapons on pylons it doesn't
+/// have (to remove), its flares and chaff, and loading it all again where it
+/// is - see FlightEditor::loadout_window.
+fn loadout_editor(ui: &mut egui::Ui, name: &str, aircraft: &mut AircraftPlacement, pylons: &[PylonSpec], weapons: &[(String, WeaponCategory)], plane_countermeasures: Option<(u32, u32)>, live: Option<LiveAircraft>, requests: &mut Vec<EditorRequest>) {
+    let (pylons, weapons) = (pylons.to_vec(), weapons.to_vec());
+    if pylons.is_empty() {
+        property(ui, "", |ui| {
+            ui.label(RichText::new(format!("The {} has no pylons - add them to its data.ron", aircraft.plane)).weak());
+        });
+    }
+    // A weapon (or Empty) on each of its plane's pylons - only the
+    // kinds the pylon takes.
+    for pylon in &pylons {
+        property(ui, &pylon.name, |ui| {
+            let current = aircraft.loadout.get(&pylon.name).cloned();
+            let mut choice = current.clone();
+            egui::ComboBox::from_id_salt(("pylon", pylon.name.as_str()))
+                .width(ui.available_width())
+                .selected_text(current.as_deref().map(weapon_label).unwrap_or_else(|| "Empty".to_owned()))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut choice, None, "Empty");
+                    for (id, category) in &weapons {
+                        if pylon.accepts(*category) {
+                            ui.selectable_value(&mut choice, Some(id.clone()), weapon_label(id));
+                        }
+                    }
+                });
+            if choice != current {
+                match choice {
+                    Some(id) => { aircraft.loadout.insert(pylon.name.clone(), id); }
+                    None => { aircraft.loadout.remove(&pylon.name); }
+                }
+            }
+        });
+    }
+    // Weapons on pylons its plane doesn't have (another plane was
+    // picked) - shown so they can go.
+    let stale: Vec<String> = aircraft.loadout.keys().filter(|name| !pylons.iter().any(|pylon| pylon.name == **name)).cloned().collect();
+    for pylon_name in stale {
+        property(ui, &pylon_name, |ui| {
+            ui.label(RichText::new("no such pylon on this plane").color(ERROR_COLOR));
+            if ui.small_button("×").on_hover_text("Remove it from the loadout").clicked() {
+                aircraft.loadout.remove(&pylon_name);
+            }
+        });
+    }
+    if !aircraft.loadout.is_empty() {
+        property(ui, "", |ui| {
+            if ui.add(egui::Button::new("Clear loadout").min_size(egui::vec2(ui.available_width(), 0.0))).clicked() {
+                aircraft.loadout.clear();
+            }
+        });
+    }
+
+    // Flares and chaff - as many as its plane carries unless set
+    // here (left at that, it's left out of the map file).
+    match plane_countermeasures {
+        Some((plane_flares, plane_chaff)) => {
+            for (label, count, plane_count) in [("Flares", &mut aircraft.flares, plane_flares), ("Chaff", &mut aircraft.chaff, plane_chaff)] {
+                property(ui, label, |ui| {
+                    let mut value = count.unwrap_or(plane_count);
+                    let response = ui.add_sized([ui.available_width(), 20.0], egui::DragValue::new(&mut value).speed(1.0).range(0..=999))
+                        .on_hover_text(format!("Its plane carries {plane_count} by its data.ron"));
+                    if response.changed() {
+                        *count = (value != plane_count).then_some(value);
+                    }
+                });
+            }
+        }
+        None => {
+            property(ui, "", |ui| {
+                ui.label(RichText::new(format!("The {} has no flares or chaff - add `countermeasures` to its data.ron", aircraft.plane)).weak());
+            });
+        }
+    }
+
+    property(ui, "", |ui| {
+        let reset = ui.add_enabled(live.is_some(), egui::Button::new("Reset loadout").min_size(egui::vec2(ui.available_width(), 0.0)))
+            .on_hover_text("Load it again where it is: every weapon back on, flares and chaff full");
+        if reset.clicked() {
+            requests.push(EditorRequest::ResetLoadout(name.to_owned()));
+        }
+    });
+}
+
 /// A row's icon - drawn as shapes where egui's fonts might lack the glyph.
 #[derive(Clone, Copy)]
 enum Icon {
@@ -985,11 +935,12 @@ fn tree_row(ui: &mut egui::Ui, selected: bool, row: TreeRow) -> RowClick {
 /// actions on the right (`actions`), and its status under them (`status`) -
 /// with a line under it.
 fn inspector_header(ui: &mut egui::Ui, icon: Icon, icon_color: Color32, name: &str, status: impl FnOnce(&mut egui::Ui), actions: impl FnOnce(&mut egui::Ui)) {
-    padded(ui, |ui| {
+    egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 10)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(16.0, 18.0), egui::Sense::hover());
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(20.0, 22.0), egui::Sense::hover());
             paint_icon(ui.painter(), ui.style(), icon, rect.center(), icon_color);
-            ui.label(name);
+            ui.label(RichText::new(name).size(17.0).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), actions);
         });
         status(ui);
@@ -1014,33 +965,37 @@ fn status_line(ui: &mut egui::Ui, live: Option<LiveAircraft>) {
 }
 
 /// A collapsible inspector section (egui's own collapsing header, open to
-/// start with) - padded inside, then a line under it across the column.
+/// start with) - a card of its own: a faint rounded box, its title on top.
 fn section(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
-    padded(ui, |ui| {
-        egui::CollapsingHeader::new(RichText::new(title).strong())
-            .id_salt(title)
-            .default_open(true)
-            .show_unindented(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.spacing_mut().item_spacing.y = 2.0;
-                body(ui);
-            });
-    });
-    ui.separator();
+    let visuals = ui.visuals().clone();
+    egui::Frame::new()
+        .fill(visuals.faint_bg_color)
+        .stroke(egui::Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color))
+        .corner_radius(6)
+        .inner_margin(egui::Margin::symmetric(10, 6))
+        .outer_margin(egui::Margin { left: PAD, right: PAD, top: 3, bottom: 3 })
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            egui::CollapsingHeader::new(RichText::new(title).strong())
+                .id_salt(title)
+                .default_open(true)
+                .show_unindented(ui, |ui| {
+                    ui.add_space(2.0);
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    body(ui);
+                });
+        });
 }
 
-/// One inspector row: `label` in the fixed-width label column, the value's
-/// widgets (`value`) filling the rest - a faint line above it.
+/// One inspector row: `label` dimmed in the fixed-width label column, the
+/// value's widgets (`value`) filling the rest.
 fn property(ui: &mut egui::Ui, label: &str, value: impl FnOnce(&mut egui::Ui)) {
-    row_line(ui);
-    ui.add_space(2.0);
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(LABEL_WIDTH, 20.0), egui::Sense::hover());
         let font = egui::TextStyle::Body.resolve(ui.style());
-        ui.painter().text(rect.left_center(), egui::Align2::LEFT_CENTER, label, font, ui.visuals().text_color());
+        ui.painter().text(rect.left_center(), egui::Align2::LEFT_CENTER, label, font, ui.visuals().weak_text_color());
         value(ui);
     });
-    ui.add_space(2.0);
 }
 
 /// Three numbers side by side, each with its axis letter in the axis color
@@ -1069,14 +1024,6 @@ fn vector_field_labelled(ui: &mut egui::Ui, values: [&mut f32; 3], letters: [&st
 /// A weapon's name to show, from its id: "missiles/aim-9x" -> "AIM-9X".
 fn weapon_label(id: &str) -> String {
     id.rsplit('/').next().unwrap_or(id).to_uppercase()
-}
-
-/// A line in the world from `from` to `to` - see App::world_lines.
-fn line(from: Vector3<f32>, to: Vector3<f32>, color: [f32; 3]) -> [ManualVertex; 2] {
-    [
-        ManualVertex { position: [from.x, from.y, from.z], color },
-        ManualVertex { position: [to.x, to.y, to.z], color },
-    ]
 }
 
 /// Where "+ Add point" puts the next point of `aircraft`'s path: PATH_STEP

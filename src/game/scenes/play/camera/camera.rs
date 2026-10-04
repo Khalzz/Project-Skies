@@ -343,7 +343,7 @@ impl Camera {
     }
 
     /// Back from `enter_wreck_view` - the player has a flying plane again
-    /// (respawned, or switched to another one from the F6 flight editor).
+    /// (respawned, or switched to another one from the flight editor (F10's editor view)).
     /// Into or out of F10's tactical map view (see `update_tactical`) - it
     /// starts behind the target, looking down on it.
     pub fn set_tactical_view(&mut self, on: bool) {
@@ -400,7 +400,7 @@ impl Camera {
 
         let mouse_free = app.mouse_free();
         // Its own bar and flight plan window are egui too.
-        let overlay_up = app.flight_editor.open || app.debug_overlay_visible() || app.tactical_map_active;
+        let overlay_up = app.debug_overlay_visible() || app.tactical_map_active;
         let over_ui = overlay_up && app.egui_overlay.ctx.is_pointer_over_area();
         let turning = !app.is_paused && (!mouse_free || (input::mouse_right_button_down() && !over_ui));
         if turning {
@@ -421,6 +421,12 @@ impl Camera {
         let (yaw, pitch) = (orbit.yaw.to_radians(), orbit.pitch.to_radians());
         let offset = Vector3::new(yaw.cos() * pitch.cos(), pitch.sin(), yaw.sin() * pitch.cos()) * orbit.distance;
         let active = cameras.active_mut();
+        // Shaped like where it's drawn - the editor view's middle, or the
+        // whole screen.
+        let (width, height) = app.tactical_viewport
+            .map(|[_, _, width, height]| (width, height))
+            .unwrap_or((app.window_manager.size.width as f32, app.window_manager.size.height as f32));
+        active.projection.resize(width.max(1.0) as u32, height.max(1.0) as u32);
         active.projection.fovy = TACTICAL_FOV;
         active.projection.znear = 1.0;
         active.camera.rotation_modifier = UnitQuaternion::identity();
@@ -537,9 +543,12 @@ impl Behavior for Camera {
             self.update_tactical(cameras, app);
             return;
         }
+        // The whole screen's shape again (F10's editor view draws in only
+        // part of it).
+        cameras.active_mut().projection.resize(app.window_manager.size.width.max(1), app.window_manager.size.height.max(1));
 
         let look = LookInput::read();
-        // F7 (or the F6 flight editor) frees the mouse - it's clicking
+        // F7 (or the flight editor (F10's editor view)) frees the mouse - it's clicking
         // buttons then, not looking around (see App::mouse_free).
         let mouse = MouseLook::read(app.mouse_free());
         // Runs in every mode, so switching into the cockpit picks the head

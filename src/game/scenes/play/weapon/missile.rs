@@ -1,6 +1,7 @@
 //! A missile in flight - a point mass flown from its `WeaponSpec`: the
 //! motor's thrust along its velocity (and the propellant burnt off), drag by
-//! Mach on its body tube, gravity, and - homing on a target its seeker can
+//! Mach on its body tube (and the induced drag of whatever turn it's
+//! pulling), gravity, and - homing on a target its seeker can
 //! see - proportional navigation: it turns at N times the rate the line of
 //! sight to the target turns, as hard as the G it can pull at its speed
 //! allows. An infrared one sees heat (see play::weapon::heat): something
@@ -289,7 +290,18 @@ impl MissileFlight {
             if homing.is_none() {
                 self.target = None;
             }
-            acceleration += self.steering(spec, along, speed, homing);
+            let turn = self.steering(spec, along, speed, homing);
+            acceleration += turn;
+            // What turning costs: to pull `turn` it flies at an angle of
+            // attack (its lift / (q S slope)), so that lift leans back by
+            // as much - induced drag, lift x angle. Near free holding itself
+            // up fast, dear in a hard turn, dearer still slow.
+            let lift = turn.magnitude() * mass;
+            let lift_per_radian = dynamic_pressure * spec.reference_area() * NORMAL_FORCE_SLOPE;
+            if lift_per_radian > 1.0 {
+                let induced_drag = lift * lift / lift_per_radian;
+                acceleration -= along * induced_drag / mass;
+            }
         }
 
         self.velocity += acceleration * h;
@@ -308,9 +320,14 @@ impl MissileFlight {
 
     /// The turn it's steered into: toward what it's homing on (`homing` -
     /// proportional navigation onto a target, or turning its path straight
-    /// at the sun), plus holding up against gravity - square to its flight
-    /// path, as hard as the G it can pull at `speed` allows.
+    /// at the sun), plus holding up against gravity (the guidance's g-bias)
+    /// - square to its flight path, as hard as the G it can pull at `speed`
+    /// allows. Homing on nothing, its seeker gives no command at all: it
+    /// coasts on a ballistic arc, dropping more the slower it gets.
     fn steering(&self, spec: &WeaponSpec, along: Vector3<f32>, speed: f32, homing: Option<Homing>) -> Vector3<f32> {
+        if homing.is_none() {
+            return Vector3::zeros();
+        }
         let navigation = match homing {
             Some(Homing::Intercept(line_of_sight, target_velocity)) => {
                 let range_squared = line_of_sight.norm_squared().max(1.0);
@@ -450,12 +467,26 @@ mod tests {
     }
 
     #[test]
-    fn unlocked_it_flies_on_without_sagging() {
+    fn unlocked_it_drops_on_a_ballistic_arc() {
+        // Nothing to home on: no command, so gravity bends it down - about
+        // as far as anything falls in 3 s (~44 m), the airflow on its fins
+        // swinging its nose down after its path.
         let spec = aim9();
         let mut missile = MissileFlight::launch(Vector3::new(0.0, 3000.0, 0.0), Vector3::new(0.0, 0.0, 250.0), UnitQuaternion::identity(), None);
         for _ in 0..(3 * 60) {
             missile.step(&spec, 1.0 / 60.0, &Surroundings::open(&[], -1000.0));
         }
+        let dropped = 3000.0 - missile.position.y;
+        assert!((25.0..60.0).contains(&dropped), "dropped {dropped:.1} m");
+        assert!(missile.velocity.y < -5.0, "heading down: {:?}", missile.velocity);
+    }
+
+    #[test]
+    fn homing_it_holds_itself_up() {
+        // A target dead level ahead: the g-bias keeps it from sagging.
+        let spec = aim9();
+        let mut missile = MissileFlight::launch(Vector3::new(0.0, 3000.0, 0.0), Vector3::new(0.0, 0.0, 250.0), UnitQuaternion::identity(), Some("bandit".into()));
+        fly(&mut missile, &spec, Vector3::new(0.0, 3000.0, 6000.0), Vector3::new(0.0, 0.0, 200.0), 2.0);
         assert!((missile.position.y - 3000.0).abs() < 15.0, "{}", missile.position.y);
     }
 
@@ -515,6 +546,24 @@ mod tests {
 
     fn jet(name: &str, position: Vector3<f32>, heat: f32) -> TargetTrack {
         TargetTrack { name: name.into(), position, velocity: Vector3::zeros(), heat, decoy: false }
+    }
+
+    #[test]
+    fn turning_hard_bleeds_its_speed() {
+        // The same shot, one at a target dead ahead, one at a target 60
+        // degrees off its nose (hard turn) - 2 s in, the turning one's slower.
+        let spec = aim9();
+        let speed_after = |target: Vector3<f32>| {
+            let mut missile = MissileFlight::launch(Vector3::new(0.0, 3000.0, 0.0), Vector3::new(0.0, 0.0, 250.0), UnitQuaternion::identity(), Some("bandit".into()));
+            fly(&mut missile, &spec, target, Vector3::zeros(), 2.0);
+            missile.velocity.magnitude()
+        };
+        let straight = speed_after(Vector3::new(0.0, 3000.0, 8000.0));
+        let turning = speed_after(Vector3::new(8000.0 * 60f32.to_radians().sin(), 3000.0, 8000.0 * 60f32.to_radians().cos()));
+        // Still burning and fast, where turning's cheapest - without induced
+        // drag the two would be the same (a pull square to its path doesn't
+        // slow it).
+        assert!(turning < straight - 10.0, "turning {turning:.0} m/s, straight {straight:.0} m/s");
     }
 
     #[test]

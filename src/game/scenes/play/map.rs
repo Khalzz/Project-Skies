@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 /// A level's starting setup - `<scene folder>/map.ron`: its coalitions, every
 /// aircraft in each, where each one starts and whether the player flies it.
 /// Read each time the level opens (a restart included), so edits to it apply
-/// on the next restart - or right away from the F6 flight editor (see
+/// on the next restart - or right away from the flight editor (F10's editor view) (see
 /// play::flight_editor), which can also write it back (`save`).
 #[derive(Deserialize, Serialize, Clone, PartialEq, Default)]
 pub struct MapSpec {
@@ -126,7 +126,7 @@ const FILE_HEADER: &str = "\
 // The level's starting setup - its coalitions and every aircraft in each (see
 // play::map::MapSpec). Read each time the level opens, so an edit here shows
 // up on the next restart (pause menu > Restart) - or edit it live in game with
-// the F6 flight editor, which saves back to this file.
+// the flight editor (F10's editor view), which saves back to this file.
 //
 // Each coalition:
 //   name      - its name (\"Blue\", \"Allies\"...). Unique.

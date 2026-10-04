@@ -106,9 +106,9 @@ pub struct App {
     // scroll so the overlay's buttons can be clicked mid-flight. Also shows
     // the overlay - see `debug_overlay_visible`.
     pub debug_mouse_free: bool,
-    // F6 (see play::scene::GameLogic::update_flight_editor) - the live map
-    // editor, drawn by the same egui overlay pass. Frees the mouse while
-    // open, like F7 (see `mouse_free`).
+    // The live map editor, docked in F10's editor view (see
+    // play::scene::GameLogic::update_flight_editor) - drawn by the same egui
+    // overlay pass.
     pub flight_editor: FlightEditor,
     // F10 (see play::tactical_map) - while set, the world isn't drawn: a
     // dark screen and `thick_lines` instead (see render_tactical_map_pass).
@@ -116,6 +116,11 @@ pub struct App {
     // The tactical map's buttons, selection and flight plan window (see
     // play::tactical_ui) - drawn by the egui overlay pass while it's up.
     pub tactical_ui: crate::game::scenes::play::tactical_ui::TacticalUi,
+    // Where F10's map is drawn (logical px: x, y, width, height) - the
+    // middle of the editor view's layout, between its panels (see
+    // FlightEditor::draw_docked), set by the egui pass each frame. None: the
+    // whole screen.
+    pub tactical_viewport: Option<[f32; 4]>,
     // Lines a fixed number of pixels thick (see engine::rendering::
     // thick_lines) - what the tactical map is drawn with.
     pub thick_lines: crate::engine::rendering::thick_lines::ThickLines,
@@ -367,6 +372,7 @@ impl App {
             flight_editor: FlightEditor::default(),
             tactical_map_active: false,
             tactical_ui: Default::default(),
+            tactical_viewport: None,
             thick_lines,
             hud_lines,
             hud_horizon_lines,
@@ -544,10 +550,10 @@ impl App {
         self.ui.has_changed = true;
     }
 
-    /// Whether the mouse is a pointer for clicking debug windows (F7, the F6
+    /// Whether the mouse is a pointer for clicking debug windows (F7, F10's
     /// flight editor or the F10 tactical map open) instead of looking around.
     pub fn mouse_free(&self) -> bool {
-        self.debug_mouse_free || self.flight_editor.open || self.tactical_map_active
+        self.debug_mouse_free || self.tactical_map_active
     }
 
     /// Whether the F7 debug overlay is up.

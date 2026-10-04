@@ -92,6 +92,12 @@ pub fn min_height_for_font_size(font_size: f32) -> f32 {
 // off (`Wrap::None`) regardless, but an unbounded width is what actually reports
 // the text's true natural size instead of whatever the (possibly wrong, that's
 // the point of calling this) current box width would clip it to.
+/// How wide `text` is on one line at `font_size` in `font` (px) - for
+/// sizing something to fit it.
+pub fn text_width(font_system: &mut FontSystem, text: &str, font_size: f32, font: Font) -> f32 {
+    natural_line_width(font_system, text, font_size, font)
+}
+
 fn natural_line_width(font_system: &mut FontSystem, text: &str, font_size: f32, font: Font) -> f32 {
     let mut buffer = Buffer::new(font_system, Metrics::new(font_size, font_size * LINE_HEIGHT_RATIO));
     buffer.set_size(font_system, None, Some(font_size * LINE_HEIGHT_RATIO));

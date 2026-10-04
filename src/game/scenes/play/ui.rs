@@ -91,6 +91,53 @@ pub fn hud_heading_label_key(index: usize) -> String {
     format!("hud_heading_{index}")
 }
 
+/// The kill feed (see GameLogic::update_kill_feed): how many rows at most,
+/// each one's height, its text's size, the room either side of the text
+/// inside its box and between its pieces (px), and how many pieces of text
+/// a row has - killer, "killed", victim, "with ..." - each its own label, in
+/// its own color.
+pub const KILL_FEED_ROWS: usize = 5;
+pub const KILL_FEED_ROW_HEIGHT: f32 = 26.0;
+pub const KILL_FEED_FONT_SIZE: f32 = 13.0;
+pub const KILL_FEED_PADDING: f32 = 10.0;
+pub const KILL_FEED_GAP: f32 = 5.0;
+pub const KILL_FEED_PIECES: usize = 4;
+/// The widest a piece of text can be (px) - its label's own width.
+const KILL_FEED_PIECE_MAX_WIDTH: f32 = 320.0;
+
+/// A row's box.
+pub fn kill_feed_key(row: usize) -> String {
+    format!("kill_feed_{row}")
+}
+
+/// A row's piece of text `piece`.
+pub fn kill_feed_piece_key(row: usize, piece: usize) -> String {
+    format!("kill_feed_{row}_{piece}")
+}
+
+/// A kill feed row's box - dark, see-through, rounded, sized to its text
+/// every frame. Built hidden.
+pub fn build_kill_feed_box(app: &mut App) -> UiNode {
+    label(app, "")
+        .set_size(SizeValue::Pixels(KILL_FEED_PIECE_MAX_WIDTH), SizeValue::Pixels(KILL_FEED_ROW_HEIGHT))
+        .set_background_color(UiColor::Rgba(0, 0, 0, 150))
+        .set_corner_radius(4.0)
+        .active(false)
+}
+
+/// A piece of a kill feed row's text - on no box of its own (the row's is
+/// under it), its color set with its text. Built hidden.
+pub fn build_kill_feed_piece(app: &mut App) -> UiNode {
+    label(app, "")
+        .set_size(SizeValue::Pixels(KILL_FEED_PIECE_MAX_WIDTH), SizeValue::Pixels(KILL_FEED_ROW_HEIGHT))
+        .set_font(&mut app.ui.text.font_system, HUD_FONT)
+        .set_font_size(&mut app.ui.text.font_system, KILL_FEED_FONT_SIZE)
+        .set_text_color(UiColor::Rgb(230, 230, 230))
+        .set_background_color(UiColor::TRANSPARENT)
+        .set_align(Align::Left)
+        .active(false)
+}
+
 /// How many heat sources the F8 heat view can label at once (see
 /// GameLogic::update_heat_view), and a label's box (px).
 pub const HEAT_LABELS: usize = 16;
