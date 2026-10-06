@@ -111,6 +111,12 @@ pub struct Plane {
     afterburner_base_scale: Option<Vector3<f32>>,
     /// Internal tanks - see `fuel`.
     fuel: Fuel,
+    /// Fuel left at which the aircraft-data box marks bingo (kg). None: no
+    /// bingo set.
+    pub bingo_kg: Option<f32>,
+    /// Radar altitude (m, straight down) at which the HUD's low-altitude
+    /// warning starts. See `map::DEFAULT_RADAR_WARN_M`.
+    pub radar_warn_m: f32,
     gear_meshes: GearMeshes,
     quick_menu: QuickList,
 }
@@ -178,6 +184,8 @@ impl Plane {
             military: 1.0,
             afterburner_base_scale: None,
             fuel: Fuel::default(),
+            bingo_kg: None,
+            radar_warn_m: crate::game::scenes::play::map::DEFAULT_RADAR_WARN_M,
             gear_meshes: GearMeshes::new(),
             quick_menu: QuickList::new(),
         }
@@ -236,6 +244,12 @@ impl Plane {
     /// A fuel spec edited while flying.
     pub fn set_fuel_spec(&mut self, spec: &super::fuel::FuelSpec) {
         self.fuel.apply_spec(spec);
+    }
+
+    /// Puts `kg` in the tanks, up to their maximum. Replaces what's there
+    /// (a loadout's fuel setting), unlike `add_fuel`.
+    pub fn set_fuel_kg(&mut self, kg: f32) {
+        self.fuel.set_kg(kg);
     }
 
     /// Puts `kg` in the tanks, up to their maximum.
@@ -376,25 +390,16 @@ impl Plane {
         }
     }
 
-    /// The D-pad quick menu: navigate/run actions while the player has
-    /// control, and keep its HUD in sync (hidden during cinematics/pause).
-    fn update_quick_menu(&mut self, node: &mut Node, app: &mut App) {
-        let has_control = !self.input_locked && !self.wrecked && !self.pilot.is_unconscious() && !app.is_paused;
-        if has_control {
-            if let Some(action) = self.quick_menu.update() {
-                self.apply_quick_action(node, action);
-            }
-        }
-
-        let gear_deploy = node.physics_state::<AircraftState>().map(|state| state.gear_deploy).or_else(|| self.gear_meshes.armed_deploy()).unwrap_or(1.0);
-        let speed_brake = node.physics_state::<AircraftState>().map(|state| state.speed_brake).unwrap_or(0.0);
+    /// The contextual aircraft list stays hidden. Gear, brakes and
+    /// fly-by-wire stay on their own keys in `read_pilot_input`.
+    fn update_quick_menu(&mut self, _node: &mut Node, app: &mut App) {
         let status = QuickMenuStatus {
-            gear: GearStatus::from_deploy(gear_deploy),
-            speed_brake: GearStatus::from_deploy(speed_brake),
-            parking_brake: self.controls.parking_brake,
-            fly_by_wire: self.fcs.pitch_autotrim,
+            gear: GearStatus::Up,
+            speed_brake: GearStatus::Up,
+            parking_brake: false,
+            fly_by_wire: false,
         };
-        self.quick_menu.refresh_ui(app, &status, has_control);
+        self.quick_menu.refresh_ui(app, &status, false);
     }
 
     /// Any part of the plane touching the water (see the node's

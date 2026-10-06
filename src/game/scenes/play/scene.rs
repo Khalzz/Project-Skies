@@ -101,11 +101,19 @@ pub struct GameLogic {
     last_fired_side: f32,
     // The weapons line on the HUD - see update_weapons.
     weapons_status: String,
-    // The countermeasures line on the HUD: flares and chaff left, what's
-    // released - see update_weapons. The column is the same, as two rows
-    // with a ">" on each one a press releases.
+    // The countermeasures line on the data box. The column is what's left
+    // and the release setting - the HUD itself only flashes the setting
+    // when it changes (see cms_cue).
     countermeasures_status: String,
     countermeasures_column: Option<(u32, u32, Release)>,
+    // The setting just chosen, and the game time it was chosen - the HUD
+    // blinks it, holds it, then fades it.
+    cms_cue: Option<(String, f64)>,
+    // Fuel has already crossed bingo, so the four-second BINGO cue doesn't
+    // start again every frame. Cleared once the tanks are above bingo or empty.
+    bingo_latched: bool,
+    // Game time until which the WARN text reads BINGO.
+    bingo_warn_until: Option<f64>,
     // Every flare and chaff in the air.
     countermeasures: Countermeasures,
     // The bots' reactions to missiles fired at them - see
@@ -228,8 +236,11 @@ impl GameLogic {
         app.ui.add_to_ui("game_ui".to_owned(), game_ui);
         for (key, text, font_size, width) in play_ui::HUD_READOUTS {
             let mut readout = play_ui::build_hud_readout(app, text, font_size, width);
-            if key == "hud_flares" || key == "hud_chaff" {
+            if key == "hud_corner_fuel" || key == "hud_radar_altitude" {
                 readout = readout.set_align(glyphon::cosmic_text::Align::Left);
+            }
+            if key == "hud_altitude_warning" {
+                readout = readout.set_font(&mut app.ui.text.font_system, play_ui::HUD_WARN_FACE);
             }
             readout.resolve(screen_width, screen_height);
             app.ui.add_to_ui(key.to_owned(), readout);
@@ -244,7 +255,10 @@ impl GameLogic {
         for index in 0..play_ui::HEAT_LABELS {
             let mut heat_label = play_ui::build_heat_label(app);
             heat_label.resolve(screen_width, screen_height);
-            app.ui.add_to_ui(play_ui::heat_label_key(index), heat_label);
+            let key = play_ui::heat_label_key(index);
+            app.ui.add_to_ui(key.clone(), heat_label);
+            // Over the grey heat-view grade, so the labels stay white.
+            app.ui.always_on_top.push(key);
         }
         for row in 0..play_ui::KILL_FEED_ROWS {
             let mut kill_feed_box = play_ui::build_kill_feed_box(app);
@@ -358,6 +372,9 @@ impl GameLogic {
             weapons_status: String::new(),
             countermeasures_status: String::new(),
             countermeasures_column: None,
+            cms_cue: None,
+            bingo_latched: false,
+            bingo_warn_until: None,
             countermeasures: Countermeasures::default(),
             ai_defense: AiDefense::default(),
             range_cue: None,
@@ -1353,6 +1370,12 @@ impl GameLogic {
                         Some((plane.clone(), (countermeasures.flares, countermeasures.chaff)))
                     })
                     .collect();
+                app.flight_editor.fuel_capacity = app.flight_editor.planes.iter()
+                    .filter_map(|plane| {
+                        let capacity = AircraftSpec::load(plane).ok()?.fuel.capacity_kg;
+                        (capacity > 0.0).then_some((plane.clone(), capacity))
+                    })
+                    .collect();
                 app.flight_editor.weapons = WeaponSpec::available().into_iter()
                     .filter_map(|id| Some((id.clone(), WeaponSpec::read(&id).ok()?.category)))
                     .collect();
@@ -1916,11 +1939,12 @@ impl GameLogic {
     /// (its engine, afterburner or fire) and the sun - as a glowing blob,
     /// bigger and whiter the brighter it looks from the camera, labelled
     /// with its heat and how bright it looks (the number a seeker compares,
-    /// see play::weapon::heat). Drawn into the HUD's screen lines, after
-    /// update_hud has filled them.
+    /// see play::weapon::heat). The blobs are drawn after the grey grade,
+    /// so they keep their color.
     fn update_heat_view(&mut self, scene: &Scene, app: &mut App) {
         // Past this many meters from the camera - not the jet it's sitting in.
         const MIN_DISTANCE: f32 = 30.0;
+        app.heat_screen_lines.dynamic.clear();
         if input::is_action_just_pressed("toggle_heat_view") {
             self.heat_view = !self.heat_view;
         }
@@ -1963,8 +1987,8 @@ impl GameLogic {
             let glow = apparent / (apparent + 1.0);
             let radius = 4.0 + 30.0 * glow;
             let color = heat_color(glow);
-            heat_blob(&mut app.hud_screen_lines.dynamic, (x, y), radius * 2.0, [color[0], color[1], color[2], 0.25 * glow + 0.05], to_pixels);
-            heat_blob(&mut app.hud_screen_lines.dynamic, (x, y), radius, [color[0], color[1], color[2], 0.95], to_pixels);
+            heat_blob(&mut app.heat_screen_lines.dynamic, (x, y), radius * 2.0, [color[0], color[1], color[2], 0.25 * glow + 0.05], to_pixels);
+            heat_blob(&mut app.heat_screen_lines.dynamic, (x, y), radius, [color[0], color[1], color[2], 0.95], to_pixels);
 
             let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &play_ui::heat_label_key(index)).filter(|_| index < play_ui::HEAT_LABELS) else { continue };
             node.set_active(true);
@@ -2218,8 +2242,8 @@ impl GameLogic {
             self.selected_weapon = kinds.get(next).map(|(kind, _)| kind.clone());
             self.fire_control.drop_locks();
         }
-        self.weapon_list = std::iter::once(("OFF".to_owned(), self.selected_weapon.is_none()))
-            .chain(kinds.iter().map(|(kind, count)| (format!("{} x{count}", weapon_label(kind)), self.selected_weapon.as_ref() == Some(kind))))
+        self.weapon_list = kinds.iter()
+            .map(|(kind, count)| (format!("{} x{count}", weapon_label(kind)), self.selected_weapon.as_ref() == Some(kind)))
             .collect();
 
         // The selected weapon's data, and every pylon carrying one.
@@ -2240,6 +2264,8 @@ impl GameLogic {
             self.weapons_status = String::new();
             self.countermeasures_status = String::new();
             self.countermeasures_column = None;
+            self.bingo_latched = false;
+            self.bingo_warn_until = None;
             app.hud_lines.dynamic.clear();
             return;
         };
@@ -2251,6 +2277,7 @@ impl GameLogic {
             Some(set) => {
                 if has_control && input::is_action_just_pressed("countermeasure_mode") {
                     set.release = set.release.next();
+                    self.cms_cue = Some((set.release.label().to_owned(), self.game_time));
                 }
                 if has_control && input::is_action_just_pressed("countermeasure_single") {
                     released.extend(set.release_one());
@@ -2265,6 +2292,18 @@ impl GameLogic {
         };
         self.countermeasures_status = status;
         self.countermeasures_column = column;
+        let (fuel_kg, bingo_kg) = scene.content.nodes.get(&player_id)
+            .and_then(|node| node.get_behavior::<Plane>())
+            .map(|plane| (plane.fuel().0, plane.bingo_kg))
+            .unwrap_or((0.0, None));
+        let in_bingo = bingo_kg.is_some_and(|bingo| fuel_kg <= bingo && fuel_kg > 0.0);
+        if in_bingo && !self.bingo_latched {
+            self.bingo_warn_until = Some(self.game_time + 4.0);
+        }
+        if !in_bingo || fuel_kg <= 0.0 {
+            self.bingo_warn_until = None;
+        }
+        self.bingo_latched = in_bingo;
         for release in released {
             self.countermeasures.release(scene, app, release, own.position, own.rotation, own.velocity);
         }
@@ -2436,8 +2475,7 @@ impl GameLogic {
         if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "hud_g").and_then(|node| node.as_label_mut()) {
             label.set_text(&mut app.ui.text.font_system, &format!("{g:.1}G"), true);
         }
-        // Speed against the left edge, altitude against the right, each with
-        // its caption over it.
+        // Speed on the left, altitude on the right. No captions.
         let speed_x = frame_x + readout_width * 0.5;
         let altitude_x = frame_x + frame_width - readout_width * 0.5;
         let middle_y = frame_y + frame_height * 0.5;
@@ -2450,66 +2488,118 @@ impl GameLogic {
         let label_y = ticks_bottom - HEADING_MAJOR_TICK - 2.0 - play_ui::HUD_SMALL_LABEL_SIZE.1 * 0.5;
         let heading_y = label_y - 4.0;
         let g_y = line_bottom - readout_height * 0.5;
-        // The weapon name stays on the square's bottom edge. Everything
-        // else listed here sits in the column to the right of the square,
-        // under the altitude readout: the wheels, then fuel, then the
-        // countermeasures.
-        const FUEL_WIDTH: f32 = 120.0;
-        const WEAPON_WIDTH: f32 = 160.0;
-        const WARNING_WIDTH: f32 = 140.0;
-        const COUNTERMEASURE_WIDTH: f32 = 96.0;
         let weapon_y = line_bottom;
-        // Past the altitude box, in the margin to the right of the square,
-        // so the wider fuel and countermeasure boxes stay outside it.
-        let column_left = frame_x + frame_width + 14.0;
-        let side_x = column_left + FUEL_WIDTH * 0.5;
-        let countermeasure_x = column_left + COUNTERMEASURE_WIDTH * 0.5;
+        // The wheels sit further right. Fuel and radar altitude are a
+        // left-aligned pair just outside the right line's bottom corner.
+        let side_x = frame_x + frame_width + 14.0 + 24.0;
         let wheels_y = middle_y;
-        let fuel_caption_y = wheels_y + 40.0;
-        let fuel_y = fuel_caption_y + readout_height;
-        let flares_y = fuel_y + readout_height + 10.0;
-        let chaff_y = flares_y + readout_height - 2.0;
-        // The low-altitude cue stays in the square, above the weapon name.
-        let warning_y = line_bottom - 48.0;
-        let (fuel_kg, fuel_capacity) = scene.content.nodes.get(self.flight_manager.player_id())
+        // Center of the square's bottom half.
+        let warning_y = (line_top + line_bottom * 3.0) * 0.25;
+        const CORNER_WIDTH: f32 = 130.0;
+        let corner_x = right_line + 8.0 + CORNER_WIDTH * 0.5;
+        // The pair sits outside the line, its bottom edge on the line's bottom.
+        let radar_y = line_bottom - readout_height * 0.5;
+        let fuel_y = radar_y - readout_height - 2.0;
+        let cms_y = line_bottom - 40.0;
+        let player_id = self.flight_manager.player_id();
+        let (fuel_kg, fuel_capacity, radar_warn_m) = scene.content.nodes.get(player_id)
             .and_then(|node| node.get_behavior::<Plane>())
-            .map(|plane| plane.fuel())
-            .unwrap_or((0.0, 0.0));
-        let fuel_shown = shown && fuel_capacity > 0.0;
-        let weapon_shown = shown && self.selected_weapon.is_some();
-        let low_altitude = shown && scene.content.nodes.get(self.flight_manager.player_id())
-            .and_then(|node| node.physics_state::<AircraftState>())
-            .is_some_and(|state| state.flight_data.altimeter < 150.0);
-        // A slow flash, about once a second, the way a jet's warning light
-        // pulses rather than strobes.
-        const ALTITUDE_BLINK_SECONDS: f64 = 0.7;
+            .map(|plane| { let (kg, capacity) = plane.fuel(); (kg, capacity, plane.radar_warn_m) })
+            .unwrap_or((0.0, 0.0, super::map::DEFAULT_RADAR_WARN_M));
+        let radar_altitude = scene.content.renderizable_instances.get(player_id)
+            .map(|instance| self.world_collision.height_below(instance.instance.transform.position, app.water.ocean.sea_level()))
+            .unwrap_or(0.0);
+        let low_altitude = shown && radar_altitude < radar_warn_m;
+        let bingo_text = self.bingo_warn_until.is_some_and(|until| self.game_time < until);
+        // The cue after a countermeasure setting change: a few fast blinks,
+        // a short hold, then a fade.
+        let cms_cue = self.cms_cue.as_ref().and_then(|(text, started)| {
+            let age = self.game_time - *started;
+            const BLINK_END: f64 = 0.5;
+            const HOLD_END: f64 = 1.7;
+            const FADE_END: f64 = 2.4;
+            if !(0.0..FADE_END).contains(&age) {
+                return None;
+            }
+            let (on, alpha) = if age < BLINK_END {
+                ((age * 8.0).fract() < 0.5, 1.0)
+            } else if age < HOLD_END {
+                (true, 1.0)
+            } else {
+                (true, (1.0 - ((age - HOLD_END) / (FADE_END - HOLD_END)) as f32).clamp(0.0, 1.0))
+            };
+            Some((text.clone(), on, alpha))
+        });
+        // About twice a second. Low radar altitude blinks WARN and the
+        // radar figure. For the four seconds after bingo, BINGO and the
+        // fuel figure blink too, and the fuel figure does not blink again.
+        const ALTITUDE_BLINK_SECONDS: f64 = 0.5;
         let blink_on = (self.game_time % ALTITUDE_BLINK_SECONDS) < ALTITUDE_BLINK_SECONDS * 0.5;
-        let altitude_lit = shown && (!low_altitude || blink_on);
-        let warning_shown = low_altitude && blink_on;
-        let countermeasures_shown = shown && self.countermeasures_column.is_some();
+        let radar_red = low_altitude && blink_on;
+        let fuel_red = bingo_text && blink_on;
+        let warning_shown = shown && blink_on && (bingo_text || low_altitude);
+        let (warn_width, warn_height) = play_ui::HUD_WARN_SIZE;
         let placed = [
-            ("hud_speed", speed_x, middle_y, shown, readout_width),
-            ("hud_altitude", altitude_x, middle_y, altitude_lit, readout_width),
-            ("hud_speed_caption", speed_x, middle_y - readout_height, shown, readout_width),
-            ("hud_altitude_caption", altitude_x, middle_y - readout_height, shown, readout_width),
-            ("hud_heading", middle_x, heading_y, shown, readout_width),
-            ("hud_g", speed_x, g_y, shown && fox2, readout_width),
-            ("hud_weapon", middle_x, weapon_y, weapon_shown, WEAPON_WIDTH),
-            ("hud_fuel_caption", side_x, fuel_caption_y, fuel_shown, FUEL_WIDTH),
-            ("hud_fuel", side_x, fuel_y, fuel_shown, FUEL_WIDTH),
-            ("hud_altitude_warning", middle_x, warning_y, warning_shown, WARNING_WIDTH),
-            ("hud_flares", countermeasure_x, flares_y, countermeasures_shown, COUNTERMEASURE_WIDTH),
-            ("hud_chaff", countermeasure_x, chaff_y, countermeasures_shown, COUNTERMEASURE_WIDTH),
+            ("hud_speed", speed_x, middle_y, shown, readout_width, readout_height),
+            ("hud_altitude", altitude_x, middle_y, shown, readout_width, readout_height),
+            ("hud_heading", middle_x, heading_y, shown, readout_width, readout_height),
+            ("hud_g", speed_x, g_y, shown && fox2, readout_width, readout_height),
+            ("hud_weapon", middle_x, weapon_y, shown && self.selected_weapon.is_some(), 160.0, readout_height),
+            ("hud_altitude_warning", middle_x, warning_y, warning_shown, warn_width, warn_height),
+            ("hud_corner_fuel", corner_x, fuel_y, shown && fuel_capacity > 0.0, CORNER_WIDTH, readout_height),
+            ("hud_radar_altitude", corner_x, radar_y, shown, CORNER_WIDTH, readout_height),
+            ("hud_cms_cue", middle_x, cms_y, shown && cms_cue.as_ref().is_some_and(|(_, on, _)| *on), 160.0, readout_height),
         ];
-        for (key, x, y, visible, width) in placed {
+        for (key, x, y, visible, width, height) in placed {
             let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, key) else { continue };
             node.set_active(visible);
+            if key == "hud_radar_altitude" {
+                node.style.text_color = Some(if radar_red { UiColor::Rgb(255, 64, 64) } else { UiColor::Rgb(0, 255, 77) });
+                if let Some(label) = node.as_label_mut() {
+                    label.set_text(&mut app.ui.text.font_system, &format!("R: {radar_altitude:.0}"), true);
+                }
+            }
+            if key == "hud_corner_fuel" {
+                node.style.text_color = Some(if fuel_red { UiColor::Rgb(255, 64, 64) } else { UiColor::Rgb(0, 255, 77) });
+                if let Some(label) = node.as_label_mut() {
+                    label.set_text(&mut app.ui.text.font_system, &format!("FUEL: {fuel_kg:.0}"), true);
+                }
+            }
+            if key == "hud_weapon" {
+                if let Some(label) = node.as_label_mut() {
+                    let name = self.selected_weapon.as_deref().map(weapon_label).unwrap_or_default();
+                    label.set_text(&mut app.ui.text.font_system, &name, true);
+                }
+            }
+            if key == "hud_altitude_warning" {
+                if let Some(label) = node.as_label_mut() {
+                    label.set_text(&mut app.ui.text.font_system, if bingo_text { "BINGO" } else { "WARN" }, true);
+                }
+            }
+            if key == "hud_cms_cue" {
+                if let Some((text, _, alpha)) = &cms_cue {
+                    node.style.text_color = Some(UiColor::Rgba(0, 255, 77, (alpha * 255.0) as u8));
+                    if let Some(label) = node.as_label_mut() {
+                        label.set_text(&mut app.ui.text.font_system, text, true);
+                    }
+                }
+            }
             node.transform.x = x - width / 2.0;
-            node.transform.y = y - readout_height / 2.0;
+            node.transform.y = y - height / 2.0;
+            node.transform.width = width;
+            node.transform.height = height;
             node.transform.rect.left = node.transform.x;
             node.transform.rect.top = node.transform.y;
             node.transform.rect.right = node.transform.x + width;
-            node.transform.rect.bottom = node.transform.y + readout_height;
+            node.transform.rect.bottom = node.transform.y + height;
+        }
+        for (key, visible) in [
+            ("game_ui/hud_stores", shown),
+            ("game_ui/hud_stores/weapons", shown && !self.weapon_list.is_empty()),
+        ] {
+            if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, key) {
+                node.set_active(visible);
+            }
         }
         // The ladder's and the heading tape's numbers - hidden until placed
         // below.
@@ -2544,7 +2634,8 @@ impl GameLogic {
                 screen_line((line, y), (line + inward * END_IN, y), WIDTH);
             }
         }
-        // The readouts' boxes. The altitude box flashes with its number.
+        // The readouts' boxes. The radar altitude under the altitude number
+        // has none, and neither does WARN.
         {
             let mut readout_box = |x: f32, y: f32, width: f32| {
                 let (left, right) = (x - width * 0.5, x + width * 0.5);
@@ -2555,15 +2646,7 @@ impl GameLogic {
                 screen_line((left, bottom), (left, top), WIDTH);
             };
             readout_box(speed_x, middle_y, readout_width);
-            if altitude_lit {
-                readout_box(altitude_x, middle_y, readout_width);
-            }
-            if fuel_shown {
-                readout_box(side_x, fuel_y, FUEL_WIDTH);
-            }
-            if warning_shown {
-                readout_box(middle_x, warning_y, WARNING_WIDTH);
-            }
+            readout_box(altitude_x, middle_y, readout_width);
         }
         // Three wheels, in the right-hand column, while the gear is out.
         // Each ring is wide enough, and broken into enough pieces, that it
@@ -2821,26 +2904,6 @@ impl GameLogic {
                 let text = if fuel_capacity > 0.0 { format!("Fuel: {:.0} / {:.0} kg", fuel_kg, fuel_capacity) } else { "Fuel: —".to_owned() };
                 label.set_text(&mut app.ui.text.font_system, &text, true);
             }
-            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "hud_fuel").and_then(|n| n.as_label_mut()) {
-                label.set_text(&mut app.ui.text.font_system, &format!("{fuel_kg:.0} / {fuel_capacity:.0}"), true);
-            }
-            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "hud_weapon").and_then(|n| n.as_label_mut()) {
-                let name = self.selected_weapon.as_deref().map(weapon_label).unwrap_or_default();
-                label.set_text(&mut app.ui.text.font_system, &name, true);
-            }
-            let (flares_text, chaff_text) = match self.countermeasures_column {
-                Some((flares, chaff, release)) => (
-                    format!("{} FLR {flares}", if release.releases_flares() { ">" } else { " " }),
-                    format!("{} CHF {chaff}", if release.releases_chaff() { ">" } else { " " }),
-                ),
-                None => (String::new(), String::new()),
-            };
-            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "hud_flares").and_then(|n| n.as_label_mut()) {
-                label.set_text(&mut app.ui.text.font_system, &flares_text, true);
-            }
-            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "hud_chaff").and_then(|n| n.as_label_mut()) {
-                label.set_text(&mut app.ui.text.font_system, &chaff_text, true);
-            }
 
             if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/data_box/weapons").and_then(|n| n.as_label_mut()) {
                 label.set_text(&mut app.ui.text.font_system, &self.weapons_status, true);
@@ -2850,23 +2913,8 @@ impl GameLogic {
             }
             play_ui::update_weapon_list(app, &self.weapon_list);
 
-            // Below this height (m) the altitude number and the ALTITUDE
-            // cue go red. The flash itself is in update_hud.
-            const LOW_ALTITUDE_M: f32 = 150.0;
-            let low_altitude = altimeter < LOW_ALTITUDE_M;
-            if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "hud_altitude") {
-                node.style.text_color = Some(if low_altitude { UiColor::Rgb(255, 64, 64) } else { UiColor::Rgb(0, 255, 77) });
-                node.set_alpha(1.0);
-                if let Some(label) = node.as_label_mut() {
-                    label.set_text(&mut app.ui.text.font_system, &format!("{:.0}", altimeter), true);
-                }
-            }
-            if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "hud_altitude_warning") {
-                node.style.text_color = Some(UiColor::Rgb(255, 64, 64));
-                node.set_alpha(1.0);
-                if let Some(label) = node.as_label_mut() {
-                    label.set_text(&mut app.ui.text.font_system, "ALTITUDE", true);
-                }
+            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "hud_altitude").and_then(|node| node.as_label_mut()) {
+                label.set_text(&mut app.ui.text.font_system, &format!("{:.0}", altimeter), true);
             }
 
             // F3 debug view - two separate single-line labels (see

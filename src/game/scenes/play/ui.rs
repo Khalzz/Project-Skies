@@ -9,8 +9,10 @@
 //! `level_planning.ron` had to toggle all of them individually.
 
 use glyphon::cosmic_text::Align;
+use glyphon::Weight;
 
 use crate::app::App;
+use crate::engine::ui::components::label::Font;
 use crate::engine::rendering::ui::ui::Ui;
 use crate::engine::ui::color::UiColor;
 use crate::engine::ui::layer::Layer;
@@ -43,31 +45,35 @@ fn hud_label(app: &mut App, text: &str, width: f32, height: f32) -> UiNode {
 /// "velocity_marker" is deliberately NOT included here despite being part of
 /// the same HUD reveal - see `build_velocity_marker`'s own doc comment for
 /// why it has to stay independent instead.
-/// The HUD's speed and altitude, and their captions - each its own top-level
-/// node (like the velocity marker), placed every frame inside the HUD's
-/// frame (see GameLogic::update_hud): (key, text, font size).
-pub const HUD_READOUTS: [(&str, &str, f32, f32); 12] = [
+/// The HUD's readouts - each its own top-level node (like the velocity
+/// marker), placed every frame inside the HUD's frame (see
+/// GameLogic::update_hud): (key, text, font size, width).
+pub const HUD_READOUTS: [(&str, &str, f32, f32); 9] = [
     ("hud_speed", "0", 12.0, 64.0),
     ("hud_altitude", "0", 12.0, 64.0),
-    ("hud_speed_caption", "SPD KT", 9.0, 64.0),
-    ("hud_altitude_caption", "ALT M", 9.0, 64.0),
     // The heading, in the middle of the heading tape.
     ("hud_heading", "0", 16.0, 64.0),
     // The G, bottom left - in the Fox-2 mode only.
     ("hud_g", "1.0G", 12.0, 64.0),
-    // Fuel, under the square: a caption over the boxed quantity.
-    ("hud_fuel_caption", "FUEL", 9.0, 120.0),
-    ("hud_fuel", "0", 12.0, 120.0),
-    // The selected weapon, sitting on the square's bottom edge.
+    // "WARN" (or "BINGO") inside the square.
+    ("hud_altitude_warning", "WARN", HUD_WARN_FONT, HUD_WARN_SIZE.0),
+    // The selected weapon, on the square's bottom edge, in attack.
     ("hud_weapon", "", 13.0, 160.0),
-    // "ALTITUDE" inside the square while low.
-    ("hud_altitude_warning", "ALTITUDE", 14.0, 140.0),
-    // Flares and chaff, one row each. A ">" marks the ones a press releases.
-    ("hud_flares", "", 12.0, 96.0),
-    ("hud_chaff", "", 12.0, 96.0),
+    // Outside the right line's bottom corner, left-aligned.
+    ("hud_corner_fuel", "FUEL: 0", 12.0, 130.0),
+    ("hud_radar_altitude", "R: 0", 12.0, 130.0),
+    // The countermeasure setting, shown only just after it changes.
+    ("hud_cms_cue", "", 16.0, 160.0),
 ];
 /// A HUD readout's box (px).
 pub const HUD_READOUT_SIZE: (f32, f32) = (64.0, 20.0);
+/// The low-altitude WARN cue: font size, and the box the text is clipped to
+/// (px). Taller than a readout so the larger glyphs aren't cut off.
+pub const HUD_WARN_FONT: f32 = 32.0;
+pub const HUD_WARN_SIZE: (f32, f32) = (160.0, 48.0);
+/// Inter Thin, the lighter face loaded with the HUD font. Regular is the
+/// only other weight bundled, so this is the thinner step available.
+pub const HUD_WARN_FACE: Font = Font { family: Some("Inter"), weight: Weight::THIN };
 
 /// One of `HUD_READOUTS` - built hidden. The HUD's text is the regular
 /// weight, a touch heavier than the thin default.
@@ -208,45 +214,71 @@ pub fn build_game_ui(app: &mut App) -> UiNode {
         .set_background_color(UiColor::TRANSPARENT)
         .set_child("data_box", data_box)
         .set_child("compass", compass)
-        .set_child("weapon_list", build_weapon_list(app))
+        .set_child("hud_stores", build_hud_stores(app))
         .active(false)
 }
 
-/// How many entries the weapon list has room for - OFF and up to this
-/// many kinds of weapon, less one.
-const WEAPON_LIST_ROWS: usize = 8;
+/// Bottom-right stores, top to bottom. A box is shown only while the jet
+/// has something for it (see GameLogic::update_hud). Another page (a radar,
+/// later) is another child of `hud_stores` plus a line in that update.
+const STORE_ROW_WIDTH: f32 = 168.0;
+const STORE_ROW_HEIGHT: f32 = 18.0;
+/// How many weapon rows the weapons box has room for.
+pub const WEAPON_LIST_ROWS: usize = 8;
 
-/// The weapon list, bottom right: OFF, then each kind of weapon on the jet
-/// with how many are left - the selected one bright (see
-/// `update_weapon_list`).
-fn build_weapon_list(app: &mut App) -> UiNode {
-    let mut list = UiNode::container()
-        .set_orientation(Orientation::Vertical)
-        .set_size(SizeValue::Fit, SizeValue::Fit)
-        .set_position(PositionValue::End(-20.0), PositionValue::End(-20.0))
-        .set_padding(10.0)
-        .set_gap(2.0)
-        .set_background_color(UiColor::Rgba(0, 0, 0, 128))
-        .set_child("title", hud_label(app, "WEAPONS", 180.0, 22.0));
-    for row in 0..WEAPON_LIST_ROWS {
-        let entry = hud_label(app, "", 180.0, 22.0)
-            .set_border_color(UiColor::TRANSPARENT)
-            .active(false);
-        list = list.set_child(format!("row{row}"), entry);
-    }
-    list
+fn store_label(app: &mut App, text: &str, font_size: f32) -> UiNode {
+    label(app, text)
+        .set_size(SizeValue::Pixels(STORE_ROW_WIDTH), SizeValue::Pixels(STORE_ROW_HEIGHT))
+        .set_font(&mut app.ui.text.font_system, HUD_FONT)
+        .set_font_size(&mut app.ui.text.font_system, font_size)
+        .set_text_color(UiColor::Rgb(0, 255, 77))
+        .set_background_color(UiColor::TRANSPARENT)
+        .set_align(Align::Left)
 }
 
-/// Fills the weapon list from `entries` - each one's text and whether it's
-/// selected. Rows past the last entry are hidden.
+fn store_box(app: &mut App, title: &str, rows: &[(&str, &str)]) -> UiNode {
+    let mut box_node = UiNode::container()
+        .set_orientation(Orientation::Vertical)
+        .set_size(SizeValue::Fit, SizeValue::Fit)
+        .set_padding(8.0)
+        .set_gap(2.0)
+        .set_background_color(UiColor::Rgba(0, 0, 0, 140))
+        .set_child("title", store_label(app, title, 11.0));
+    for (id, text) in rows {
+        box_node = box_node.set_child(*id, store_label(app, text, 13.0));
+    }
+    box_node
+}
+
+/// The bottom-right column: the weapon list. Text is left-aligned. Fuel and
+/// radar altitude sit on the HUD square instead, and the countermeasure
+/// setting is a cue that fades. Built hidden.
+fn build_hud_stores(app: &mut App) -> UiNode {
+    let mut weapons = store_box(app, "WPN", &[]);
+    for row in 0..WEAPON_LIST_ROWS {
+        weapons = weapons.set_child(format!("row{row}"), store_label(app, "", 13.0).active(false));
+    }
+    UiNode::container()
+        .set_orientation(Orientation::Vertical)
+        .set_size(SizeValue::Fit, SizeValue::Fit)
+        .set_position(PositionValue::End(-16.0), PositionValue::End(-16.0))
+        .set_gap(8.0)
+        .set_background_color(UiColor::TRANSPARENT)
+        .set_child("weapons", weapons)
+        .active(false)
+}
+
+/// Fills the weapons box from `entries` - each one's name and whether it's
+/// the one selected. A `>` marks only that row. Rows past the last entry
+/// are hidden.
 pub fn update_weapon_list(app: &mut App, entries: &[(String, bool)]) {
     for row in 0..WEAPON_LIST_ROWS {
-        let key = format!("game_ui/weapon_list/row{row}");
+        let key = format!("game_ui/hud_stores/weapons/row{row}");
         let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &key) else { continue };
         match entries.get(row) {
             Some((text, selected)) => {
                 node.set_active(true);
-                let color = if *selected { UiColor::Rgb(0, 255, 0) } else { UiColor::Rgb(0, 120, 0) };
+                let color = if *selected { UiColor::Rgb(0, 255, 77) } else { UiColor::Rgb(0, 140, 50) };
                 node.update_style(|style| style.set_text_color(color));
                 if let Some(label) = node.as_label_mut() {
                     let text = if *selected { format!("> {text}") } else { text.clone() };

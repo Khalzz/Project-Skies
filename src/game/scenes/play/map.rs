@@ -417,6 +417,17 @@ pub struct AircraftPlacement {
     pub flares: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "plain_some")]
     pub chaff: Option<u32>,
+    /// Fuel in the tanks at spawn (kg). Optional: full when left out.
+    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "plain_some")]
+    pub fuel_kg: Option<f32>,
+    /// Bingo fuel (kg). Optional: none when left out. The aircraft-data box
+    /// marks the fuel line once what's left is at or under this.
+    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "plain_some")]
+    pub bingo_kg: Option<f32>,
+    /// Radar altitude (m, straight down) that starts the HUD's low-altitude
+    /// warning. Optional: `DEFAULT_RADAR_WARN_M` when left out.
+    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "plain_some")]
+    pub radar_warn_m: Option<f32>,
     /// How good a pilot a bot is - how quickly it reacts (see
     /// play::ai_defense). Optional: Medium when left out. Nothing for the
     /// player's.
@@ -427,6 +438,10 @@ pub struct AircraftPlacement {
     #[serde(default, skip_serializing_if = "Start::is_ground")]
     pub start: Start,
 }
+
+/// Radar altitude (m) that starts the low-altitude warning when a placement
+/// doesn't set its own.
+pub const DEFAULT_RADAR_WARN_M: f32 = 150.0;
 
 /// How an aircraft is put into the level - see `AircraftPlacement::start`.
 #[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq, Default)]

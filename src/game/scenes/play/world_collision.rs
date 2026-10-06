@@ -77,6 +77,18 @@ impl WorldCollision {
         }
         first.map(|t| start + direction * t)
     }
+
+    /// Meters straight down from `position` to the ground under it. Land and
+    /// runway win when they're closer than the sea; over open water it's the
+    /// sea surface.
+    pub fn height_below(&self, position: Vector3<f32>, sea_level: f32) -> f32 {
+        let sea = position.y - sea_level;
+        let end = Vector3::new(position.x, position.y - 80_000.0, position.z);
+        match self.segment_hit(position, end).map(|hit| position.y - hit.y) {
+            Some(terrain) if terrain >= 0.0 && terrain < sea => terrain,
+            _ => sea.max(0.0),
+        }
+    }
 }
 
 /// Where (0..1 along `direction` from `start`) a segment crosses a triangle,

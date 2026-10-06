@@ -1630,6 +1630,31 @@ impl App {
         );
     }
 
+    /// F8's heat blobs, on the swapchain after the grey grade (see
+    /// `play::scene::update_heat_view`).
+    fn render_heat_lines_pass(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
+        if self.heat_screen_lines.dynamic.is_empty() {
+            return;
+        }
+        let camera_position = self.scene_manager.cameras().map(|c| c.active().camera.position()).unwrap_or_else(nalgebra::Point3::origin);
+        let screen = [self.window_manager.pixel_size.width as f32, self.window_manager.pixel_size.height as f32];
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Heat lines pass"),
+            color_attachments: &[color_attachment(view, wgpu::LoadOp::Load)],
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
+        });
+        self.heat_screen_lines.draw(
+            &self.renderer.device,
+            &self.renderer.queue,
+            &mut render_pass,
+            &self.camera_resources.bind_group,
+            [camera_position.x, camera_position.y, camera_position.z],
+            screen,
+        );
+    }
+
     pub(crate) fn render_scene_passes(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
         if self.tactical_map_active {
             self.render_tactical_map_pass(encoder, view);
@@ -1651,6 +1676,9 @@ impl App {
         self.render_ui_pass(encoder, &hud_view, UiLayer::UnderEffect);
         self.renderer.blur.write_effects(&self.renderer.queue);
         self.renderer.blur.render(encoder, view);
+        // Heat blobs sit on the graded picture, so desaturation doesn't
+        // turn them grey.
+        self.render_heat_lines_pass(encoder, view);
         self.render_editor_lines_pass(encoder, view);
         self.render_ui_pass(encoder, view, UiLayer::OverEffect);
         // Drawn last so it's always on top of the game's own HUD too.

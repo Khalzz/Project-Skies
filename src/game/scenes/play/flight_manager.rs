@@ -77,6 +77,9 @@ fn load_map(scene_folder: &str) -> MapSpec {
                     loadout: Default::default(),
                     flares: None,
                     chaff: None,
+                    fuel_kg: None,
+                    bingo_kg: None,
+                    radar_warn_m: None,
                     difficulty: Default::default(),
                     start: Default::default(),
                 }],
@@ -411,6 +414,16 @@ impl flight_manager {
             if before.loadout != after.loadout || before.flares != after.flares || before.chaff != after.chaff {
                 self.rearm(scene, app, after);
             }
+            if before.fuel_kg != after.fuel_kg || before.bingo_kg != after.bingo_kg || before.radar_warn_m != after.radar_warn_m {
+                if let Some(plane) = scene.content.nodes.get_mut(&after.name).and_then(|node| node.get_behavior_mut::<Plane>()) {
+                    if before.fuel_kg != after.fuel_kg {
+                        let capacity = plane.fuel().1;
+                        plane.set_fuel_kg(after.fuel_kg.unwrap_or(capacity));
+                    }
+                    plane.bingo_kg = after.bingo_kg.filter(|kg| *kg > 0.0);
+                    plane.radar_warn_m = after.radar_warn_m.unwrap_or(super::map::DEFAULT_RADAR_WARN_M).max(0.0);
+                }
+            }
         }
         self.player_id = edited.player().name.clone();
 
@@ -503,6 +516,11 @@ impl flight_manager {
             physics.rigidbody.initial_velocity = rotation * Vector3::new(0.0, 0.0, speed);
         }
         let mut plane = Plane::new().with_effects(&aircraft_spec.effects).with_throttle(placement.throttle).with_military(aircraft_spec.engine.afterburner_gate).with_fuel(&aircraft_spec.fuel);
+        if let Some(kg) = placement.fuel_kg {
+            plane.set_fuel_kg(kg);
+        }
+        plane.bingo_kg = placement.bingo_kg.filter(|kg| *kg > 0.0);
+        plane.radar_warn_m = placement.radar_warn_m.unwrap_or(super::map::DEFAULT_RADAR_WARN_M).max(0.0);
         plane.arm_gear(&aircraft_spec.gear, placement.start.gear_down());
         plane.set_path(&flight_plan.0, Speed::Hold(cruise_speed(placement)), placement.difficulty, flight_plan.1);
         let plane = if placement.player { plane } else { plane.bot() };
@@ -808,6 +826,9 @@ mod tests {
             loadout: loadout.iter().map(|(pylon, weapon)| (pylon.to_string(), weapon.to_string())).collect(),
             flares: None,
             chaff: None,
+            fuel_kg: None,
+            bingo_kg: None,
+            radar_warn_m: None,
             difficulty: Default::default(),
             start: Default::default(),
         }

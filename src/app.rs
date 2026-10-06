@@ -143,6 +143,9 @@ pub struct App {
     // HUD lines in screen pixels (the speed/altitude tapes, the range
     // scale) - see ThickLines::screen_space.
     pub hud_screen_lines: crate::engine::rendering::thick_lines::ThickLines,
+    // F8 heat blobs, also in screen pixels, drawn after the grey grade so
+    // they keep their color (see play::scene::update_heat_view).
+    pub heat_screen_lines: crate::engine::rendering::thick_lines::ThickLines,
     // The SDL cursor showing for egui's cursor request, and which one it is
     // - kept alive while it's set (see render_pass.rs's apply_egui_cursor).
     pub egui_cursor: Option<(egui::CursorIcon, sdl2::mouse::Cursor)>,
@@ -357,6 +360,8 @@ impl App {
         let hud_horizon_lines = crate::engine::rendering::thick_lines::ThickLines::new(&renderer.device, renderer.config.format, &camera_resources);
         let mut hud_screen_lines = crate::engine::rendering::thick_lines::ThickLines::new(&renderer.device, renderer.config.format, &camera_resources);
         hud_screen_lines.screen_space = true;
+        let mut heat_screen_lines = crate::engine::rendering::thick_lines::ThickLines::new(&renderer.device, renderer.config.format, &camera_resources);
+        heat_screen_lines.screen_space = true;
 
         let egui_overlay = crate::engine::rendering::egui_overlay::EguiOverlay::new(&renderer.device, renderer.config.format);
 
@@ -390,6 +395,7 @@ impl App {
             spectate_telemetry: None,
             hud_horizon_lines,
             hud_screen_lines,
+            heat_screen_lines,
             egui_cursor: None,
             infinite_drag: None,
             world_lines: Vec::new(),
@@ -851,6 +857,7 @@ impl App {
                 self.hud_lines.dynamic.clear();
                 self.hud_horizon_lines.dynamic.clear();
                 self.hud_screen_lines.dynamic.clear();
+                self.heat_screen_lines.dynamic.clear();
 
                 // The scene doesn't exist yet at this point - SceneManager::create_scene/
                 // create_loaded_scene only registered its constructor. Clone it out first

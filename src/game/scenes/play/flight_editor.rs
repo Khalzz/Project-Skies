@@ -177,6 +177,8 @@ pub struct FlightEditor {
     /// How many flares and chaff each plane carries by its data.ron, by
     /// plane - none for one without dispensers.
     pub countermeasures: HashMap<String, (u32, u32)>,
+    /// Internal fuel capacity (kg) by plane - none for one without tanks.
+    pub fuel_capacity: HashMap<String, f32>,
     /// Every weapon that loads, by id, with its category - what a pylon can
     /// carry (see `PylonSpec::accepts`).
     pub weapons: Vec<(String, WeaponCategory)>,
@@ -450,6 +452,7 @@ impl FlightEditor {
         let plane = self.map.coalitions[coalition_index].aircraft[index].plane.clone();
         let pylons = self.pylons.get(&plane).cloned().unwrap_or_default();
         let plane_countermeasures = self.countermeasures.get(&plane).copied();
+        let fuel_capacity = self.fuel_capacity.get(&plane).copied();
         let live = self.live.get(&name).copied();
         let aircraft = &mut self.map.coalitions[coalition_index].aircraft[index];
         let (weapons, requests) = (&self.weapons, &mut self.requests);
@@ -466,7 +469,7 @@ impl FlightEditor {
                 ui.spacing_mut().item_spacing.y = 4.0;
                 ui.label(RichText::new(format!("{} · {}", aircraft.plane, if aircraft.player { "player" } else { "bot" })).weak());
                 ui.add_space(4.0);
-                loadout_editor(ui, &name, aircraft, &pylons, weapons, plane_countermeasures, live, requests);
+                loadout_editor(ui, &name, aircraft, &pylons, weapons, plane_countermeasures, fuel_capacity, live, requests);
             });
         if !open {
             self.loadout_open = false;
@@ -1096,7 +1099,7 @@ impl FlightEditor {
                 (position, rotation, Some(speed), 0.8)
             }
         };
-        AircraftPlacement { name, plane, player: false, position, rotation, speed, throttle, path: Vec::new(), follow: None, loadout: Default::default(), flares: None, chaff: None, difficulty: Default::default(), start }
+        AircraftPlacement { name, plane, player: false, position, rotation, speed, throttle, path: Vec::new(), follow: None, loadout: Default::default(), flares: None, chaff: None, fuel_kg: None, bingo_kg: None, radar_warn_m: None, difficulty: Default::default(), start }
     }
 }
 
@@ -1105,7 +1108,7 @@ impl FlightEditor {
 /// plane's pylons - only the kinds each takes - weapons on pylons it doesn't
 /// have (to remove), its flares and chaff, and loading it all again where it
 /// is - see FlightEditor::loadout_window.
-fn loadout_editor(ui: &mut egui::Ui, name: &str, aircraft: &mut AircraftPlacement, pylons: &[PylonSpec], weapons: &[(String, WeaponCategory)], plane_countermeasures: Option<(u32, u32)>, live: Option<LiveAircraft>, requests: &mut Vec<EditorRequest>) {
+fn loadout_editor(ui: &mut egui::Ui, name: &str, aircraft: &mut AircraftPlacement, pylons: &[PylonSpec], weapons: &[(String, WeaponCategory)], plane_countermeasures: Option<(u32, u32)>, fuel_capacity: Option<f32>, live: Option<LiveAircraft>, requests: &mut Vec<EditorRequest>) {
     let (pylons, weapons) = (pylons.to_vec(), weapons.to_vec());
     if pylons.is_empty() {
         property(ui, "", |ui| {
@@ -1177,6 +1180,40 @@ fn loadout_editor(ui: &mut egui::Ui, name: &str, aircraft: &mut AircraftPlacemen
             });
         }
     }
+
+    match fuel_capacity {
+        Some(capacity) => {
+            property(ui, "Fuel", |ui| {
+                let mut kilos = aircraft.fuel_kg.unwrap_or(capacity);
+                let response = ui.add_sized([ui.available_width(), 20.0], egui::DragValue::new(&mut kilos).speed(10.0).range(0.0..=capacity).suffix(" kg").max_decimals(0))
+                    .on_hover_text(format!("Full tanks are {capacity:.0} kg. Drag it back to full and the map leaves it out"));
+                if response.changed() {
+                    aircraft.fuel_kg = ((capacity - kilos).abs() > 0.5).then_some(kilos);
+                }
+            });
+            property(ui, "Bingo", |ui| {
+                let mut kilos = aircraft.bingo_kg.unwrap_or(0.0);
+                let response = ui.add_sized([ui.available_width(), 20.0], egui::DragValue::new(&mut kilos).speed(10.0).range(0.0..=capacity).suffix(" kg").max_decimals(0))
+                    .on_hover_text("The fuel line marks once what's left is at or under this. 0 is no bingo");
+                if response.changed() {
+                    aircraft.bingo_kg = (kilos > 0.5).then_some(kilos);
+                }
+            });
+        }
+        None => {
+            property(ui, "Fuel", |ui| {
+                ui.label(RichText::new(format!("The {} has no internal tanks", aircraft.plane)).weak());
+            });
+        }
+    }
+    property(ui, "Alt warning", |ui| {
+        let mut meters = aircraft.radar_warn_m.unwrap_or(super::map::DEFAULT_RADAR_WARN_M);
+        let response = ui.add_sized([ui.available_width(), 20.0], egui::DragValue::new(&mut meters).speed(5.0).range(0.0..=5_000.0).suffix(" m").max_decimals(0))
+            .on_hover_text("Radar altitude - straight down to the ground or the sea - that starts the HUD warning. The default is left out of the map");
+        if response.changed() {
+            aircraft.radar_warn_m = ((meters - super::map::DEFAULT_RADAR_WARN_M).abs() > 0.5).then_some(meters);
+        }
+    });
 
     property(ui, "", |ui| {
         let reset = ui.add_enabled(live.is_some(), egui::Button::new("Reset loadout").min_size(egui::vec2(ui.available_width(), 0.0)))

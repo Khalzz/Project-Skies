@@ -101,6 +101,17 @@ impl Fuel {
         .burn_kg_s(throttle, gate)
     }
 
+    /// Sets what's in the tanks, clamped to the maximum. Back to flying on
+    /// the engine once there's any. The physics body hears about it on the
+    /// next whole-kilogram report.
+    pub fn set_kg(&mut self, kg: f32) {
+        if self.capacity_kg <= 0.0 {
+            return;
+        }
+        self.kg = kg.clamp(0.0, self.capacity_kg);
+        self.starved = self.kg <= 0.0;
+    }
+
     /// Puts `kg` in the tanks, up to the maximum. Back to flying on the
     /// engine once there's any.
     pub fn add(&mut self, kg: f32) {
