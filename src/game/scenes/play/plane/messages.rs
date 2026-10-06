@@ -29,6 +29,10 @@ pub enum AircraftEvent {
     ToggleGear,
     GearUp,
     GearDown,
+    /// Open or close the speed brake.
+    ToggleSpeedBrake,
+    SpeedBrakeExtend,
+    SpeedBrakeRetract,
     /// Crashed (hit the water) - from here on the jet is just a wreck: no
     /// thrust, lift, wheels or flight controls, only whatever else acts on
     /// the body (gravity, the water - see engine::physics::water_contact).
@@ -38,6 +42,12 @@ pub enum AircraftEvent {
     /// flies: its wings keep lifting and dragging as it goes down. A
     /// `Wreck` follows when it hits the water.
     ShotDown,
+    /// The tanks are dry - thrust and the afterburner stop. The airframe
+    /// keeps flying.
+    EngineOut,
+    /// Internal fuel, kg in the tanks and the tanks' maximum. The body's
+    /// mass is its full-tanks mass minus what's been burned.
+    Fuel { kg: f32, capacity: f32 },
 }
 
 /// The plane's data.ron was edited while flying - new wings/surfaces/pilot
@@ -63,6 +73,8 @@ pub struct AircraftState {
     pub flight_data: FlightData,
     /// Landing gear extension, 0 = stowed, 1 = down and locked.
     pub gear_deploy: f32,
+    /// Speed brake extension, 0 = stowed, 1 = fully open.
+    pub speed_brake: f32,
     /// Each wheel's suspension contact point, keyed by wheel mesh name.
     pub wheels: HashMap<String, WheelData>,
     /// What the simulated elevator wing is actually doing (after any
@@ -74,4 +86,7 @@ pub struct AircraftState {
     pub afterburner: f32,
     /// Each wing's last lift force, keyed by wing label (F7 overlay).
     pub wing_lift_forces: HashMap<String, Vector3<f32>>,
+    /// The G the pitch fly-by-wire is commanding right now (what the stick
+    /// asks for, after its AoA limiter) - 1 with fly-by-wire off.
+    pub g_command: f32,
 }

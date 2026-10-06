@@ -42,6 +42,30 @@ struct FlyingMissile {
     burning_model: bool,
     /// The aircraft that fired it, by name.
     shooter: String,
+    /// Where it's been, a point every TRAIL_STEP meters or so (at most
+    /// TRAIL_POINTS) - for the editor to draw its path.
+    trail: Vec<Vector3<f32>>,
+}
+
+/// How far apart a missile's trail points are (m), and how many it keeps.
+const TRAIL_STEP: f32 = 25.0;
+const TRAIL_POINTS: usize = 400;
+
+/// A missile in flight as the editor's telemetry shows it - see
+/// `Missiles::telemetry`.
+pub struct MissileTelemetry {
+    pub weapon: String,
+    pub shooter: String,
+    pub position: Vector3<f32>,
+    pub velocity: Vector3<f32>,
+    /// Seconds since launch.
+    pub time: f32,
+    /// Its motor's still burning.
+    pub burning: bool,
+    /// The aircraft its seeker's on, by name - none: lost, or on the sun.
+    pub target: Option<String>,
+    /// Where it's been, oldest first (see `FlyingMissile::trail`).
+    pub trail: Vec<Vector3<f32>>,
 }
 
 /// An aircraft a missile's warhead got - who it was, who fired it, with
@@ -102,6 +126,21 @@ impl Missiles {
         Some((missile.flight.position, flight_rotation(&missile.flight)))
     }
 
+    /// The missile `node_id` in flight, for the editor's telemetry.
+    pub fn telemetry(&self, node_id: &str) -> Option<MissileTelemetry> {
+        let missile = self.flying.iter().find(|missile| missile.node_id == node_id)?;
+        Some(MissileTelemetry {
+            weapon: missile.spec.id.clone(),
+            shooter: missile.shooter.clone(),
+            position: missile.flight.position,
+            velocity: missile.flight.velocity,
+            time: missile.flight.time,
+            burning: missile.flight.burning(&missile.spec),
+            target: missile.flight.target_aircraft().map(str::to_owned),
+            trail: missile.trail.clone(),
+        })
+    }
+
     /// Every missile in flight - where, how it's moving, who fired it.
     pub fn in_flight(&self) -> Vec<MissileTrack> {
         self.flying.iter()
@@ -144,7 +183,8 @@ impl Missiles {
                 .add_property(ParticleEmitters::new().add("smoke", Emitter::particles(smoke_puffs()))),
         );
         println!("Fox 2 - {} away{}", spec.id, flight.target_aircraft().map(|target| format!(" at {target}")).unwrap_or_default());
-        self.flying.push(FlyingMissile { node_id, smoke_id, spec, flight, burning_model: true, shooter: shooter.to_owned() });
+        let trail = vec![flight.position];
+        self.flying.push(FlyingMissile { node_id, smoke_id, spec, flight, burning_model: true, shooter: shooter.to_owned(), trail });
     }
 
     /// Flies every missile `delta_time` seconds - `aircraft`: every aircraft
@@ -166,6 +206,12 @@ impl Missiles {
                 let _ = scene.spawn_node(app, missile_node(&missile.node_id, &missile.spec, pose(&missile.spec, &missile.flight), false));
             }
 
+            if missile.trail.last().is_none_or(|last| (missile.flight.position - last).magnitude() >= TRAIL_STEP) {
+                missile.trail.push(missile.flight.position);
+                if missile.trail.len() > TRAIL_POINTS {
+                    missile.trail.remove(0);
+                }
+            }
             let (position, rotation) = pose(&missile.spec, &missile.flight);
             if let Some(instance) = scene.content.renderizable_instances.get_mut(&missile.node_id) {
                 instance.instance.transform.position = position;

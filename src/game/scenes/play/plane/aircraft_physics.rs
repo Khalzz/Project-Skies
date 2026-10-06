@@ -6,11 +6,12 @@ use rapier3d::prelude::RigidBody;
 use crate::engine::physics::physics_behavior::{DebugDraw, PhysicsBehavior, PhysicsCtx, PhysicsPayload};
 use crate::game::scenes::play::plane::aero_spec::AeroSpec;
 
-use super::airframe::Airframe;
+use super::airframe::{dynamic_drag, Airframe};
 use super::controls::PlaneControls;
 use super::flight_system::FlightSystem;
 use super::instrumentation::Instrumentation;
 use super::messages::{AircraftEvent, AircraftReload, AircraftState};
+use crate::engine::game_nodes::game_object::ColliderType;
 use crate::engine::physics::physics_resources::compute_principal_inertia;
 use super::physics::rolling_rate::{commanded_roll_rate_deg_s, RollRateParams};
 use super::physics::wheels::wheel_manager::{WheelInputs, WheelManager};
@@ -49,6 +50,8 @@ const PILOT_SEAT_COLOR: [f32; 3] = [0.2, 1.0, 0.4];
 // Nose-wheel heading, drawn from its contact point while on the ground.
 const STEERING_DRAW_LENGTH: f32 = 4.0;
 const STEERING_COLOR: [f32; 3] = [0.2, 0.9, 1.0];
+// The speed-brake boards on the F5 overlay.
+const SPEED_BRAKE_COLOR: [f32; 3] = [0.35, 0.75, 1.0];
 // Particle emitters (the data.ron's `effects`): a cross with a tick up.
 const EMITTER_COLOR: [f32; 3] = [1.0, 0.55, 0.1];
 const EMITTER_TICK: f32 = 1.2;
@@ -72,19 +75,40 @@ pub struct AircraftPhysics {
     /// Where the plane's particle emitters sit (its data.ron `effects`,
     /// jet's frame) - only drawn, for the F5 overlay.
     effect_positions: Vec<Vector3<f32>>,
+    /// The jet with its tanks full (kg) - the mass it was spawned with -
+    /// and where that mass sits. Fuel burned comes off it.
+    full_mass: f32,
+    /// The additional mass last written onto the body. Starts as
+    /// `full_mass`, so a report that the tanks are still full doesn't
+    /// rebuild the mass properties (that kick, on the opening frame, was
+    /// enough to put the jet in the water).
+    applied_mass: f32,
+    com: Vector3<f32>,
+    colliders: Vec<ColliderType>,
+    fuel_kg: f32,
+    fuel_capacity: f32,
+    /// Tanks ran dry - no thrust until fuel is added.
+    engine_out: bool,
 }
 
 impl AircraftPhysics {
-    pub fn new(spec: &AeroSpec, engine: &super::engine::EngineSpec, gear: &super::gear_spec::GearSpec, effects: &[super::effects::EffectSpec]) -> Self {
+    pub fn new(spec: &AeroSpec, engine: &super::engine::EngineSpec, gear: &super::gear_spec::GearSpec, effects: &[super::effects::EffectSpec], com: Vector3<f32>, colliders: Vec<ColliderType>, full_mass: f32, gear_down: bool) -> Self {
         Self {
             wing_manager: WingManager::new(spec),
             wheel_manager: WheelManager::new(gear),
             flight_system: FlightSystem::new(engine.clone()),
-            airframe: Airframe::new(),
+            airframe: Airframe::new(gear_down),
             instrumentation: Instrumentation::new(spec.pilot_position),
             wrecked: false,
             shot_down: None,
             effect_positions: effects.iter().map(|effect| effect.position).collect(),
+            full_mass,
+            applied_mass: full_mass,
+            com,
+            colliders,
+            fuel_kg: 0.0,
+            fuel_capacity: 0.0,
+            engine_out: false,
         }
     }
 
@@ -97,19 +121,55 @@ impl AircraftPhysics {
         self.effect_positions = reload.effects.iter().map(|effect| effect.position).collect();
         self.flight_system.engine = reload.engine;
         self.instrumentation.set_pilot_position(reload.aero.pilot_position);
+        self.full_mass = reload.mass;
+        self.applied_mass = reload.mass;
+        self.com = reload.center_of_mass;
+        self.colliders = reload.colliders.clone();
         let inertia = compute_principal_inertia(reload.mass, reload.center_of_mass, &reload.colliders);
         let mass_properties = rapier3d::prelude::MassProperties::new(reload.center_of_mass.into(), reload.mass, inertia);
+        ctx.rigidbody_mut().set_additional_mass_properties(mass_properties, true);
+        self.apply_fuel_mass(ctx);
+    }
+
+    /// The body's mass with the fuel that's left. `full_mass` is the jet
+    /// with the tanks full - the mass it spawned at, not whatever the body
+    /// reports (that total also counts the colliders, and reading it back
+    /// as the new mass made the jet heavier every report).
+    fn apply_fuel(&mut self, kg: f32, capacity: f32, ctx: &mut PhysicsCtx) {
+        self.fuel_kg = kg.max(0.0);
+        self.fuel_capacity = capacity.max(0.0);
+        if self.fuel_kg > 0.0 {
+            self.engine_out = false;
+        }
+        self.apply_fuel_mass(ctx);
+    }
+
+    fn apply_fuel_mass(&mut self, ctx: &mut PhysicsCtx) {
+        if self.fuel_capacity <= 0.0 || self.full_mass <= 0.0 {
+            return;
+        }
+        let mass = (self.full_mass - (self.fuel_capacity - self.fuel_kg)).max(1.0);
+        // Still the spawned weight: leave the body alone.
+        if (mass - self.applied_mass).abs() < 0.5 {
+            return;
+        }
+        self.applied_mass = mass;
+        let inertia = compute_principal_inertia(mass, self.com, &self.colliders);
+        let mass_properties = rapier3d::prelude::MassProperties::new(self.com.into(), mass, inertia);
         ctx.rigidbody_mut().set_additional_mass_properties(mass_properties, true);
     }
 
     fn handle_event(&mut self, event: AircraftEvent, ctx: &mut PhysicsCtx) {
-        let landing_gear = &mut self.airframe.landing_gear;
         match event {
-            AircraftEvent::ToggleGear => landing_gear.request_toggle(),
-            AircraftEvent::GearUp => landing_gear.set_commanded_down(false),
-            AircraftEvent::GearDown => landing_gear.set_commanded_down(true),
+            AircraftEvent::ToggleGear => self.airframe.landing_gear.request_toggle(),
+            AircraftEvent::GearUp => self.airframe.landing_gear.set_commanded_down(false),
+            AircraftEvent::GearDown => self.airframe.landing_gear.set_commanded_down(true),
+            AircraftEvent::ToggleSpeedBrake => self.airframe.speed_brake.request_toggle(),
+            AircraftEvent::SpeedBrakeExtend => self.airframe.speed_brake.set_commanded_out(true),
+            AircraftEvent::SpeedBrakeRetract => self.airframe.speed_brake.set_commanded_out(false),
             AircraftEvent::Wreck => {
                 self.wrecked = true;
+                self.flight_system.cut_engine();
                 // Rapier keeps user forces until reset - drop the last
                 // step's thrust and lift, since nothing will replace them.
                 let rigidbody = ctx.rigidbody_mut();
@@ -117,23 +177,33 @@ impl AircraftPhysics {
                 rigidbody.reset_torques(true);
             }
             AircraftEvent::ShotDown => {
+                self.flight_system.cut_engine();
                 // Rolls off the way it was already rolling (left if level).
                 let rigidbody = ctx.rigidbody();
                 let roll_rate = (rigidbody.rotation().inverse() * rigidbody.angvel()).z;
                 self.shot_down = Some(if roll_rate < 0.0 { -SHOT_DOWN_ROLL } else { SHOT_DOWN_ROLL });
             }
+            AircraftEvent::EngineOut => {
+                self.engine_out = true;
+                self.flight_system.cut_engine();
+            }
+            AircraftEvent::Fuel { kg, capacity } => self.apply_fuel(kg, capacity, ctx),
         }
     }
 
     /// Thrust plus fuselage side-drag, applied fresh this step - forces are
     /// reset first, since rapier keeps user forces until told otherwise.
-    fn apply_body_forces(&mut self, ctx: &mut PhysicsCtx, controls: &PlaneControls, dt: f32) {
+    fn apply_body_forces(&mut self, ctx: &mut PhysicsCtx, controls: &PlaneControls, dt: f32, engine_alive: bool) {
         let rigidbody = ctx.rigidbody_mut();
         rigidbody.reset_forces(true);
         rigidbody.reset_torques(true);
 
         let rotation = *rigidbody.rotation();
-        let thrust_force = self.flight_system.compute_thrust(rigidbody.translation().y, rotation, controls.throttle, dt);
+        let thrust_force = if engine_alive {
+            self.flight_system.compute_thrust(rigidbody.translation().y, rotation, controls.throttle, dt)
+        } else {
+            Vector3::zeros()
+        };
 
         let sideslip_speed = (rotation.inverse() * rigidbody.linvel()).x;
         let air_density = 1.225f32;
@@ -142,8 +212,17 @@ impl AircraftPhysics {
         let fuselage_side_force_mag = -0.5 * air_density * sideslip_speed * sideslip_speed.abs() * fuselage_side_area * fuselage_cd;
         let fuselage_side_force = rotation * Vector3::new(fuselage_side_force_mag, 0.0, 0.0);
 
+        // Gear and the speed brake: extra flat-plate area into the wind,
+        // scaled by how far each is out. The gear's struts are the smaller
+        // of the two; the boards are the larger.
+        const GEAR_DRAG_AREA: f32 = 1.2;
+        const SPEED_BRAKE_DRAG_AREA: f32 = 1.8;
+        let drag_area = GEAR_DRAG_AREA * self.airframe.landing_gear.deploy + SPEED_BRAKE_DRAG_AREA * self.airframe.speed_brake.deploy;
+        let drag = dynamic_drag(*rigidbody.linvel(), air_density, drag_area);
+
         rigidbody.add_force(thrust_force, true);
         rigidbody.add_force(fuselage_side_force, true);
+        rigidbody.add_force(drag, true);
     }
 
     /// Undoes the rigidbody's blanket `angular_damping` (see
@@ -251,7 +330,8 @@ impl PhysicsBehavior for AircraftPhysics {
         };
 
         self.airframe.landing_gear.tick(dt);
-        self.apply_body_forces(ctx, &controls, dt);
+        self.airframe.speed_brake.tick(dt);
+        self.apply_body_forces(ctx, &controls, dt, self.shot_down.is_none() && !self.engine_out);
 
         // Nose-wheel steering rides on the rudder pedals, like the real jet.
         let wheel_inputs = WheelInputs {
@@ -281,10 +361,12 @@ impl PhysicsBehavior for AircraftPhysics {
         Some(Box::new(AircraftState {
             flight_data: self.instrumentation.flight_data.clone(),
             gear_deploy: self.airframe.landing_gear.deploy,
+            speed_brake: self.airframe.speed_brake.deploy,
             wheels: self.wheel_manager.renderizable_wheels.clone(),
             elevator_control_input,
             afterburner: self.flight_system.afterburner_activation(),
             wing_lift_forces: wings.iter().map(|wing| (wing.label.clone(), wing.last_lift_force)).collect(),
+            g_command: self.wing_manager.pitch_flcs.last_g_cmd,
         }))
     }
 
@@ -362,6 +444,23 @@ impl PhysicsBehavior for AircraftPhysics {
                     draw.ray(to_world(contact.local_position), heading * STEERING_DRAW_LENGTH, STEERING_COLOR);
                 }
             }
+        }
+
+        // The speed-brake boards, hinged on the aft fuselage and swinging
+        // out to each side as they open. Stowed, they lie along the tail.
+        let open = self.airframe.speed_brake.deploy;
+        let swing = open * 55.0_f32.to_radians();
+        for side in [-1.0_f32, 1.0] {
+            let hinge = Vector3::new(side * 0.42, 0.2, -2.5);
+            let outward = Vector3::new(side * swing.sin(), 0.0, -swing.cos());
+            let tip = hinge + outward * 0.9;
+            let up = Vector3::y() * 0.22;
+            draw.outline(&[
+                to_world(hinge - up * 0.5),
+                to_world(hinge + up * 0.5),
+                to_world(tip + up * 0.5),
+                to_world(tip - up * 0.5),
+            ], SPEED_BRAKE_COLOR);
         }
     }
 }

@@ -32,6 +32,11 @@
         (action: "quick_menu_left", bindings: [ControllerButton("DPadLeft")]),
         (action: "landing_gear_up", bindings: []),
         (action: "landing_gear_down", bindings: []),
+        // The speed brake: toggle opens or closes it. The extend/retract
+        // pair is for a switch that holds a direction (no default key).
+        (action: "toggle_air_brake", bindings: [Key("h")]),
+        (action: "air_brake_extend", bindings: []),
+        (action: "air_brake_retract", bindings: []),
         // Weapons: the next one in the HUD's weapon list (round to OFF), and
         // the trigger.
         (action: "next_weapon", bindings: [Key("Tab"), ControllerButton("B")]),
@@ -51,11 +56,17 @@
         (action: "camera_next_missile", bindings: [Key("F4")]),
         // F5-F8: debugging and editing the map.
         // F10: the tactical map.
-        (action: "toggle_debug", bindings: [Key("F5")]),
+        // F5 / F9: the debug view - colliders, and while spectating (F2-F4)
+        // what's followed: its telemetry and the path it's flying.
+        (action: "toggle_debug", bindings: [Key("F5"), Key("F9")]),
         (action: "toggle_debug_mouse", bindings: [Key("F7")]),
         // F8: the heat view - what an IR seeker sees.
         (action: "toggle_heat_view", bindings: [Key("F8")]),
-        (action: "toggle_tactical_map", bindings: [Key("F10")]),
+        // F10: the editor - the world seen through a free editor camera, the
+        // hierarchy, properties and timeline around it.
+        (action: "toggle_editor", bindings: [Key("F10")]),
+        // M: the map - the battle as lines on a dark screen.
+        (action: "toggle_tactical_map", bindings: [Key("m")]),
         // The sandbox camera's orbit toggle - no key.
         (action: "follow_cam_toggle", bindings: []),
         (action: "toggle_pause_menu", bindings: [Key("Escape")]),

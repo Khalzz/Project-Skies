@@ -15,6 +15,7 @@ use crate::game::scenes::play::crash_effects::Crash;
 use crate::transform::Transform;
 
 use super::afterburner::Afterburner;
+use super::fuel::Fuel;
 use super::control_surfaces::{ControlInput, ControlSurface, SurfaceBase};
 use super::controls::PlaneControls;
 use super::fcs::Fcs;
@@ -24,9 +25,15 @@ use super::effects::{self, EffectKind, EffectSpec};
 use super::pilot::Pilot;
 use crate::engine::particles::ParticleEmitters;
 use crate::engine::physics::physics_handler::RenderMessage;
-use super::autopilot::Autopilot;
+use super::autopilot::{Autopilot, Speed};
+use crate::game::scenes::play::map::Difficulty;
 use super::quick_list::QuickList;
 use super::quick_menu::{GearStatus, QuickAction, QuickMenuStatus};
+
+/// How long after an animation lets an aircraft go its pilot still feels
+/// no G (s) - long enough for the physics to settle it from being placed
+/// (or teleported) into flying at speed.
+const CALM_GRACE_SECONDS: f32 = 2.5;
 
 /// An aircraft's main-thread half - reads the pilot's input, sends it to the
 /// physics half (`AircraftPhysics`), and animates the model from whatever
@@ -48,6 +55,23 @@ pub struct Plane {
     /// (see `fixed_update`) - what the autopilot steers from.
     pose: Option<(Vector3<f32>, UnitQuaternion<f32>)>,
     pub input_locked: bool,
+    /// Its autopilot flies it even when it's the player's - a timeline has
+    /// it fly a path (see play::path_follow).
+    pub scripted: bool,
+    /// An animation's placing it (its body held still - see
+    /// SceneContent::kinematic): nothing the physics says about it counts
+    /// meanwhile - no crash, no G on the pilot, no controls.
+    pub held: bool,
+    /// An animation's playing on it: its pilot feels no G meanwhile.
+    pub calm: bool,
+    /// Who moved its controls last frame, and (read from the pilot's input)
+    /// the stick it was easing toward - for the editor's Status.
+    pub flown_by: &'static str,
+    pub stick_target: f32,
+    /// Seconds its pilot still feels no G after an animation let it go (see
+    /// CALM_GRACE_SECONDS) - the jump from being placed to flying again
+    /// isn't a G the pilot pulled.
+    calm_left: f32,
     /// Hit the water - see `check_wreck`. Never cleared (a restart builds
     /// a new plane).
     pub wrecked: bool,
@@ -79,9 +103,14 @@ pub struct Plane {
     pub fcs: Fcs,
     control_surfaces: Vec<ControlSurface>,
     afterburner: Afterburner,
+    /// The engine's afterburner gate - military power, and where the
+    /// autopilot holds the lever when the speed is right (1: no afterburner).
+    military: f32,
     // The afterburner mesh's own scale from the model, captured the first
     // frame - its length is stretched by `afterburner.value` on top of it.
     afterburner_base_scale: Option<Vector3<f32>>,
+    /// Internal tanks - see `fuel`.
+    fuel: Fuel,
     gear_meshes: GearMeshes,
     quick_menu: QuickList,
 }
@@ -126,6 +155,12 @@ impl Plane {
             throttle_lever: None,
             pose: None,
             input_locked: false,
+            scripted: false,
+            held: false,
+            calm: false,
+            flown_by: "",
+            stick_target: 0.0,
+            calm_left: 0.0,
             wrecked: false,
             shot_down: false,
             going_down: false,
@@ -140,7 +175,9 @@ impl Plane {
             fcs: Fcs::new(),
             control_surfaces: Self::default_control_surfaces(),
             afterburner: Afterburner::new(),
+            military: 1.0,
             afterburner_base_scale: None,
+            fuel: Fuel::default(),
             gear_meshes: GearMeshes::new(),
             quick_menu: QuickList::new(),
         }
@@ -152,10 +189,11 @@ impl Plane {
         self
     }
 
-    /// Gives a bot a path to fly (see autopilot) at `cruise_speed` (m/s),
-    /// from its first point - or, empty, none (it flies on as it is).
-    pub fn set_path(&mut self, path: &[(f32, f32, f32)], cruise_speed: f32) {
-        self.autopilot = (!path.is_empty()).then(|| Autopilot::new(path, cruise_speed));
+    /// Gives a bot a path to fly (see autopilot) at `speed`, flown as well
+    /// as a `skill` pilot flies, from its first point - round and round when
+    /// `looped`, once otherwise - or, empty, none (it flies on as it is).
+    pub fn set_path(&mut self, path: &[(f32, f32, f32)], speed: Speed, skill: Difficulty, looped: bool) {
+        self.autopilot = (!path.is_empty()).then(|| Autopilot::new(path, speed, skill, looped).with_military(self.military));
     }
 
     /// The point of its path a bot is flying to - an index into its path.
@@ -163,10 +201,69 @@ impl Plane {
         self.autopilot.as_ref().and_then(Autopilot::next_point)
     }
 
+    /// The path its autopilot's flying - its points, which it's flying to,
+    /// and whether round and round - while it's flying one.
+    pub fn route(&self) -> Option<(Vec<Vector3<f32>>, Option<usize>, bool)> {
+        if self.is_player && !self.scripted {
+            return None;
+        }
+        let (points, next, looped) = self.autopilot.as_ref()?.route();
+        (!points.is_empty()).then(|| (points.to_vec(), next, looped))
+    }
+
+    /// Whether its pilot feels the G it pulls - not while an animation has
+    /// it (placed, or playing with it), nor for a moment after (see
+    /// CALM_GRACE_SECONDS).
+    pub fn feels_g(&self) -> bool {
+        !self.held && !self.calm && self.calm_left <= 0.0
+    }
+
+    /// Where the point its autopilot's flying to is, while it's flying one
+    /// (a bot, or anything an animation has flying a path).
+    pub fn waypoint(&self) -> Option<Vector3<f32>> {
+        if self.is_player && !self.scripted {
+            return None;
+        }
+        self.autopilot.as_ref().and_then(Autopilot::waypoint)
+    }
+
+    /// Starts with the tanks `spec` describes, full.
+    pub fn with_fuel(mut self, spec: &super::fuel::FuelSpec) -> Self {
+        self.fuel = Fuel::from_spec(spec);
+        self
+    }
+
+    /// A fuel spec edited while flying.
+    pub fn set_fuel_spec(&mut self, spec: &super::fuel::FuelSpec) {
+        self.fuel.apply_spec(spec);
+    }
+
+    /// Puts `kg` in the tanks, up to their maximum.
+    pub fn add_fuel(&mut self, kg: f32) {
+        self.fuel.add(kg);
+    }
+
+    /// Fuel left, and the tanks' maximum (kg).
+    pub fn fuel(&self) -> (f32, f32) {
+        (self.fuel.kg, self.fuel.capacity_kg)
+    }
+
     /// Starts with the throttle at `throttle` (0..1).
     pub fn with_throttle(mut self, throttle: f32) -> Self {
         self.controls.throttle = throttle.clamp(0.0, 1.0);
         self
+    }
+
+    /// Military power is `gate` - the engine's afterburner gate (1 when it
+    /// has none). The autopilot holds the lever there when the speed is right.
+    pub fn with_military(mut self, gate: f32) -> Self {
+        self.military = gate.clamp(0.01, 1.0);
+        self
+    }
+
+    /// The wheels show `down` until physics reports the gear.
+    pub fn arm_gear(&mut self, gear: &super::gear_spec::GearSpec, down: bool) {
+        self.gear_meshes.arm(gear, down);
     }
 
     /// What each of the node's emitters is - the plane's data.ron effects.
@@ -208,6 +305,7 @@ impl Plane {
 
         let target_aileron = target_aileron + self.controls.trim.roll;
 
+        self.stick_target = target_elevator;
         self.controls.elevator = lerp(self.controls.elevator, target_elevator, delta_time * STICK_INPUT_LERP_SPEED);
         self.controls.aileron = lerp(self.controls.aileron, target_aileron, delta_time * STICK_INPUT_LERP_SPEED);
         self.controls.rudder = lerp(self.controls.rudder, target_rudder, delta_time * STICK_INPUT_LERP_SPEED);
@@ -246,6 +344,15 @@ impl Plane {
         if input::is_action_just_pressed("landing_gear_down") {
             node.push_physics_event(AircraftEvent::GearDown);
         }
+        if input::is_action_just_pressed("toggle_air_brake") {
+            node.push_physics_event(AircraftEvent::ToggleSpeedBrake);
+        }
+        if input::is_action_just_pressed("air_brake_extend") {
+            node.push_physics_event(AircraftEvent::SpeedBrakeExtend);
+        }
+        if input::is_action_just_pressed("air_brake_retract") {
+            node.push_physics_event(AircraftEvent::SpeedBrakeRetract);
+        }
     }
 
     /// Runs one of the plane's toggles - shared by the keyboard keys (see
@@ -254,6 +361,7 @@ impl Plane {
     fn apply_quick_action(&mut self, node: &mut Node, action: QuickAction) {
         match action {
             QuickAction::ToggleGear => node.push_physics_event(AircraftEvent::ToggleGear),
+            QuickAction::ToggleSpeedBrake => node.push_physics_event(AircraftEvent::ToggleSpeedBrake),
             QuickAction::ToggleParkingBrake => {
                 self.controls.parking_brake = !self.controls.parking_brake;
                 println!("Parking brake: {}", if self.controls.parking_brake { "SET" } else { "RELEASED" });
@@ -278,9 +386,11 @@ impl Plane {
             }
         }
 
-        let gear_deploy = node.physics_state::<AircraftState>().map(|state| state.gear_deploy).unwrap_or(1.0);
+        let gear_deploy = node.physics_state::<AircraftState>().map(|state| state.gear_deploy).or_else(|| self.gear_meshes.armed_deploy()).unwrap_or(1.0);
+        let speed_brake = node.physics_state::<AircraftState>().map(|state| state.speed_brake).unwrap_or(0.0);
         let status = QuickMenuStatus {
             gear: GearStatus::from_deploy(gear_deploy),
+            speed_brake: GearStatus::from_deploy(speed_brake),
             parking_brake: self.controls.parking_brake,
             fly_by_wire: self.fcs.pitch_autotrim,
         };
@@ -328,6 +438,36 @@ impl Plane {
         self.controls = PlaneControls { parking_brake: self.controls.parking_brake, ..PlaneControls::new() };
         self.controls.throttle = 0.0;
         node.push_physics_event(event);
+    }
+
+    /// Burns fuel with the throttle. Dry tanks cut the engine. The physics
+    /// body hears about each whole kilogram, and weighs that much less than
+    /// a full jet.
+    fn update_fuel(&mut self, node: &mut Node, app: &App, delta_time: f32) {
+        if !self.fuel.has_tanks() {
+            return;
+        }
+        if !app.is_paused && !self.wrecked && self.fuel.kg > 0.0 {
+            let burned = self.fuel.burn_kg_s(self.controls.throttle, self.military) * delta_time;
+            self.fuel.kg = (self.fuel.kg - burned).max(0.0);
+        }
+        if self.fuel.kg <= 0.0 {
+            self.controls.throttle = 0.0;
+            if !self.fuel.starved {
+                self.fuel.starved = true;
+                node.push_physics_event(AircraftEvent::EngineOut);
+            }
+        }
+        // A shot is flying the jet. The tally above still runs for the HUD;
+        // the body keeps the weight it spawned at until the shot lets go.
+        // A fuel report rewrites the mass properties, and doing that on the
+        // opening frames is what wrecked the intro.
+        if self.held || self.calm || self.scripted {
+            return;
+        }
+        if let Some(kg) = self.fuel.take_report() {
+            node.push_physics_event(AircraftEvent::Fuel { kg, capacity: self.fuel.capacity_kg });
+        }
     }
 
     /// A plane going down after a missile hit reaching the end: `crash`.
@@ -409,7 +549,7 @@ impl Plane {
         }
         let flight_data = node.physics_state::<AircraftState>().map(|state| &state.flight_data);
         match flight_data {
-            Some(flight_data) if !self.input_locked => {
+            Some(flight_data) if !self.input_locked && !self.calm && self.calm_left <= 0.0 => {
                 if self.wrecked {
                     self.pilot.recover(flight_data.impact_g, delta_time);
                 } else {
@@ -471,15 +611,41 @@ impl Behavior for Plane {
     }
 
     fn update(&mut self, node: &mut Node, _cameras: &mut SceneCameras, app: &mut App, delta_time: f32) {
+        if self.held || self.calm {
+            self.calm_left = CALM_GRACE_SECONDS;
+        } else if !app.is_paused {
+            self.calm_left = (self.calm_left - delta_time).max(0.0);
+        }
+        // Placed by an animation: the physics' view of it (held still, at
+        // no speed) means nothing - no G for the pilot, no crash, no flying
+        // it - until it's let go.
+        if self.held {
+            self.flown_by = "placed by an animation";
+            if !app.is_paused {
+                self.update_effects(node, delta_time);
+            }
+            return;
+        }
         // 1. Input → physics half.
         self.update_pilot(node, app, delta_time);
         self.check_wreck(node);
         if !app.is_paused {
             self.update_effects(node, delta_time);
         }
-        if !self.is_player {
-            // A bot: its autopilot flies its path; without one its controls
-            // are left as they are.
+        self.flown_by = if !self.is_player || self.scripted {
+            "autopilot"
+        } else if self.wrecked {
+            "nobody (wrecked)"
+        } else if self.pilot.is_unconscious() {
+            "nobody (pilot unconscious)"
+        } else if self.input_locked {
+            "nobody (input locked)"
+        } else {
+            "the pilot"
+        };
+        if !self.is_player || self.scripted {
+            // A bot (or one a timeline's flying): its autopilot flies its
+            // path; without one its controls are left as they are.
             let flight_data = node.physics_state::<AircraftState>().map(|state| state.flight_data.clone());
             if let (Some(autopilot), Some((position, rotation)), Some(flight_data)) = (&mut self.autopilot, self.pose, flight_data) {
                 if !self.wrecked && !app.is_paused {
@@ -502,6 +668,7 @@ impl Behavior for Plane {
         if self.is_player {
             self.update_quick_menu(node, app);
         }
+        self.update_fuel(node, app, delta_time);
         self.controls.fly_by_wire_pitch_autotrim = self.fcs.pitch_autotrim;
         node.set_physics_input(self.controls.clone());
 
@@ -520,7 +687,12 @@ impl Behavior for Plane {
         let Some(model_instance) = app.game_models.get_mut(model_ref) else { return };
         let model = &mut model_instance.model;
 
-        self.afterburner.update(state.map(|state| state.afterburner).unwrap_or(0.0), delta_time);
+        let engine_dead = self.wrecked || self.fuel.starved;
+        if engine_dead {
+            self.afterburner.value = 0.0;
+        } else {
+            self.afterburner.update(state.map(|state| state.afterburner).unwrap_or(0.0), delta_time);
+        }
         if let Some(afterburner_mesh) = model.mesh_lists.get_mut("transparent").and_then(|meshes| meshes.get_mut("Afterburner")) {
             let base = *self.afterburner_base_scale.get_or_insert(afterburner_mesh.transform.scale);
             let new_transform = Transform::new(afterburner_mesh.transform.position, afterburner_mesh.transform.rotation, Vector3::new(base.x, base.y, base.z * self.afterburner.value));
@@ -532,8 +704,12 @@ impl Behavior for Plane {
             surface.apply(model, &self.controls, simulated_elevator, delta_time, &app.renderer.queue);
         }
 
+        if self.gear_meshes.armed_deploy().is_some() {
+            self.gear_meshes.show_armed(model, scale, &app.renderer.queue);
+        }
         if let Some(state) = state {
             self.gear_meshes.place(model, &state.wheels, state.gear_deploy, scale, &app.renderer.queue);
+            self.gear_meshes.disarm();
 
             if self.is_player && app.debug_overlay_visible() {
                 Self::record_aero_debug_trail(app, state, &self.controls, delta_time);

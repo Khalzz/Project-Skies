@@ -95,6 +95,7 @@ impl GameLogic {
         self.drift_camera(scene, delta_time);
         rebind_modal::update(app);
         ui::update_settings_sliders(app);
+        ui::refresh_controller_states(app);
 
         app.ui.has_changed = true;
     }

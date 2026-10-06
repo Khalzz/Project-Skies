@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use nalgebra::{Matrix4, Point3, Quaternion, Vector3};
+use nalgebra::{Matrix4, Point3, Quaternion, UnitQuaternion, Vector3};
 use sdl2::rect::Point;
 use wgpu::{util::DeviceExt, BindGroup, BindGroupLayout, BindGroupLayoutDescriptor, Buffer, Device, Queue};
 use crate::engine::rendering::instance_management::InstanceData;
@@ -42,9 +42,7 @@ pub enum LookAtTarget {
     Point(Point3<f32>),
     // A renderizable instance's id (see `Scene::spawn_node`'s `Model`
     // registration, or a `data.ron`-loaded object) - resolved via its live
-    // `transform.position` each frame, the same lookup
-    // `animation_tracks::CameraTrack::Shot`'s `follow_at`/`look_at` already
-    // do for the same reason.
+    // `transform.position` each frame.
     Node(String),
 }
 
@@ -382,6 +380,41 @@ impl SceneCameras {
             self.transition = None;
             self.select_camera(&to);
         }
+    }
+
+    /// Takes the camera `name` away - if it was the active one, back to no
+    /// camera until another is selected.
+    pub fn remove_camera(&mut self, name: &str) {
+        if name == NO_CAMERA_SENTINEL || self.cameras.remove(name).is_none() {
+            return;
+        }
+        if self.active == name {
+            self.active = NO_CAMERA_SENTINEL.to_owned();
+        }
+        if self.transition.as_ref().is_some_and(|transition| transition.to == name) {
+            self.transition = None;
+        }
+    }
+
+    /// Puts camera `name` (registering it first if it's new) where a camera
+    /// node is: at `position`, looking along `rotation`'s +Z with its +Y up,
+    /// with the lens given - drawn `viewport` big, or the whole screen. See
+    /// `Scene::sync_cameras`.
+    pub fn place(&mut self, name: &str, position: Vector3<f32>, rotation: UnitQuaternion<f32>, fovy: f32, znear: f32, viewport: Option<(u32, u32)>) {
+        if !self.cameras.contains_key(name) {
+            self.create_camera(name, Transform::new(position, Quaternion::identity(), Vector3::new(1.0, 1.0, 1.0)), fovy);
+        }
+        let (width, height) = viewport.unwrap_or((self.width, self.height));
+        let Some(instance) = self.cameras.get_mut(name) else { return };
+        instance.camera.set_position(Point3::from(position));
+        instance.camera.set_orientation(rotation * Vector3::z(), rotation * Vector3::y());
+        instance.projection.fovy = fovy;
+        instance.projection.znear = znear;
+        instance.projection.resize(width.max(1), height.max(1));
+    }
+
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.cameras.keys().map(String::as_str).filter(|name| *name != NO_CAMERA_SENTINEL && *name != TRANSITION_CAMERA_NAME)
     }
 
     pub fn active_name(&self) -> &str {

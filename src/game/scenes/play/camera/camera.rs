@@ -1,4 +1,4 @@
-use nalgebra::{Point3, UnitQuaternion, Vector3};
+use nalgebra::{UnitQuaternion, Vector3};
 
 use crate::app::App;
 use crate::engine::game_nodes::game_object::Cameras;
@@ -6,7 +6,9 @@ use crate::engine::input::input;
 use crate::engine::rendering::camera::handler::SceneCameras;
 use crate::engine::scene_manager::behavior::Behavior;
 use crate::engine::scene_manager::node::Node;
-use crate::engine::utils::lerps::{lerp, lerp_point3, lerp_quaternion, smoothstep};
+use crate::engine::scene_manager::properties::{CameraLens, Transform3D};
+use crate::engine::scene_manager::scene_nodes::facing;
+use crate::engine::utils::lerps::{lerp, lerp_quaternion, smoothstep};
 use crate::game::game_settings::GAME_SETTINGS;
 
 use super::head_motion::{HeadInput, HeadMotion};
@@ -99,6 +101,41 @@ const TACTICAL_START_PITCH_DEG: f32 = 35.0;
 const TACTICAL_FOV: f32 = 50.0;
 const TACTICAL_TURN_PER_PIXEL_DEG: f32 = 0.25;
 
+/// F10's editor camera (see `Camera::update_editor`): its field of view,
+/// how far mouse look turns it per pixel (rad), how fast it flies to start
+/// with and the most and least (m/s), how much faster with the sprint key,
+/// how much one wheel notch changes its speed, and how far a wheel notch
+/// moves it while not looking (in seconds of its speed).
+const EDITOR_FOV: f32 = 60.0;
+const EDITOR_TURN_PER_PIXEL: f32 = 0.0035;
+const EDITOR_START_SPEED: f32 = 60.0;
+const EDITOR_MIN_SPEED: f32 = 2.0;
+const EDITOR_MAX_SPEED: f32 = 20_000.0;
+const EDITOR_SPRINT: f32 = 4.0;
+const EDITOR_SPEED_STEP: f32 = 1.25;
+const EDITOR_DOLLY_SECONDS: f32 = 0.6;
+/// How fast a locked view eases back to center (per second).
+const LOOK_CENTER_RATE: f32 = 6.0;
+
+/// F10's editor camera - free, like a game engine editor's: where it is,
+/// which way it looks, how fast it flies.
+struct EditorCamera {
+    position: Vector3<f32>,
+    /// Round the vertical (rad, 0 looking along +Z) and up from level.
+    yaw: f32,
+    pitch: f32,
+    speed: f32,
+    /// The right button went down off the editor's panels - looking and
+    /// flying until it's let go, even over a panel.
+    looking: bool,
+}
+
+impl EditorCamera {
+    fn forward(&self) -> Vector3<f32> {
+        Vector3::new(self.pitch.cos() * self.yaw.sin(), self.pitch.sin(), self.pitch.cos() * self.yaw.cos())
+    }
+}
+
 /// F10's tactical map view - an orbit round a point on the map: the
 /// target, while following it, or wherever it's been dragged to.
 struct TacticalOrbit {
@@ -126,6 +163,11 @@ struct LookInput {
 }
 
 impl LookInput {
+    /// The stick left alone.
+    fn none() -> Self {
+        Self { x: 0.0, y: 0.0, raw_x: 0.0, raw_y: 0.0 }
+    }
+
     fn read() -> Self {
         let raw_x = input::get_axis("look_left", "look_right");
         let raw_y = input::get_axis("look_down", "look_up");
@@ -177,14 +219,6 @@ pub const DEFAULT_THIRD_PERSON: (Vector3<f32>, f32) = (Vector3::new(0.0, 3.85, -
 pub const DEFAULT_FREE: (Vector3<f32>, f32) = (Vector3::new(0.0, 0.0, 0.0), 60.0);
 pub const DEFAULT_FRONT: (Vector3<f32>, f32) = (Vector3::new(0.0, 2.895, 16.84), 40.0);
 
-struct CinematicReturnBlend {
-    elapsed: f32,
-    duration: f32,
-    from_position: Point3<f32>,
-    from_look_at: Point3<f32>,
-    from_fov: f32,
-}
-
 pub struct CameraTarget {
     pub position: Vector3<f32>,
     pub rotation: UnitQuaternion<f32>,
@@ -225,14 +259,19 @@ pub struct Camera {
     look_pitch: f32,
     // 0 = static pose, 1 = moving pose (eased between) - see `orbit_look`.
     look_moving: f32,
-    cinematic_return_blend: Option<CinematicReturnBlend>,
     // Free mode's current orbit distance, eased toward FREE_DISTANCE (or
     // WRECK_DISTANCE after a crash).
     free_distance: f32,
     // The water's height, once the plane has crashed - see `enter_wreck_view`.
     wreck_sea_level: Option<f32>,
-    // F10's tactical map view, while it's up - see `update_tactical`.
+    // M's map view, while it's up - see `update_tactical`.
     tactical: Option<TacticalOrbit>,
+    // F10's editor camera, while it's up - see `update_editor`.
+    editor: Option<EditorCamera>,
+    /// The player's controls are locked (the intro, an animation) - no
+    /// looking around or switching views meanwhile: the view eases back to
+    /// its center.
+    pub look_locked: bool,
 }
 
 impl Camera {
@@ -265,11 +304,130 @@ impl Camera {
             look_yaw: 0.0,
             look_pitch: 0.0,
             look_moving: 0.0,
-            cinematic_return_blend: None,
             free_distance: FREE_DISTANCE,
             wreck_sea_level: None,
             tactical: None,
+            editor: None,
+            look_locked: false,
         }
+    }
+
+    /// Into or out of F10's editor camera (see `update_editor`) - it starts
+    /// at `from` (position, and the way it looks), where the view was.
+    pub fn set_editor_view(&mut self, on: bool, from: (Vector3<f32>, Vector3<f32>)) {
+        if !on {
+            self.editor = None;
+            return;
+        }
+        if self.editor.is_some() {
+            return;
+        }
+        let (position, forward) = from;
+        let forward = forward.try_normalize(1e-6).unwrap_or_else(Vector3::z);
+        self.editor = Some(EditorCamera {
+            position,
+            yaw: forward.x.atan2(forward.z),
+            pitch: forward.y.clamp(-1.0, 1.0).asin(),
+            speed: EDITOR_START_SPEED,
+            looking: false,
+        });
+    }
+
+    /// The editor camera looking at `target` from `distance` away, the way
+    /// it already faces.
+    pub fn editor_focus(&mut self, target: Vector3<f32>, distance: f32) {
+        if let Some(editor) = &mut self.editor {
+            editor.position = target - editor.forward() * distance;
+        }
+    }
+
+    /// F10's editor camera: held right button (pressed off the panels) to
+    /// look round with the mouse and fly with the debug camera keys (WASD,
+    /// space/ctrl up and down, shift faster), the wheel changing its speed
+    /// meanwhile; otherwise the wheel moves it forward and back (not over a
+    /// panel) and the mouse is the editor's.
+    ///
+    /// While the animation camera is on screen the view stays there: the
+    /// editor camera is parked on it, and the mouse and WASD don't drift it.
+    /// Holding the right button takes that view over and flies from it at once.
+    fn update_editor(&mut self, node: &mut Node, cameras: &SceneCameras, app: &mut App, delta_time: f32) {
+        let cinematic = cameras.active_name() == "animation_camera";
+        if cinematic {
+            if let Some(instance) = cameras.get("animation_camera") {
+                let forward = instance.camera.calc_forward_direction().try_normalize(1e-6).unwrap_or_else(Vector3::z);
+                if let Some(editor) = self.editor.as_mut() {
+                    editor.position = instance.camera.position().coords;
+                    editor.yaw = forward.x.atan2(forward.z);
+                    editor.pitch = forward.y.clamp(-1.0, 1.0).asin();
+                }
+            }
+        }
+        let Some(editor) = self.editor.as_mut() else { return };
+        let over_ui = app.egui_overlay.ctx.is_pointer_over_area();
+        let right = input::mouse_right_button_down();
+        let take_over = cinematic && right && !over_ui && !app.is_paused;
+        if take_over {
+            app.flight_editor.timeline_preview = false;
+        }
+        if cinematic && !take_over {
+            if editor.looking && !app.is_paused {
+                app.window_manager.context.mouse().set_relative_mouse_mode(false);
+            }
+            editor.looking = false;
+            let (position, forward) = (editor.position, editor.forward());
+            set_pose(node, position, position + forward, Vector3::y(), CameraLens { fovy: EDITOR_FOV, znear: 0.5, viewport: None });
+            return;
+        }
+        let was_looking = editor.looking;
+        if !right {
+            editor.looking = false;
+        } else if !editor.looking && !over_ui {
+            editor.looking = true;
+        }
+        // The cursor held while looking, so it never stops at the screen's
+        // edge - let go with the button.
+        if editor.looking != was_looking && !app.is_paused {
+            app.window_manager.context.mouse().set_relative_mouse_mode(editor.looking);
+        }
+        let scroll = input::mouse_scroll_y();
+        if editor.looking && !app.is_paused {
+            editor.yaw -= input::mouse_rel_x() as f32 * EDITOR_TURN_PER_PIXEL;
+            editor.pitch = (editor.pitch - input::mouse_rel_y() as f32 * EDITOR_TURN_PER_PIXEL).clamp(-1.55, 1.55);
+            if scroll != 0.0 {
+                editor.speed = (editor.speed * EDITOR_SPEED_STEP.powf(scroll)).clamp(EDITOR_MIN_SPEED, EDITOR_MAX_SPEED);
+            }
+            let forward = editor.forward();
+            let right_dir = forward.cross(&Vector3::y()).try_normalize(1e-6).unwrap_or_else(Vector3::x);
+            let mut direction = Vector3::zeros();
+            if input::is_action_pressed("debug_cam_forward") { direction += forward; }
+            if input::is_action_pressed("debug_cam_back") { direction -= forward; }
+            if input::is_action_pressed("debug_cam_right") { direction += right_dir; }
+            if input::is_action_pressed("debug_cam_left") { direction -= right_dir; }
+            if input::is_action_pressed("debug_cam_up") { direction += Vector3::y(); }
+            if input::is_action_pressed("debug_cam_down") { direction -= Vector3::y(); }
+            let sprint = if input::is_action_pressed("debug_cam_sprint") { EDITOR_SPRINT } else { 1.0 };
+            if let Some(direction) = direction.try_normalize(1e-6) {
+                editor.position += direction * editor.speed * sprint * delta_time;
+            }
+        } else if scroll != 0.0 && !over_ui && !app.is_paused {
+            editor.position += editor.forward() * scroll * editor.speed * EDITOR_DOLLY_SECONDS;
+        }
+        let (position, forward) = (editor.position, editor.forward());
+        set_pose(node, position, position + forward, Vector3::y(), CameraLens { fovy: EDITOR_FOV, znear: 0.5, viewport: None });
+    }
+
+    /// Moves the editor camera by `delta` (m) - keeping up with what it
+    /// follows.
+    pub fn editor_shift(&mut self, delta: Vector3<f32>) {
+        if let Some(editor) = &mut self.editor {
+            editor.position += delta;
+        }
+    }
+
+    /// The editor camera's flying with the mouse (its right button held) -
+    /// the player's controls are kept off meanwhile.
+    pub fn editor_looking(&self) -> bool {
+        self.editor.as_ref().is_some_and(|editor| editor.looking)
     }
 
     /// Looking out of the cockpit.
@@ -394,7 +552,7 @@ impl Camera {
     /// `pan_tactical`). The right mouse button turns it round, the wheel
     /// zooms from TACTICAL_MIN_DISTANCE out to TACTICAL_MAX_DISTANCE (not
     /// over a window, which they're for).
-    fn update_tactical(&mut self, cameras: &mut SceneCameras, app: &mut App) {
+    fn update_tactical(&mut self, node: &mut Node, app: &mut App) {
         let Some(orbit) = self.tactical.as_mut() else { return };
         let Some(target) = self.target.take() else { return };
 
@@ -420,19 +578,14 @@ impl Camera {
 
         let (yaw, pitch) = (orbit.yaw.to_radians(), orbit.pitch.to_radians());
         let offset = Vector3::new(yaw.cos() * pitch.cos(), pitch.sin(), yaw.sin() * pitch.cos()) * orbit.distance;
-        let active = cameras.active_mut();
         // Shaped like where it's drawn - the editor view's middle, or the
         // whole screen.
         let (width, height) = app.tactical_viewport
             .map(|[_, _, width, height]| (width, height))
             .unwrap_or((app.window_manager.size.width as f32, app.window_manager.size.height as f32));
-        active.projection.resize(width.max(1.0) as u32, height.max(1.0) as u32);
-        active.projection.fovy = TACTICAL_FOV;
-        active.projection.znear = 1.0;
-        active.camera.rotation_modifier = UnitQuaternion::identity();
-        active.camera.up = *Vector3::y_axis();
-        active.camera.set_position(Point3::from(pivot + offset));
-        active.camera.look_at(Point3::from(pivot));
+        let lens = CameraLens { fovy: TACTICAL_FOV, znear: 1.0, viewport: Some((width.max(1.0) as u32, height.max(1.0) as u32)) };
+        set_pose(node, pivot + offset, pivot, Vector3::y(), lens);
+        self.target = Some(target);
     }
 
     pub fn leave_wreck_view(&mut self) {
@@ -441,17 +594,6 @@ impl Camera {
         }
         self.state = CameraState::Cockpit;
         self.free_distance = FREE_DISTANCE;
-    }
-
-    pub fn snapshot_cinematic_return(&mut self, cameras: &SceneCameras) {
-        let cam = cameras.active();
-        self.cinematic_return_blend = Some(CinematicReturnBlend {
-            elapsed: 0.0,
-            duration: 0.6,
-            from_position: cam.camera.position(),
-            from_look_at: cam.camera.position() + cam.camera.calc_forward_direction() * 100.0,
-            from_fov: cam.projection.fovy,
-        });
     }
 
     /// Fixed modes' right-stick look, Ace Combat-style, with two states:
@@ -537,20 +679,41 @@ impl Camera {
 }
 
 impl Behavior for Camera {
-    fn update(&mut self, _node: &mut Node, cameras: &mut SceneCameras, app: &mut App, delta_time: f32) {
-        // F10 - the tactical map view takes over while it's up.
-        if self.tactical.is_some() {
-            self.update_tactical(cameras, app);
+    fn update(&mut self, node: &mut Node, _cameras: &mut SceneCameras, app: &mut App, delta_time: f32) {
+        // F10 - the editor camera takes over while it's up.
+        if self.editor.is_some() {
+            self.update_editor(node, _cameras, app, delta_time);
             return;
         }
-        // The whole screen's shape again (F10's editor view draws in only
+        // M - the map view takes over while it's up.
+        if self.tactical.is_some() {
+            self.update_tactical(node, app);
+            return;
+        }
+        // The pause menu has the cursor. Looking stays where it was.
+        if app.is_paused {
+            return;
+        }
+        let cinematic = _cameras.active_name() == "animation_camera";
+        // Its own lens, changed below and put back on the node at the end -
+        // the whole screen's shape again (F10's editor view draws in only
         // part of it).
-        cameras.active_mut().projection.resize(app.window_manager.size.width.max(1), app.window_manager.size.height.max(1));
+        let mut lens = node.get_property::<CameraLens>().copied().unwrap_or_default();
+        lens.viewport = None;
 
-        let look = LookInput::read();
-        // F7 (or the flight editor (F10's editor view)) frees the mouse - it's clicking
-        // buttons then, not looking around (see App::mouse_free).
-        let mouse = MouseLook::read(app.mouse_free());
+        // Locked (the intro, an animation): no looking round - the view
+        // eases back to its center.
+        let locked = self.look_locked;
+        let look = if locked || cinematic { LookInput::none() } else { LookInput::read() };
+        // F7 (or the editor) frees the mouse - it's clicking buttons then, not
+        // looking around (see App::mouse_free). The animation camera owns the
+        // view meanwhile, so the player's own look stays put.
+        let mouse = MouseLook::read(app.mouse_free() || locked || cinematic);
+        if locked {
+            let ease = (delta_time * LOOK_CENTER_RATE).clamp(0.0, 1.0);
+            self.cockpit_yaw += (0.0 - self.cockpit_yaw) * ease;
+            self.cockpit_pitch += (0.0 - self.cockpit_pitch) * ease;
+        }
         // Runs in every mode, so switching into the cockpit picks the head
         // up wherever the G has it rather than snapping from rest.
         self.head_motion.update(self.head_input, delta_time);
@@ -560,16 +723,15 @@ impl Behavior for Camera {
             let (target_position, target_look_at, target_up) = match self.state {
                 CameraState::ThirdPerson => {
                     let (position, fov) = Self::named(&target, THIRD_PERSON_CAMERA, DEFAULT_THIRD_PERSON);
-                    let active = cameras.active_mut();
-                    active.projection.znear = 0.1;
-                    active.projection.fovy = fov;
+                    lens.znear = 0.1;
+                    lens.fovy = fov;
                     let target_pos = target.position + (target.rotation * position);
                     let look_at = target.position + (target.rotation * Vector3::new(0.0, 0.0, 47.8));
                     (target_pos, look_at, target.rotation * *Vector3::y_axis())
                 },
                 CameraState::Cockpit => {
                     let base_pos = target.rotation * Self::named(&target, COCKPIT_CAMERA, (Vector3::new(0.0, 0.2, 1.3), 70.0)).0;
-                    cameras.active_mut().projection.znear = 0.01;
+                    lens.znear = 0.01;
 
                     // Mouse wheel adjusts target FOV
                     let scroll = mouse.scroll;
@@ -579,7 +741,7 @@ impl Behavior for Camera {
                     // Lerp current FOV toward target
                     self.cockpit_current_fov = lerp(self.cockpit_current_fov, self.cockpit_target_fov, delta_time * 8.0);
                     let head = self.head_motion.pose(GAME_SETTINGS.lock().unwrap().head_g_reaction);
-                    cameras.active_mut().projection.fovy = self.cockpit_current_fov;
+                    lens.fovy = self.cockpit_current_fov;
 
                     let max_yaw: f32 = 170.0;
                     let max_pitch: f32 = 70.0;
@@ -638,15 +800,14 @@ impl Behavior for Camera {
                 },
                 CameraState::Front => {
                     let (position, fov) = Self::named(&target, FRONT_CAMERA, DEFAULT_FRONT);
-                    let active = cameras.active_mut();
-                    active.projection.znear = 0.1;
-                    active.projection.fovy = fov;
+                    lens.znear = 0.1;
+                    lens.fovy = fov;
                     let target_pos = target.position + (target.rotation * position);
                     let look_at = target.position;
                     (target_pos, look_at, target.rotation * *Vector3::y_axis())
                 },
                 CameraState::Free => {
-                    cameras.active_mut().projection.znear = 0.1;
+                    lens.znear = 0.1;
 
                     // Mouse wheel adjusts target FOV
                     let scroll = mouse.scroll;
@@ -654,7 +815,7 @@ impl Behavior for Camera {
                         self.free_target_fov = (self.free_target_fov - scroll * 5.0).clamp(20.0, 120.0);
                     }
                     self.free_current_fov = lerp(self.free_current_fov, self.free_target_fov, delta_time * 8.0);
-                    cameras.active_mut().projection.fovy = self.free_current_fov;
+                    lens.fovy = self.free_current_fov;
 
                     let sens = input::mouse_sensitivity();
                     self.free_yaw = self.free_yaw - mouse.rel_x * sens.0;
@@ -768,44 +929,31 @@ impl Behavior for Camera {
                 (final_position, target_look_at, target_up)
             };
 
-            // Apply camera position directly (no interpolation to match object
-            // movement) - except right after a CameraTrack::Shot ends, where
-            // cinematic_return_blend (see its own doc comment) eases from the
-            // Shot's last pose into whatever's computed above instead of cutting.
-            let target_position: Point3<f32> = final_position.into();
-            let target_look_at: Point3<f32> = target_look_at.into();
-            let target_fov = cameras.active().projection.fovy;
-
-            let (blended_position, blended_look_at, blended_fov) = match &mut self.cinematic_return_blend {
-                Some(blend) => {
-                    blend.elapsed += delta_time;
-                    let t = smoothstep((blend.elapsed / blend.duration).clamp(0.0, 1.0));
-                    let blended = (
-                        lerp_point3(blend.from_position, target_position, t),
-                        lerp_point3(blend.from_look_at, target_look_at, t),
-                        lerp(blend.from_fov, target_fov, t),
-                    );
-                    if blend.elapsed >= blend.duration {
-                        self.cinematic_return_blend = None;
-                    }
-                    blended
-                }
-                None => (target_position, target_look_at, target_fov),
-            };
-
-            let active = cameras.active_mut();
-            active.camera.set_position(blended_position);
-            active.camera.look_at(blended_look_at);
-            active.camera.up = target_up;
-            active.projection.fovy = blended_fov;
+            // On its pose this frame. Coming back from an animation's camera
+            // cuts here instead of easing across.
+            set_pose(node, final_position, target_look_at, target_up, lens);
 
             self.target = Some(target);
         }
 
-        if input::is_action_just_pressed("change_camera") && self.wreck_sea_level.is_none() {
+        if input::is_action_just_pressed("change_camera") && self.wreck_sea_level.is_none() && !self.look_locked {
             self.next_camera();
         }
     }
+}
+
+/// Puts the camera's node at `position`, looking at `look_at` with `up`
+/// as its up, with `lens` - the node's camera follows (see
+/// Scene::sync_cameras).
+fn set_pose(node: &mut Node, position: Vector3<f32>, look_at: Vector3<f32>, up: Vector3<f32>, lens: CameraLens) {
+    let direction = look_at - position;
+    let rotation = match (direction.try_normalize(1e-6), up.try_normalize(1e-6)) {
+        (Some(direction), Some(up)) if direction.cross(&up).norm() > 1e-4 => UnitQuaternion::face_towards(&direction, &up),
+        _ => facing(direction).unwrap_or_else(UnitQuaternion::identity),
+    };
+    let scale = node.get_property::<Transform3D>().map(|transform| transform.scale).unwrap_or_else(|| Vector3::new(1.0, 1.0, 1.0));
+    node.set_property(Transform3D { position, rotation, scale });
+    node.set_property(lens);
 }
 
 #[cfg(test)]

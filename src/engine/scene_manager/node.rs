@@ -7,6 +7,7 @@ use crate::engine::physics::physics_handler::RenderMessage;
 use crate::engine::rendering::camera::handler::SceneCameras;
 
 use super::behavior::Behavior;
+use super::properties::Space;
 
 /// A single entity in a scene: an id, an open set of typed properties
 /// (position, model, whatever a future property type needs), and an open set
@@ -29,6 +30,13 @@ pub struct Node {
     physics_input: PhysicsInput,
     // Latest state each physics behavior published, keyed by its concrete type.
     physics_states: HashMap<TypeId, PhysicsPayload>,
+    // Nodes given with `with_child`, waiting to be spawned right after this
+    // one (see `Scene::spawn_node`) - empty once it's in the scene.
+    children: Vec<Node>,
+    // How this node is placed under the parent it's given to with
+    // `with_child` - see `global`/`follow_position_only`.
+    space: Space,
+    inherit_rotation: bool,
 }
 
 impl Node {
@@ -40,7 +48,65 @@ impl Node {
             physics_behaviors: Vec::new(),
             physics_input: PhysicsInput::default(),
             physics_states: HashMap::new(),
+            children: Vec::new(),
+            space: Space::Local,
+            inherit_rotation: true,
         }
+    }
+
+    /// Adds `child` under this node, builder-style - spawned right after it,
+    /// with a `Parent` property put on for you (this node's id, `child`'s
+    /// space and whether it turns with this node). By default `child`'s
+    /// `Transform3D` is `local`: an offset from this node's origin, moving
+    /// and turning with it. Mark it `.global()` for a place in the world
+    /// that stays put whatever this node does. Children can have children.
+    pub fn with_child(mut self, child: Node) -> Self {
+        self.children.push(child);
+        self
+    }
+
+    /// Given to a parent with `with_child`: its `Transform3D` is an offset
+    /// from the parent's origin, and it moves with the parent - the default.
+    pub fn local(mut self) -> Self {
+        self.space = Space::Local;
+        self
+    }
+
+    /// Given to a parent with `with_child`: its `Transform3D` is a place in
+    /// the world, disconnected from the parent - it stays there whatever the
+    /// parent does.
+    pub fn global(mut self) -> Self {
+        self.space = Space::Global;
+        self
+    }
+
+    /// Given to a parent with `with_child` as `local`: follows the parent's
+    /// position only, keeping its own rotation - its offset is along the
+    /// world's axes, not turned with the parent.
+    pub fn follow_position_only(mut self) -> Self {
+        self.inherit_rotation = false;
+        self
+    }
+
+    /// The children given with `with_child`, and how each wants placing -
+    /// taken once, when the node spawns.
+    pub(crate) fn take_children(&mut self) -> Vec<Node> {
+        std::mem::take(&mut self.children)
+    }
+
+    pub(crate) fn placement(&self) -> (Space, bool) {
+        (self.space, self.inherit_rotation)
+    }
+
+    /// Puts `property` on (or replaces it) in place - `add_property` for a
+    /// node that's already built.
+    pub fn set_property<T: 'static>(&mut self, property: T) {
+        self.properties.insert(TypeId::of::<T>(), Box::new(property));
+    }
+
+    /// Takes the property of type `T` off, if it has one.
+    pub fn remove_property<T: 'static>(&mut self) -> Option<T> {
+        self.properties.remove(&TypeId::of::<T>())?.downcast::<T>().ok().map(|boxed| *boxed)
     }
 
     /// Attaches a property, builder-style (chains like `ui_node.rs`'s

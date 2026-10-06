@@ -6,6 +6,7 @@ use crate::engine::game_nodes::game_object::{Cameras, ColliderType, Physics};
 
 use super::aero_spec::AeroSpec;
 use super::engine::EngineSpec;
+use super::fuel::FuelSpec;
 use super::gear_spec::GearSpec;
 use super::effects::EffectSpec;
 use super::pylon_spec::{self, PylonSpec};
@@ -43,6 +44,9 @@ pub struct AircraftSpec {
     pub aero: AeroSpec,
     /// Thrust, afterburner and spool times - `data.ron`'s `engine: ( ... )`.
     pub engine: EngineSpec,
+    /// Internal fuel - `data.ron`'s `fuel: ( ... )` (optional: none). The
+    /// rigidbody mass is the jet with these tanks full.
+    pub fuel: FuelSpec,
     /// The wheels and their steering - `data.ron`'s `gear: ( ... )`.
     pub gear: GearSpec,
     /// Every particle emitter on the plane, and where - `data.ron`'s
@@ -72,6 +76,8 @@ struct PlaneData {
     physics: Physics,
     aero: AeroSpec,
     engine: EngineSpec,
+    #[serde(default)]
+    fuel: FuelSpec,
     gear: GearSpec,
     #[serde(default)]
     effects: Vec<EffectSpec>,
@@ -191,6 +197,7 @@ impl AircraftSpec {
             physics,
             aero,
             engine: data.engine,
+            fuel: data.fuel,
             gear: data.gear,
             effects: data.effects,
             pylons: data.pylons,

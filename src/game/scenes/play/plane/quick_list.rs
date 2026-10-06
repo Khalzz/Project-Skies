@@ -64,6 +64,14 @@ impl Entry {
                 };
                 format!("Landing gear ({gear})")
             }
+            Entry::Action(QuickAction::ToggleSpeedBrake) => {
+                let brake = match status.speed_brake {
+                    GearStatus::Up => "CLOSED",
+                    GearStatus::Down => "OPEN",
+                    GearStatus::Moving => "MOVING",
+                };
+                format!("Speed brake ({brake})")
+            }
             Entry::Action(QuickAction::ToggleParkingBrake) => {
                 format!("Parking brake ({})", if status.parking_brake { "SET" } else { "OFF" })
             }
@@ -85,6 +93,7 @@ fn menu(id: MenuId) -> (&'static str, &'static [Entry]) {
         ]),
         MenuId::GearAndBrakes => ("Gear & brakes", &[
             Entry::Action(QuickAction::ToggleGear),
+            Entry::Action(QuickAction::ToggleSpeedBrake),
             Entry::Action(QuickAction::ToggleParkingBrake),
         ]),
         MenuId::FlightControl => ("Flight control", &[

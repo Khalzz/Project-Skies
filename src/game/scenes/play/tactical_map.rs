@@ -143,7 +143,7 @@ pub struct View {
 
 impl View {
     /// How many meters a pixel is at `point`.
-    fn meters_per_pixel(&self, point: Vector3<f32>) -> f32 {
+    pub(crate) fn meters_per_pixel(&self, point: Vector3<f32>) -> f32 {
         let distance = (point - self.camera_position).magnitude().max(1.0);
         2.0 * distance * (self.fovy_deg.to_radians() * 0.5).tan() / self.screen_height.max(1.0)
     }
@@ -201,6 +201,12 @@ impl TacticalMap {
             if !aircraft.wrecked {
                 drop_line(&mut lines, aircraft.position, sea_level, rgb, view);
                 triangle(&mut lines, aircraft.position, aircraft.rotation, rgb, view);
+                // A line to the point its autopilot's flying to, and that
+                // point marked.
+                if let Some(waypoint) = aircraft.waypoint {
+                    lines.push(LineInstance { start: aircraft.position.into(), end: waypoint.into(), color: [NEXT_POINT_COLOR[0], NEXT_POINT_COLOR[1], NEXT_POINT_COLOR[2], 0.55], width: LINE_WIDTH });
+                    diamond(&mut lines, waypoint, PLAN_MARKER_SIZE_PX, [NEXT_POINT_COLOR[0], NEXT_POINT_COLOR[1], NEXT_POINT_COLOR[2], 0.9], view);
+                }
             }
         }
         for mark in &self.wreck_marks {
@@ -213,7 +219,8 @@ impl TacticalMap {
         }
         if let Some((_, placement)) = selected.and_then(|name| map.find(name)) {
             let now = live.get(&placement.name);
-            flight_plan(&mut lines, &placement.path, now, sea_level, view);
+            let (points, looped) = map.flight_plan(placement);
+            flight_plan(&mut lines, &points, looped, now, sea_level, view);
             if let Some(aircraft) = now {
                 ring(&mut lines, aircraft.position, SELECTED_RING_RADIUS_PX, [1.0, 1.0, 1.0, 0.9], view);
             }
@@ -296,10 +303,10 @@ fn diamond(lines: &mut Vec<LineInstance>, position: Vector3<f32>, size_px: f32, 
 }
 
 /// The selected aircraft's flight plan: its path's points joined in order
-/// (and the last back to the first - it loops), a diamond on each with a
+/// (and the last back to the first when it loops), a diamond on each with a
 /// faint line down to the sea (their heights), and a line from the aircraft
 /// to the point it's flying to - that point's diamond in gold.
-fn flight_plan(lines: &mut Vec<LineInstance>, path: &[(f32, f32, f32)], aircraft: Option<&LiveAircraft>, sea_level: f32, view: &View) {
+pub(crate) fn flight_plan(lines: &mut Vec<LineInstance>, path: &[(f32, f32, f32)], looped: bool, aircraft: Option<&LiveAircraft>, sea_level: f32, view: &View) {
     if path.is_empty() {
         return;
     }
@@ -308,7 +315,7 @@ fn flight_plan(lines: &mut Vec<LineInstance>, path: &[(f32, f32, f32)], aircraft
     for pair in points.windows(2) {
         lines.push(LineInstance { start: pair[0].into(), end: pair[1].into(), color: plan(0.9), width: LINE_WIDTH });
     }
-    if points.len() > 2 {
+    if looped && points.len() > 2 {
         // Back round to the start - dimmer, it's the loop.
         lines.push(LineInstance { start: points[points.len() - 1].into(), end: points[0].into(), color: plan(0.35), width: LINE_WIDTH });
     }
@@ -381,7 +388,7 @@ mod tests {
     }
 
     fn live(position: Vector3<f32>, wrecked: bool) -> LiveAircraft {
-        LiveAircraft { position, rotation: UnitQuaternion::identity(), speed_kt: 0.0, altitude: position.y, wrecked, next_path_point: None }
+        LiveAircraft { position, rotation: UnitQuaternion::identity(), speed_kt: 0.0, altitude: position.y, wrecked, next_path_point: None, waypoint: None, g: 1.0, g_felt: true, stick_pull: 0.0, g_command: 1.0, autopilot: false, flown_by: "", stick_target_pull: 0.0 }
     }
 
     #[test]

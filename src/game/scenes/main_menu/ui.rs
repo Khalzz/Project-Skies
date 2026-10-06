@@ -301,17 +301,30 @@ fn settings_toggle_row(app: &mut App, tab: &str, key: &str, name: &str, read: fn
         })
 }
 
-/// Which actions get a row here, and in what order - see settings/controller.ron
+/// Which actions get a row here, grouped by job - see settings/controller.ron
 /// (a curated subset of settings/input.ron's full action list: debug/UI-internal
 /// actions aren't meant to be player-rebindable, so they're left out of this file
 /// entirely rather than filtered here).
 const CONTROLLER_ACTIONS_RON: &str = include_str!("../../../../settings/controller.ron");
 
-/// One section per action, stacked in a single column - see
-/// `controller_settings_section`.
-fn controller_settings_list(app: &mut App) -> UiNode {
-    let actions: Vec<String> = ron::from_str(CONTROLLER_ACTIONS_RON).expect("Failed to parse settings/controller.ron");
+#[derive(serde::Deserialize)]
+struct ControllerSection {
+    name: String,
+    actions: Vec<String>,
+}
 
+fn controller_sections() -> Vec<ControllerSection> {
+    ron::from_str(CONTROLLER_ACTIONS_RON).expect("Failed to parse settings/controller.ron")
+}
+
+/// Where `action`'s settings row lives, once the page is built.
+pub(crate) fn controller_action_path(action: &str) -> Option<String> {
+    controller_sections().into_iter().find(|section| section.actions.iter().any(|name| name == action)).map(|section| format!("Settings/Content/Controller/List/{}/{action}", section.name))
+}
+
+/// One block per group (Flying, Camera, ...), each a title and then one row
+/// per action - see `controller_settings_section`.
+fn controller_settings_list(app: &mut App) -> UiNode {
     let mut list = UiNode::container()
         .set_background_color(UiColor::TRANSPARENT)
         // Grow, not Fit - a bounded viewport for scroll to actually happen
@@ -323,12 +336,46 @@ fn controller_settings_list(app: &mut App) -> UiNode {
         .set_padding([0.0, 0.0, 0.0, 16.0])
         .set_scrollable(true);
 
-    for action in actions {
-        let section = controller_settings_section(app, &action);
-        list = list.set_child(action, section);
+    for section in controller_sections() {
+        let mut block = UiNode::container()
+            .set_orientation(Orientation::Vertical)
+            .set_background_color(UiColor::TRANSPARENT)
+            .set_size(SizeValue::Grow, SizeValue::Fit)
+            .set_gap(0.0)
+            .set_child(
+                "Title",
+                label(app, &section.name)
+                    .set_font_size(&mut app.ui.text.font_system, 18.0)
+                    .set_text_color(UiColor::WHITE)
+                    .set_padding([16.0, 8.0, 4.0, 0.0]),
+            );
+        for action in section.actions {
+            block = block.set_child(&action, controller_settings_section(app, &action));
+        }
+        list = list.set_child(section.name, block);
     }
 
     list
+}
+
+/// Writes each action row's live reading (see the "State" label on
+/// `controller_settings_section`). A button reads off or its strength; an
+/// axis reads how far it's leaned, so a binding can be tried without leaving
+/// the page. No-op when the settings page isn't built.
+pub(crate) fn refresh_controller_states(app: &mut App) {
+    for section in controller_sections() {
+        for action in section.actions {
+            let path = format!("Settings/Content/Controller/List/{}/{action}/State", section.name);
+            let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &path) else { continue };
+            let strength = input::action_strength(&action);
+            let live = strength > 0.02 || input::is_action_pressed(&action);
+            node.style.text_color = Some(if live { UiColor::Rgb(80, 220, 120) } else { UiColor::Rgb(130, 130, 130) });
+            if let Some(label) = node.as_label_mut() {
+                let text = if live { format!("{strength:.2}") } else { "off".to_owned() };
+                label.set_text(&mut app.ui.text.font_system, &text, true);
+            }
+        }
+    }
 }
 
 /// A single action's settings section - a bare row (no resting background)
@@ -366,6 +413,7 @@ fn controller_settings_section(app: &mut App, action: &str) -> UiNode {
         .set_child_anchor(Anchor::Start, Anchor::Center)
         .set_gap(16.0)
         .set_child("Name", label(app, &rebind_modal::display_name(action)).set_size(SizeValue::Pixels(150.0), SizeValue::Fit).set_text_color(UiColor::Rgb(200, 200, 200)))
+        .set_child("State", label(app, "off").set_size(SizeValue::Pixels(48.0), SizeValue::Fit).set_align(glyphon::cosmic_text::Align::Center).set_text_color(UiColor::Rgb(130, 130, 130)))
         .set_child("Chips", chips)
 }
 

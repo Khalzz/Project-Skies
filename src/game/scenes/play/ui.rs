@@ -46,24 +46,34 @@ fn hud_label(app: &mut App, text: &str, width: f32, height: f32) -> UiNode {
 /// The HUD's speed and altitude, and their captions - each its own top-level
 /// node (like the velocity marker), placed every frame inside the HUD's
 /// frame (see GameLogic::update_hud): (key, text, font size).
-pub const HUD_READOUTS: [(&str, &str, f32); 6] = [
-    ("hud_speed", "0", 12.0),
-    ("hud_altitude", "0", 12.0),
-    ("hud_speed_caption", "SPD KT", 9.0),
-    ("hud_altitude_caption", "ALT M", 9.0),
+pub const HUD_READOUTS: [(&str, &str, f32, f32); 12] = [
+    ("hud_speed", "0", 12.0, 64.0),
+    ("hud_altitude", "0", 12.0, 64.0),
+    ("hud_speed_caption", "SPD KT", 9.0, 64.0),
+    ("hud_altitude_caption", "ALT M", 9.0, 64.0),
     // The heading, in the middle of the heading tape.
-    ("hud_heading", "0", 16.0),
+    ("hud_heading", "0", 16.0, 64.0),
     // The G, bottom left - in the Fox-2 mode only.
-    ("hud_g", "1.0G", 12.0),
+    ("hud_g", "1.0G", 12.0, 64.0),
+    // Fuel, under the square: a caption over the boxed quantity.
+    ("hud_fuel_caption", "FUEL", 9.0, 120.0),
+    ("hud_fuel", "0", 12.0, 120.0),
+    // The selected weapon, sitting on the square's bottom edge.
+    ("hud_weapon", "", 13.0, 160.0),
+    // "ALTITUDE" inside the square while low.
+    ("hud_altitude_warning", "ALTITUDE", 14.0, 140.0),
+    // Flares and chaff, one row each. A ">" marks the ones a press releases.
+    ("hud_flares", "", 12.0, 96.0),
+    ("hud_chaff", "", 12.0, 96.0),
 ];
 /// A HUD readout's box (px).
 pub const HUD_READOUT_SIZE: (f32, f32) = (64.0, 20.0);
 
 /// One of `HUD_READOUTS` - built hidden. The HUD's text is the regular
 /// weight, a touch heavier than the thin default.
-pub fn build_hud_readout(app: &mut App, text: &str, font_size: f32) -> UiNode {
+pub fn build_hud_readout(app: &mut App, text: &str, font_size: f32, width: f32) -> UiNode {
     label(app, text)
-        .set_size(SizeValue::Pixels(HUD_READOUT_SIZE.0), SizeValue::Pixels(HUD_READOUT_SIZE.1))
+        .set_size(SizeValue::Pixels(width), SizeValue::Pixels(HUD_READOUT_SIZE.1))
         .set_font(&mut app.ui.text.font_system, HUD_FONT)
         .set_font_size(&mut app.ui.text.font_system, font_size)
         .set_text_color(UiColor::Rgb(0, 255, 77))
@@ -183,6 +193,7 @@ pub fn build_game_ui(app: &mut App) -> UiNode {
         .set_child("framerate", hud_label(app, "100fps", 250.0, 35.0))
         .set_child("g", hud_label(app, "1g", 250.0, 35.0))
         .set_child("power", hud_label(app, "0%", 250.0, 35.0))
+        .set_child("fuel", hud_label(app, "Fuel: 0 kg", 250.0, 35.0))
         // The selected weapon and its lock - see GameLogic::update_weapons.
         .set_child("weapons", hud_label(app, "WPN OFF", 250.0, 35.0))
         // Flares and chaff left, and what's released - see

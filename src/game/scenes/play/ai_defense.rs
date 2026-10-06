@@ -15,23 +15,16 @@ use std::collections::{HashMap, HashSet};
 use super::map::Difficulty;
 
 impl Difficulty {
-    /// How long a missile's been coming before it's noticed (s).
+    /// How long a missile's been coming before it's noticed (s) - its pilot
+    /// skill's (see play::pilot_skill).
     pub fn reaction_seconds(self) -> f32 {
-        match self {
-            Difficulty::Beginner => 2.5,
-            Difficulty::Medium => 1.2,
-            Difficulty::Ace => 0.4,
-        }
+        self.skill().reaction_seconds
     }
 
     /// Once it's reacted, how often it bursts again while a missile's still
     /// coming (s) - `None`: once for each missile.
     pub fn burst_every(self) -> Option<f32> {
-        match self {
-            Difficulty::Beginner => None,
-            Difficulty::Medium => Some(3.0),
-            Difficulty::Ace => Some(1.5),
-        }
+        self.skill().flare_burst_every
     }
 }
 

@@ -58,6 +58,12 @@ impl FlightSystem {
         self.engine.afterburner_activation(self.last_throttle)
     }
 
+    /// Thrust and the afterburner off at once - a wreck, or tanks run dry.
+    pub fn cut_engine(&mut self) {
+        self.current_thrust = 0.0;
+        self.last_throttle = 0.0;
+    }
+
     pub fn compute_thrust(&mut self, altitude_m: f32, rotation: nalgebra::UnitQuaternion<f32>, throttle: f32, dt: f32) -> Vector3<f32> {
         self.last_throttle = throttle;
         let target = self.engine.target_thrust(throttle, altitude_m);

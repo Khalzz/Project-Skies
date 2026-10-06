@@ -14,7 +14,11 @@ use crate::engine::primitive::manual_vertex::ManualVertex;
 
 #[derive(Clone)]
 pub enum DebugPhysicsMessageType {
-    RenderizableLines([ManualVertex; 2]),
+    /// A world-space line. `owner` is the node whose body it was drawn on,
+    /// so the render thread can carry it forward with that body's
+    /// extrapolated pose (see `physics_pose_now`). `None` stays where it
+    /// was drawn.
+    RenderizableLines { owner: Option<String>, line: [ManualVertex; 2] },
     RenderizablePoint(Point3<f32>),
 }
 

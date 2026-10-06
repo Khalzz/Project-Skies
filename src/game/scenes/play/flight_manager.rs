@@ -14,7 +14,7 @@ use crate::engine::physics::physics_handler::PhysicsCommand;
 use crate::engine::physics::water_contact::WaterContact;
 use crate::engine::rendering::ui::ui::Ui;
 use crate::engine::scene_manager::node::Node;
-use crate::engine::scene_manager::properties::{Model, Transform3D};
+use crate::engine::scene_manager::properties::{Model, Parent, Space, Transform3D};
 use crate::engine::ui::color::UiColor;
 use crate::engine::ui::ui_transform::SizeValue;
 use crate::resources::{DoubleSidedMeshes, ModelSource};
@@ -28,6 +28,7 @@ use crate::game::scenes::play::weapon::weapon_spec::WeaponSpec;
 use crate::game::scenes::play::weapon::countermeasures::CountermeasureSet;
 use crate::game::scenes::play::plane::pylon_spec::PylonSpec;
 use std::collections::{BTreeMap, BTreeSet};
+use crate::game::scenes::play::plane::autopilot::Speed;
 use crate::game::scenes::play::plane::{aircraft_physics::AircraftPhysics, effects, messages::{AircraftReload, AircraftState}, plane::Plane};
 
 // After crashing into the water: how long the wreck floats, then how long it
@@ -72,12 +73,15 @@ fn load_map(scene_folder: &str) -> MapSpec {
                     speed: None,
                     throttle: 0.0,
                     path: Vec::new(),
+                    follow: None,
                     loadout: Default::default(),
                     flares: None,
                     chaff: None,
                     difficulty: Default::default(),
+                    start: Default::default(),
                 }],
             }],
+            ..Default::default()
         }
     })
 }
@@ -146,7 +150,7 @@ fn reload_event(spec: AircraftSpec, loadout: &BTreeMap<String, String>) -> Aircr
 }
 
 /// A weapon hung on an aircraft - a model of its own (node `node_id`),
-/// carried along at its pylon every frame (see `update_stores`).
+/// carried along at its pylon as a child of the jet (see `hang_stores`).
 struct Store {
     node_id: String,
     /// The pylon it's on, and what it is (a weapon id).
@@ -154,9 +158,6 @@ struct Store {
     weapon: String,
     /// Where it hangs, meters in the jet's frame - its pylon's position.
     offset: Vector3<f32>,
-    /// How its model is turned to face the jet's way (its `model:`
-    /// `rotation`).
-    model_rotation: UnitQuaternion<f32>,
 }
 
 /// How often (s) each plane's data.ron is checked for edits - see `update`.
@@ -211,8 +212,26 @@ pub struct LiveAircraft {
     pub altitude: f32,
     pub wrecked: bool,
     /// The point of its path its autopilot is flying to (an index), for a
-    /// bot with a path.
+    /// bot flying its own flight plan.
     pub next_path_point: Option<usize>,
+    /// Where the point its autopilot's flying to is - a bot's, or one an
+    /// animation has flying a path (the player's too).
+    pub waypoint: Option<Vector3<f32>>,
+    /// The G it's pulling (its G meter), and whether its pilot feels it -
+    /// not while an animation has it, nor just after (see Plane::feels_g).
+    pub g: f32,
+    pub g_felt: bool,
+    /// The pitch stick as it is (-1 full push .. +1 full pull), the G the
+    /// fly-by-wire commands from it, and whether its autopilot's flying it
+    /// (a bot, or an animation flying a path) - then the stick's not the
+    /// pilot's.
+    pub stick_pull: f32,
+    pub g_command: f32,
+    pub autopilot: bool,
+    /// Who moved its controls last frame (see Plane::flown_by), and the
+    /// stick the pilot's input was easing toward (as `stick_pull`).
+    pub flown_by: &'static str,
+    pub stick_target_pull: f32,
 }
 
 /* This code defines the flight manager for the game, managing all planes in the game. */
@@ -263,7 +282,6 @@ impl flight_manager {
     /// values. Model, scale and colliders still need a restart. Call once a
     /// frame.
     pub fn update(&mut self, scene: &mut Scene, delta_time: f32) {
-        self.update_stores(scene);
         self.since_last_check += delta_time;
         if self.since_last_check < WATCH_INTERVAL_SECONDS {
             return;
@@ -305,6 +323,7 @@ impl flight_manager {
             }
             if let Some(plane) = node.get_behavior_mut::<Plane>() {
                 plane.set_effects(&spec.effects);
+                plane.set_fuel_spec(&spec.fuel);
             }
             // What's left of its loadout's weight stays on.
             let loadout = remaining_loadout(&self.applied, &self.fired, &plane.node_id);
@@ -320,7 +339,7 @@ impl flight_manager {
         let map = load_map(scene_folder);
         self.player_id = map.player().name.clone();
         for (coalition, placement) in map.aircraft() {
-            if let Err(error) = self.add_plane(scene, app, None, coalition, placement) {
+            if let Err(error) = self.add_plane(scene, app, None, coalition, placement, map.flight_plan(placement)) {
                 if placement.player {
                     panic!("{error} - the player's aircraft can't be left out");
                 }
@@ -358,17 +377,26 @@ impl flight_manager {
         let mut errors = Vec::new();
         for (coalition, after) in edited.aircraft() {
             let Some((old_coalition, before)) = old.find(&after.name).filter(|(_, before)| before.plane == after.plane) else {
-                if let Err(error) = self.add_plane(scene, app, physics_command_tx, coalition, after) {
+                if let Err(error) = self.add_plane(scene, app, physics_command_tx, coalition, after, edited.flight_plan(after)) {
                     errors.push(error);
                 }
                 continue;
             };
+            if before.start != after.start {
+                if let Err(error) = self.respawn(scene, app, physics_command_tx, &after.name) {
+                    errors.push(error);
+                }
+                continue;
+            }
             if before.position != after.position || before.rotation != after.rotation || before.speed != after.speed {
                 self.teleport(scene, physics_command_tx, after);
             }
-            if before.path != after.path || before.speed != after.speed {
+            let flight_plan = edited.flight_plan(after);
+            if old.flight_plan(before) != flight_plan || before.speed != after.speed || before.difficulty != after.difficulty {
                 if let Some(plane) = scene.content.nodes.get_mut(&after.name).and_then(|node| node.get_behavior_mut::<Plane>()) {
-                    plane.set_path(&after.path, cruise_speed(after));
+                    if !plane.scripted {
+                        plane.set_path(&flight_plan.0, Speed::Hold(cruise_speed(after)), after.difficulty, flight_plan.1);
+                    }
                 }
             }
             if before.throttle != after.throttle || before.player != after.player {
@@ -405,7 +433,8 @@ impl flight_manager {
             return Err(format!("no aircraft named '{name}'"));
         };
         self.remove_plane(scene, app, physics_command_tx, name);
-        self.add_plane(scene, app, physics_command_tx, &coalition, &placement)
+        let flight_plan = self.applied.flight_plan(&placement);
+        self.add_plane(scene, app, physics_command_tx, &coalition, &placement, flight_plan)
     }
 
     /// Makes where the aircraft `name` is right now (position and attitude)
@@ -431,18 +460,30 @@ impl flight_manager {
             position: transform.position,
             rotation: transform.rotation,
             speed_kt: flight_data.map(|data| data.speedometer).unwrap_or(0.0),
+            g: flight_data.map(|data| data.g_meter).unwrap_or(1.0),
+            g_felt: node.and_then(|node| node.get_behavior::<Plane>()).is_none_or(|plane| plane.feels_g()),
+            stick_pull: node.and_then(|node| node.get_behavior::<Plane>()).map(|plane| -plane.controls.elevator).unwrap_or(0.0),
+            g_command: node.and_then(|node| node.physics_state::<AircraftState>()).map(|state| state.g_command).unwrap_or(1.0),
+            autopilot: node.and_then(|node| node.get_behavior::<Plane>()).is_some_and(|plane| !plane.is_player || plane.scripted),
+            flown_by: node.and_then(|node| node.get_behavior::<Plane>()).map(|plane| plane.flown_by).unwrap_or(""),
+            stick_target_pull: node.and_then(|node| node.get_behavior::<Plane>()).map(|plane| -plane.stick_target).unwrap_or(0.0),
             altitude: flight_data.map(|data| data.altimeter).unwrap_or(transform.position.y),
             wrecked: node.and_then(|node| node.get_behavior::<Plane>()).is_some_and(|plane| plane.wrecked),
+            // An animation's path isn't its flight plan - no point of that
+            // to mark then.
             next_path_point: node.and_then(|node| node.get_behavior::<Plane>())
-                .filter(|plane| !plane.is_player)
+                .filter(|plane| !plane.is_player && !plane.scripted)
                 .and_then(|plane| plane.next_path_point()),
+            waypoint: node.and_then(|node| node.get_behavior::<Plane>()).and_then(|plane| plane.waypoint()),
         })
     }
 
     /// Spawns one aircraft from the map, under its `name`, in `coalition` -
     /// sending its body to the physics thread when one is running (see
     /// Scene::spawn_node_live).
-    fn add_plane(&mut self, scene: &mut Scene, app: &mut App, physics_command_tx: Option<&Sender<PhysicsCommand>>, coalition: &Coalition, placement: &AircraftPlacement) -> Result<(), String> {
+    /// `flight_plan`: the points it flies and whether round and round (see
+    /// MapSpec::flight_plan).
+    fn add_plane(&mut self, scene: &mut Scene, app: &mut App, physics_command_tx: Option<&Sender<PhysicsCommand>>, coalition: &Coalition, placement: &AircraftPlacement, flight_plan: (Vec<(f32, f32, f32)>, bool)) -> Result<(), String> {
         let aircraft_spec = AircraftSpec::load(&placement.plane)
             .map_err(|error| format!("map aircraft '{}': {error}", placement.name))?;
 
@@ -453,13 +494,17 @@ impl flight_manager {
         let rotation = placement.rotation();
         let mut physics = aircraft_spec.physics.clone();
         // Its loadout's weight on, where it hangs.
-        (physics.rigidbody.mass, physics.rigidbody.center_of_mass) = loaded_mass(&aircraft_spec, &placement.loadout);
+        let (mass, center_of_mass) = loaded_mass(&aircraft_spec, &placement.loadout);
+        physics.rigidbody.mass = mass;
+        physics.rigidbody.center_of_mass = center_of_mass;
+        let colliders = physics.colliders.clone();
         let data_initial_velocity = physics.rigidbody.initial_velocity;
         if let Some(speed) = placement.speed {
             physics.rigidbody.initial_velocity = rotation * Vector3::new(0.0, 0.0, speed);
         }
-        let mut plane = Plane::new().with_effects(&aircraft_spec.effects).with_throttle(placement.throttle);
-        plane.set_path(&placement.path, cruise_speed(placement));
+        let mut plane = Plane::new().with_effects(&aircraft_spec.effects).with_throttle(placement.throttle).with_military(aircraft_spec.engine.afterburner_gate).with_fuel(&aircraft_spec.fuel);
+        plane.arm_gear(&aircraft_spec.gear, placement.start.gear_down());
+        plane.set_path(&flight_plan.0, Speed::Hold(cruise_speed(placement)), placement.difficulty, flight_plan.1);
         let plane = if placement.player { plane } else { plane.bot() };
 
         scene.spawn_node_live(app,
@@ -479,7 +524,7 @@ impl flight_manager {
                     .scaled(aircraft_spec.model.scale))
                 .add_property(effects::plane_emitters(&aircraft_spec.effects, &aircraft_spec.gear))
                 .add_property(physics)
-                .add_physics_behavior(AircraftPhysics::new(&aircraft_spec.aero, &aircraft_spec.engine, &aircraft_spec.gear, &aircraft_spec.effects))
+                .add_physics_behavior(AircraftPhysics::new(&aircraft_spec.aero, &aircraft_spec.engine, &aircraft_spec.gear, &aircraft_spec.effects, center_of_mass, colliders, mass, placement.start.gear_down()))
                 .add_physics_behavior(WaterContact::new(app.water.ocean.sea_level()).sinks(WRECK_FLOAT_SECONDS, WRECK_SINK_SECONDS)),
             physics_command_tx,
         ).map_err(|error| format!("map aircraft '{}': {error}", placement.name))?;
@@ -525,9 +570,8 @@ impl flight_manager {
     }
 
     /// Hangs `placement`'s loadout on its aircraft: a model for each weapon,
-    /// at its pylon - carried along from then on (see `update_stores`).
+    /// at its pylon - a child of the jet, carried along by the hierarchy from then on.
     fn hang_stores(&mut self, scene: &mut Scene, app: &mut App, placement: &AircraftPlacement, spec: &AircraftSpec) {
-        let (position, rotation) = (placement.position(), placement.rotation());
         let mut stores = Vec::new();
         for (pylon, weapon) in loaded_stores(spec, &placement.loadout) {
             if !Path::new(&weapon.model.model).is_file() {
@@ -535,19 +579,19 @@ impl flight_manager {
                 continue;
             }
             let node_id = format!("{}:{}", placement.name, pylon.name);
+            // A child of the jet, at its pylon - the hierarchy carries it
+            // along from then on.
+            let local = Transform3D { position: pylon.position, rotation: weapon.model.rotation(), scale: Vector3::new(1.0, 1.0, 1.0) };
             let spawned = scene.spawn_node(app,
                 Node::new(&node_id)
-                    .add_property(Transform3D {
-                        position: position + rotation * pylon.position,
-                        rotation: rotation * weapon.model.rotation(),
-                        scale: Vector3::new(1.0, 1.0, 1.0),
-                    })
+                    .add_property(local)
+                    .add_property(Parent { id: placement.name.clone(), space: Space::Local, local, inherit_rotation: true })
                     .add_property(Model::from_file(&weapon.model.model)
                         .double_sided(DoubleSidedMeshes::Meshes(weapon.model.double_sided.clone()))
                         .scaled(weapon.model.scale)),
             );
             match spawned {
-                Ok(()) => stores.push(Store { node_id, pylon: pylon.name.clone(), weapon: weapon.id.clone(), offset: pylon.position, model_rotation: weapon.model.rotation() }),
+                Ok(()) => stores.push(Store { node_id, pylon: pylon.name.clone(), weapon: weapon.id.clone(), offset: pylon.position }),
                 Err(error) => eprintln!("map aircraft '{}': couldn't hang {} on '{}': {error}", placement.name, weapon.id, pylon.name),
             }
         }
@@ -587,23 +631,6 @@ impl flight_manager {
         if let Some(node) = scene.content.nodes.get_mut(&placement.name) {
             node.push_physics_event(reload_event(spec, &placement.loadout));
         }
-        // Where it really is now, not where it spawned.
-        self.update_stores(scene);
-    }
-
-    /// Carries every hung weapon along with its aircraft - at its pylon,
-    /// turned with it. Call every frame, after anything that moves the
-    /// aircraft (physics, a scripted track).
-    pub fn update_stores(&self, scene: &mut Scene) {
-        for (aircraft, stores) in &self.stores {
-            let Some(transform) = scene.content.renderizable_instances.get(aircraft).map(|instance| instance.instance.transform) else { continue };
-            for store in stores {
-                if let Some(instance) = scene.content.renderizable_instances.get_mut(&store.node_id) {
-                    instance.instance.transform.position = transform.position + transform.rotation * store.offset;
-                    instance.instance.transform.rotation = transform.rotation * store.model_rotation;
-                }
-            }
-        }
     }
 
     /// Takes the aircraft `name` out of the scene - node, body, name tag,
@@ -630,6 +657,11 @@ impl flight_manager {
         self.spawned.get_mut(name).and_then(|spawned| spawned.countermeasures.as_mut())
     }
 
+    /// Whether the node `id` is a weapon hung on an aircraft.
+    pub fn is_store(&self, id: &str) -> bool {
+        self.stores.values().flatten().any(|store| store.node_id == id)
+    }
+
     /// The weapons still hanging on the aircraft `name`: each one's pylon,
     /// weapon id and where the pylon is (m, the jet's frame).
     pub fn hung_weapons(&self, name: &str) -> Vec<(String, String, Vector3<f32>)> {
@@ -643,7 +675,7 @@ impl flight_manager {
     /// - position, and the aircraft's rotation - to launch it from; `None`
     /// with nothing there.
     pub fn release(&mut self, scene: &mut Scene, app: &mut App, name: &str, pylon: &str) -> Option<(Vector3<f32>, UnitQuaternion<f32>)> {
-        let transform = scene.content.renderizable_instances.get(name)?.instance.transform;
+        let transform = scene.world_transform(name)?;
         let stores = self.stores.get_mut(name)?;
         let index = stores.iter().position(|store| store.pylon == pylon)?;
         let store = stores.remove(index);
@@ -747,7 +779,7 @@ pub fn loadout_problems(placement: &AircraftPlacement, spec: &AircraftSpec) -> V
 
 /// The airspeed a bot holds flying its path (m/s) - its map `speed`, or
 /// DEFAULT_CRUISE_SPEED without one.
-fn cruise_speed(placement: &AircraftPlacement) -> f32 {
+pub fn cruise_speed(placement: &AircraftPlacement) -> f32 {
     placement.speed.filter(|speed| *speed > 1.0).unwrap_or(DEFAULT_CRUISE_SPEED)
 }
 
@@ -772,10 +804,12 @@ mod tests {
             speed: None,
             throttle: 0.0,
             path: Vec::new(),
+            follow: None,
             loadout: loadout.iter().map(|(pylon, weapon)| (pylon.to_string(), weapon.to_string())).collect(),
             flares: None,
             chaff: None,
             difficulty: Default::default(),
+            start: Default::default(),
         }
     }
 

@@ -106,13 +106,22 @@ pub struct App {
     // scroll so the overlay's buttons can be clicked mid-flight. Also shows
     // the overlay - see `debug_overlay_visible`.
     pub debug_mouse_free: bool,
-    // The live map editor, docked in F10's editor view (see
+    // The live map editor, docked round the world in F10's editor (see
     // play::scene::GameLogic::update_flight_editor) - drawn by the same egui
     // overlay pass.
     pub flight_editor: FlightEditor,
-    // F10 (see play::tactical_map) - while set, the world isn't drawn: a
+    // M's map (see play::tactical_map) - while set, the world isn't drawn: a
     // dark screen and `thick_lines` instead (see render_tactical_map_pass).
     pub tactical_map_active: bool,
+    // F10's editor - the world drawn as usual, seen through a free editor
+    // camera, with the editor's panels round it and `editor_lines` (cameras'
+    // views, paths, links) over it (see render_editor_lines_pass).
+    pub editor_active: bool,
+    // The debug view (F5/F9) while spectating - what the camera's on, as
+    // the play scene sees it (see play::scene's telemetry), drawn over the
+    // game by the egui overlay pass. None otherwise.
+    pub spectate_telemetry: Option<crate::game::scenes::play::flight_editor::Telemetry>,
+    pub editor_lines: crate::engine::rendering::thick_lines::ThickLines,
     // The tactical map's buttons, selection and flight plan window (see
     // play::tactical_ui) - drawn by the egui overlay pass while it's up.
     pub tactical_ui: crate::game::scenes::play::tactical_ui::TacticalUi,
@@ -243,8 +252,8 @@ pub struct App {
     // physics command channel (that only exists inside GameLogic::update's own
     // FrameContext), so a button can't send PhysicsCommand::TogglePause
     // directly. This flag is the handoff: GameLogic::update polls it every
-    // frame and reacts to its rising/falling edge (same idiom as
-    // `was_cinematic_active`) to actually pause/resume physics and gate
+    // frame and reacts to its rising/falling edge to actually pause/resume
+    // physics and gate
     // `Plane::update`. Meaningless outside the "playing" scene, same as
     // `show_depth_map`/other single-scene debug flags already living here.
     pub is_paused: bool,
@@ -344,6 +353,7 @@ impl App {
         let render_physics = RenderPhysics::new(&renderer.device, &renderer.config, &camera_resources);
         let thick_lines = crate::engine::rendering::thick_lines::ThickLines::new(&renderer.device, renderer.config.format, &camera_resources);
         let hud_lines = crate::engine::rendering::thick_lines::ThickLines::new(&renderer.device, renderer.config.format, &camera_resources);
+        let editor_lines = crate::engine::rendering::thick_lines::ThickLines::new(&renderer.device, renderer.config.format, &camera_resources);
         let hud_horizon_lines = crate::engine::rendering::thick_lines::ThickLines::new(&renderer.device, renderer.config.format, &camera_resources);
         let mut hud_screen_lines = crate::engine::rendering::thick_lines::ThickLines::new(&renderer.device, renderer.config.format, &camera_resources);
         hud_screen_lines.screen_space = true;
@@ -375,6 +385,9 @@ impl App {
             tactical_viewport: None,
             thick_lines,
             hud_lines,
+            editor_lines,
+            editor_active: false,
+            spectate_telemetry: None,
             hud_horizon_lines,
             hud_screen_lines,
             egui_cursor: None,
@@ -553,7 +566,7 @@ impl App {
     /// Whether the mouse is a pointer for clicking debug windows (F7, F10's
     /// flight editor or the F10 tactical map open) instead of looking around.
     pub fn mouse_free(&self) -> bool {
-        self.debug_mouse_free || self.tactical_map_active
+        self.debug_mouse_free || self.tactical_map_active || self.editor_active
     }
 
     /// Whether the F7 debug overlay is up.
@@ -995,10 +1008,35 @@ impl App {
 
                 for message in &debug_physics {
                     match message {
-                        DebugPhysicsMessageType::RenderizableLines(lines) => {
-                            self.render_physics.renderizable_lines.push(lines.clone());
+                        DebugPhysicsMessageType::RenderizableLines { owner, line } => {
+                            let mut line = *line;
+                            // The mesh is drawn ahead of the last physics
+                            // sample (see physics_pose_now). Carry this
+                            // body's lines by the same amount, or they sit
+                            // behind the jet.
+                            if !self.is_paused {
+                                if let Some(id) = owner {
+                                    if let Some(pose) = self.physics_poses.get(id) {
+                                        let kinematic = self.scene_manager.content().is_some_and(|content| content.kinematic.contains(id));
+                                        if !kinematic {
+                                            if let Some((position, rotation)) = physics_pose_now(pose, std::time::Instant::now()) {
+                                                let sample_rotation = nalgebra::UnitQuaternion::new_normalize(pose.rotation);
+                                                let shift = |point: [f32; 3]| {
+                                                    let local = sample_rotation.inverse() * (nalgebra::Vector3::new(point[0], point[1], point[2]) - pose.translation);
+                                                    let world = position + rotation * local;
+                                                    [world.x, world.y, world.z]
+                                                };
+                                                line[0].position = shift(line[0].position);
+                                                line[1].position = shift(line[1].position);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            self.render_physics.renderizable_lines.push(line);
                         },
                         DebugPhysicsMessageType::RenderizablePoint(point) => {
+                            let _ = point;
                         },
                     }
                 }
@@ -1017,13 +1055,28 @@ impl App {
                 // stopped. Skipping this loop entirely just holds the render
                 // transform at wherever it already was the instant pausing
                 // began, matching the camera exactly.
+                //
+                // Onto the node's own Transform3D too - that's where every
+                // node's pose is read from (the hierarchy, the editor, the
+                // animation) and where the renderer instance is synced from
+                // at the end of the frame (Scene::sync_render_instances).
+                // Not onto a node an animation is moving (SceneContent::
+                // kinematic) - its body is held still meanwhile.
                 if !self.is_paused {
                     if let Some(content) = self.scene_manager.content_mut() {
                         let now = std::time::Instant::now();
-                        for (key, renderizable) in &mut content.renderizable_instances {
-                            if let Some((position, rotation)) = self.physics_poses.get(key).and_then(|pose| physics_pose_now(pose, now)) {
+                        for (key, pose) in &self.physics_poses {
+                            if content.kinematic.contains(key) {
+                                continue;
+                            }
+                            let Some((position, rotation)) = physics_pose_now(pose, now) else { continue };
+                            if let Some(renderizable) = content.renderizable_instances.get_mut(key) {
                                 renderizable.instance.transform.position = position;
                                 renderizable.instance.transform.rotation = rotation;
+                            }
+                            if let Some(transform) = content.nodes.get_mut(key).and_then(|node| node.get_property_mut::<Transform3D>()) {
+                                transform.position = position;
+                                transform.rotation = rotation;
                             }
                         }
                     }
@@ -1068,6 +1121,15 @@ impl App {
                             eprintln!("Failed to send node physics inputs: {}", e);
                         }
                     }
+
+                    // The animation's turn, after the behaviors - then the
+                    // hierarchy (children onto their parents, LookAt nodes
+                    // turned), and from that every renderer instance and
+                    // camera node's camera.
+                    scene.run_late_update(&mut self, &mut ctx);
+                    scene.content.nodes.resolve_hierarchy();
+                    scene.sync_render_instances();
+                    scene.sync_cameras();
 
                     // Re-aims every look_at-configured camera at its current
                     // target - last, so it wins over whatever a Behavior/

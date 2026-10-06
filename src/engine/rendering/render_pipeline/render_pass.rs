@@ -538,7 +538,9 @@ impl App {
 
     // Physics debug lines and UI/text share this pass since they're both drawn on top,
     // without a depth buffer, gated on there being UI geometry to draw at all.
-    fn render_ui_pass(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
+    // `which` splits the flight HUD (drawn under the G-force effects) from the
+    // menus that stay sharp on top of them.
+    fn render_ui_pass(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, which: UiLayer) {
         if self.ui.ui_rendering.num_indices == 0 && self.ui.image_draws.is_empty() {
             return;
         }
@@ -555,7 +557,7 @@ impl App {
         render_pass.set_bind_group(0, &self.render_physics.bind_group, &[]);
         render_pass.set_bind_group(1, &self.camera_resources.bind_group, &[]);
 
-        if !self.show_depth_map && (self.render_physics.visible || !self.world_lines.is_empty()) {
+        if which != UiLayer::UnderEffect && !self.show_depth_map && (self.render_physics.visible || !self.world_lines.is_empty()) {
             self.render_physics_debug_lines(&mut render_pass);
         }
 
@@ -570,7 +572,7 @@ impl App {
         // regardless, since all text - modal's and panel's alike - drew after
         // all quads unconditionally.
         let main_index_count = self.ui.ui_rendering.main_index_count;
-        if main_index_count > 0 {
+        if which != UiLayer::OverEffect && main_index_count > 0 {
             render_pass.set_pipeline(&self.ui.ui_pipeline);
             render_pass.set_bind_group(0, &self.ui.blur_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.ui.ui_rendering.vertex_buffer.slice(..));
@@ -583,7 +585,7 @@ impl App {
         // Image content today), so it renders as one batch here, same relative
         // position (after the main pass's quads, before the on-top pass) it
         // always has.
-        if !self.ui.image_draws.is_empty() {
+        if which != UiLayer::OverEffect && !self.ui.image_draws.is_empty() {
             render_pass.set_pipeline(&self.ui.image_pipeline);
             for draw in &self.ui.image_draws {
                 if let Some(image) = self.ui.images.get(&draw.path) {
@@ -596,9 +598,11 @@ impl App {
         }
 
         // Render text (text renderer handles empty content gracefully)
-        self.ui.text.text_renderer.render(&self.ui.text.text_atlas, &self.renderer.glyphon.viewport, &mut render_pass).unwrap();
+        if which != UiLayer::OverEffect {
+            self.ui.text.text_renderer.render(&self.ui.text.text_atlas, &self.renderer.glyphon.viewport, &mut render_pass).unwrap();
+        }
 
-        if self.ui.ui_rendering.num_indices > main_index_count {
+        if which != UiLayer::UnderEffect && self.ui.ui_rendering.num_indices > main_index_count {
             render_pass.set_pipeline(&self.ui.ui_pipeline);
             render_pass.set_bind_group(0, &self.ui.blur_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.ui.ui_rendering.vertex_buffer.slice(..));
@@ -606,7 +610,9 @@ impl App {
             render_pass.draw_indexed(main_index_count..self.ui.ui_rendering.num_indices, 0, 0..1);
         }
 
-        self.ui.text.text_renderer_on_top.render(&self.ui.text.text_atlas, &self.renderer.glyphon.viewport, &mut render_pass).unwrap();
+        if which != UiLayer::UnderEffect {
+            self.ui.text.text_renderer_on_top.render(&self.ui.text.text_atlas, &self.renderer.glyphon.viewport, &mut render_pass).unwrap();
+        }
     }
 
     // F7 (see App::show_aero_debug_overlay's own doc comment) - two live
@@ -629,7 +635,7 @@ impl App {
     // open (its text fields need it).
     fn render_aero_debug_overlay_pass(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
         let show_debug = self.debug_overlay_visible();
-        if !show_debug && !self.tactical_map_active {
+        if !show_debug && !self.tactical_map_active && !self.editor_active && self.spectate_telemetry.is_none() {
             // No egui - back to the plain arrow (the pause menu's, say), and
             // the mouse let go if a drag had it.
             self.end_infinite_drag();
@@ -706,8 +712,8 @@ impl App {
         }
         // Back to where the pointer is now, after any presses elsewhere.
         raw_input.events.push(egui::Event::PointerMoved(pointer_pos));
-        // Typing for the editor's text fields - docked in F10's editor view.
-        if self.tactical_map_active && self.tactical_ui.editor_view() {
+        // Typing for the editor's text fields - F10's editor.
+        if self.editor_active {
             raw_input.events.extend(input::typed_input().iter().filter_map(egui_typing_event));
         }
 
@@ -783,10 +789,11 @@ impl App {
         let mut flight_editor = std::mem::take(&mut self.flight_editor);
         let mut tactical_ui = std::mem::take(&mut self.tactical_ui);
         let tactical_map_active = self.tactical_map_active;
-        // F10's editor view: the editor docked round the map - which then
-        // draws only in the middle (see render_tactical_map_pass).
-        let editor_view = tactical_map_active && tactical_ui.editor_view();
-        let mut tactical_viewport = None;
+        let editor_active = self.editor_active;
+        let spectate_telemetry = self.spectate_telemetry.clone();
+        // The map draws on the whole screen now - F10's editor is round the
+        // world instead.
+        let tactical_viewport = None;
 
         self.egui_overlay.render(
             &self.renderer.device,
@@ -797,12 +804,14 @@ impl App {
             pixels_per_point,
             raw_input,
             |ctx| {
-                if editor_view {
-                    let map = flight_editor.draw_docked(ctx, &mut tactical_ui);
-                    tactical_viewport = Some([map.left(), map.top(), map.width(), map.height()]);
-                    tactical_ui.draw(ctx, Some(map));
+                if editor_active {
+                    flight_editor.draw_docked(ctx, &mut tactical_ui);
                 } else if tactical_map_active {
                     tactical_ui.draw(ctx, None);
+                }
+                // The debug view while spectating (F5/F9, F2-F4).
+                if let (false, Some(telemetry)) = (editor_active, &spectate_telemetry) {
+                    crate::game::scenes::play::flight_editor::draw_telemetry(ctx, telemetry, ctx.screen_rect());
                 }
                 if !show_debug {
                     return;
@@ -1554,6 +1563,32 @@ impl App {
         );
     }
 
+    /// F10's editor's lines over the world (`editor_lines` - cameras' views,
+    /// paths, links, see play::scene's update_editor_gizmos) - and the debug
+    /// view's (F5/F9) followed path while spectating.
+    fn render_editor_lines_pass(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
+        if self.editor_lines.dynamic.is_empty() {
+            return;
+        }
+        let camera_position = self.scene_manager.cameras().map(|c| c.active().camera.position()).unwrap_or_else(nalgebra::Point3::origin);
+        let screen = [self.window_manager.pixel_size.width as f32, self.window_manager.pixel_size.height as f32];
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Editor lines pass"),
+            color_attachments: &[color_attachment(view, wgpu::LoadOp::Load)],
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
+        });
+        self.editor_lines.draw(
+            &self.renderer.device,
+            &self.renderer.queue,
+            &mut render_pass,
+            &self.camera_resources.bind_group,
+            [camera_position.x, camera_position.y, camera_position.z],
+            screen,
+        );
+    }
+
     /// The HUD's symbols in the world (`hud_lines` - see App::hud_lines),
     /// over the 3D view - skipped when there are none.
     fn render_hud_lines_pass(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
@@ -1598,7 +1633,7 @@ impl App {
     pub(crate) fn render_scene_passes(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
         if self.tactical_map_active {
             self.render_tactical_map_pass(encoder, view);
-            self.render_ui_pass(encoder, view);
+            self.render_ui_pass(encoder, view, UiLayer::All);
             self.render_aero_debug_overlay_pass(encoder, view);
             return;
         }
@@ -1606,16 +1641,39 @@ impl App {
         self.render_water_pass(encoder);
         self.render_transparent_pass(encoder);
         self.render_particle_pass(encoder);
-        // Blits scene_color onto the real swapchain view, so the scene still looks
-        // normal everywhere - see BlurRender::render. Has to run after the 3D
-        // passes above (nothing to blit yet otherwise) and before the UI pass
-        // below, which samples scene_color directly (at whatever per-node radius,
-        // see text_shader.wgsl) for any node with background_blur set.
+        // The flight HUD into its own target, then the blit copies the world
+        // and that HUD onto the screen with the G-force effects over both.
+        // Menus (always on top) draw after, so a blackout doesn't cover them.
+        // A fresh view, so these passes can borrow it while `self` is in use.
+        let hud_view = self.renderer.blur.hud_color.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.clear_hud_target(encoder, &hud_view);
+        self.render_hud_lines_pass(encoder, &hud_view);
+        self.render_ui_pass(encoder, &hud_view, UiLayer::UnderEffect);
         self.renderer.blur.write_effects(&self.renderer.queue);
         self.renderer.blur.render(encoder, view);
-        self.render_hud_lines_pass(encoder, view);
-        self.render_ui_pass(encoder, view);
+        self.render_editor_lines_pass(encoder, view);
+        self.render_ui_pass(encoder, view, UiLayer::OverEffect);
         // Drawn last so it's always on top of the game's own HUD too.
         self.render_aero_debug_overlay_pass(encoder, view);
     }
+
+    /// Clears the flight-HUD target to transparent before this frame's symbols.
+    fn clear_hud_target(&self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
+        let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("HUD clear"),
+            color_attachments: &[color_attachment(view, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT))],
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
+        });
+    }
+}
+
+/// Which slice of the UI a pass draws. The flight HUD is composited under the
+/// G-force effects; menus stay above them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UiLayer {
+    All,
+    UnderEffect,
+    OverEffect,
 }

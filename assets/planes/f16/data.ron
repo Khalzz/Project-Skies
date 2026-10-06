@@ -8,7 +8,7 @@
   physics: (
     rigidbody: (
       is_static: false,
-      mass: 11900.0, // This mass is with full fuel, in the future it should be the mass empty
+      mass: 11900.0, // With the internal tanks full. Empty is this minus fuel.capacity_kg.
       center_of_mass: (0.0, 0.029, 1.459),
       initial_velocity: (0.0, 0.0, 0.0),
     ),
@@ -176,6 +176,17 @@
     spool_afterburner_seconds: 0.5,
     spool_down_seconds: 0.8,     // throttle chop
     altitude_lapse_exponent: 0.7,
+  ),
+  // Internal fuel. The rigidbody mass above is the jet with these tanks
+  // full, so empty is that mass minus capacity_kg. Burn is kg/s: idle at
+  // the bottom of the lever, military at the afterburner gate, full
+  // afterburner at the top. The lever blends between them the same way the
+  // thrust does.
+  fuel: (
+    capacity_kg: 3240.0,
+    idle_kg_s: 0.18,
+    military_kg_s: 1.6,
+    afterburner_kg_s: 7.0,
   ),
   // The landing gear: each wheel is a suspension strut casting straight
   // down from `position` (meters in the jet's frame: +X left, +Y up, +Z

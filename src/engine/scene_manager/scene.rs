@@ -1,5 +1,5 @@
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
@@ -16,7 +16,7 @@ use crate::engine::physics::physics_handler::{PhysicsCommand, RenderMessage};
 use crate::engine::physics::physics_resources::PhysicsObjectDef;
 use crate::engine::scene_manager::node::Node;
 use crate::engine::scene_manager::physics_bridge;
-use crate::engine::scene_manager::properties::Model as NodeModelProperty;
+use crate::engine::scene_manager::properties::{CameraLens, Model as NodeModelProperty, Parent, Space, SpawnedLive, Transform3D};
 use crate::engine::scene_manager::render_bridge;
 use crate::engine::scene_manager::scene_nodes::SceneNodes;
 use crate::engine::rendering::models::model::Model as LoadedModel;
@@ -35,8 +35,8 @@ pub struct FrameContext<'a> {
     pub event_pump: &'a mut EventPump,
     // None whenever the active scene has no physics running (see
     // Scene::start_physics) - lets a scene pause/resume/teleport a
-    // physics-driven object (see PhysicsCommand::SetTransform) for a scripted
-    // cinematic, e.g. CameraTrack::LookAt.
+    // physics-driven object (see PhysicsCommand::SetTransform) - an animation
+    // moving it, for one.
     pub physics_command_tx: Option<&'a Sender<PhysicsCommand>>,
     pub physics_data: &'a HashMap<String, RenderMessage>,
     pub debug_physics: &'a [DebugPhysicsMessageType],
@@ -62,6 +62,11 @@ pub struct SceneContent {
     // PhysicsObjectDef's own doc comment for why. Read once by
     // Scene::start_physics to seed the physics thread.
     pub physics_bodies: Vec<PhysicsObjectDef>,
+    // Nodes something else is moving right now (an animation) - the
+    // physics' pose isn't written onto them meanwhile (see App::run). Whoever
+    // puts a node in here also holds its body still (PhysicsCommand::
+    // SetKinematic) and lets it go again.
+    pub kinematic: HashSet<String>,
 }
 
 impl SceneContent {
@@ -69,6 +74,7 @@ impl SceneContent {
         self.nodes.clear();
         self.renderizable_instances.clear();
         self.physics_bodies.clear();
+        self.kinematic.clear();
     }
 }
 
@@ -82,6 +88,10 @@ impl SceneContent {
 pub trait SceneBehaviour {
     fn on_spawn(&mut self, scene: &mut Scene, app: &mut App) { let _ = (scene, app); }
     fn update(&mut self, scene: &mut Scene, app: &mut App, ctx: &mut FrameContext) { let _ = (scene, app, ctx); }
+    /// After every node's behaviors have run this frame, before the
+    /// hierarchy is resolved and the cameras placed - where an animation
+    /// goes, so it has the last word on what it moves.
+    fn late_update(&mut self, scene: &mut Scene, app: &mut App, ctx: &mut FrameContext) { let _ = (scene, app, ctx); }
 }
 
 /// A "screen" the game can be in (main menu, plane selection, playing, ...) -
@@ -96,6 +106,9 @@ pub struct Scene {
     pub cameras: SceneCameras,
     pub environment: SceneEnvironment,
     behaviour: Option<Box<dyn SceneBehaviour>>,
+    // Set once the scene's been built (its behaviour's on_spawn has run) -
+    // nodes spawned from then on are marked SpawnedLive.
+    started: bool,
 }
 
 impl Scene {
@@ -108,6 +121,7 @@ impl Scene {
             cameras: SceneCameras::new(app.camera_resources.width(), app.camera_resources.height()),
             environment: SceneEnvironment::default(),
             behaviour: None,
+            started: false,
         }
     }
 
@@ -120,16 +134,61 @@ impl Scene {
     /// `Model` property, immediately registers it with the renderer too (see
     /// `engine::scene_manager::render_bridge::register_static_model`); same
     /// deal if it carries a `Physics` property (see
-    /// `engine::scene_manager::physics_bridge::register_physics_body`) - in
-    /// both cases the property itself is what triggers instantiation, not a
+    /// `engine::scene_manager::physics_bridge::register_physics_body`), or a
+    /// `CameraLens` (a camera under its id, see `sync_cameras`) - in every
+    /// case the property itself is what triggers instantiation, not a
     /// second call the spawner has to remember to make separately.
+    /// Children given with `Node::with_child` are spawned right after it,
+    /// each with its `Parent`.
     /// `Node`/`SceneNodes` stay unaware of rendering/physics either way -
     /// this just composes them at the one place that actually has both
     /// `&mut Scene` and `&mut App` available.
     pub fn spawn_node(&mut self, app: &mut App, node: Node) -> Result<(), String> {
+        self.spawn_tree(app, node, None)
+    }
+
+    /// `spawn_node` for a scene whose physics thread is already running (see
+    /// `start_physics` - a plain `spawn_node` then gets no body): the node's
+    /// body and physics halves (its children's too) are sent to the running
+    /// thread through `physics_command_tx`. Without one (no physics running),
+    /// the same as `spawn_node`.
+    pub fn spawn_node_live(&mut self, app: &mut App, node: Node, physics_command_tx: Option<&Sender<PhysicsCommand>>) -> Result<(), String> {
+        self.spawn_tree(app, node, physics_command_tx)
+    }
+
+    fn spawn_tree(&mut self, app: &mut App, mut node: Node, physics_command_tx: Option<&Sender<PhysicsCommand>>) -> Result<(), String> {
+        let children = node.take_children();
         let id = node.id.clone();
+        self.spawn_one(app, node, physics_command_tx)?;
+        for mut child in children {
+            let (space, inherit_rotation) = child.placement();
+            let given = child.get_property::<Transform3D>().copied().unwrap_or_default();
+            let local = match space {
+                Space::Local => given,
+                Space::Global => Transform3D::default(),
+            };
+            child.set_property(Parent { id: id.clone(), space, local, inherit_rotation });
+            self.spawn_tree(app, child, physics_command_tx)?;
+        }
+        Ok(())
+    }
+
+    fn spawn_one(&mut self, app: &mut App, mut node: Node, physics_command_tx: Option<&Sender<PhysicsCommand>>) -> Result<(), String> {
+        let id = node.id.clone();
+        // A local child starts where its parent is now - its renderer
+        // instance, body and camera are all made from this.
+        if let Some(parent) = node.get_property::<Parent>().filter(|parent| parent.space == Space::Local).cloned() {
+            if let Some(parent_world) = self.content.nodes.world_transform(&parent.id) {
+                node.set_property(parent_world.compose(&parent.local, parent.inherit_rotation));
+            }
+        }
+        if self.started {
+            node.set_property(SpawnedLive);
+        }
         let has_model = node.get_property::<NodeModelProperty>().is_some();
         let has_physics = node.get_property::<Physics>().is_some();
+        let lens = node.get_property::<CameraLens>().copied();
+        let transform = node.get_property::<Transform3D>().copied().unwrap_or_default();
 
         self.content.nodes.spawn(node, &mut self.cameras, app)?;
 
@@ -141,19 +200,11 @@ impl Scene {
             physics_bridge::register_physics_body(self, &id)?;
         }
 
-        Ok(())
-    }
+        if let Some(lens) = lens {
+            self.cameras.place(&id, transform.position, transform.rotation, lens.fovy, lens.znear, lens.viewport);
+        }
 
-    /// `spawn_node` for a scene whose physics thread is already running (see
-    /// `start_physics` - a plain `spawn_node` then gets no body): the node's
-    /// body and physics halves are sent to the running thread through
-    /// `physics_command_tx`. Without one (no physics running), the same as
-    /// `spawn_node`.
-    pub fn spawn_node_live(&mut self, app: &mut App, node: Node, physics_command_tx: Option<&Sender<PhysicsCommand>>) -> Result<(), String> {
-        let id = node.id.clone();
-        self.spawn_node(app, node)?;
         let Some(tx) = physics_command_tx else { return Ok(()) };
-
         let def = self.content.physics_bodies.iter().rposition(|def| def.id == id)
             .map(|index| self.content.physics_bodies.remove(index));
         let behaviors = self.content.nodes.get_mut(&id).map(|node| node.take_physics_behaviors()).unwrap_or_default();
@@ -164,19 +215,115 @@ impl Scene {
         Ok(())
     }
 
-    /// Removes the node `id` - its behaviors, its instance on the renderer
-    /// (see `render_bridge::unregister_model`) and, with physics running, its
-    /// body (sent through `physics_command_tx`). Nothing happens for an id
-    /// with no node. Like `SceneNodes::clear`, anything its behaviors did
-    /// outside their own node isn't undone.
+    /// Removes the node `id` and its children (and theirs) - their
+    /// behaviors, their instances on the renderer (see
+    /// `render_bridge::unregister_model`), their cameras and, with physics
+    /// running, their bodies (sent through `physics_command_tx`). Nothing
+    /// happens for an id with no node. Like `SceneNodes::clear`, anything
+    /// their behaviors did outside their own node isn't undone.
     pub fn despawn_node(&mut self, app: &mut App, id: &str, physics_command_tx: Option<&Sender<PhysicsCommand>>) {
-        if self.content.nodes.remove(id).is_none() {
+        if self.content.nodes.get(id).is_none() {
             return;
         }
-        render_bridge::unregister_model(self, app, id);
-        self.content.physics_bodies.retain(|def| def.id != id);
-        if let Some(tx) = physics_command_tx {
-            let _ = tx.send(PhysicsCommand::RemoveBody { name: id.to_owned() });
+        let mut ids = vec![id.to_owned()];
+        ids.extend(self.content.nodes.descendants_of(id));
+        for id in ids {
+            if self.content.nodes.remove(&id).is_none() {
+                continue;
+            }
+            render_bridge::unregister_model(self, app, &id);
+            self.cameras.remove_camera(&id);
+            self.content.kinematic.remove(&id);
+            self.content.physics_bodies.retain(|def| def.id != id);
+            if let Some(tx) = physics_command_tx {
+                let _ = tx.send(PhysicsCommand::RemoveBody { name: id.clone() });
+            }
+        }
+    }
+
+    /// Where the node `id` is in the world (see `SceneNodes::world_transform`).
+    pub fn world_transform(&self, id: &str) -> Option<Transform3D> {
+        self.content.nodes.world_transform(id)
+    }
+
+    /// Moves the node `id` to `world` - for a `Local` child, by changing its
+    /// offset from the parent so it lands there; for anything else, its own
+    /// transform. Shown right away (its renderer instance too), not just
+    /// once the frame's syncs run.
+    pub fn set_world_transform(&mut self, id: &str, world: Transform3D) {
+        let parent = self.content.nodes.get(id).and_then(|node| node.get_property::<Parent>()).cloned();
+        if let Some(mut parent) = parent.filter(|parent| parent.space == Space::Local) {
+            if let Some(parent_world) = self.content.nodes.world_transform(&parent.id) {
+                parent.local = parent_world.relative(&world, parent.inherit_rotation);
+                if let Some(node) = self.content.nodes.get_mut(id) {
+                    node.set_property(parent);
+                }
+            }
+        }
+        let Some(node) = self.content.nodes.get_mut(id) else { return };
+        node.set_property(world);
+        let render_scale = node.get_property::<NodeModelProperty>().map(|model| model.render_scale(world.scale)).unwrap_or(world.scale);
+        if let Some(instance) = self.content.renderizable_instances.get_mut(id) {
+            instance.instance.transform.position = world.position;
+            instance.instance.transform.rotation = world.rotation;
+            instance.instance.transform.scale = render_scale;
+        }
+    }
+
+    /// Re-parents the node `id` - under `parent` (in `space`, turning with
+    /// it or not), or out to the top with `None` - keeping it exactly where
+    /// it is in the world, so it doesn't jump: a `Local` child's offset is
+    /// worked out from where it is now. False (nothing changed) for a
+    /// missing node or a parent that's it or one of its own children.
+    pub fn set_parent(&mut self, id: &str, parent: Option<(&str, Space, bool)>) -> bool {
+        let Some(world) = self.content.nodes.world_transform(id) else { return false };
+        let new_parent = match parent {
+            None => None,
+            Some((parent_id, space, inherit_rotation)) => {
+                if parent_id == id || self.content.nodes.descendants_of(id).iter().any(|child| child == parent_id) {
+                    return false;
+                }
+                let Some(parent_world) = self.content.nodes.world_transform(parent_id) else { return false };
+                let local = match space {
+                    Space::Local => parent_world.relative(&world, inherit_rotation),
+                    Space::Global => Transform3D::default(),
+                };
+                Some(Parent { id: parent_id.to_owned(), space, local, inherit_rotation })
+            }
+        };
+        let Some(node) = self.content.nodes.get_mut(id) else { return false };
+        match new_parent {
+            Some(parent) => node.set_property(parent),
+            None => { node.remove_property::<Parent>(); }
+        }
+        true
+    }
+
+    /// Every node's renderer instance to where the node is - position,
+    /// rotation, and scale (the node's times its model's, see
+    /// `Model::render_scale`). Called every frame by `App::run` after the
+    /// hierarchy's resolved, so a node's `Transform3D` is the one place its
+    /// pose is set from.
+    pub fn sync_render_instances(&mut self) {
+        let SceneContent { nodes, renderizable_instances, .. } = &mut self.content;
+        for node in nodes.iter() {
+            let Some(transform) = node.get_property::<Transform3D>() else { continue };
+            let Some(instance) = renderizable_instances.get_mut(&node.id) else { continue };
+            let render_scale = node.get_property::<NodeModelProperty>().map(|model| model.render_scale(transform.scale)).unwrap_or(transform.scale);
+            instance.instance.transform.position = transform.position;
+            instance.instance.transform.rotation = transform.rotation;
+            instance.instance.transform.scale = render_scale;
+        }
+    }
+
+    /// Every camera node's camera (see `CameraLens`) to where its node is
+    /// and to its lens - called every frame by `App::run`, after the
+    /// hierarchy's resolved.
+    pub fn sync_cameras(&mut self) {
+        for node in self.content.nodes.iter() {
+            let Some(lens) = node.get_property::<CameraLens>() else { continue };
+            let transform = node.get_property::<Transform3D>().copied().unwrap_or_default();
+            self.cameras.place(&node.id, transform.position, transform.rotation, lens.fovy, lens.znear, lens.viewport);
         }
     }
 
@@ -212,11 +359,19 @@ impl Scene {
             behaviour.on_spawn(self, app);
             self.behaviour = Some(behaviour);
         }
+        self.started = true;
     }
 
     pub(crate) fn run_update(&mut self, app: &mut App, ctx: &mut FrameContext) {
         if let Some(mut behaviour) = self.behaviour.take() {
             behaviour.update(self, app, ctx);
+            self.behaviour = Some(behaviour);
+        }
+    }
+
+    pub(crate) fn run_late_update(&mut self, app: &mut App, ctx: &mut FrameContext) {
+        if let Some(mut behaviour) = self.behaviour.take() {
+            behaviour.late_update(self, app, ctx);
             self.behaviour = Some(behaviour);
         }
     }

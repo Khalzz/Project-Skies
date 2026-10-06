@@ -29,6 +29,14 @@ var t_scene: texture_2d<f32>;
 @group(0) @binding(1)
 var s_scene: sampler;
 
+// The flight HUD, drawn into its own target (straight-alpha blended onto
+// transparency, so the stored rgb is premultiplied). Composited here, before
+// the effects, so the grey, the dimming and the tunnel cover it too.
+@group(0) @binding(3)
+var t_hud: texture_2d<f32>;
+@group(0) @binding(4)
+var s_hud: sampler;
+
 // See BlurRender's ScreenEffects.
 struct ScreenEffects {
     // desaturation (0..1), tunnel (0..1), screen aspect (w/h), darkening (0..1)
@@ -37,6 +45,9 @@ struct ScreenEffects {
     tunnel_color: vec4<f32>,
     // flat color over the scene, alpha = how much
     tint: vec4<f32>,
+    // x: flight HUD opacity (0 off .. 1 as drawn). The fade-in after a
+    // cinematic cuts back to the cockpit.
+    hud_params: vec4<f32>,
 };
 
 @group(0) @binding(2)
@@ -50,6 +61,12 @@ const TUNNEL_BLUR: f32 = 1.1;
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var color = textureSample(t_scene, s_scene, in.tex_coords);
+    let hud = textureSample(t_hud, s_hud, in.tex_coords);
+    // The HUD is stored premultiplied, so both its cover and its color
+    // scale with the power-on opacity.
+    let hud_opacity = effects.hud_params.x;
+    let cover = hud.a * hud_opacity;
+    color = vec4<f32>(color.rgb * (1.0 - cover) + hud.rgb * hud_opacity, 1.0);
     let desaturation = effects.params.x;
     let tunnel = effects.params.y;
     let aspect = effects.params.z;

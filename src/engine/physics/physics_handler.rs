@@ -34,13 +34,11 @@ pub enum PhysicsCommand {
     Shutdown,         // Main thread signals shutdown
     TogglePause,      // Toggle physics pause
     /// Teleports a named rigidbody (see `Physics::physics_elements`) to an exact
-    /// translation/rotation/velocity - meant to be sent right before un-pausing
-    /// after a scripted cinematic (see `CameraTrack::LookAt` /
-    /// `GameLogic::update`'s cinematic handling) has been moving that object's
-    /// *render* transform directly while physics sat paused. Without this, the
-    /// rigidbody resumes stepping from wherever it was when it got paused -
-    /// wherever the script left it visually - causing a visible snap the instant
-    /// physics starts writing the render transform again.
+    /// translation/rotation/velocity - an aircraft respawned, put at the start
+    /// of a path an animation has it fly (see play::path_follow), or let go
+    /// where an animation left it (see `SetKinematic`). Without this, the
+    /// rigidbody carries on from wherever the physics last had it - a visible
+    /// snap the instant physics starts writing the node's transform again.
     SetTransform { name: String, translation: Vector3<f32>, rotation: Quaternion<f32>, linvel: Vector3<f32> },
     /// A body (and its node's physics halves) for a node spawned after the
     /// thread started - see `Scene::spawn_node_live`. Replaces any body
@@ -49,6 +47,12 @@ pub enum PhysicsCommand {
     /// Removes the body (colliders and physics halves too) of a node that
     /// was despawned - see `Scene::despawn_node`.
     RemoveBody { name: String },
+    /// Holds a body still (kinematic: nothing pushes it, it doesn't fall)
+    /// while something else moves its node - an animation (see
+    /// `SceneContent::kinematic`) - or lets it go again. Letting go doesn't
+    /// move it: send a `SetTransform` first to start it where the animation
+    /// left it.
+    SetKinematic { name: String, kinematic: bool },
 }
 
 // By hand - a physics half (`Box<dyn PhysicsBehavior>`) isn't Debug.
@@ -61,6 +65,7 @@ impl std::fmt::Debug for PhysicsCommand {
             PhysicsCommand::SetTransform { name, .. } => write!(f, "SetTransform {{ name: {name:?}, .. }}"),
             PhysicsCommand::AddBody { def, behaviors } => write!(f, "AddBody {{ id: {:?}, behaviors: {} }}", def.id, behaviors.len()),
             PhysicsCommand::RemoveBody { name } => write!(f, "RemoveBody {{ name: {name:?} }}"),
+            PhysicsCommand::SetKinematic { name, kinematic } => write!(f, "SetKinematic {{ name: {name:?}, kinematic: {kinematic} }}"),
         }
     }
 }
@@ -224,6 +229,21 @@ impl Physics {
                             }
                         }
                     },
+                    Ok(PhysicsCommand::SetKinematic { name, kinematic }) => {
+                        if let Some(Some(physics_data)) = self.physics_elements.get(&name) {
+                            if let Some(rb) = self.rigidbody_set.get_mut(physics_data.rigidbody_handle) {
+                                // A static body (the ground) stays static.
+                                if !rb.is_fixed() {
+                                    let body_type = if kinematic { rapier3d::prelude::RigidBodyType::KinematicPositionBased } else { rapier3d::prelude::RigidBodyType::Dynamic };
+                                    rb.set_body_type(body_type, true);
+                                    if kinematic {
+                                        rb.set_linvel(Vector3::zeros(), true);
+                                        rb.set_angvel(Vector3::zeros(), true);
+                                    }
+                                }
+                            }
+                        }
+                    },
                     Ok(PhysicsCommand::RemoveBody { name }) => {
                         self.remove_body(&name, &mut island_manager, &mut impulse_joint_set, &mut multibody_joint_set);
                         physics_nodes.retain(|physics_node| physics_node.id != name);
@@ -276,19 +296,25 @@ impl Physics {
                 let mut debug_draw = DebugDraw::default();
                 if send_debug_lines {
                     for physics_node in &physics_nodes {
+                        debug_draw.set_owner(Some(physics_node.id.clone()));
                         physics_node.debug_draw(&self.rigidbody_set, &mut debug_draw);
                     }
                     // Every collider on a moving body, as it really is - fixed
                     // bodies (the ground/runway meshes) skipped, they'd bury
                     // the screen.
                     const COLLIDER_COLOR: [f32; 3] = [1.0, 0.55, 0.1];
-                    for (_, body) in self.rigidbody_set.iter().filter(|(_, body)| body.is_dynamic()) {
-                        for handle in body.colliders() {
-                            if let Some(collider) = self.collider_set.get(*handle) {
+                    for (handle, body) in self.rigidbody_set.iter().filter(|(_, body)| body.is_dynamic()) {
+                        let owner = self.physics_elements.iter().find_map(|(id, data)| {
+                            data.as_ref().filter(|data| data.rigidbody_handle == handle).map(|_| id.clone())
+                        });
+                        debug_draw.set_owner(owner);
+                        for collider_handle in body.colliders() {
+                            if let Some(collider) = self.collider_set.get(*collider_handle) {
                                 debug_draw.collider(collider, COLLIDER_COLOR);
                             }
                         }
                     }
+                    debug_draw.set_owner(None);
                 }
                 if let Err(e) = debug_physics_tx.send(debug_draw.into_lines()) {
                     println!("Failed to send debug physics messages: {}", e);

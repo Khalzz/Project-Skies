@@ -144,7 +144,7 @@ fn save_current(app: &mut App) {
 /// untouched.
 fn refresh_chips(app: &mut App, action: &str) {
     let chips = controller_chip_nodes(app, action);
-    let path = format!("Settings/Content/Controller/List/{action}/Chips");
+    let Some(path) = super::ui::controller_action_path(action).map(|path| format!("{path}/Chips")) else { return };
     if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &path) {
         if let Some(container) = node.as_container_mut() {
             container.children = chips;

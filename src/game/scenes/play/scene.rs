@@ -2,15 +2,21 @@ use std::{collections::HashMap, f32::consts::PI, time::{Duration, Instant}};
 
 use glyphon::FontSystem;
 use nalgebra::{vector, Point3, UnitQuaternion, Vector3};
-use crate::{app::App, engine::{audio::subtitles::Subtitle, input::input, physics::physics_handler::{PhysicsCommand, RenderMessage}, primitive::manual_vertex::ManualVertex, rendering::{camera::camera::yaw_pitch_rotation, enviroment::environment::Environment, ui::ui::Ui}, scene_manager::{node::Node, properties::{Model, Transform3D}, scene::{FrameContext, LoadReporter, Scene, SceneBehaviour}}, ui::{color::UiColor, ui_node::{UiNode, UiNodeContent}, ui_transform::{Anchor, Orientation, PositionValue, SizeValue}}}, transform::Transform};
+use crate::{app::App, engine::{audio::subtitles::Subtitle, input::input, physics::physics_handler::{PhysicsCommand, RenderMessage}, primitive::manual_vertex::ManualVertex, rendering::{enviroment::environment::Environment, ui::ui::Ui}, scene_manager::{node::Node, properties::{CameraLens, Model, Transform3D}, scene::{FrameContext, LoadReporter, Scene, SceneBehaviour}}, ui::{color::UiColor, ui_node::{UiNode, UiNodeContent}, ui_transform::{Anchor, Orientation, PositionValue, SizeValue}}}};
 use crate::engine::game_nodes::game_object::{Camera as GameObjectCamera, Cameras, ColliderType, Lighting, Physics as PhysicsProperty, RigidBodyData};
 use crate::game::scenes::main_menu::ui as main_menu_ui;
-use super::flight_editor::EditorRequest;
-use super::flight_manager::{flight_manager, LiveAircraft};
+use super::flight_editor::{EditorRequest, NodeKind, Playback, SceneNodeInfo, Telemetry, TimelineRequest};
+use super::map_nodes::MapNodes;
+use super::animations::{self, Animations};
+use super::map::AnimAction;
+use crate::engine::scene_manager::properties::degrees_from_rotation;
+use crate::engine::scene_manager::properties::{Parent, Space, SpawnedLive};
+use super::flight_manager::{cruise_speed, flight_manager, LiveAircraft};
+use super::plane::autopilot::Speed;
 use super::map::MapSpec;
 use super::tactical_map::{self, contour_lines, TacticalMap, View as TacticalView};
 use super::flight_editor::next_path_point;
-use super::tactical_ui::{AircraftStatus, FlightPlan, RosterCoalition, RosterEntry};
+use super::tactical_ui::{AircraftStatus, FlightPlan, PlanTarget, RosterCoalition, RosterEntry};
 use super::plane::aircraft_spec::AircraftSpec;
 use super::ai_defense::AiDefense;
 use super::map::Difficulty;
@@ -49,7 +55,6 @@ pub struct GameLogic {
     pub start_time: Instant,
     pub event_system: Option<EventSystem>,
     pub game_time: f64,
-    was_cinematic_active: bool,
     was_paused: bool,
     esc_hold_time: f32,
     is_dead: bool,
@@ -97,8 +102,10 @@ pub struct GameLogic {
     // The weapons line on the HUD - see update_weapons.
     weapons_status: String,
     // The countermeasures line on the HUD: flares and chaff left, what's
-    // released - see update_weapons.
+    // released - see update_weapons. The column is the same, as two rows
+    // with a ">" on each one a press releases.
     countermeasures_status: String,
+    countermeasures_column: Option<(u32, u32, Release)>,
     // Every flare and chaff in the air.
     countermeasures: Countermeasures,
     // The bots' reactions to missiles fired at them - see
@@ -114,7 +121,37 @@ pub struct GameLogic {
     weapon_list: Vec<(String, bool)>,
     // The land and runway, for missiles to fly into - see spawn_world.
     world_collision: WorldCollision,
+    // The map's own nodes and every node's tracks, kept in the scene - see
+    // play::map_nodes.
+    map_nodes: MapNodes,
+    // Every node's animations running (map.ron's animations) and the paths
+    // followed meanwhile - see late_update.
+    animations: Animations,
+    // A running animation has the HUD hidden (as of last frame) - see
+    // update_g_vision.
+    animation_hides_hud: bool,
+    // Seconds into the HUD power-on after a cinematic returns to the
+    // cockpit. None once it's on for good - see tick_hud_boot.
+    hud_boot: Option<f32>,
+    // F10's editor camera keeping up with what F1-F4 picked: its node id
+    // and where it was last frame - see update_editor_follow.
+    editor_follow: Option<(String, Vector3<f32>)>,
+    // The telemetry's last look at what the camera's on: its id and
+    // velocity - for a missile's G.
+    telemetry_last: Option<(String, Vector3<f32>)>,
+    // The camera the view was last put on - see update_view.
+    view_camera: String,
 }
+
+/// The player's view - a camera node driven by play::camera::camera::Camera.
+pub const PLAYER_CAMERA: &str = "camera";
+/// The camera animations' camera keys move (see play::animations).
+pub const ANIMATION_CAMERA: &str = "animation_camera";
+/// How far F10's editor camera stands off what it focuses on (m) - an
+/// aircraft, anything else.
+const EDITOR_FOCUS_AIRCRAFT: f32 = 60.0;
+const EDITOR_FOCUS_NODE: f32 = 25.0;
+const EDITOR_FOCUS_MISSILE: f32 = 15.0;
 
 /// The level's folder - its level_planning.ron (see EventSystem) and
 /// map.ron (see flight_manager::spawn_map).
@@ -162,12 +199,24 @@ impl GameLogic {
         let mut flight_manager = flight_manager::new();
         let mut world_collision = WorldCollision::default();
         Self::spawn_world(scene, app, &mut flight_manager, &mut world_collision, prepared.ground_trimesh, prepared.runway_trimesh);
+        // The map's own nodes (cameras...) and its timeline's tracks.
+        let mut map_nodes = MapNodes::default();
+        map_nodes.sync(scene, app, flight_manager.map());
+        // What animations' camera keys move - a camera of its own.
+        scene.spawn_node(app,
+            Node::new(ANIMATION_CAMERA)
+                .add_property(Transform3D::default())
+                .add_property(CameraLens::new(60.0))
+        ).expect("play should only spawn the animation camera once");
+        let mut animations = Animations::default();
+        animations.start_level(flight_manager.map());
 
         app.window_manager.context.mouse().set_relative_mouse_mode(true);
         app.debug_mouse_free = false;
 
-        scene.create_camera("main", Transform::new(Vector3::new(0.0, 0.0, 0.0), yaw_pitch_rotation(-90.0, -20.0), Vector3::new(1.0, 1.0, 1.0)), 45.0);
-        scene.select_camera("main");
+        // The player's view is the "camera" node (see spawn_world); the
+        // level's animations cut to their own camera nodes (see update_view).
+        scene.select_camera(PLAYER_CAMERA);
 
         app.is_paused = false;
 
@@ -177,8 +226,11 @@ impl GameLogic {
         let mut game_ui = play_ui::build_game_ui(app);
         game_ui.resolve(screen_width, screen_height);
         app.ui.add_to_ui("game_ui".to_owned(), game_ui);
-        for (key, text, font_size) in play_ui::HUD_READOUTS {
-            let mut readout = play_ui::build_hud_readout(app, text, font_size);
+        for (key, text, font_size, width) in play_ui::HUD_READOUTS {
+            let mut readout = play_ui::build_hud_readout(app, text, font_size, width);
+            if key == "hud_flares" || key == "hud_chaff" {
+                readout = readout.set_align(glyphon::cosmic_text::Align::Left);
+            }
             readout.resolve(screen_width, screen_height);
             app.ui.add_to_ui(key.to_owned(), readout);
         }
@@ -283,7 +335,6 @@ impl GameLogic {
             event_system,
             subtitle_data,
             game_time: 0.0,
-            was_cinematic_active: false,
             was_paused: false,
             esc_hold_time: 0.0,
             is_dead: false,
@@ -306,12 +357,20 @@ impl GameLogic {
             last_fired_side: -1.0,
             weapons_status: String::new(),
             countermeasures_status: String::new(),
+            countermeasures_column: None,
             countermeasures: Countermeasures::default(),
             ai_defense: AiDefense::default(),
             range_cue: None,
             selected_weapon: None,
             weapon_list: Vec::new(),
             world_collision,
+            map_nodes,
+            animations,
+            animation_hides_hud: false,
+            hud_boot: None,
+            editor_follow: None,
+            telemetry_last: None,
+            view_camera: PLAYER_CAMERA.to_owned(),
         }
     }
 
@@ -353,6 +412,7 @@ impl GameLogic {
         world_collision.add_mesh(&runway_trimesh.0, &runway_trimesh.1, runway_position, runway_scale);
         app.thick_lines.dynamic.clear();
         app.tactical_map_active = false;
+        app.editor_active = false;
         scene.spawn_node(app,
             Node::new("ground")
                 .add_property(Transform3D {
@@ -416,13 +476,16 @@ impl GameLogic {
                 .add_property(super::plane::effects::spray_emitters())
         ).expect("play should only spawn 'water_spray' once");
 
-        // No Transform3D/Model - a pure logic node, same idea as "player"'s
-        // own Plane behavior but with no mesh/physics of its own to carry.
-        // See play::camera::camera::Camera's own doc comment for how it gets
-        // fed "player"'s position each frame despite a Behavior having no
-        // way to reach another node's data on its own.
+        // The player's camera - a camera node (CameraLens) whose Camera
+        // behavior places it every frame. See play::camera::camera::Camera's
+        // own doc comment for how it gets fed the followed aircraft's
+        // position each frame despite a Behavior having no way to reach
+        // another node's data on its own.
         scene.spawn_node(app,
-            Node::new("camera").add_behavior(Camera::new())
+            Node::new(PLAYER_CAMERA)
+                .add_property(Transform3D::default())
+                .add_property(CameraLens::new(45.0))
+                .add_behavior(Camera::new())
         ).expect("play should only spawn 'camera' once");
 
         scene.spawn_node(app,
@@ -475,9 +538,9 @@ impl GameLogic {
     // needs to track the camera.
     fn update_water_plane(scene: &mut Scene) {
         let camera_position = scene.cameras.active().camera.position().coords;
-        if let Some(world) = scene.content.renderizable_instances.get_mut("world") {
-            world.instance.transform.position.x = camera_position.x;
-            world.instance.transform.position.z = camera_position.z;
+        if let Some(world) = scene.content.nodes.get_mut("world").and_then(|node| node.get_property_mut::<Transform3D>()) {
+            world.position.x = camera_position.x;
+            world.position.z = camera_position.z;
         }
     }
 
@@ -551,8 +614,9 @@ impl GameLogic {
     /// Drains the colors, closes in the tunnel or reds out the view as the
     /// pilot does (see plane::pilot::Pilot::screen_effects) - every frame,
     /// since screen effects only last one (see BlurRender::write_effects).
-    /// Also decides whether the HUD should be hidden (see hide_hud) - while
-    /// the view is completely gone, and for good once crashed.
+    /// The flight HUD is drawn under that same pass, so it greys, dims and
+    /// tunnels with the world. It's still switched off once crashed, and
+    /// while the map, the editor or an animation asks for it gone.
     fn update_g_vision(&mut self, scene: &Scene, app: &mut App) {
         let player_id = self.flight_manager.player_id();
         let Some(plane) = scene.content.nodes.get(player_id).and_then(|node| node.get_behavior::<Plane>()) else { return };
@@ -572,14 +636,14 @@ impl GameLogic {
         let mut effects = if shown { plane.pilot.screen_effects() } else { ScreenEffects::default() };
         // F8's heat view: the world dim and grey under the heat sources
         // (see update_heat_view).
-        if self.heat_view && !app.tactical_map_active {
+        if self.heat_view && !(app.tactical_map_active || app.editor_active) {
             effects = ScreenEffects::default();
             effects.desaturation = 1.0;
             effects.darkening = 0.75;
         }
         app.renderer.blur.effects = effects;
 
-        let hide = effects.tunnel >= 0.97 || plane.wrecked || plane.pilot.is_dead() || app.tactical_map_active;
+        let hide = plane.wrecked || plane.pilot.is_dead() || (app.tactical_map_active || app.editor_active) || self.animation_hides_hud;
         if !hide && self.hud_hidden_by_g {
             // Vision's back - the flight HUD returns (the quick menu shows
             // itself again once the pilot has control, see Plane).
@@ -596,6 +660,53 @@ impl GameLogic {
     // The flight HUD: timer, FPS, G, power, altitude, speed, compass (all
     // under "game_ui") and the flight path marker.
     const FLIGHT_HUD: [&'static str; 2] = ["game_ui", "velocity_marker"];
+
+    /// The player's own cockpit, the view the HUD belongs to.
+    fn in_player_cockpit(&self, scene: &Scene) -> bool {
+        self.view_camera == PLAYER_CAMERA
+            && scene.content.nodes.get(PLAYER_CAMERA).and_then(|node| node.get_behavior::<Camera>()).is_some_and(Camera::is_cockpit)
+    }
+
+    /// Starts the HUD power-on the frame a cinematic stops hiding it and
+    /// the view is the cockpit. A shot that never hid the HUD leaves it
+    /// alone. Opening the editor or the map, or another shot hiding it
+    /// again, drops a boot that's still running.
+    fn sync_hud_boot(&mut self, scene: &Scene, app: &mut App, was_hiding_hud: bool) {
+        if app.editor_active || app.tactical_map_active || self.animation_hides_hud {
+            if self.hud_boot.is_some() {
+                self.hud_boot = None;
+                app.renderer.blur.hud_opacity = 1.0;
+            }
+            return;
+        }
+        if was_hiding_hud && self.in_player_cockpit(scene) {
+            self.hud_boot = Some(0.0);
+            app.renderer.blur.hud_opacity = 0.0;
+        }
+    }
+
+    /// Advances the power-on and writes the HUD's opacity. `advance` is
+    /// false while paused, so the fade holds instead of running behind the
+    /// menu. Once the fade is done the HUD stays fully on.
+    fn tick_hud_boot(&mut self, app: &mut App, advance: bool) {
+        if self.hud_hidden_by_g {
+            self.hud_boot = None;
+            app.renderer.blur.hud_opacity = 1.0;
+            return;
+        }
+        let Some(t) = self.hud_boot else {
+            app.renderer.blur.hud_opacity = 1.0;
+            return;
+        };
+        let t = if advance { t + app.time.delta_time } else { t };
+        if t >= hud_boot_length() {
+            self.hud_boot = None;
+            app.renderer.blur.hud_opacity = 1.0;
+        } else {
+            self.hud_boot = Some(t);
+            app.renderer.blur.hud_opacity = hud_boot_alpha(t);
+        }
+    }
 
     /// Keeps the flight HUD hidden while update_g_vision says so - every
     /// frame, after the level's UI tracks (EventSystem::apply_tracks) have
@@ -634,6 +745,9 @@ impl GameLogic {
         self.flight_manager.update(scene, app.time.delta_time);
         // The live map editor (F10's editor view); paused or not.
         self.update_flight_editor(scene, app, physics_command_tx);
+        // The map's own nodes and the tracks on every node, as the map (the
+        // editor's, while it's up) has them.
+        self.map_nodes.sync(scene, app, self.flight_manager.map());
         // F10 - the tactical map; live, paused or not.
         self.update_tactical_map(scene, app, physics_command_tx);
         // The aircraft the player flies - its name in map.ron (the editor
@@ -666,6 +780,7 @@ impl GameLogic {
                 None => {}
             }
         }
+        self.update_editor_follow(scene, app, &focus);
         if let Some(followed) = scene.content.renderizable_instances.get(&focus) {
             // A missile: along its flight, not turned like its model.
             let (position, rotation) = self.missiles.camera_pose(&focus)
@@ -705,6 +820,9 @@ impl GameLogic {
         // Every frame, paused or not - the effects only last one frame, and
         // the view shouldn't pop back to normal behind the pause menu.
         self.update_g_vision(scene, app);
+        // The HUD's power-on, if a cinematic just handed the cockpit back.
+        // Paused, it holds whatever brightness it had.
+        self.tick_hud_boot(app, !app.is_paused);
 
         // F3 debug view - shows/hides in lockstep with the console toggle,
         // same "set_active every frame, no separate dirty-tracking" idiom
@@ -732,6 +850,16 @@ impl GameLogic {
         let input_lock_end = self.event_system.as_ref().and_then(|es| es.input_lock_end(self.game_time));
         if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "skip_prompt") {
             node.set_active(input_lock_end.is_some());
+        }
+        // Locked (the intro, an animation playing - from its first frame):
+        // no flying and no looking round either - the camera eases back to
+        // its center. And the editor camera flying (right button held) keeps
+        // the plane's controls off too.
+        let controls_locked = input_lock_end.is_some() || self.sequence_locks_input();
+        let mut editor_flying = false;
+        if let Some(camera) = scene.content.nodes.get_mut(PLAYER_CAMERA).and_then(|node| node.get_behavior_mut::<Camera>()) {
+            camera.look_locked = controls_locked;
+            editor_flying = camera.editor_looking();
         }
 
         if let Some(lock_end_ms) = input_lock_end {
@@ -821,73 +949,29 @@ impl GameLogic {
             // The pause menu's Settings panel is main_menu's own - its
             // sliders need following while dragged here too.
             main_menu_ui::update_settings_sliders(app);
+            main_menu_ui::refresh_controller_states(app);
             return;
         }
 
+        // A paused or finished animation still has the plane. Flying it lets
+        // go at once, from where it is, on its own flight plan.
+        self.release_player_to_live(scene, app, player_id);
+
         self.game_time += app.time.delta_time as f64;
-
-        // While a CameraTrack::LookAt cinematic is driving the camera (see
-        // level_planning.ron's camera_tracks), the player doesn't get flight
-        // controls - skipping Plane::update leaves `controls` at whatever they
-        // already are (neutral, since nothing else ever touches them). The plane
-        // itself is expected to be driven by a matching Object3DTrack targeting
-        // "player" for the same window (see level_planning.ron) rather than
-        // physics - see the pause/resume handling right below.
-        let cinematic_active = match &self.event_system {
-            Some(event_system) => event_system.is_cinematic_camera_active(self.game_time),
-            None => false,
-        };
-
-        let cinematic_just_ended = !cinematic_active && self.was_cinematic_active;
-
-        // Rising/falling edge of the cinematic window - pause physics for its
-        // duration (so the rigidbody's own simulated position doesn't drift away
-        // from wherever the scripted Object3DTrack is putting the plane, which
-        // would otherwise cause a visible snap the instant physics starts
-        // driving the render transform again), then on the way out, teleport the
-        // rigidbody to match exactly where the script left the plane before
-        // un-pausing - see PhysicsCommand::SetTransform's own doc comment.
-        if let Some(physics_command_tx) = physics_command_tx {
-            if cinematic_active && !self.was_cinematic_active {
-                let _ = physics_command_tx.send(PhysicsCommand::TogglePause);
-            } else if cinematic_just_ended {
-                if let Some(player) = scene.content.renderizable_instances.get(player_id) {
-                    let transform = player.instance.transform;
-                    let _ = physics_command_tx.send(PhysicsCommand::SetTransform {
-                        name: player_id.to_owned(),
-                        translation: transform.position,
-                        rotation: transform.rotation.into_inner(),
-                        // Matches data.ron's own player initial_velocity - a
-                        // reasonable cruise speed to resume normal flight at
-                        // regardless of exactly what the cinematic's own path was.
-                        linvel: Vector3::new(0.0, 0.0, 0.0),
-                    });
-                }
-                let _ = physics_command_tx.send(PhysicsCommand::TogglePause);
-            }
-        }
-
-        if cinematic_just_ended {
-            if let Some(camera) = scene.content.nodes.get_mut("camera").and_then(|node| node.get_behavior_mut::<Camera>()) {
-                camera.snapshot_cinematic_return(&scene.cameras);
-            }
-        }
-
-        self.was_cinematic_active = cinematic_active;
 
         // Everything else about the plane (input, physics feedback, model
         // animation) runs in its own Plane behavior - input_locked is the one
-        // thing that depends on cinematic/event-system state only this
+        // thing that depends on the level's animations / intro state only this
         // SceneBehaviour sees.
         if let Some(plane) = scene.content.nodes.get_mut(player_id).and_then(|node| node.get_behavior_mut::<Plane>()) {
             // Typing in the flight editor isn't flying.
-            plane.input_locked = cinematic_active || input_lock_end.is_some() || app.flight_editor.typing;
+            plane.input_locked = input_lock_end.is_some() || app.flight_editor.typing || self.sequence_locks_input() || editor_flying;
         }
 
         Self::update_water_plane(scene);
         Self::update_water_wake(scene, app, player_id);
         self.check_crash(scene, app);
-        let has_control = !cinematic_active && input_lock_end.is_none() && !app.flight_editor.typing;
+        let has_control = input_lock_end.is_none() && !app.flight_editor.typing && !self.sequence_locks_input();
         self.update_weapons(scene, app, has_control);
 
         if let Some(event_system) = &mut self.event_system {
@@ -897,10 +981,8 @@ impl GameLogic {
         self.ui_control(scene, app);
 
         if let Some(event_system) = &self.event_system {
-            event_system.apply_tracks(self.game_time, scene, app);
+            event_system.apply_tracks(self.game_time, app);
         }
-        // Hung weapons onto wherever the tracks just put their aircraft.
-        self.flight_manager.update_stores(scene);
         self.update_hud(scene, app);
         self.update_lock_arrow(scene, app);
         self.update_heat_view(scene, app);
@@ -968,12 +1050,41 @@ impl GameLogic {
         (self.camera_focus.clone(), switch)
     }
 
-    /// F10's tactical map (see play::tactical_map): opens/closes it - the
+    /// F10's editor and M's map (see play::tactical_map): opens/closes them
+    /// (one at a time) - for the map, the
     /// camera into its orbit view and the renderer onto its lines - keeps
     /// every aircraft's trail, and while it's open builds this frame's
     /// lines.
     fn update_tactical_map(&mut self, scene: &mut Scene, app: &mut App, physics_command_tx: Option<&Sender<PhysicsCommand>>) {
-        if input::is_action_just_pressed("toggle_tactical_map") {
+        // F10 - the editor; not with the map up (one closes the other).
+        if input::is_action_just_pressed("toggle_editor") {
+            let open = !app.editor_active;
+            if open && self.tactical_map.open {
+                self.tactical_map.open = false;
+                app.tactical_map_active = false;
+                if let Some(camera) = scene.content.nodes.get_mut(PLAYER_CAMERA).and_then(|node| node.get_behavior_mut::<Camera>()) {
+                    camera.set_tactical_view(false);
+                }
+            }
+            app.editor_active = open;
+            app.ui.has_changed = true;
+            // Starts where the view is now.
+            let active = scene.cameras.active();
+            let from = (active.camera.position().coords, active.camera.calc_forward_direction());
+            if let Some(camera) = scene.content.nodes.get_mut(PLAYER_CAMERA).and_then(|node| node.get_behavior_mut::<Camera>()) {
+                camera.set_editor_view(open, from);
+            }
+            if !app.is_paused {
+                app.window_manager.context.mouse().set_relative_mouse_mode(!app.mouse_free());
+            }
+        }
+        if input::is_action_just_pressed("toggle_tactical_map") && !app.flight_editor.typing {
+            if app.editor_active {
+                app.editor_active = false;
+                if let Some(camera) = scene.content.nodes.get_mut(PLAYER_CAMERA).and_then(|node| node.get_behavior_mut::<Camera>()) {
+                    camera.set_editor_view(false, (Vector3::zeros(), Vector3::z()));
+                }
+            }
             self.tactical_map.open = !self.tactical_map.open;
             app.tactical_map_active = self.tactical_map.open;
             app.ui.has_changed = true;
@@ -1010,11 +1121,9 @@ impl GameLogic {
         // at its own height - or, with Shift, up and down. Into the path like
         // an edit in its window (below).
         if let Some(drag) = app.tactical_ui.point_drag.take() {
-            let selected = app.tactical_ui.selected.clone();
-            let path = selected.as_deref()
-                .and_then(|name| self.flight_manager.map().find(name))
-                .map(|(_, placement)| placement.path.clone());
-            if let (Some(name), Some(mut path)) = (selected, path) {
+            // The flight plan shown - an aircraft's or a map path's.
+            let shown = app.tactical_ui.plan.as_ref().map(|plan| (plan.target.clone(), plan.points.clone()));
+            if let Some((target, mut path)) = shown {
                 if let Some(point) = path.get_mut(drag.index) {
                     let active = scene.cameras.active();
                     let [left, top, width, height] = tactical_viewport(app);
@@ -1035,22 +1144,28 @@ impl GameLogic {
                             }
                         }
                     }
-                    app.tactical_ui.path_edit = Some((name, path));
+                    app.tactical_ui.path_edit = Some((target, path));
                 }
             }
         }
 
-        if let Some((name, path)) = app.tactical_ui.path_edit.take() {
+        // Into the map path it is (or the aircraft follows - every aircraft
+        // on it flies the new one), or the aircraft's own.
+        if let Some((target, path)) = app.tactical_ui.path_edit.take() {
+            let apply = |map: &mut MapSpec| match &target {
+                PlanTarget::Aircraft(name) => map.set_flight_plan(name, path.clone()),
+                PlanTarget::Path(name) => {
+                    if let Some(spec) = map.named_path_mut(name) {
+                        spec.points = path.clone();
+                    }
+                }
+            };
             let mut map = self.flight_manager.map().clone();
-            if let Some(placement) = map.find_mut(&name) {
-                placement.path = path.clone();
-                if let Err(error) = self.flight_manager.sync(scene, app, physics_command_tx, &map) {
-                    eprintln!("F10 flight plan: {error}");
-                }
-                if let Some(placement) = app.flight_editor.map.find_mut(&name) {
-                    placement.path = path;
-                }
+            apply(&mut map);
+            if let Err(error) = self.flight_manager.sync(scene, app, physics_command_tx, &map) {
+                eprintln!("F10 flight plan: {error}");
             }
+            apply(&mut app.flight_editor.map);
         }
 
         // Its center button: the camera kept on the selected aircraft -
@@ -1089,7 +1204,14 @@ impl GameLogic {
         let sea_level = app.water.ocean.sea_level();
         let selected = app.tactical_ui.selected.clone();
         let hovered = app.tactical_ui.hovered.clone();
-        app.thick_lines.dynamic = self.tactical_map.lines(self.flight_manager.map(), &live, self.flight_manager.player_id(), selected.as_deref(), hovered.as_deref(), &view, sea_level);
+        // A map path picked in the editor is shown instead of the aircraft's
+        // flight plan.
+        let picked_path = app.tactical_ui.selected_path.as_deref().and_then(|name| self.flight_manager.map().named_path(name)).cloned();
+        let plan_of = if picked_path.is_some() { None } else { selected.as_deref() };
+        app.thick_lines.dynamic = self.tactical_map.lines(self.flight_manager.map(), &live, self.flight_manager.player_id(), plan_of, hovered.as_deref(), &view, sea_level);
+        if let Some(path) = &picked_path {
+            tactical_map::flight_plan(&mut app.thick_lines.dynamic, &path.points, path.looped, None, sea_level, &view);
+        }
         // The missiles in the air, in their shooter's colors.
         for missile in self.missiles.in_flight() {
             let rgb = match self.flight_manager.map().find(&missile.shooter) {
@@ -1121,10 +1243,42 @@ impl GameLogic {
 
         let mut labels = Vec::new();
         let mut point_pickables = Vec::new();
-        let plan = selected.and_then(|name| self.flight_manager.map().find(name)).map(|(coalition, placement)| {
+        let picked_path = app.tactical_ui.selected_path.as_deref().and_then(|name| self.flight_manager.map().named_path(name));
+        let path_plan = picked_path.map(|path| {
+            for (index, &(x, altitude, z)) in path.points.iter().enumerate() {
+                if let Some(at) = on_screen(Vector3::new(x, altitude, z)) {
+                    labels.push((at, format!("{}  {:.0} m", index + 1, altitude), egui::Color32::WHITE));
+                    point_pickables.push((index, at));
+                }
+            }
+            // On from the last point the way the last leg goes (or north).
+            let next_suggestion = match path.points.as_slice() {
+                [.., a, b] => (b.0 + (b.0 - a.0).signum() * 1000.0, b.1, b.2 + (b.2 - a.2).signum() * 1000.0),
+                [only] => (only.0, only.1, only.2 + 1000.0),
+                [] => {
+                    let at = scene.cameras.active().camera.position();
+                    (at.x, 1000.0, at.z)
+                }
+            };
+            FlightPlan {
+                target: PlanTarget::Path(path.name.clone()),
+                path_name: Some(path.name.clone()),
+                name: path.name.clone(),
+                coalition: String::new(),
+                color: egui::Color32::from_rgb(140, 200, 255),
+                plane: format!("{} points · {}{}", path.points.len(), if path.looped { "looped" } else { "once" }, if path.smooth { " · smooth" } else { "" }),
+                is_player: false,
+                live: None,
+                points: path.points.clone(),
+                next: None,
+                next_suggestion,
+            }
+        });
+        let plan = if path_plan.is_some() { path_plan } else { selected.and_then(|name| self.flight_manager.map().find(name)).map(|(coalition, placement)| {
             let now = live.get(&placement.name).copied();
             let next = now.and_then(|now| now.next_path_point);
-            for (index, &(x, altitude, z)) in placement.path.iter().enumerate() {
+            let (points, _) = self.flight_manager.map().flight_plan(placement);
+            for (index, &(x, altitude, z)) in points.iter().enumerate() {
                 if let Some(at) = on_screen(Vector3::new(x, altitude, z)) {
                     let color = if next == Some(index) { egui::Color32::from_rgb(255, 205, 40) } else { egui::Color32::WHITE };
                     labels.push((at, format!("{}  {:.0} m", index + 1, altitude), color));
@@ -1138,17 +1292,19 @@ impl GameLogic {
                 egui::Color32::from_rgb(coalition.color.0, coalition.color.1, coalition.color.2)
             };
             FlightPlan {
+                target: PlanTarget::Aircraft(placement.name.clone()),
+                path_name: placement.follow.clone().filter(|name| self.flight_manager.map().named_path(name).is_some()),
                 name: placement.name.clone(),
                 coalition: coalition.name.clone(),
                 color,
                 plane: placement.plane.clone(),
                 is_player,
                 live: now,
-                points: placement.path.clone(),
+                next_suggestion: next_path_point(placement, &points, now),
+                points,
                 next,
-                next_suggestion: next_path_point(placement, now),
             }
-        });
+        }) };
 
         let roster = self.flight_manager.map().coalitions.iter().map(|coalition| RosterCoalition {
             name: coalition.name.clone(),
@@ -1179,7 +1335,7 @@ impl GameLogic {
     /// to the world - every frame it's up (see flight_manager::sync).
     fn update_flight_editor(&mut self, scene: &mut Scene, app: &mut App, physics_command_tx: Option<&Sender<PhysicsCommand>>) {
         // Docked in F10's editor view - up while that is.
-        let open = app.tactical_map_active && app.tactical_ui.editor_view();
+        let open = app.editor_active;
         if open != self.flight_editor_was_open {
             self.flight_editor_was_open = open;
             if open {
@@ -1235,6 +1391,40 @@ impl GameLogic {
                         Err(error) => (error, true),
                     });
                 }
+                EditorRequest::Timeline(request) => match request {
+                    TimelineRequest::Play(node, name) => {
+                        let length = editor.map.animation(&node, &name).map(|animation| animation.length).unwrap_or(0.0);
+                        self.animations.resume(&node, &name, length);
+                    }
+                    TimelineRequest::Start(node, name) => self.animations.start(&node, &name),
+                    TimelineRequest::Pause(node, name) => self.animations.pause(&node, &name),
+                    TimelineRequest::Stop(node, name) => self.animations.stop(&node, &name),
+                    TimelineRequest::Reset(node, name) => {
+                        self.animations.stop(&node, &name);
+                        scene.content.kinematic.remove(&node);
+                        if editor.map.find(&node).is_some() {
+                            respawn.push(node);
+                        } else if let Some(spec) = editor.map.node(&node).cloned() {
+                            scene.content.kinematic.remove(&node);
+                            if let Some(placed) = scene.content.nodes.get_mut(&node) {
+                                placed.set_property(Transform3D { position: spec.position(), rotation: spec.rotation(), scale: Vector3::new(1.0, 1.0, 1.0) });
+                            }
+                        }
+                    }
+                    TimelineRequest::Seek(node, name, time) => {
+                        let length = editor.map.animation(&node, &name).map(|animation| animation.length).unwrap_or(time);
+                        self.animations.seek(&node, &name, time.min(length));
+                    }
+                },
+                EditorRequest::Focus(id) => {
+                    self.editor_follow = None;
+                    if let Some(world) = scene.world_transform(&id) {
+                        let distance = if self.flight_manager.map().find(&id).is_some() { EDITOR_FOCUS_AIRCRAFT } else { EDITOR_FOCUS_NODE };
+                        if let Some(camera) = scene.content.nodes.get_mut(PLAYER_CAMERA).and_then(|node| node.get_behavior_mut::<Camera>()) {
+                            camera.editor_focus(world.position, distance);
+                        }
+                    }
+                }
                 EditorRequest::RespawnAll => respawn_all = true,
                 EditorRequest::Respawn(name) => respawn.push(name),
                 EditorRequest::ResetLoadout(name) => self.flight_manager.reset_loadout(scene, app, &name),
@@ -1274,6 +1464,7 @@ impl GameLogic {
         editor.live = self.flight_manager.map().aircraft()
             .filter_map(|(_, aircraft)| Some((aircraft.name.clone(), self.flight_manager.live(scene, &aircraft.name)?)))
             .collect();
+        self.fill_editor_scene(scene, &mut editor);
         app.flight_editor = editor;
 
         // The player flying again (respawned, or switched to a plane that
@@ -1290,6 +1481,357 @@ impl GameLogic {
                 }
             }
         }
+    }
+
+    /// What the editor shows of the scene this frame: every node (for the
+    /// hierarchy), the shown animation's clock, and where the view is (for a
+    /// new camera key).
+    fn fill_editor_scene(&self, scene: &Scene, editor: &mut super::flight_editor::FlightEditor) {
+        let map = self.flight_manager.map();
+        editor.nodes = scene.content.nodes.iter().map(|node| {
+            let kind = if map.find(&node.id).is_some() {
+                NodeKind::Aircraft
+            } else if map.node(&node.id).is_some() {
+                NodeKind::MapNode
+            } else if node.get_property::<SpawnedLive>().is_some() || self.flight_manager.is_store(&node.id) || node.id == ANIMATION_CAMERA {
+                NodeKind::Runtime
+            } else {
+                NodeKind::Level
+            };
+            let parent = node.get_property::<Parent>();
+            let world = node.get_property::<Transform3D>().copied().unwrap_or_default();
+            SceneNodeInfo {
+                id: node.id.clone(),
+                kind,
+                parent: parent.map(|parent| parent.id.clone()),
+                space: parent.map(|parent| parent.space).unwrap_or(Space::Local),
+                camera: node.get_property::<CameraLens>().is_some(),
+                animated: map.animations.get(&node.id).is_some_and(|animations| !animations.is_empty()),
+                world_position: world.position,
+                world_rotation: degrees_from_rotation(&world.rotation),
+            }
+        }).collect();
+        editor.playback = editor.current_animation.as_ref()
+            .and_then(|(node, name)| self.animations.get(node, name))
+            .map(|running| Playback { time: running.time, playing: running.playing, engaged: true })
+            .unwrap_or_default();
+        // The editor camera's pose - what a new camera key takes.
+        let active = scene.cameras.active();
+        editor.view_position = active.camera.position().coords;
+        editor.view_rotation = Some(facing_with_up(active.camera.calc_forward_direction(), active.camera.up));
+        editor.view_fov = active.projection.fovy;
+        if editor.preview_camera.as_ref().is_some_and(|camera| scene.cameras.get(camera).is_none()) {
+            editor.preview_camera = None;
+        }
+    }
+
+    /// F10's editor: F1-F4 fly the editor camera to what they picked (it
+    /// keeps looking the way it was), and from then on it keeps up with it
+    /// as it moves - flying it about with the mouse moves round it. Until
+    /// something else is picked (or focused from the hierarchy), or what it
+    /// follows is gone.
+    fn update_editor_follow(&mut self, scene: &mut Scene, app: &App, focus: &str) {
+        if !app.editor_active {
+            self.editor_follow = None;
+            return;
+        }
+        let picked = ["camera_player", "camera_next_aircraft", "camera_next_ground_unit", "camera_next_missile"]
+            .iter()
+            .any(|action| input::is_action_just_pressed(action)) && !app.flight_editor.typing;
+        let at = scene.world_transform(focus).map(|transform| transform.position);
+        let Some(camera) = scene.content.nodes.get_mut(PLAYER_CAMERA).and_then(|node| node.get_behavior_mut::<Camera>()) else { return };
+        if picked {
+            if let Some(at) = at {
+                let distance = if self.flight_manager.map().find(focus).is_some() { EDITOR_FOCUS_AIRCRAFT } else { EDITOR_FOCUS_MISSILE };
+                camera.editor_focus(at, distance);
+                self.editor_follow = Some((focus.to_owned(), at));
+            }
+            return;
+        }
+        match (&self.editor_follow, at) {
+            (Some((id, last)), Some(at)) if id == focus => {
+                camera.editor_shift(at - last);
+                self.editor_follow = Some((id.clone(), at));
+            }
+            // Gone (a missile that blew up) or something else picked - it
+            // stays where it is.
+            (Some(_), _) => self.editor_follow = None,
+            (None, _) => {}
+        }
+    }
+
+    /// What the camera's on, for the editor's Telemetry window - an
+    /// aircraft or a missile (not the player's own jet): how fast, how high,
+    /// the G, what it's doing.
+    fn telemetry(&mut self, scene: &Scene, delta_time: f32) -> Option<Telemetry> {
+        let focus = self.camera_focus.clone();
+        if focus.is_empty() || focus == self.flight_manager.player_id() {
+            self.telemetry_last = None;
+            return None;
+        }
+        let row = |label: &str, value: String| (label.to_owned(), value, false);
+        let warn = |label: &str, value: String| (label.to_owned(), value, true);
+        let heading = |velocity: Vector3<f32>| (velocity.x.atan2(velocity.z).to_degrees() + 360.0) % 360.0;
+
+        if let Some(missile) = self.missiles.telemetry(&focus) {
+            // Its G: how its velocity changed since last frame, gravity out.
+            let g = match &self.telemetry_last {
+                Some((id, last)) if *id == focus && delta_time > 1e-4 => {
+                    let felt = (missile.velocity - last) / delta_time - Vector3::new(0.0, -9.81, 0.0);
+                    Some(felt.magnitude() / 9.81)
+                }
+                _ => None,
+            };
+            self.telemetry_last = Some((focus.clone(), missile.velocity));
+            let speed = missile.velocity.magnitude();
+            let target_at = missile.target.as_deref().and_then(|target| scene.world_transform(target)).map(|transform| transform.position);
+            let mut rows = vec![
+                row("Speed", format!("{:.0} kt · M{:.2}", speed * 1.943_84, speed / 340.29)),
+                row("Altitude", format!("{:.0} m", missile.position.y)),
+                g.map(|g| if g > 30.0 { warn("G", format!("{g:.0} G")) } else { row("G", format!("{g:.1} G")) }).unwrap_or_else(|| row("G", "-".to_owned())),
+                row("Heading", format!("{:.0}°", heading(missile.velocity))),
+                row("Flying for", format!("{:.1} s", missile.time)),
+                row("Motor", if missile.burning { "burning".to_owned() } else { "burnt out".to_owned() }),
+            ];
+            match (&missile.target, target_at) {
+                (Some(target), Some(at)) => rows.push(row("Target", format!("{target} · {:.1} km", (at - missile.position).magnitude() / 1000.0))),
+                (Some(target), None) => rows.push(row("Target", target.clone())),
+                (None, _) => rows.push(warn("Target", "none - lost it".to_owned())),
+            }
+            return Some(Telemetry { title: focus.clone(), subtitle: format!("{} · fired by {}", missile.weapon, missile.shooter), rows });
+        }
+
+        self.telemetry_last = None;
+        let (coalition, placement) = self.flight_manager.map().find(&focus)?;
+        let live = self.flight_manager.live(scene, &focus)?;
+        let node = scene.content.nodes.get(&focus);
+        let state = node.and_then(|node| node.physics_state::<AircraftState>());
+        let plane = node.and_then(|node| node.get_behavior::<Plane>());
+        let flight_data = state.map(|state| &state.flight_data);
+        let mut rows = vec![
+            row("Speed", format!("{:.0} kt · M{:.2}", live.speed_kt, flight_data.map(|data| data.mach).unwrap_or(0.0))),
+            row("Altitude", format!("{:.0} m", live.altitude)),
+        ];
+        let g_text = format!("{:+.1} G (commanded {:+.1})", live.g, live.g_command);
+        rows.push(if live.g > 9.0 || live.g < -3.0 { warn("G", g_text) } else { row("G", g_text) });
+        rows.push(row("Angle of attack", format!("{:.1}°", flight_data.map(|data| data.aoa_y).unwrap_or(0.0))));
+        if let Some(plane) = plane {
+            let afterburner = state.map(|state| state.afterburner).unwrap_or(0.0);
+            rows.push(row("Throttle", format!("{:.0}%{}", plane.controls.throttle * 100.0, if afterburner > 0.01 { " · afterburner" } else { "" })));
+        }
+        rows.push(row("Heading", format!("{:.0}°", heading(flight_data.map(|data| data.velocity).unwrap_or_else(Vector3::z)))));
+        rows.push(row("Flown by", live.flown_by.to_owned()));
+        if let Some(waypoint) = live.waypoint {
+            rows.push(row("Next point", format!("{:.1} km", (waypoint - live.position).magnitude() / 1000.0)));
+        }
+        if live.wrecked {
+            rows.push(warn("State", "wrecked".to_owned()));
+        }
+        let who = if placement.player { "player".to_owned() } else { format!("{} pilot", placement.difficulty.label()) };
+        Some(Telemetry { title: focus.clone(), subtitle: format!("{} · {} · {who}", placement.plane, coalition.name), rows })
+    }
+
+    /// Stick or keys asking the plane to fly. The editor's fly button (right
+    /// mouse) is the camera's, so it doesn't count.
+    fn player_flight_input() -> bool {
+        if input::mouse_right_button_down() {
+            return false;
+        }
+        ["pitch_up", "pitch_down", "roll_left", "roll_right", "rudder_left", "rudder_right", "throttle_up", "throttle_down"]
+            .iter()
+            .any(|action| input::is_action_pressed(action))
+    }
+
+    /// The player is flying while an animation has the plane and isn't
+    /// playing: let go of that hold and fly the map's own plan from here.
+    fn release_player_to_live(&mut self, scene: &mut Scene, app: &App, player_id: &str) {
+        if app.flight_editor.typing || !Self::player_flight_input() || self.animations.playing_on(player_id) {
+            return;
+        }
+        if scene.content.nodes.get(PLAYER_CAMERA).and_then(|node| node.get_behavior::<Camera>()).is_some_and(|camera| camera.editor_looking()) {
+            return;
+        }
+        let placement = self.flight_manager.map().find(player_id).map(|(_, placement)| placement.clone());
+        let stopped = self.animations.stop_paused(player_id);
+        let Some(plane) = scene.content.nodes.get_mut(player_id).and_then(|node| node.get_behavior_mut::<Plane>()) else { return };
+        if !stopped && !plane.held && !plane.scripted {
+            return;
+        }
+        plane.held = false;
+        plane.scripted = false;
+        if let Some(placement) = placement {
+            let (points, looped) = self.flight_manager.map().flight_plan(&placement);
+            plane.set_path(&points, Speed::Hold(cruise_speed(&placement)), placement.difficulty, looped);
+        }
+    }
+
+    /// An animation is playing with `lock_input` - the player has no
+    /// controls meanwhile.
+    fn sequence_locks_input(&self) -> bool {
+        self.animations.locks_input(self.flight_manager.map())
+    }
+
+    /// Puts the right camera on screen:
+    /// - in M's map, the map's view;
+    /// - in F10's editor, the editor camera - or a camera it's looking
+    ///   through ("View through", or the animation's camera with "Camera in
+    ///   view");
+    /// - otherwise the animation camera while a running animation's camera
+    ///   keys drive it (`animating`);
+    /// - the player's view the rest of the time, cut to as soon as a
+    ///   cinematic camera lets go of the screen.
+    fn update_view(&mut self, scene: &mut Scene, app: &App, animating: bool) {
+        let preview = app.editor_active.then(|| {
+            app.flight_editor.preview_camera.clone()
+                .or_else(|| (app.flight_editor.timeline_preview && animating).then(|| ANIMATION_CAMERA.to_owned()))
+        }).flatten();
+        let (wanted, blend) = if app.tactical_map_active {
+            (PLAYER_CAMERA.to_owned(), 0.0)
+        } else if app.editor_active {
+            (preview.clone().unwrap_or_else(|| PLAYER_CAMERA.to_owned()), 0.0)
+        } else if animating {
+            (ANIMATION_CAMERA.to_owned(), 0.0)
+        } else {
+            (PLAYER_CAMERA.to_owned(), 0.0)
+        };
+        let wanted = if scene.cameras.get(&wanted).is_some() { wanted } else { PLAYER_CAMERA.to_owned() };
+
+        // Every camera drawn the whole screen's size (the player's sizes
+        // itself).
+        for node in scene.content.nodes.iter_mut() {
+            if node.id == PLAYER_CAMERA {
+                continue;
+            }
+            if let Some(lens) = node.get_property_mut::<CameraLens>() {
+                lens.viewport = None;
+            }
+        }
+
+        // Already on it - unless the camera on screen went away (a camera
+        // node despawned with its parent and spawned again).
+        if wanted == self.view_camera && scene.cameras.has_active_camera() {
+            return;
+        }
+        if blend > 0.0 {
+            scene.cameras.transition_to(&wanted, blend);
+        } else {
+            scene.select_camera(&wanted);
+        }
+        self.view_camera = wanted;
+    }
+
+    /// The level's animations' turn each frame, after every behavior (see
+    /// SceneBehaviour::late_update): their clocks on, every animated node
+    /// set to its keys, the paths followed, their events carried out, and
+    /// the right camera on screen.
+    fn late_update(&mut self, scene: &mut Scene, app: &mut App, physics_command_tx: Option<&Sender<PhysicsCommand>>) {
+        if app.is_paused {
+            return;
+        }
+        let frame = self.animations.update(app.time.delta_time, scene, self.flight_manager.map(), physics_command_tx);
+        // Aircraft an animation's placing: nothing the physics says about
+        // them counts meanwhile (see Plane::held) - and one an animation's
+        // playing on feels no G (Plane::calm).
+        for node in scene.content.nodes.iter_mut() {
+            let held = scene.content.kinematic.contains(&node.id);
+            let calm = frame.calm.contains(&node.id);
+            if let Some(plane) = node.get_behavior_mut::<Plane>() {
+                plane.held = held;
+                plane.calm = calm;
+            }
+        }
+        let was_hiding_hud = self.animation_hides_hud;
+        self.animation_hides_hud = frame.hides_hud;
+        for event in frame.events {
+            match event {
+                AnimAction::PlayAudio(folder) => app.audio.play_audio(folder),
+                AnimAction::Subtitle { text, seconds } => self.subtitle_data.add_text(&text, (seconds * 1000.0) as u64, app),
+                // Done by the animations themselves.
+                AnimAction::StartAnimation { .. } | AnimAction::StopAnimation { .. } => {}
+            }
+        }
+        // The animation camera where its keys put it.
+        if let Some(pose) = frame.camera {
+            if let Some(node) = scene.content.nodes.get_mut(ANIMATION_CAMERA) {
+                node.set_property(Transform3D { position: pose.position, rotation: pose.rotation, scale: Vector3::new(1.0, 1.0, 1.0) });
+                node.set_property(CameraLens::new(pose.fovy));
+            }
+        }
+        self.update_view(scene, app, frame.camera.is_some());
+        self.sync_hud_boot(scene, app, was_hiding_hud);
+        // What the camera's on, while spectating - for the editor, or the
+        // debug view (F5/F9) in game.
+        let debug_view = app.render_physics.visible;
+        let telemetry = if app.editor_active || debug_view { self.telemetry(scene, app.time.delta_time) } else { None };
+        app.spectate_telemetry = if app.editor_active { None } else { telemetry.clone() };
+        app.flight_editor.telemetry = telemetry;
+        self.update_editor_gizmos(scene, app);
+    }
+
+    /// F10's editor's lines over the world - see play::editor_gizmos.
+    /// F10's editor's lines over the world (see play::editor_gizmos) - and,
+    /// in the editor or the debug view (F5/F9) while spectating, the path
+    /// of what's followed.
+    fn update_editor_gizmos(&self, scene: &Scene, app: &mut App) {
+        let spectating = app.flight_editor.telemetry.is_some();
+        if !app.editor_active && !spectating {
+            app.editor_lines.dynamic.clear();
+            return;
+        }
+        let active = scene.cameras.active();
+        let to_pixels = app.window_manager.pixel_size.height as f32 / (app.window_manager.size.height as f32).max(1.0);
+        let view = TacticalView {
+            camera_position: active.camera.position().coords,
+            fovy_deg: active.projection.fovy,
+            screen_height: app.window_manager.size.height as f32 * to_pixels,
+            focus: active.camera.position().coords,
+        };
+        let aspect = app.window_manager.size.width as f32 / (app.window_manager.size.height as f32).max(1.0);
+        let editor = &app.flight_editor;
+        let selected = editor.selected_node();
+        let mut highlighted: Vec<&str> = selected.into_iter().collect();
+        if let Some(preview) = editor.preview_camera.as_deref() {
+            highlighted.push(preview);
+        }
+        let mut lines = if app.editor_active {
+            super::editor_gizmos::lines(scene, self.flight_manager.map(), scene.cameras.active_name(), selected, &highlighted, &view, app.water.ocean.sea_level(), aspect)
+        } else {
+            Vec::new()
+        };
+        // What the camera's on (see telemetry): an aircraft's path - the one
+        // its autopilot's flying - with a line to the point it's making for;
+        // a missile's trail and a line to its target.
+        if spectating && !self.camera_focus.is_empty() {
+            let sea_level = app.water.ocean.sea_level();
+            if let Some(missile) = self.missiles.telemetry(&self.camera_focus) {
+                for pair in missile.trail.windows(2).chain(std::iter::once([*missile.trail.last().unwrap_or(&missile.position), missile.position].as_slice())) {
+                    lines.push(LineInstance { start: pair[0].into(), end: pair[1].into(), color: [1.0, 0.6, 0.2, 0.9], width: 2.0 });
+                }
+                if let Some(target) = missile.target.as_deref().and_then(|target| scene.world_transform(target)) {
+                    lines.push(LineInstance { start: missile.position.into(), end: target.position.into(), color: [1.0, 0.3, 0.3, 0.6], width: 1.5 });
+                }
+            } else if let Some(mut live) = self.flight_manager.live(scene, &self.camera_focus) {
+                let route = scene.content.nodes.get(&self.camera_focus).and_then(|node| node.get_behavior::<Plane>()).and_then(Plane::route);
+                let (points, looped) = match &route {
+                    Some((points, next, looped)) => {
+                        live.next_path_point = *next;
+                        (points.iter().map(|point| (point.x, point.y, point.z)).collect::<Vec<_>>(), *looped)
+                    }
+                    None => self.flight_manager.map().find(&self.camera_focus).map(|(_, placement)| self.flight_manager.map().flight_plan(placement)).unwrap_or_default(),
+                };
+                tactical_map::flight_plan(&mut lines, &points, looped, Some(&live), sea_level, &view);
+            }
+        }
+        // The shown animation's camera keys, each where it puts the camera.
+        if let Some(animation) = editor.current_animation.as_ref().filter(|_| app.editor_active).and_then(|current| Some(current)).as_ref().and_then(|(node, name)| self.flight_manager.map().animation(node, name)) {
+            let picked = editor.picked_camera_key();
+            for (index, key) in animation.camera.iter().enumerate() {
+                if let Some(pose) = animations::key_pose(key, scene) {
+                    super::editor_gizmos::camera_key(&mut lines, pose.position, pose.rotation, pose.fovy, picked == Some(index), &view, aspect);
+                }
+            }
+        }
+        app.editor_lines.dynamic = lines;
     }
 
     /// Every aircraft still flying - where it is, how it's moving, how hot
@@ -1327,7 +1869,7 @@ impl GameLogic {
         const EDGE_INSET: f32 = 70.0;
         const LENGTH: f32 = 22.0;
         const HALF_WIDTH: f32 = 11.0;
-        if app.tactical_map_active || self.hud_hidden_by_g {
+        if (app.tactical_map_active || app.editor_active) || self.hud_hidden_by_g {
             return;
         }
         let Some(target) = self.fire_control.seeker_target.as_ref()
@@ -1387,7 +1929,7 @@ impl GameLogic {
                 node.set_active(false);
             }
         }
-        if !self.heat_view || app.tactical_map_active {
+        if !self.heat_view || (app.tactical_map_active || app.editor_active) {
             return;
         }
 
@@ -1568,7 +2110,7 @@ impl GameLogic {
         let overflow = self.kill_feed.len().saturating_sub(play_ui::KILL_FEED_ROWS);
         self.kill_feed.drain(..overflow);
 
-        let shown = !app.tactical_map_active;
+        let shown = !(app.tactical_map_active || app.editor_active);
         let height = play_ui::KILL_FEED_ROW_HEIGHT;
         let right = app.window_manager.size.width as f32 - MARGIN;
         // Puts a node at (x, y), `width` wide - shown or hidden.
@@ -1697,6 +2239,7 @@ impl GameLogic {
             self.fire_control.drop_locks();
             self.weapons_status = String::new();
             self.countermeasures_status = String::new();
+            self.countermeasures_column = None;
             app.hud_lines.dynamic.clear();
             return;
         };
@@ -1704,7 +2247,7 @@ impl GameLogic {
         // Countermeasures: the key choosing flares, chaff or both, one
         // release, the burst program - and the program's releases due now.
         let mut released = Vec::new();
-        self.countermeasures_status = match self.flight_manager.countermeasures_mut(&player_id) {
+        let (status, column) = match self.flight_manager.countermeasures_mut(&player_id) {
             Some(set) => {
                 if has_control && input::is_action_just_pressed("countermeasure_mode") {
                     set.release = set.release.next();
@@ -1716,10 +2259,12 @@ impl GameLogic {
                     released.extend(set.start_program());
                 }
                 released.extend(set.update(delta_time));
-                format!("FLR {}  CHF {}  {}", set.flares, set.chaff, set.release.label())
+                (format!("FLR {}  CHF {}  {}", set.flares, set.chaff, set.release.label()), Some((set.flares, set.chaff, set.release)))
             }
-            None => String::new(),
+            None => (String::new(), None),
         };
+        self.countermeasures_status = status;
+        self.countermeasures_column = column;
         for release in released {
             self.countermeasures.release(scene, app, release, own.position, own.rotation, own.velocity);
         }
@@ -1905,22 +2450,65 @@ impl GameLogic {
         let label_y = ticks_bottom - HEADING_MAJOR_TICK - 2.0 - play_ui::HUD_SMALL_LABEL_SIZE.1 * 0.5;
         let heading_y = label_y - 4.0;
         let g_y = line_bottom - readout_height * 0.5;
+        // The weapon name stays on the square's bottom edge. Everything
+        // else listed here sits in the column to the right of the square,
+        // under the altitude readout: the wheels, then fuel, then the
+        // countermeasures.
+        const FUEL_WIDTH: f32 = 120.0;
+        const WEAPON_WIDTH: f32 = 160.0;
+        const WARNING_WIDTH: f32 = 140.0;
+        const COUNTERMEASURE_WIDTH: f32 = 96.0;
+        let weapon_y = line_bottom;
+        // Past the altitude box, in the margin to the right of the square,
+        // so the wider fuel and countermeasure boxes stay outside it.
+        let column_left = frame_x + frame_width + 14.0;
+        let side_x = column_left + FUEL_WIDTH * 0.5;
+        let countermeasure_x = column_left + COUNTERMEASURE_WIDTH * 0.5;
+        let wheels_y = middle_y;
+        let fuel_caption_y = wheels_y + 40.0;
+        let fuel_y = fuel_caption_y + readout_height;
+        let flares_y = fuel_y + readout_height + 10.0;
+        let chaff_y = flares_y + readout_height - 2.0;
+        // The low-altitude cue stays in the square, above the weapon name.
+        let warning_y = line_bottom - 48.0;
+        let (fuel_kg, fuel_capacity) = scene.content.nodes.get(self.flight_manager.player_id())
+            .and_then(|node| node.get_behavior::<Plane>())
+            .map(|plane| plane.fuel())
+            .unwrap_or((0.0, 0.0));
+        let fuel_shown = shown && fuel_capacity > 0.0;
+        let weapon_shown = shown && self.selected_weapon.is_some();
+        let low_altitude = shown && scene.content.nodes.get(self.flight_manager.player_id())
+            .and_then(|node| node.physics_state::<AircraftState>())
+            .is_some_and(|state| state.flight_data.altimeter < 150.0);
+        // A slow flash, about once a second, the way a jet's warning light
+        // pulses rather than strobes.
+        const ALTITUDE_BLINK_SECONDS: f64 = 0.7;
+        let blink_on = (self.game_time % ALTITUDE_BLINK_SECONDS) < ALTITUDE_BLINK_SECONDS * 0.5;
+        let altitude_lit = shown && (!low_altitude || blink_on);
+        let warning_shown = low_altitude && blink_on;
+        let countermeasures_shown = shown && self.countermeasures_column.is_some();
         let placed = [
-            ("hud_speed", speed_x, middle_y, shown),
-            ("hud_altitude", altitude_x, middle_y, shown),
-            ("hud_speed_caption", speed_x, middle_y - readout_height, shown),
-            ("hud_altitude_caption", altitude_x, middle_y - readout_height, shown),
-            ("hud_heading", middle_x, heading_y, shown),
-            ("hud_g", speed_x, g_y, shown && fox2),
+            ("hud_speed", speed_x, middle_y, shown, readout_width),
+            ("hud_altitude", altitude_x, middle_y, altitude_lit, readout_width),
+            ("hud_speed_caption", speed_x, middle_y - readout_height, shown, readout_width),
+            ("hud_altitude_caption", altitude_x, middle_y - readout_height, shown, readout_width),
+            ("hud_heading", middle_x, heading_y, shown, readout_width),
+            ("hud_g", speed_x, g_y, shown && fox2, readout_width),
+            ("hud_weapon", middle_x, weapon_y, weapon_shown, WEAPON_WIDTH),
+            ("hud_fuel_caption", side_x, fuel_caption_y, fuel_shown, FUEL_WIDTH),
+            ("hud_fuel", side_x, fuel_y, fuel_shown, FUEL_WIDTH),
+            ("hud_altitude_warning", middle_x, warning_y, warning_shown, WARNING_WIDTH),
+            ("hud_flares", countermeasure_x, flares_y, countermeasures_shown, COUNTERMEASURE_WIDTH),
+            ("hud_chaff", countermeasure_x, chaff_y, countermeasures_shown, COUNTERMEASURE_WIDTH),
         ];
-        for (key, x, y, visible) in placed {
+        for (key, x, y, visible, width) in placed {
             let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, key) else { continue };
             node.set_active(visible);
-            node.transform.x = x - readout_width / 2.0;
+            node.transform.x = x - width / 2.0;
             node.transform.y = y - readout_height / 2.0;
             node.transform.rect.left = node.transform.x;
             node.transform.rect.top = node.transform.y;
-            node.transform.rect.right = node.transform.x + readout_width;
+            node.transform.rect.right = node.transform.x + width;
             node.transform.rect.bottom = node.transform.y + readout_height;
         }
         // The ladder's and the heading tape's numbers - hidden until placed
@@ -1956,14 +2544,60 @@ impl GameLogic {
                 screen_line((line, y), (line + inward * END_IN, y), WIDTH);
             }
         }
-        // The readouts' boxes.
-        for x in [speed_x, altitude_x] {
-            let (left, right) = (x - readout_width * 0.5, x + readout_width * 0.5);
-            let (top, bottom) = (middle_y - readout_height * 0.5, middle_y + readout_height * 0.5);
-            screen_line((left, top), (right, top), WIDTH);
-            screen_line((right, top), (right, bottom), WIDTH);
-            screen_line((right, bottom), (left, bottom), WIDTH);
-            screen_line((left, bottom), (left, top), WIDTH);
+        // The readouts' boxes. The altitude box flashes with its number.
+        {
+            let mut readout_box = |x: f32, y: f32, width: f32| {
+                let (left, right) = (x - width * 0.5, x + width * 0.5);
+                let (top, bottom) = (y - readout_height * 0.5, y + readout_height * 0.5);
+                screen_line((left, top), (right, top), WIDTH);
+                screen_line((right, top), (right, bottom), WIDTH);
+                screen_line((right, bottom), (left, bottom), WIDTH);
+                screen_line((left, bottom), (left, top), WIDTH);
+            };
+            readout_box(speed_x, middle_y, readout_width);
+            if altitude_lit {
+                readout_box(altitude_x, middle_y, readout_width);
+            }
+            if fuel_shown {
+                readout_box(side_x, fuel_y, FUEL_WIDTH);
+            }
+            if warning_shown {
+                readout_box(middle_x, warning_y, WARNING_WIDTH);
+            }
+        }
+        // Three wheels, in the right-hand column, while the gear is out.
+        // Each ring is wide enough, and broken into enough pieces, that it
+        // reads as a circle rather than a handful of squares.
+        let (gear_deploy, brake_deploy) = scene.content.nodes.get(self.flight_manager.player_id())
+            .and_then(|node| node.physics_state::<AircraftState>())
+            .map(|state| (state.gear_deploy, state.speed_brake))
+            .unwrap_or((0.0, 0.0));
+        if gear_deploy > 0.02 {
+            // Big enough that each piece of the ring is a short arc, not a
+            // square. A line through the middle is the axle.
+            let radius = 11.0;
+            let nose = (side_x, wheels_y - 14.0);
+            let left_main = (side_x - 16.0, wheels_y + 8.0);
+            let right_main = (side_x + 16.0, wheels_y + 8.0);
+            const STEPS: usize = 24;
+            for center in [nose, left_main, right_main] {
+                for step in 0..STEPS {
+                    let a0 = step as f32 / STEPS as f32 * std::f32::consts::TAU;
+                    let a1 = (step + 1) as f32 / STEPS as f32 * std::f32::consts::TAU;
+                    screen_line(
+                        (center.0 + radius * a0.cos(), center.1 + radius * a0.sin()),
+                        (center.0 + radius * a1.cos(), center.1 + radius * a1.sin()),
+                        1.0,
+                    );
+                }
+                screen_line((center.0 - radius * 0.55, center.1), (center.0 + radius * 0.55, center.1), 1.0);
+            }
+        }
+        if brake_deploy > 0.02 {
+            let hinge = (side_x + 32.0, wheels_y);
+            let spread = 4.0 + brake_deploy * 6.0;
+            screen_line(hinge, (hinge.0 + 2.0, hinge.1 - spread), WIDTH);
+            screen_line(hinge, (hinge.0 + 2.0, hinge.1 + spread), WIDTH);
         }
         if let Some(cue) = &self.range_cue {
             // Bottom of the line is 0 m, the top the seeker's range.
@@ -2182,6 +2816,31 @@ impl GameLogic {
             if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/data_box/power").and_then(|n| n.as_label_mut()) {
                 label.set_text(&mut app.ui.text.font_system, &format!("Power: {}%", (throttle * 100.0).round()), true);
             }
+            let (fuel_kg, fuel_capacity) = player.and_then(|node| node.get_behavior::<Plane>()).map(|plane| plane.fuel()).unwrap_or((0.0, 0.0));
+            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/data_box/fuel").and_then(|n| n.as_label_mut()) {
+                let text = if fuel_capacity > 0.0 { format!("Fuel: {:.0} / {:.0} kg", fuel_kg, fuel_capacity) } else { "Fuel: —".to_owned() };
+                label.set_text(&mut app.ui.text.font_system, &text, true);
+            }
+            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "hud_fuel").and_then(|n| n.as_label_mut()) {
+                label.set_text(&mut app.ui.text.font_system, &format!("{fuel_kg:.0} / {fuel_capacity:.0}"), true);
+            }
+            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "hud_weapon").and_then(|n| n.as_label_mut()) {
+                let name = self.selected_weapon.as_deref().map(weapon_label).unwrap_or_default();
+                label.set_text(&mut app.ui.text.font_system, &name, true);
+            }
+            let (flares_text, chaff_text) = match self.countermeasures_column {
+                Some((flares, chaff, release)) => (
+                    format!("{} FLR {flares}", if release.releases_flares() { ">" } else { " " }),
+                    format!("{} CHF {chaff}", if release.releases_chaff() { ">" } else { " " }),
+                ),
+                None => (String::new(), String::new()),
+            };
+            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "hud_flares").and_then(|n| n.as_label_mut()) {
+                label.set_text(&mut app.ui.text.font_system, &flares_text, true);
+            }
+            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "hud_chaff").and_then(|n| n.as_label_mut()) {
+                label.set_text(&mut app.ui.text.font_system, &chaff_text, true);
+            }
 
             if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui/data_box/weapons").and_then(|n| n.as_label_mut()) {
                 label.set_text(&mut app.ui.text.font_system, &self.weapons_status, true);
@@ -2191,8 +2850,23 @@ impl GameLogic {
             }
             play_ui::update_weapon_list(app, &self.weapon_list);
 
-            if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "hud_altitude").and_then(|n| n.as_label_mut()) {
-                label.set_text(&mut app.ui.text.font_system, &format!("{:.0}", altimeter), true);
+            // Below this height (m) the altitude number and the ALTITUDE
+            // cue go red. The flash itself is in update_hud.
+            const LOW_ALTITUDE_M: f32 = 150.0;
+            let low_altitude = altimeter < LOW_ALTITUDE_M;
+            if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "hud_altitude") {
+                node.style.text_color = Some(if low_altitude { UiColor::Rgb(255, 64, 64) } else { UiColor::Rgb(0, 255, 77) });
+                node.set_alpha(1.0);
+                if let Some(label) = node.as_label_mut() {
+                    label.set_text(&mut app.ui.text.font_system, &format!("{:.0}", altimeter), true);
+                }
+            }
+            if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "hud_altitude_warning") {
+                node.style.text_color = Some(UiColor::Rgb(255, 64, 64));
+                node.set_alpha(1.0);
+                if let Some(label) = node.as_label_mut() {
+                    label.set_text(&mut app.ui.text.font_system, "ALTITUDE", true);
+                }
             }
 
             // F3 debug view - two separate single-line labels (see
@@ -2303,6 +2977,40 @@ fn bank_angle(rotation: &UnitQuaternion<f32>) -> Option<f32> {
     Some((-up.dot(&level_left)).atan2(up.dot(&level_up)).to_degrees())
 }
 
+/// How long the HUD takes to fade in after a cinematic (s).
+const HUD_BOOT_FADE: f32 = 0.32;
+
+fn hud_boot_length() -> f32 {
+    HUD_BOOT_FADE
+}
+
+/// 0 hidden, 1 fully on. `t` is seconds since the cockpit HUD started
+/// coming on: a short fade, then steady.
+fn hud_boot_alpha(t: f32) -> f32 {
+    if t <= 0.0 {
+        return 0.0;
+    }
+    if t >= HUD_BOOT_FADE {
+        return 1.0;
+    }
+    let u = t / HUD_BOOT_FADE;
+    u * u * (3.0 - 2.0 * u)
+}
+
+#[cfg(test)]
+mod hud_boot_tests {
+    use super::*;
+
+    #[test]
+    fn hud_fades_in_then_stays_on() {
+        assert_eq!(hud_boot_alpha(0.0), 0.0);
+        let early = hud_boot_alpha(HUD_BOOT_FADE * 0.5);
+        assert!(early > 0.0 && early < 1.0, "{early}");
+        assert_eq!(hud_boot_alpha(hud_boot_length()), 1.0);
+        assert_eq!(hud_boot_alpha(hud_boot_length() + 2.0), 1.0);
+    }
+}
+
 #[cfg(test)]
 mod bank_tests {
     use super::*;
@@ -2398,5 +3106,18 @@ fn weapon_label(id: &str) -> String {
 impl SceneBehaviour for GameLogic {
     fn update(&mut self, scene: &mut Scene, app: &mut App, ctx: &mut FrameContext) {
         self.update(scene, app, ctx.physics_command_tx, ctx.physics_data);
+    }
+
+    fn late_update(&mut self, scene: &mut Scene, app: &mut App, ctx: &mut FrameContext) {
+        self.late_update(scene, app, ctx.physics_command_tx);
+    }
+}
+
+/// The rotation looking along `forward` with `up` as near up as it gets.
+fn facing_with_up(forward: Vector3<f32>, up: Vector3<f32>) -> UnitQuaternion<f32> {
+    match (forward.try_normalize(1e-6), up.try_normalize(1e-6)) {
+        (Some(forward), Some(up)) if forward.cross(&up).norm() > 1e-4 => UnitQuaternion::face_towards(&forward, &up),
+        (Some(forward), _) => crate::engine::scene_manager::scene_nodes::facing(forward).unwrap_or_else(UnitQuaternion::identity),
+        _ => UnitQuaternion::identity(),
     }
 }

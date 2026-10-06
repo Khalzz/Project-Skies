@@ -72,8 +72,22 @@ pub struct RosterEntry {
     pub status: AircraftStatus,
 }
 
-/// The selected aircraft's flight plan, as the window shows (and edits) it.
+/// Whose points a flight plan window shows (and edits).
+#[derive(Clone, Debug, PartialEq)]
+pub enum PlanTarget {
+    /// An aircraft's - the map path it follows, or its own.
+    Aircraft(String),
+    /// One of the map's paths, by name.
+    Path(String),
+}
+
+/// The selected aircraft's flight plan (or a map path picked in the
+/// editor), as the window shows (and edits) it.
 pub struct FlightPlan {
+    pub target: PlanTarget,
+    /// The map path it is or follows - shared with whatever else follows
+    /// it. `None`: an aircraft's own path.
+    pub path_name: Option<String>,
     pub name: String,
     pub coalition: String,
     pub color: Color32,
@@ -118,9 +132,13 @@ pub struct TacticalUi {
     /// The right button went down on the map (not a window) - orbiting the
     /// camera, until it's let go.
     orbiting: bool,
-    /// The selected aircraft's path, changed in the Flight plan window - for
-    /// the scene to apply (taken there): its name and every point.
-    pub path_edit: Option<(String, Vec<(f32, f32, f32)>)>,
+    /// The shown flight plan's points, changed in its window or dragged on
+    /// the map - for the scene to apply (taken there): whose, and every
+    /// point.
+    pub path_edit: Option<(PlanTarget, Vec<(f32, f32, f32)>)>,
+    /// A map path picked in the editor's Paths window - shown and edited
+    /// instead of the selected aircraft's flight plan.
+    pub selected_path: Option<String>,
     /// Every aircraft that can be clicked, and where it is on screen
     /// (logical pixels) - filled by the scene every frame.
     pub pickables: Vec<(String, Pos2)>,
@@ -131,10 +149,6 @@ pub struct TacticalUi {
     pub roster: Vec<RosterCoalition>,
     /// The selected aircraft's flight plan - filled by the scene every frame.
     pub plan: Option<FlightPlan>,
-    /// The editor view switched off - just the map, with its own Aircraft
-    /// window. Off (so the editor view's on) to start with; later set by
-    /// whether the player's in edit mode (the mission/campaign editor).
-    pub plain_view: bool,
 }
 
 impl TacticalUi {
@@ -146,12 +160,6 @@ impl TacticalUi {
         self.dragging_map || self.dragging_point.is_some() || self.dragging_row.is_some() || self.orbiting
     }
 
-    /// The editor view's layout around the map (see FlightEditor::
-    /// draw_docked) - on unless switched off.
-    pub fn editor_view(&self) -> bool {
-        !self.plain_view
-    }
-
     /// Draws it all and takes a click on the map - call inside the egui
     /// frame while the tactical map is up. `map`: where the map is, in the
     /// editor view (between its panels - which list the aircraft, so this
@@ -160,10 +168,12 @@ impl TacticalUi {
         self.pick(ctx, map);
         self.top_bar(ctx, map);
         self.point_labels(ctx);
+        // In the editor view both are in its own panels - the aircraft in
+        // its Coalitions window, the flight plan in its Properties.
         if map.is_none() {
             self.roster_window(ctx);
+            self.plan_window(ctx, map);
         }
-        self.plan_window(ctx, map);
     }
 
     /// The aircraft under the pointer (nearest within PICK_RADIUS, not over a
@@ -255,11 +265,6 @@ impl TacticalUi {
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        let mut editor_view = self.editor_view();
-                        if ui.toggle_value(&mut editor_view, "Editor view").on_hover_text("The map with the editor around it: aircraft, properties, timeline").changed() {
-                            self.plain_view = !editor_view;
-                        }
-                        ui.separator();
                         let can_center = self.selected.is_some();
                         let hint = match (can_center, self.following) {
                             (false, _) => "Select an aircraft first",
@@ -281,7 +286,7 @@ impl TacticalUi {
                             }
                         }
                         ui.separator();
-                        ui.label(RichText::new("Drag: move · right-drag: orbit · scroll: zoom · F10: close").small().weak());
+                        ui.label(RichText::new("Drag: move · right-drag: orbit · scroll: zoom · M: close · F10: editor").small().weak());
                     });
                 });
             });
@@ -378,11 +383,20 @@ impl TacticalUi {
             None => window.anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 60.0)),
         };
         window.show(ctx, |ui| {
+                let is_path = matches!(plan.target, PlanTarget::Path(_));
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(&plan.name).color(plan.color).strong().size(15.0));
-                    ui.label(RichText::new(if plan.is_player { "player" } else { "bot" }).small().weak());
+                    let kind = if is_path { "path" } else if plan.is_player { "player" } else { "bot" };
+                    ui.label(RichText::new(kind).small().weak());
                 });
-                ui.label(RichText::new(format!("{} coalition · {}", plan.coalition, plan.plane)).weak());
+                if is_path {
+                    ui.label(RichText::new(&plan.plane).weak());
+                } else {
+                    ui.label(RichText::new(format!("{} coalition · {}", plan.coalition, plan.plane)).weak());
+                    if let Some(path) = &plan.path_name {
+                        ui.label(RichText::new(format!("Flies the map path '{path}' - editing it changes it for everything that follows it")).small().color(NEXT_POINT_COLOR));
+                    }
+                }
                 match plan.live {
                     Some(live) if live.wrecked => {
                         ui.label(RichText::new("Destroyed").color(ERROR_COLOR));
@@ -390,6 +404,7 @@ impl TacticalUi {
                     Some(live) => {
                         ui.label(RichText::new(format!("Flying · {:.0} kt · {:.0} m", live.speed_kt, live.altitude)).color(OK_COLOR));
                     }
+                    None if is_path => {}
                     None => {
                         ui.label(RichText::new("Not in the scene").color(ERROR_COLOR));
                     }
@@ -402,7 +417,8 @@ impl TacticalUi {
                 if points.is_empty() {
                     ui.label(RichText::new("No flight plan yet - add its first point").weak());
                 } else {
-                    changed |= points_table(ui, &mut points, plan, &mut self.dragging_row);
+                    let from = plan.live.map(|live| live.position);
+                    changed |= points_table(ui, "tactical_plan", &mut points, from, plan.next, plan.next_suggestion, &mut self.dragging_row);
                 }
 
                 ui.add_space(4.0);
@@ -425,28 +441,32 @@ impl TacticalUi {
                 });
             });
         if changed {
-            self.path_edit = Some((plan.name.clone(), points));
+            self.path_edit = Some((plan.target.clone(), points));
         }
         if !open {
-            self.selected = None;
+            match plan.target {
+                PlanTarget::Path(_) => self.selected_path = None,
+                PlanTarget::Aircraft(_) => self.selected = None,
+            }
         }
     }
 }
 
-/// The flight plan's points as a table - a handle to drag the row up or
-/// down the list (`dragging_row` - held between frames), #, x, z, altitude
-/// (all draggable), the distance from the aircraft, and per point: insert a
-/// point after it, delete it. Returns whether anything changed.
-fn points_table(ui: &mut egui::Ui, points: &mut Vec<(f32, f32, f32)>, plan: &FlightPlan, dragging_row: &mut Option<usize>) -> bool {
+/// A path's points as a table - a handle to drag the row up or down the
+/// list (`dragging_row` - held between frames), #, x, z, altitude (all
+/// draggable), the distance from `from` (the aircraft flying it), and per
+/// point: insert a point after it, delete it. `next`: the point it's flying
+/// to, marked; `next_suggestion`: where a point inserted after the last one
+/// goes. `id`: tells two tables apart. Returns whether anything changed.
+pub(crate) fn points_table(ui: &mut egui::Ui, id: &str, points: &mut Vec<(f32, f32, f32)>, from: Option<Vector3<f32>>, next: Option<usize>, next_suggestion: (f32, f32, f32), dragging_row: &mut Option<usize>) -> bool {
     let mut changed = false;
     let mut insert_after = None;
     let mut remove = None;
     let mut dropped = false;
     // Each row's top and bottom on screen - where a dragged row would land.
     let mut rows: Vec<(f32, f32)> = Vec::with_capacity(points.len());
-    let from = plan.live.map(|live| live.position);
-    egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-        let grid = egui::Grid::new("flight_plan_points").striped(true).num_columns(8).spacing([8.0, 4.0]).show(ui, |ui| {
+    egui::ScrollArea::vertical().id_salt((id, "scroll")).max_height(320.0).show(ui, |ui| {
+        let grid = egui::Grid::new((id, "points")).striped(true).num_columns(8).spacing([8.0, 4.0]).show(ui, |ui| {
             for header in ["", "#", "x", "z", "alt", "dist", "", ""] {
                 ui.label(RichText::new(header).strong());
             }
@@ -460,7 +480,7 @@ fn points_table(ui: &mut egui::Ui, points: &mut Vec<(f32, f32, f32)>, plan: &Fli
                 if handle.drag_stopped() {
                     dropped = true;
                 }
-                let is_next = plan.next == Some(index);
+                let is_next = next == Some(index);
                 let number = if is_next { format!("{} >", index + 1) } else { (index + 1).to_string() };
                 ui.label(if is_next { RichText::new(number).color(NEXT_POINT_COLOR).strong() } else { RichText::new(number) });
                 changed |= ui.add(egui::DragValue::new(&mut point.0).speed(10.0).max_decimals(0)).changed();
@@ -502,7 +522,7 @@ fn points_table(ui: &mut egui::Ui, points: &mut Vec<(f32, f32, f32)>, plan: &Fli
                 let here = points[index];
                 ((here.0 + next.0) * 0.5, (here.1 + next.1) * 0.5, (here.2 + next.2) * 0.5)
             }
-            None => plan.next_suggestion,
+            None => next_suggestion,
         };
         points.insert(index + 1, point);
         changed = true;
@@ -511,7 +531,7 @@ fn points_table(ui: &mut egui::Ui, points: &mut Vec<(f32, f32, f32)>, plan: &Fli
         points.remove(index);
         changed = true;
     }
-    if plan.next.is_some() {
+    if next.is_some() {
         ui.label(RichText::new("> the point it's flying to").small().color(NEXT_POINT_COLOR));
     }
     changed
@@ -590,7 +610,7 @@ mod tests {
     }
 
     fn plan(name: &str, points: Vec<(f32, f32, f32)>) -> FlightPlan {
-        FlightPlan { name: name.into(), coalition: "Blue".into(), color: Color32::WHITE, plane: "f16".into(), is_player: false, live: None, points, next: None, next_suggestion: (0.0, 1000.0, 9000.0) }
+        FlightPlan { target: PlanTarget::Aircraft(name.into()), path_name: None, name: name.into(), coalition: "Blue".into(), color: Color32::WHITE, plane: "f16".into(), is_player: false, live: None, points, next: None, next_suggestion: (0.0, 1000.0, 9000.0) }
     }
 
     #[test]
@@ -767,7 +787,7 @@ mod tests {
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 // Not clicking anything: nothing changes.
-                assert!(!points_table(ui, &mut points, &flight_plan, &mut None));
+                assert!(!points_table(ui, "test", &mut points, None, flight_plan.next, flight_plan.next_suggestion, &mut None));
             });
         });
         assert_eq!(points.len(), 2);

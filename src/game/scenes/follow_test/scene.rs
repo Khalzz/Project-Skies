@@ -166,9 +166,9 @@ impl GameLogic {
         // no shimmer, and it means the water never runs out from under a
         // fast free-fly. Same approach as play::scene::update_water_plane.
         let camera_xz = scene.cameras.active().camera.position().coords;
-        if let Some(water) = scene.content.renderizable_instances.get_mut("world") {
-            water.instance.transform.position.x = camera_xz.x;
-            water.instance.transform.position.z = camera_xz.z;
+        if let Some(water) = scene.content.nodes.get_mut("world").and_then(|node| node.get_property_mut::<Transform3D>()) {
+            water.position.x = camera_xz.x;
+            water.position.z = camera_xz.z;
         }
     }
 }

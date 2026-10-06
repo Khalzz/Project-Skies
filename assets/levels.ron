@@ -17,8 +17,8 @@
         name: "Test Chamber",
         description: "This level is a testing place, where the player could fly freely, this is set mainly to test mechanics.",
         scene: "playing",
-        mission_title: "The Chosen One",
-        location: "Mexican Gulf",
-        mission_date: "0100 hrs. 02 April 1998",
+        mission_title: "Test Chamber",
+        location: "Unknown island",
+        mission_date: "0100 hrs. 02 April 2022",
     ),
 ]

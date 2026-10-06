@@ -50,6 +50,17 @@ impl Camera {
         self.set_yaw_pitch(yaw, pitch);
     }
 
+    /// Points it along `forward` with `up` as its up - a full orientation,
+    /// roll included (unlike `look_at`, which keeps whatever `up` it had).
+    pub fn set_orientation(&mut self, forward: Vector3<f32>, up: Vector3<f32>) {
+        let Some(forward) = forward.try_normalize(1e-6) else { return };
+        let pitch = forward.y.clamp(-1.0, 1.0).asin();
+        let yaw = forward.z.atan2(forward.x);
+        self.set_yaw_pitch(yaw, pitch);
+        self.up = up;
+        self.rotation_modifier = UnitQuaternion::identity();
+    }
+
     pub fn calc_forward_direction(&self) -> Vector3<f32> {
         UnitQuaternion::from_quaternion(self.transform.rotation) * Vector3::new(1.0, 0.0, 0.0)
     }

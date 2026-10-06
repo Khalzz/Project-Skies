@@ -30,9 +30,10 @@ struct DirectionUniform {
     _padding: [f32; 2],
 }
 
-/// Full-screen effects applied to the 3D scene as it's copied onto the screen
-/// (see `BlurRender::render`) - the UI draws on top, unaffected. All zero =
-/// the scene untouched. Layout must match `ScreenEffects` in scene_blit.wgsl.
+/// Full-screen effects applied as the 3D scene and the flight HUD are copied
+/// onto the screen (see `BlurRender::render`). Menus drawn after that stay
+/// sharp. All zero = the picture untouched. Layout must match `ScreenEffects`
+/// in scene_blit.wgsl.
 #[repr(C)]
 #[derive(Copy, Clone, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ScreenEffects {
@@ -50,6 +51,11 @@ pub struct ScreenEffects {
     pub tunnel_color: [f32; 4],
     /// A flat color over the whole scene (linear rgb), alpha = how much.
     pub tint: [f32; 4],
+    /// How much of the flight HUD is drawn (0 hidden .. 1 normal).
+    /// `write_effects` fills this from `BlurRender::hud_opacity`. The
+    /// value on a `ScreenEffects` the game built is not what gets drawn.
+    pub hud_opacity: f32,
+    _pad_hud: [f32; 3],
 }
 
 // Deliberately not Texture::create_texture - that helper's sampler always sets
@@ -156,6 +162,10 @@ fn fullscreen_pipeline(device: &Device, layout: &wgpu::PipelineLayout, shader: &
 /// effect.
 pub struct BlurRender {
     pub scene_color: Texture,
+    /// The flight HUD for this frame, transparent where there's no symbol.
+    /// Composited over `scene_color` by the blit, then the screen effects
+    /// cover both (see scene_blit.wgsl).
+    pub hud_color: Texture,
     blur_a: Texture,
     pub blurred: Texture,
     blit_bind_group: BindGroup,
@@ -163,6 +173,10 @@ pub struct BlurRender {
     /// This frame's screen effects - set every frame they're wanted (see
     /// `write_effects`).
     pub effects: ScreenEffects,
+    /// Flight HUD opacity for the blit (1 = the HUD as drawn). The play
+    /// scene's power-on drives this. It stays until something changes it,
+    /// unlike `effects`, which `write_effects` clears every frame.
+    pub hud_opacity: f32,
     effects_buffer: Buffer,
     aspect: f32,
     // One bind group per compounding pass, in order - even indices are H passes
@@ -176,6 +190,7 @@ pub struct BlurRender {
 impl BlurRender {
     pub fn new(device: &Device, config: &SurfaceConfiguration) -> Self {
         let scene_color = offscreen_texture(device, config.width, config.height, config.format, "scene_color");
+        let hud_color = offscreen_texture(device, config.width, config.height, config.format, "hud_color");
         let blur_a = offscreen_texture(device, config.width, config.height, config.format, "blur_a");
         let blurred = offscreen_texture(device, config.width, config.height, config.format, "blurred_scene");
 
@@ -220,10 +235,69 @@ impl BlurRender {
             contents: bytemuck::cast_slice(&[ScreenEffects { aspect, ..Default::default() }]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
-        let blit_bind_group = make_bind_group(device, &blur_layout, &scene_color, &effects_buffer, "scene_blit_bind_group");
+        // The blit also samples the HUD. The blur passes don't, so they keep
+        // blur_layout; the blit has its own.
+        let blit_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("scene_blit_bind_group_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let blit_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scene_blit_bind_group"),
+            layout: &blit_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&scene_color.view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&scene_color.sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: effects_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&hud_color.view) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&hud_color.sampler) },
+            ],
+        });
         let blit_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("scene_blit_pipeline_layout"),
-            bind_group_layouts: &[&blur_layout],
+            bind_group_layouts: &[&blit_layout],
             push_constant_ranges: &[],
         });
         let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -275,11 +349,13 @@ impl BlurRender {
 
         Self {
             scene_color,
+            hud_color,
             blur_a,
             blurred,
             blit_bind_group,
             blit_pipeline,
             effects: ScreenEffects::default(),
+            hud_opacity: 1.0,
             effects_buffer,
             aspect,
             blur_passes,
@@ -295,8 +371,10 @@ impl BlurRender {
     // trade-off DepthRender/Texture::create_depth_texture already make elsewhere).
     pub fn resize(&mut self, device: &Device, config: &SurfaceConfiguration) {
         let effects = self.effects;
+        let hud_opacity = self.hud_opacity;
         *self = Self::new(device, config);
         self.effects = effects;
+        self.hud_opacity = hud_opacity;
     }
 
     /// Uploads `effects` for this frame's blit - call before `render` - and
@@ -304,7 +382,8 @@ impl BlurRender {
     /// them every frame, and they're gone the moment it stops (a scene
     /// change, a restart) instead of getting stuck on screen.
     pub fn write_effects(&mut self, queue: &wgpu::Queue) {
-        let effects = ScreenEffects { aspect: self.aspect, ..std::mem::take(&mut self.effects) };
+        let mut effects = ScreenEffects { aspect: self.aspect, ..std::mem::take(&mut self.effects) };
+        effects.hud_opacity = self.hud_opacity;
         queue.write_buffer(&self.effects_buffer, 0, bytemuck::cast_slice(&[effects]));
     }
 

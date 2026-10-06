@@ -21,7 +21,7 @@ const GEAR_LOCKED_THRESHOLD: f32 = 0.999;
 /// main thread can place the wheel meshes from it (see `GearMeshes`).
 ///
 /// Rules:
-/// - starts down (see `Airframe::new`);
+/// - starts down or up, as the spawn says (see `Airframe::new`);
 /// - can't retract while down-and-locked AND a wheel is on the ground;
 /// - freely toggled in the air;
 /// - if a wheel ray finds ground while the gear is mid-cycle (not
@@ -78,8 +78,7 @@ impl LandingGear {
 
         let target = if self.commanded_down { 1.0 } else { 0.0 };
         let rate = if forced { GEAR_EMERGENCY_RATE_PER_S } else { GEAR_RATE_PER_S };
-        let step = rate * delta_time;
-        self.deploy = (self.deploy + (target - self.deploy).clamp(-step, step)).clamp(0.0, 1.0);
+        self.deploy = super::airframe::approach(self.deploy, target, rate, delta_time);
     }
 }
 
@@ -101,11 +100,43 @@ pub struct GearMeshes {
     /// last wheel data that had it - the wheels (the plane's data.ron gear)
     /// are still known while the gear is up, when there's no data.
     mounts: HashMap<String, Vector3<f32>>,
+    /// Strut mounts in the jet's frame, and the deploy to show, until the
+    /// physics thread has reported the gear. An air start is up on the
+    /// first frame instead of sitting in the model's gear-down pose.
+    armed: Option<(Vec<(String, Vector3<f32>)>, f32)>,
 }
 
 impl GearMeshes {
     pub fn new() -> Self {
-        Self { mounts: HashMap::new() }
+        Self { mounts: HashMap::new(), armed: None }
+    }
+
+    /// Show `gear` at `down` until physics reports. `down`: extended.
+    pub fn arm(&mut self, gear: &super::gear_spec::GearSpec, down: bool) {
+        self.armed = Some((
+            gear.wheels.iter().map(|wheel| (wheel.mesh.clone(), wheel.position)).collect(),
+            if down { 1.0 } else { 0.0 },
+        ));
+    }
+
+    /// The deploy `arm` asked for, before physics has reported.
+    pub fn armed_deploy(&self) -> Option<f32> {
+        self.armed.as_ref().map(|(_, deploy)| *deploy)
+    }
+
+    /// Physics has reported - its pose takes over.
+    pub fn disarm(&mut self) {
+        self.armed = None;
+    }
+
+    /// Puts the armed pose on the wheels. Physics replaces it.
+    pub fn show_armed(&mut self, model: &mut LoadedModel, instance_scale: Vector3<f32>, queue: &wgpu::Queue) {
+        let Some((wheels, deploy)) = self.armed.clone() else { return };
+        let to_model = |point: Vector3<f32>| point.component_div(&instance_scale);
+        for (name, position) in wheels {
+            self.mounts.insert(name, to_model(position));
+        }
+        self.place(model, &HashMap::new(), deploy, instance_scale, queue);
     }
 
     /// Positions every wheel mesh (all its materials), for `deploy` (0 =

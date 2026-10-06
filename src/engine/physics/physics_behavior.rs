@@ -53,15 +53,25 @@ pub trait PhysicsBehavior: Send {
 #[derive(Default)]
 pub struct DebugDraw {
     lines: Vec<DebugPhysicsMessageType>,
+    /// The node the lines drawn from here on belong to.
+    owner: Option<String>,
 }
 
 impl DebugDraw {
+    /// Lines drawn after this belong to `owner` (a node id), or to nobody.
+    pub fn set_owner(&mut self, owner: Option<String>) {
+        self.owner = owner;
+    }
+
     /// A line from `from` to `to`.
     pub fn line(&mut self, from: Vector3<f32>, to: Vector3<f32>, color: [f32; 3]) {
-        self.lines.push(DebugPhysicsMessageType::RenderizableLines([
-            ManualVertex { position: from.into(), color },
-            ManualVertex { position: to.into(), color },
-        ]));
+        self.lines.push(DebugPhysicsMessageType::RenderizableLines {
+            owner: self.owner.clone(),
+            line: [
+                ManualVertex { position: from.into(), color },
+                ManualVertex { position: to.into(), color },
+            ],
+        });
     }
 
     /// A line starting at `origin`, pointing along `vector` - e.g. a force

@@ -1,10 +1,12 @@
 //! The flight editor - the level's map (see play::map::MapSpec), editable
 //! while flying, docked around F10's map in its editor view (see
-//! `draw_docked`). Laid out like an engine's editor: on the left a hierarchy
-//! - every coalition, each with its aircraft beneath it; on the right an
-//! inspector for whatever is selected, in collapsible sections of
-//! label/value rows; along the bottom, the timeline. An aircraft's loadout
-//! has a window of its own; its path is F10's Flight plan window.
+//! `draw_docked`). Laid out like an engine's editor: on the left the
+//! hierarchy - every node in the scene, children under their parents (see
+//! `hierarchy`); on the right an inspector for whatever is selected, in
+//! collapsible sections of label/value rows; along the bottom, the timeline
+//! (see `timeline`). The coalitions and their aircraft have a floating
+//! window of their own, as has an aircraft's loadout; its path is F10's
+//! Flight plan window.
 //!
 //! It only edits its own copy of the map (`map`) and lists what else it was
 //! asked to do (`requests`); the play scene applies both every frame (see
@@ -17,11 +19,20 @@ use std::collections::{HashMap, HashSet};
 use egui::{Color32, RichText};
 use nalgebra::Vector3;
 
+use crate::engine::scene_manager::properties::Space;
+
 use crate::game::scenes::play::flight_manager::LiveAircraft;
-use crate::game::scenes::play::map::{AircraftPlacement, Coalition, Difficulty, MapSpec};
+use crate::game::scenes::play::map::{AircraftPlacement, Coalition, Difficulty, MapSpec, Start};
 use crate::game::scenes::play::plane::pylon_spec::PylonSpec;
 use crate::game::scenes::play::weapon::weapon_spec::WeaponCategory;
 use crate::game::scenes::play::tactical_ui::TacticalUi;
+
+mod flight_plan;
+mod hierarchy;
+mod paths;
+mod timeline;
+
+pub use timeline::TimelineSelection;
 
 /// Something the editor was asked to do beyond editing the map - for the
 /// play scene to carry out (see GameLogic::update_flight_editor).
@@ -39,6 +50,100 @@ pub enum EditorRequest {
     /// Load this aircraft again as the map has it, where it is: every
     /// weapon back on, flares and chaff full.
     ResetLoadout(String),
+    /// Play, pause, stop or scrub the animation on the timeline.
+    Timeline(TimelineRequest),
+    /// The editor camera to this node, looking at it.
+    Focus(String),
+}
+
+/// What the timeline's transport was asked to do, to which node's
+/// animation (node, animation).
+#[derive(Clone, Debug, PartialEq)]
+pub enum TimelineRequest {
+    /// On from where it is held.
+    Play(String, String),
+    /// From its start (time 0).
+    Start(String, String),
+    Pause(String, String),
+    /// Ended - everything it moved let go.
+    Stop(String, String),
+    /// Ended at the start, and an aircraft it moved is spawned again where the map has it.
+    Reset(String, String),
+    /// Held at this time (s) - the scene shown as it is then.
+    Seek(String, String, f32),
+}
+
+/// Where the timeline is - filled by the play scene every frame.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Playback {
+    pub time: f32,
+    pub playing: bool,
+    /// Playing or held somewhere on it - driving what it animates.
+    pub engaged: bool,
+}
+
+/// What a node in the scene is, for the hierarchy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NodeKind {
+    /// One of the map's aircraft - edited in its own inspector.
+    Aircraft,
+    /// One of the map's own nodes (`map.nodes`) - editable, saved.
+    MapNode,
+    /// Spawned by the level itself (the ground, the sun, the player's
+    /// camera) - shown, not saved.
+    Level,
+    /// Spawned while flying (a missile, a flare) - hidden unless asked.
+    Runtime,
+}
+
+/// A node in the scene as the hierarchy shows it - filled by the play scene
+/// every frame the editor's up.
+#[derive(Clone, Debug)]
+pub struct SceneNodeInfo {
+    pub id: String,
+    pub kind: NodeKind,
+    pub parent: Option<String>,
+    pub space: Space,
+    pub camera: bool,
+    pub animated: bool,
+    /// Where it is in the world: position (m) and rotation (degrees about
+    /// X, Y, Z).
+    pub world_position: Vector3<f32>,
+    pub world_rotation: Vector3<f32>,
+}
+
+/// What the camera's on (F2: another aircraft, F4: a missile...), as the
+/// editor's Telemetry window shows it - filled by the play scene every
+/// frame, while it isn't the player's own jet.
+#[derive(Clone, Debug, Default)]
+pub struct Telemetry {
+    pub title: String,
+    pub subtitle: String,
+    /// Label, value, and whether it's a warning (shown amber).
+    pub rows: Vec<(String, String, bool)>,
+}
+
+/// The Telemetry window (see `Telemetry`), over the top middle of `area` -
+/// the editor's, or the game's debug view (F5/F9) while spectating.
+pub fn draw_telemetry(ctx: &egui::Context, telemetry: &Telemetry, area: egui::Rect) {
+    egui::Window::new(format!("Telemetry · {}", telemetry.title))
+            .id(egui::Id::new("editor_telemetry"))
+            .pivot(egui::Align2::CENTER_TOP)
+            .default_pos(egui::pos2(area.center().x, area.top() + 12.0))
+            .resizable(false)
+            .collapsible(true)
+            .show(ctx, |ui| {
+                ui.label(RichText::new(&telemetry.subtitle).small().weak());
+                egui::Grid::new("telemetry_rows").num_columns(2).spacing([16.0, 3.0]).show(ui, |ui| {
+                    for (label, value, warning) in &telemetry.rows {
+                        ui.label(RichText::new(label).weak());
+                        let text = RichText::new(value).monospace();
+                        ui.label(if *warning { text.color(Color32::from_rgb(255, 190, 80)) } else { text });
+                        ui.end_row();
+                    }
+                });
+                ui.label(RichText::new("F1: your jet · F2: next aircraft · F4: next missile").small().weak());
+            });
 }
 
 /// What the hierarchy has selected - shown in the inspector.
@@ -51,6 +156,13 @@ enum Selection {
     Coalition(usize),
     /// An aircraft, by name.
     Aircraft(String),
+    /// Any other node in the scene, by id.
+    Node(String),
+    /// One of the map's paths, by name.
+    Path(String),
+    /// What's picked on the timeline (see `TimelineSelection`) - a path bar,
+    /// a camera key, an event of the animation shown.
+    TimelineItem,
 }
 
 #[derive(Default)]
@@ -70,6 +182,26 @@ pub struct FlightEditor {
     pub weapons: Vec<(String, WeaponCategory)>,
     /// Each aircraft as it is right now, by name - filled every frame.
     pub live: HashMap<String, LiveAircraft>,
+    /// Every node in the scene - filled every frame.
+    pub nodes: Vec<SceneNodeInfo>,
+    /// What the camera's on, while it isn't the player's jet - see
+    /// `Telemetry`.
+    pub telemetry: Option<Telemetry>,
+    /// The animation on the timeline: its node and its name.
+    pub current_animation: Option<(String, String)>,
+    /// That animation's clock - filled every frame.
+    pub playback: Playback,
+    /// The camera node the map is seen through instead of the editor's own
+    /// view, if any ("View through").
+    pub preview_camera: Option<String>,
+    /// The animation's camera shown while it runs or is held - off: the
+    /// editor camera stays.
+    pub timeline_preview: bool,
+    /// Where the editor's view is (m), which way it looks and its field of
+    /// view - what a new camera key takes - filled every frame.
+    pub view_position: Vector3<f32>,
+    pub view_rotation: Option<nalgebra::UnitQuaternion<f32>>,
+    pub view_fov: f32,
     /// The last thing done, or what's wrong with the map - `true` for an
     /// error.
     pub status: Option<(String, bool)>,
@@ -86,10 +218,36 @@ pub struct FlightEditor {
     folded: HashSet<usize>,
     /// The Loadout window is up (see `loadout_window`).
     loadout_open: bool,
+    /// A path points table's row being dragged to a new place (see
+    /// tactical_ui::points_table).
+    points_dragging: Option<usize>,
     /// The aircraft F10's map and this agreed was selected, last frame - so
     /// a new pick on either side carries over to the other (see
     /// `draw_docked`).
     synced_selection: Option<String>,
+    /// The Coalitions window is closed (see `coalitions_window`).
+    coalitions_closed: bool,
+    /// The hierarchy shows nodes spawned while flying (missiles, flares...).
+    show_runtime: bool,
+    /// Nodes folded shut in the hierarchy, by id.
+    folded_nodes: HashSet<String>,
+    /// The selected map node's id as it's being typed - applied once the
+    /// field is left, like an aircraft's name.
+    node_name_edit: Option<String>,
+    /// The key, cut, event or follow picked on the timeline.
+    timeline_selection: TimelineSelection,
+    /// The shown animation's name as it's being typed.
+    animation_name_edit: Option<String>,
+    /// The map path picked in the Paths window - shown and edited on F10's
+    /// map instead of the selected aircraft's flight plan.
+    selected_path: Option<String>,
+    /// The picked path's name as it's being typed.
+    path_name_edit: Option<String>,
+    /// The Paths and Pilot skills windows are up.
+    paths_open: bool,
+    skills_open: bool,
+    /// The last thing the Pilot skills window did - `true` for an error.
+    skills_status: Option<(String, bool)>,
 }
 
 /// A change to the map's structure, made after drawing it (the map can't
@@ -97,7 +255,7 @@ pub struct FlightEditor {
 enum Change {
     AddCoalition,
     RemoveCoalition(usize),
-    AddAircraft(usize),
+    AddAircraft { coalition: usize, start: Start },
     RemoveAircraft(usize, usize),
     MoveAircraft { from: usize, index: usize, to: usize },
     MakePlayer(usize, usize),
@@ -106,6 +264,8 @@ enum Change {
 
 /// Knots to m/s.
 const KT_TO_MS: f32 = 0.514_444;
+/// Air start's speed (m/s) when the plane being added isn't already flying.
+const AIR_START_SPEED: f32 = 150.0;
 
 /// How far "+ Add point" puts a new path point past the last one (m).
 const PATH_STEP: f32 = 1000.0;
@@ -171,7 +331,7 @@ impl FlightEditor {
     pub fn draw_docked(&mut self, ctx: &egui::Context, tactical: &mut TacticalUi) -> egui::Rect {
         const HIERARCHY_PANEL_WIDTH: f32 = 260.0;
         const PROPERTIES_PANEL_WIDTH: f32 = 380.0;
-        const TIMELINE_HEIGHT: f32 = 160.0;
+        const TIMELINE_HEIGHT: f32 = 230.0;
 
         // Picked on the map since last frame: picked here too.
         if tactical.selected != self.synced_selection {
@@ -180,7 +340,7 @@ impl FlightEditor {
                 Some(name) => Selection::Aircraft(name.clone()),
                 None => Selection::None,
             };
-            if selection != self.selection {
+            if selection != self.selection && (tactical.selected.is_some() || self.selected_aircraft().is_some()) {
                 self.select(selection);
             }
         }
@@ -197,7 +357,7 @@ impl FlightEditor {
             .show(ctx, |ui| {
                 panel_header(ui, "Hierarchy");
                 padded(ui, |ui| self.toolbar(ui));
-                self.hierarchy(ui, &mut changes);
+                self.node_hierarchy(ui);
             });
         egui::SidePanel::right("editor_properties")
             .frame(frame)
@@ -212,18 +372,27 @@ impl FlightEditor {
             .frame(frame)
             .resizable(true)
             .default_height(TIMELINE_HEIGHT)
-            .min_height(60.0)
+            .min_height(120.0)
             .show(ctx, |ui| {
                 panel_header(ui, "Timeline");
-                ui.centered_and_justified(|ui| {
-                    ui.label(RichText::new("The animation timeline goes here").weak());
-                });
+                self.timeline(ui);
             });
+        let map = ctx.available_rect();
+        self.coalitions_window(ctx, map, &mut changes);
         for change in changes {
             self.apply(change);
         }
-        let map = ctx.available_rect();
         self.loadout_window(ctx, map);
+        self.paths_window(ctx, map);
+        self.skills_window(ctx, map);
+        self.telemetry_window(ctx, map);
+        // A path picked here (its inspector up) is the one shown and
+        // edited on the map.
+        self.selected_path = match &self.selection {
+            Selection::Path(name) if self.map.named_path(name).is_some() => Some(name.clone()),
+            _ => None,
+        };
+        tactical.selected_path = self.selected_path.clone();
 
         // Picked here: picked on the map too (its Flight plan window).
         let selected = self.selected_aircraft().map(str::to_owned);
@@ -233,6 +402,38 @@ impl FlightEditor {
         }
         self.typing = ctx.wants_keyboard_input();
         map
+    }
+
+    /// What the camera's on (see `Telemetry`), over the top of the view -
+    /// only while it's on something other than the player's jet.
+    fn telemetry_window(&self, ctx: &egui::Context, area: egui::Rect) {
+        if let Some(telemetry) = &self.telemetry {
+            draw_telemetry(ctx, telemetry, area);
+        }
+    }
+
+
+    /// The coalitions and their aircraft, in a floating window of their own
+    /// (over `area`'s top left to start with) - closed and opened again
+    /// from the hierarchy's toolbar.
+    fn coalitions_window(&mut self, ctx: &egui::Context, area: egui::Rect, changes: &mut Vec<Change>) {
+        if self.coalitions_closed {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("Coalitions")
+            .id(egui::Id::new("editor_coalitions"))
+            .open(&mut open)
+            .default_pos(area.left_top() + egui::vec2(16.0, 56.0))
+            .default_size(egui::vec2(260.0, 300.0))
+            .resizable(true)
+            .collapsible(true)
+            .show(ctx, |ui| {
+                self.coalition_tree(ui, changes);
+            });
+        if !open {
+            self.coalitions_closed = true;
+        }
     }
 
     /// The selected aircraft's loadout in a window of its own, floating
@@ -279,6 +480,10 @@ impl FlightEditor {
             Selection::None => false,
             Selection::Coalition(index) => *index >= self.map.coalitions.len(),
             Selection::Aircraft(name) => self.map.find(name).is_none(),
+            // Filled every frame - empty only before the first one.
+            Selection::Node(id) => !self.nodes.is_empty() && !self.nodes.iter().any(|node| node.id == *id) && self.map.node(id).is_none(),
+            Selection::Path(name) => self.map.named_path(name).is_none(),
+            Selection::TimelineItem => self.timeline_selection == TimelineSelection::None,
         };
         if stale {
             self.select(Selection::None);
@@ -292,10 +497,13 @@ impl FlightEditor {
             match self.selection.clone() {
                 Selection::None => padded(ui, |ui| {
                     ui.add_space(8.0);
-                    ui.label(RichText::new("Select a coalition or an aircraft in the hierarchy").weak());
+                    ui.label(RichText::new("Select a node in the hierarchy, or a coalition or aircraft in the Coalitions window").weak());
                 }),
                 Selection::Coalition(index) => self.coalition_inspector(ui, index, changes),
                 Selection::Aircraft(name) => self.aircraft_inspector(ui, &name, changes),
+                Selection::Node(id) => self.node_inspector(ui, &id),
+                Selection::Path(name) => self.path_inspector(ui, &name),
+                Selection::TimelineItem => self.timeline_item_inspector(ui),
             }
             ui.add_space(8.0);
         });
@@ -310,9 +518,50 @@ impl FlightEditor {
         }
     }
 
+    /// The node selected - an aircraft or any other node - by id; with a
+    /// timeline item picked, the animation's node.
+    pub fn selected_node(&self) -> Option<&str> {
+        match &self.selection {
+            Selection::Aircraft(name) | Selection::Node(name) => Some(name),
+            Selection::TimelineItem => self.current_animation.as_ref().map(|(node, _)| node.as_str()),
+            _ => None,
+        }
+    }
+
+    /// The camera key picked on the timeline, by index - while it's what
+    /// Properties shows.
+    pub fn picked_camera_key(&self) -> Option<usize> {
+        match (&self.selection, &self.timeline_selection) {
+            (Selection::TimelineItem, TimelineSelection::Camera(index)) => Some(*index),
+            _ => None,
+        }
+    }
+
     fn select(&mut self, selection: Selection) {
         self.selection = selection;
         self.name_edit = None;
+        self.node_name_edit = None;
+        if let Some(id) = match &self.selection {
+            Selection::Aircraft(name) | Selection::Node(name) => Some(name.clone()),
+            _ => None,
+        } {
+            self.sync_shown_animation(&id);
+        }
+    }
+
+    /// The timeline shows `id`'s animation. One it already shows stays; otherwise the first, or none.
+    fn sync_shown_animation(&mut self, id: &str) {
+        let names: Vec<String> = self.map.animations.get(id).map(|list| list.iter().map(|animation| animation.name.clone()).collect()).unwrap_or_default();
+        if self.current_animation.as_ref().is_some_and(|(node, name)| node == id && names.iter().any(|candidate| candidate == name)) {
+            return;
+        }
+        match names.first() {
+            Some(name) => self.show_animation(id, name),
+            None => {
+                self.current_animation = None;
+                self.timeline_selection = TimelineSelection::None;
+            }
+        }
     }
 
     /// The coalition new aircraft go into - the selected one, or the
@@ -323,7 +572,7 @@ impl FlightEditor {
             Selection::Aircraft(name) => self.map.coalitions.iter()
                 .position(|coalition| coalition.aircraft.iter().any(|aircraft| aircraft.name == *name))
                 .unwrap_or(0),
-            Selection::None => 0,
+            Selection::None | Selection::Node(_) | Selection::Path(_) | Selection::TimelineItem => 0,
         }
     }
 
@@ -339,25 +588,44 @@ impl FlightEditor {
                 self.requests.push(EditorRequest::RespawnAll);
             }
         });
+        ui.horizontal(|ui| {
+            let mut coalitions = !self.coalitions_closed;
+            if ui.toggle_value(&mut coalitions, "Coalitions").on_hover_text("The coalitions and their aircraft, in a window of their own").changed() {
+                self.coalitions_closed = !coalitions;
+            }
+            ui.toggle_value(&mut self.paths_open, "Paths").on_hover_text("The map's named paths - for aircraft to fly and anything to follow");
+            ui.toggle_value(&mut self.skills_open, "Pilot skills").on_hover_text("How well bots fly at each skill level");
+        });
+        ui.checkbox(&mut self.show_runtime, "Runtime nodes").on_hover_text("Show what's spawned while flying - missiles, flares, hung weapons");
         if let Some((message, error)) = &self.status {
             ui.label(RichText::new(message).color(if *error { ERROR_COLOR } else { OK_COLOR }));
         }
     }
 
     /// Every coalition as a tree root, its aircraft beneath it - click a row
-    /// to inspect it, a coalition's arrow to fold it.
-    fn hierarchy(&mut self, ui: &mut egui::Ui, changes: &mut Vec<Change>) {
-        padded(ui, |ui| ui.horizontal(|ui| {
+    /// to inspect it, a coalition's arrow to fold it. In the Coalitions
+    /// window.
+    fn coalition_tree(&mut self, ui: &mut egui::Ui, changes: &mut Vec<Change>) {
+        ui.horizontal(|ui| {
             let target = self.target_coalition();
-            let add = ui.add_enabled(!self.map.coalitions.is_empty(), egui::Button::new("+ Add aircraft"))
-                .on_hover_text(self.map.coalitions.get(target).map(|coalition| format!("Into {}", coalition.name)).unwrap_or_default());
-            if add.clicked() {
-                changes.push(Change::AddAircraft(target));
-            }
+            let into = self.map.coalitions.get(target).map(|coalition| format!("Into {}", coalition.name)).unwrap_or_default();
+            ui.add_enabled_ui(!self.map.coalitions.is_empty(), |ui| {
+                ui.menu_button("+ Add aircraft", |ui| {
+                    ui.label(RichText::new(into.as_str()).small().weak());
+                    if ui.button("Ground start").on_hover_text("Sitting still, landing gear down, beside the player's place in the map").clicked() {
+                        changes.push(Change::AddAircraft { coalition: target, start: Start::Ground });
+                        ui.close();
+                    }
+                    if ui.button("Air start").on_hover_text("Flying, landing gear up, beside wherever the player is now").clicked() {
+                        changes.push(Change::AddAircraft { coalition: target, start: Start::Air });
+                        ui.close();
+                    }
+                });
+            });
             if ui.button("+ Coalition").clicked() {
                 changes.push(Change::AddCoalition);
             }
-        }));
+        });
 
         let visuals = ui.visuals().clone();
         let mut clicked = None;
@@ -368,7 +636,7 @@ impl FlightEditor {
             .fill(visuals.extreme_bg_color)
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                egui::ScrollArea::vertical().id_salt("hierarchy").auto_shrink([false, false]).show(ui, |ui| {
+                egui::ScrollArea::vertical().id_salt("coalition_tree").auto_shrink([false, false]).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
                     if self.map.coalitions.is_empty() {
                         ui.label(RichText::new("  No coalitions").weak());
@@ -478,19 +746,18 @@ impl FlightEditor {
             .find_map(|(coalition_index, coalition)| coalition.aircraft.iter().position(|aircraft| aircraft.name == name).map(|index| (coalition_index, index)))
         else { return };
         let planes = self.planes.clone();
-        let plane_of_aircraft = &self.map.coalitions[coalition_index].aircraft[index].plane;
-        let pylons = self.pylons.get(plane_of_aircraft).cloned().unwrap_or_default();
-        let plane_countermeasures = self.countermeasures.get(plane_of_aircraft).copied();
         let coalitions: Vec<(String, Color32)> = self.map.coalitions.iter().map(|coalition| (coalition.name.clone(), coalition_color(coalition))).collect();
         let live = self.live.get(name).copied();
         let aircraft = &mut self.map.coalitions[coalition_index].aircraft[index];
         let requests = &mut self.requests;
-        let loadout_open = &mut self.loadout_open;
 
         let icon_color = if aircraft.player { PLAYER_COLOR } else { ui.visuals().text_color() };
         inspector_header(ui, Icon::Aircraft, icon_color, &aircraft.name, |ui| status_line(ui, live), |ui| {
             if ui.button("Respawn").on_hover_text("Back at its place in the map, fresh").clicked() {
                 requests.push(EditorRequest::Respawn(name.to_owned()));
+            }
+            if ui.button("Focus").on_hover_text("The editor camera to it").clicked() {
+                requests.push(EditorRequest::Focus(name.to_owned()));
             }
         });
 
@@ -582,7 +849,46 @@ impl FlightEditor {
             });
         });
 
+        self.animations_section(ui, name);
+        self.flight_plan_section(ui, name);
+        self.aircraft_inspector_rest(ui, name, changes);
+    }
+
+    /// The rest of the selected aircraft's inspector, under its flight
+    /// plan: how it starts flying, its loadout, how it is right now, and
+    /// deleting it.
+    fn aircraft_inspector_rest(&mut self, ui: &mut egui::Ui, name: &str, changes: &mut Vec<Change>) {
+        let Some((coalition_index, index)) = self.map.coalitions.iter().enumerate()
+            .find_map(|(coalition_index, coalition)| coalition.aircraft.iter().position(|aircraft| aircraft.name == name).map(|index| (coalition_index, index)))
+        else { return };
+        let plane_of_aircraft = &self.map.coalitions[coalition_index].aircraft[index].plane;
+        let pylons = self.pylons.get(plane_of_aircraft).cloned().unwrap_or_default();
+        let plane_countermeasures = self.countermeasures.get(plane_of_aircraft).copied();
+        let live = self.live.get(name).copied();
+        let aircraft = &mut self.map.coalitions[coalition_index].aircraft[index];
+        let loadout_open = &mut self.loadout_open;
+
         section(ui, "Flight", |ui| {
+            property(ui, "Start", |ui| {
+                let mut start = aircraft.start;
+                ui.radio_value(&mut start, Start::Ground, "Ground").on_hover_text("Spawns sitting still, landing gear down");
+                ui.radio_value(&mut start, Start::Air, "Air").on_hover_text("Spawns flying, landing gear up");
+                if start != aircraft.start {
+                    aircraft.start = start;
+                    match start {
+                        Start::Ground => {
+                            aircraft.speed = Some(0.0);
+                            aircraft.throttle = 0.0;
+                        }
+                        Start::Air => {
+                            if aircraft.speed.unwrap_or(0.0) < AIR_START_SPEED {
+                                aircraft.speed = Some(AIR_START_SPEED);
+                            }
+                            aircraft.throttle = aircraft.throttle.max(0.8);
+                        }
+                    }
+                }
+            });
             property(ui, "Set speed", |ui| {
                 let mut has_speed = aircraft.speed.is_some();
                 if ui.checkbox(&mut has_speed, "").on_hover_text("Off: the plane's data.ron initial_velocity").changed() {
@@ -648,6 +954,45 @@ impl FlightEditor {
                     property(ui, "Altitude", |ui| {
                         ui.label(format!("{:.0} m", live.altitude));
                     });
+                    property(ui, "G", |ui| {
+                        // Amber past 6 G, red past 9 (or below -3) - the pilot's
+                        // getting close to greying out, or past it.
+                        let color = if live.g > 9.0 || live.g < -3.0 {
+                            ERROR_COLOR
+                        } else if live.g > 6.0 || live.g < -1.0 {
+                            Color32::from_rgb(255, 190, 80)
+                        } else {
+                            ui.visuals().text_color()
+                        };
+                        ui.label(RichText::new(format!("{:+.1} G", live.g)).color(color).strong());
+                        if !live.g_felt {
+                            ui.label(RichText::new("not felt - an animation has it").small().weak());
+                        }
+                    });
+                    property(ui, "Commanded G", |ui| {
+                        ui.label(format!("{:+.1} G", live.g_command)).on_hover_text("What the fly-by-wire is asking the jet for, from the stick - capped near the AoA limit");
+                    });
+                    property(ui, "Stick", |ui| {
+                        let as_text = |pull: f32| if pull >= 0.0 { format!("pull {:.0}%", pull * 100.0) } else { format!("push {:.0}%", -pull * 100.0) };
+                        ui.label(as_text(live.stick_pull));
+                        ui.label(RichText::new(format!("(easing to {})", as_text(live.stick_target_pull))).small().weak());
+                    });
+                    // What the pitch inputs read right now, each the strongest
+                    // of its bindings (a key, or a controller axis) - the stick
+                    // goes to pull minus push. A push here while only pulling
+                    // is a controller axis that isn't centered.
+                    property(ui, "Pitch input", |ui| {
+                        let pull = crate::engine::input::input::action_strength("pitch_down");
+                        let push = crate::engine::input::input::action_strength("pitch_up");
+                        ui.label(format!("pull {:.0}% · push {:.0}%", pull * 100.0, push * 100.0));
+                        if pull > 0.05 && push > 0.05 {
+                            ui.label(RichText::new("both at once - an axis isn't centered?").small().color(ERROR_COLOR));
+                        }
+                    });
+                    property(ui, "Flown by", |ui| {
+                        let color = if live.flown_by == "the pilot" { ui.visuals().text_color() } else { Color32::from_rgb(255, 190, 80) };
+                        ui.label(RichText::new(live.flown_by).color(color));
+                    });
                     property(ui, "State", |ui| {
                         if live.wrecked {
                             ui.label(RichText::new("Wrecked").color(ERROR_COLOR));
@@ -687,8 +1032,8 @@ impl FlightEditor {
                     .collect();
                 self.select(Selection::None);
             }
-            Change::AddAircraft(coalition) => {
-                let aircraft = self.new_aircraft();
+            Change::AddAircraft { coalition, start } => {
+                let aircraft = self.new_aircraft(start);
                 self.select(Selection::Aircraft(aircraft.name.clone()));
                 self.map.coalitions[coalition].aircraft.push(aircraft);
                 // Shown in the hierarchy.
@@ -721,26 +1066,37 @@ impl FlightEditor {
         }
     }
 
-    /// A new bot: off the player's right wing (60 m), flying alongside it -
-    /// or by the player's place in the map when the player isn't in the
-    /// scene.
-    fn new_aircraft(&self) -> AircraftPlacement {
+    /// A new bot. Ground: sitting beside the player's place in the map, gear
+    /// down. Air: flying beside wherever the player is now, gear up.
+    fn new_aircraft(&self, start: Start) -> AircraftPlacement {
         let name = unique_name("aircraft", |name| self.map.aircraft().any(|(_, aircraft)| aircraft.name == name));
         let plane = self.planes.first().cloned().unwrap_or_else(|| "f16".to_owned());
         let player = self.map.aircraft().map(|(_, aircraft)| aircraft).find(|aircraft| aircraft.player);
         let live = player.and_then(|player| self.live.get(&player.name));
 
-        let (position, rotation, speed) = match (live, player) {
-            (Some(live), _) => {
-                // +X is the left wing.
-                let position = live.position + live.rotation * Vector3::new(-60.0, 0.0, 0.0);
-                let speed = live.speed_kt * KT_TO_MS;
-                ((position.x, position.y, position.z), AircraftPlacement::rotation_degrees(&live.rotation), (speed > 1.0).then_some(speed))
+        let (position, rotation, speed, throttle) = match start {
+            Start::Ground => {
+                let (position, rotation) = match player {
+                    Some(player) => ((player.position.0 - 60.0, player.position.1, player.position.2), player.rotation),
+                    None => ((0.0, 105.0, 0.0), (0.0, 0.0, 0.0)),
+                };
+                (position, rotation, Some(0.0), 0.0)
             }
-            (None, Some(player)) => ((player.position.0 - 60.0, player.position.1, player.position.2), player.rotation, player.speed),
-            (None, None) => ((0.0, 105.0, 0.0), (0.0, 0.0, 0.0), None),
+            Start::Air => {
+                let (position, rotation, speed) = match (live, player) {
+                    (Some(live), _) => {
+                        // +X is the left wing.
+                        let position = live.position + live.rotation * Vector3::new(-60.0, 0.0, 0.0);
+                        ((position.x, position.y, position.z), AircraftPlacement::rotation_degrees(&live.rotation), live.speed_kt * KT_TO_MS)
+                    }
+                    (None, Some(player)) => ((player.position.0 - 60.0, player.position.1.max(1000.0), player.position.2), player.rotation, player.speed.unwrap_or(0.0)),
+                    (None, None) => ((0.0, 1000.0, 0.0), (0.0, 0.0, 0.0), 0.0),
+                };
+                let speed = (speed > 30.0).then_some(speed).unwrap_or(AIR_START_SPEED);
+                (position, rotation, Some(speed), 0.8)
+            }
         };
-        AircraftPlacement { name, plane, player: false, position, rotation, speed, throttle: if speed.is_some() { 0.8 } else { 0.0 }, path: Vec::new(), loadout: Default::default(), flares: None, chaff: None, difficulty: Default::default() }
+        AircraftPlacement { name, plane, player: false, position, rotation, speed, throttle, path: Vec::new(), follow: None, loadout: Default::default(), flares: None, chaff: None, difficulty: Default::default(), start }
     }
 }
 
@@ -837,6 +1193,12 @@ enum Icon {
     /// A coalition - a dot in its color.
     Coalition,
     Aircraft,
+    /// A camera node - a little camera body and lens.
+    Camera,
+    /// Any other node - a ring.
+    Node,
+    /// A path - a zigzag through three dots.
+    Path,
 }
 
 /// Draws `icon` centered at `center`.
@@ -847,6 +1209,23 @@ fn paint_icon(painter: &egui::Painter, style: &egui::Style, icon: Icon, center: 
         }
         Icon::Aircraft => {
             painter.text(center, egui::Align2::CENTER_CENTER, "✈", egui::TextStyle::Body.resolve(style), color);
+        }
+        Icon::Camera => {
+            let body = egui::Rect::from_center_size(center - egui::vec2(1.5, 0.0), egui::vec2(8.0, 7.0));
+            painter.rect_filled(body, 1.5, color);
+            let lens = vec![center + egui::vec2(2.5, 0.0), center + egui::vec2(6.0, -3.5), center + egui::vec2(6.0, 3.5)];
+            painter.add(egui::Shape::convex_polygon(lens, color, egui::Stroke::NONE));
+        }
+        Icon::Node => {
+            painter.circle_stroke(center, 4.0, egui::Stroke::new(1.5, color));
+        }
+        Icon::Path => {
+            let points = [center + egui::vec2(-6.0, 4.0), center + egui::vec2(-1.0, -4.0), center + egui::vec2(6.0, 2.0)];
+            painter.line_segment([points[0], points[1]], egui::Stroke::new(1.5, color));
+            painter.line_segment([points[1], points[2]], egui::Stroke::new(1.5, color));
+            for point in points {
+                painter.circle_filled(point, 2.0, color);
+            }
         }
     }
 }
@@ -1026,14 +1405,14 @@ fn weapon_label(id: &str) -> String {
     id.rsplit('/').next().unwrap_or(id).to_uppercase()
 }
 
-/// Where "+ Add point" puts the next point of `aircraft`'s path: PATH_STEP
-/// on from the last point, carrying on the way the path was going - or, for
-/// the first point, PATH_STEP ahead of the aircraft's nose (where it is now,
-/// or its place in the map when it isn't in the scene).
-pub(crate) fn next_path_point(aircraft: &AircraftPlacement, live: Option<LiveAircraft>) -> (f32, f32, f32) {
+/// Where "+ Add point" puts the next point of `path` (`aircraft`'s flight
+/// plan): PATH_STEP on from the last point, carrying on the way the path was
+/// going - or, for the first point, PATH_STEP ahead of the aircraft's nose
+/// (where it is now, or its place in the map when it isn't in the scene).
+pub(crate) fn next_path_point(aircraft: &AircraftPlacement, path: &[(f32, f32, f32)], live: Option<LiveAircraft>) -> (f32, f32, f32) {
     let (position, rotation) = live.map(|live| (live.position, live.rotation)).unwrap_or_else(|| (aircraft.position(), aircraft.rotation()));
     let nose = rotation * Vector3::z();
-    let points: Vec<Vector3<f32>> = aircraft.path.iter().map(|&(x, y, z)| Vector3::new(x, y, z)).collect();
+    let points: Vec<Vector3<f32>> = path.iter().map(|&(x, y, z)| Vector3::new(x, y, z)).collect();
     let next = match points.as_slice() {
         [] => position + nose * PATH_STEP,
         [only] => only + (only - position).try_normalize(1e-3).unwrap_or(nose) * PATH_STEP,

@@ -126,6 +126,7 @@ impl Direction {
 #[derive(Clone, Copy)]
 pub enum QuickAction {
     ToggleGear,
+    ToggleSpeedBrake,
     ToggleParkingBrake,
     ToggleFlyByWire,
 }
@@ -133,6 +134,7 @@ pub enum QuickAction {
 /// The plane's current state, for slot labels like "Landing gear (DOWN)".
 pub struct QuickMenuStatus {
     pub gear: GearStatus,
+    pub speed_brake: GearStatus,
     pub parking_brake: bool,
     pub fly_by_wire: bool,
 }
@@ -187,6 +189,14 @@ impl Slot {
                 };
                 format!("Landing gear ({gear})")
             }
+            Slot::Action(QuickAction::ToggleSpeedBrake) => {
+                let brake = match status.speed_brake {
+                    GearStatus::Up => "CLOSED",
+                    GearStatus::Down => "OPEN",
+                    GearStatus::Moving => "MOVING",
+                };
+                format!("Speed brake ({brake})")
+            }
             Slot::Action(QuickAction::ToggleParkingBrake) => {
                 format!("Parking brake ({})", if status.parking_brake { "SET" } else { "OFF" })
             }
@@ -211,7 +221,7 @@ fn menu(id: MenuId) -> (&'static str, [Slot; 4]) {
         MenuId::GearAndBrakes => ("Gear & brakes", [
             Slot::Empty,
             Slot::Action(QuickAction::ToggleParkingBrake),
-            Slot::Empty,
+            Slot::Action(QuickAction::ToggleSpeedBrake),
             Slot::Action(QuickAction::ToggleGear),
         ]),
         // Opened with Right - Right is Back.

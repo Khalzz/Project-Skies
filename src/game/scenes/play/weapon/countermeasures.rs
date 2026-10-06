@@ -105,6 +105,16 @@ impl Release {
             Release::Both => "FLR+CHF",
         }
     }
+
+    /// A press lets flares go.
+    pub fn releases_flares(self) -> bool {
+        matches!(self, Release::Flares | Release::Both)
+    }
+
+    /// A press lets chaff go.
+    pub fn releases_chaff(self) -> bool {
+        matches!(self, Release::Chaff | Release::Both)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
