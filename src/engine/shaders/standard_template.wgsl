@@ -1,0 +1,174 @@
+// The template every Surface shader is built from (see engine::rendering::
+// shader_library): the engine's inputs, the vertex and fragment work, and
+// two hooks the shader fills in - pasted where the HOOKS line is. A hook it
+// leaves out gets the default: `vertex` changes nothing, `fragment` returns
+// the lit color. "engine/standard" is this with both defaults.
+//
+// Inputs (the model pipelines' bind groups - there are only four):
+//   0 - the mesh's texture   1 - the camera
+//   2 - the mesh's transform 3 - the light (it carries the time too)
+
+struct CameraUniform {
+    view_proj: mat4x4<f32>,
+    view_pos: vec4<f32>,
+};
+
+struct Transform {
+    model_matrix: mat4x4<f32>,
+};
+
+struct Light {
+    position: vec3<f32>,
+    color: vec3<f32>,
+    time: f32,
+    camera_position: vec3<f32>,
+}
+
+@group(0) @binding(0)
+var t_diffuse: texture_2d<f32>;
+@group(0) @binding(1)
+var s_diffuse: sampler;
+
+@group(1) @binding(0)
+var<uniform> camera: CameraUniform;
+
+@group(2) @binding(0)
+var<uniform> transform: Transform;
+
+@group(3) @binding(0)
+var<uniform> light: Light;
+
+// What every hook can read, as `engine`.
+struct Engine {
+    // Seconds, counting up (back to 0 every 10000 s).
+    time: f32,
+    // The camera's true position in the world - every position a hook gets
+    // is relative to it (add it back for the true world position).
+    camera_position: vec3<f32>,
+    // Which way the sun is, and its light's color.
+    sun_direction: vec3<f32>,
+    sun_color: vec3<f32>,
+}
+var<private> engine: Engine;
+
+fn engine_values() -> Engine {
+    return Engine(light.time, light.camera_position, normalize(light.position), light.color);
+}
+
+// The `vertex` hook's vertex: where it is (relative to the camera), its
+// normal and its texture coordinates.
+struct VertexIn {
+    position: vec3<f32>,
+    normal: vec3<f32>,
+    uv: vec2<f32>,
+}
+
+// The `fragment` hook's pixel.
+struct FragmentIn {
+    // Where it is: relative to the camera, and in the world.
+    position: vec3<f32>,
+    world_position: vec3<f32>,
+    // The surface's normal (unit length), facing the side that's seen.
+    normal: vec3<f32>,
+    uv: vec2<f32>,
+    // The mesh's own texture here, and the color engine/standard draws -
+    // lit by the sun, fogged far away.
+    base_color: vec4<f32>,
+    lit_color: vec4<f32>,
+    front_facing: bool,
+}
+
+//@HOOKS
+
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) tex_coords: vec2<f32>,
+    @location(2) normal: vec3<f32>,
+}
+
+struct InstanceInput {
+    @location(5) model_matrix_0: vec4<f32>,
+    @location(6) model_matrix_1: vec4<f32>,
+    @location(7) model_matrix_2: vec4<f32>,
+    @location(8) model_matrix_3: vec4<f32>,
+
+    // Lighting rotation
+    @location(9) normal_matrix_0: vec3<f32>,
+    @location(10) normal_matrix_1: vec3<f32>,
+    @location(11) normal_matrix_2: vec3<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) tex_coords: vec2<f32>,
+    @location(1) world_normal: vec3<f32>,
+    @location(2) world_position: vec3<f32>,
+    @location(3) view_depth: f32, // Used for fog calculation
+};
+
+@vertex
+fn vs_main(model: VertexInput, instance: InstanceInput) -> VertexOutput {
+    engine = engine_values();
+    let model_matrix = mat4x4<f32>(
+        instance.model_matrix_0,
+        instance.model_matrix_1,
+        instance.model_matrix_2,
+        instance.model_matrix_3,
+    );
+
+    let normal_matrix = mat3x3<f32>(
+        instance.normal_matrix_0,
+        instance.normal_matrix_1,
+        instance.normal_matrix_2,
+    );
+
+    let world_position = model_matrix * transform.model_matrix * vec4<f32>(model.position, 1.0);
+    let v = vertex(VertexIn(world_position.xyz, normal_matrix * model.normal, model.tex_coords));
+
+    var out: VertexOutput;
+    out.tex_coords = v.uv;
+    out.world_normal = v.normal;
+    out.world_position = v.position;
+    out.clip_position = camera.view_proj * vec4<f32>(v.position, 1.0);
+
+    // Calculate view-space depth for fog, using the camera's view position
+    out.view_depth = length(camera.view_pos.xyz - out.world_position);
+
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> @location(0) vec4<f32> {
+    engine = engine_values();
+    let object_color: vec4<f32> = textureSample(t_diffuse, s_diffuse, in.tex_coords);
+
+    // For double-sided meshes (backface culling off) the back face is
+    // rasterized with the same interpolated normal as the front - flip it so
+    // it's lit as the surface it actually is. Single-sided meshes only ever
+    // hit the front face, so this is a no-op for them.
+    var normal = normalize(in.world_normal);
+    if (!front_facing) {
+        normal = -normal;
+    }
+
+    let ambient_strength = 0.8;
+    let ambient_color = light.color * ambient_strength;
+
+    let light_dir = normalize(light.position - in.world_position);
+
+    let diffuse_strength = max(dot(normal, light_dir), 0.0);
+    let diffuse_color = light.color * diffuse_strength;
+
+    let result = (ambient_color + diffuse_color) * object_color.xyz;
+
+    // Long-distance atmospheric haze - same start/end as water.wgsl's fog,
+    // fading toward the sky's horizon haze (SkyboxRender::new_procedural's
+    // haze_color), since distant objects are seen against the sky.
+    let fog_start = 80000.0;
+    let fog_end = 1400000.0;
+    let fog_factor = smoothstep(fog_start, fog_end, in.view_depth);
+    let fogged_color = mix(result, vec3<f32>(0.448, 0.604, 0.711), fog_factor);
+    let lit = vec4<f32>(fogged_color, object_color.a);
+
+    return fragment(FragmentIn(in.world_position, in.world_position + engine.camera_position, normal, in.tex_coords, object_color, lit, front_facing));
+}

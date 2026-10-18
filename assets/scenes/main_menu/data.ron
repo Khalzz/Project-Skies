@@ -4,7 +4,7 @@
     children: [
         (
             id: "sun",
-            model: "F16/f16.gltf",
+            model: "F16/f16.glb",
             transform: (
                 position: ( 1000.0, 1000000.0, 1000.0 ),
                 rotation: ( 0.0, 0.0, 0.0 ),
@@ -22,7 +22,7 @@
         ),
         (
             id: "plane",
-            model: "F16/f16.gltf",
+            model: "F16/f16.glb",
             transform: (
                 position: (-5.0, 20.0, 25.0),
                 rotation: (0.0, 180.0, -45.0),

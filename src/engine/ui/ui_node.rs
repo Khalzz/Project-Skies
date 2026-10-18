@@ -1,12 +1,13 @@
-use glyphon::{cosmic_text::Align, Color as GlyphonColor, FontSystem, TextArea};
+use glyphon::{cosmic_text::Align, Color as GlyphonColor, FontSystem, SwashCache, TextArea};
 use nalgebra::vector;
 use crate::app::{App, Size};
 use crate::engine::input::input;
 use crate::engine::rendering::ui::ui::UiRendering;
+use crate::engine::scene_manager::properties::Material;
 use crate::engine::rendering::vertex::{ImageVertex, VertexUi};
 use crate::engine::utils::lerps::lerp;
 use super::color::{lerp_rgba, Fill, UiColor};
-use super::components::label::{Label, DEFAULT_FONT_SIZE, min_height_for_font_size};
+use super::components::label::{Font, Label, DEFAULT_FONT_SIZE, min_height_for_font_size};
 use super::components::container::Container;
 use super::components::image::ImageNode;
 use super::ui_transform::{Anchor, BorderEdges, ChildAnchor, Orientation, Fit, Padding, PositionValue, Rect, SizeValue, UiTransform};
@@ -171,7 +172,7 @@ impl Style {
         let background_color = self.background_color.clone().unwrap_or(Fill::Solid(UiColor::TRANSPARENT));
         ResolvedStyle {
             // Falls back to the background color, not a hardcoded transparent - the
-            // shader (see text_shader.wgsl) always paints a border-width band along
+            // shader (see ui_template.wgsl) always paints a border-width band along
             // the edge in border_color, so a hardcoded transparent default carves a
             // literal hairline of see-through out of every box that has a
             // background but never explicitly set its own border color - subtle on
@@ -332,10 +333,21 @@ pub struct UiNode {
     // already set directly untouched.
     pending_size: Option<(SizeValue, SizeValue)>,
     pending_position: Option<(PositionValue, PositionValue)>,
+    // What its own box (or image) is drawn with - a Ui shader (see
+    // engine::rendering::shader_library). None: engine/ui. Not passed down -
+    // each child draws with its own. See `set_material`.
+    material: Option<Material>,
 }
 
 fn point_in_rect(x: f32, y: f32, rect: &Rect) -> bool {
     x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
+}
+
+/// In the stacking flow. A child that called `.set_position(...)` is placed
+/// on its own (see the container layout loop) and must not add to its
+/// parent's size or push its siblings down.
+fn in_flow(node: &UiNode) -> bool {
+    node.is_active && node.pending_position.is_none()
 }
 
 impl UiNode {
@@ -361,12 +373,20 @@ impl UiNode {
             is_clicked: false,
             pending_size: None,
             pending_position: None,
+            material: None,
         }
     }
 
     pub fn as_label_mut(&mut self) -> Option<&mut Label> {
         match &mut self.content {
             UiNodeContent::Text(label) => Some(label),
+            _ => None,
+        }
+    }
+
+    pub fn as_image_mut(&mut self) -> Option<&mut ImageNode> {
+        match &mut self.content {
+            UiNodeContent::Image(image) => Some(image),
             _ => None,
         }
     }
@@ -476,7 +496,10 @@ impl UiNode {
     /// there's no support for a scrollable container nested inside another
     /// scrollable container narrowing this further via intersection, since
     /// nothing in this codebase does that yet.
-    pub fn node_content_preparation(&mut self, size: &Size, dpi_scale: f32, ui: &mut UiRendering, font_system: &mut FontSystem, delta_time: f32, hit_testable: bool, clip_rect: Option<&Rect>) -> (Vec<TextArea>, u16, u32) {
+    /// `ancestor_hover_text` is a color an ancestor asked every descendant to
+    /// draw while that ancestor is hovered (its own `.on_hover` text color).
+    /// `None` leaves each label on its own color.
+    pub fn node_content_preparation(&mut self, size: &Size, dpi_scale: f32, ui: &mut UiRendering, font_system: &mut FontSystem, text_cache: &mut SwashCache, delta_time: f32, hit_testable: bool, clip_rect: Option<&Rect>, ancestor_hover_text: Option<UiColor>) -> (Vec<TextArea>, u16, u32) {
         // Inactive nodes render nothing and can't be hovered/clicked - their
         // *parent's* layout loop is what skips giving them any space (this alone
         // wouldn't stop them occupying a stacking slot), see the Container branch
@@ -577,7 +600,15 @@ impl UiNode {
         // .clone() (not moved) - current.text_color()/font_size/alpha are still
         // read further down, in each UiNodeContent branch below, and a method call
         // like .text_color() needs the whole struct intact, not just its own field.
-        let effective_visibility = Visibility::new(current.background_color.clone(), current.border_color.clone(), current.corner_radius, current.border_width, border_edges, current.background_blur);
+        let mut effective_visibility = Visibility::new(current.background_color.clone(), current.border_color.clone(), current.corner_radius, current.border_width, border_edges, current.background_blur);
+        // A triangle (negative corner radius) takes its hover color from the
+        // square around it, which passes that color down as text color.
+        if current.corner_radius < 0.0 {
+            if let Some(color) = ancestor_hover_text {
+                effective_visibility.background_color = Fill::Solid(color);
+                effective_visibility.border_color = Fill::Solid(color);
+            }
+        }
 
         match &mut self.content {
             UiNodeContent::Text(label) => {
@@ -590,10 +621,13 @@ impl UiNode {
                 // interpolable, so it always uses this frame's target directly.
                 label.apply_style(font_system, current.font_size, effective_style.align.unwrap_or(Align::Left));
 
-                let (text_area, added_vertices, added_indices) = label.ui_node_data_creation(size, dpi_scale, &mut ui.vertices, &vertices_slice, &mut ui.indices, &indice_slice, &inner_rect, current.text_color(), clip_rect);
-                text_areas.push(text_area);
-                ui.num_vertices += added_vertices;
-                ui.num_indices += added_indices;
+                let text_color = ancestor_hover_text.map(GlyphonColor::from).unwrap_or_else(|| current.text_color());
+                ui.use_material(self.material.as_ref());
+                ui.vertices.extend_from_slice(&vertices_slice);
+                ui.indices.extend_from_slice(&indice_slice);
+                ui.num_vertices += vertices_slice.len() as u16;
+                ui.num_indices += indice_slice.len() as u32;
+                text_areas.push(label.text_area(&inner_rect, dpi_scale, text_color, clip_rect));
             },
             UiNodeContent::Container(container) => {
                 let auto_width = self.transform.width == 0.0 || self.transform.fit.horizontal;
@@ -603,7 +637,9 @@ impl UiNode {
                 // cursor, and never have node_content_preparation called on them (so
                 // they render nothing) - same as CSS `display: none`, not
                 // `visibility: hidden` (which would still reserve their space).
-                let active_count = container.children.iter().filter(|(_, c)| c.is_active).count();
+                // Positioned children stay out of this count: they paint over
+                // the flow, they don't reserve a slot or a gap in it.
+                let flow_count = container.children.iter().filter(|(_, c)| in_flow(c)).count();
 
                 // Fit/auto-size width: measure children first, then grow from
                 // whichever edge self_anchor didn't pin - an End/Center-anchored axis
@@ -618,9 +654,9 @@ impl UiNode {
                     // each sits at its own cross-axis offset, so the widest one
                     // determines the container's width.
                     let natural_width: f32 = match self.transform.direction {
-                        Orientation::Horizontal => container.children.iter().filter(|(_, c)| c.is_active).map(|(_, c)| c.transform.width).sum::<f32>()
-                            + container.gap * (active_count.saturating_sub(1) as f32),
-                        Orientation::Vertical => container.children.iter().filter(|(_, c)| c.is_active).map(|(_, c)| c.transform.width).fold(0.0f32, |a, b| a.max(b)),
+                        Orientation::Horizontal => container.children.iter().filter(|(_, c)| in_flow(c)).map(|(_, c)| c.transform.width).sum::<f32>()
+                            + container.gap * (flow_count.saturating_sub(1) as f32),
+                        Orientation::Vertical => container.children.iter().filter(|(_, c)| in_flow(c)).map(|(_, c)| c.transform.width).fold(0.0f32, |a, b| a.max(b)),
                     };
                     let new_width = natural_width + self.padding.left + self.padding.right;
                     self.transform.width = new_width;
@@ -644,9 +680,9 @@ impl UiNode {
                 if auto_height && self.transform.self_anchor.vertical != Anchor::Start {
                     let direction = &self.transform.direction;
                     let natural_height: f32 = match direction {
-                        Orientation::Vertical => container.children.iter().filter(|(_, c)| c.is_active).map(|(_, c)| c.transform.height).sum::<f32>()
-                            + container.gap * (active_count.saturating_sub(1) as f32),
-                        Orientation::Horizontal => container.children.iter().filter(|(_, c)| c.is_active).map(|(_, c)| c.transform.height).fold(0.0f32, |a, b| a.max(b)),
+                        Orientation::Vertical => container.children.iter().filter(|(_, c)| in_flow(c)).map(|(_, c)| c.transform.height).sum::<f32>()
+                            + container.gap * (flow_count.saturating_sub(1) as f32),
+                        Orientation::Horizontal => container.children.iter().filter(|(_, c)| in_flow(c)).map(|(_, c)| c.transform.height).fold(0.0f32, |a, b| a.max(b)),
                     };
                     let new_height = natural_height + self.padding.top + self.padding.bottom;
                     self.transform.height = new_height;
@@ -665,6 +701,7 @@ impl UiNode {
                 // this node itself received (not the clip it's about to establish
                 // for its own children below - this is its own box, not theirs).
                 let (vertices_slice, indice_slice) = Self::compute_quad(&self.transform, &effective_visibility, size, dpi_scale, ui.num_vertices, Self::clip_rect_array(clip_rect));
+                ui.use_material(self.material.as_ref());
                 let (cv, ci) = container.ui_node_data_creation(size, &mut ui.vertices, &vertices_slice, &mut ui.indices, &indice_slice);
                 ui.num_vertices += cv;
                 ui.num_indices += ci;
@@ -694,10 +731,10 @@ impl UiNode {
                     Orientation::Vertical => c.transform.grow.vertical,
                     Orientation::Horizontal => c.transform.grow.horizontal,
                 };
-                let grow_count = container.children.iter().filter(|(_, c)| c.is_active && is_grow(c)).count();
+                let grow_count = container.children.iter().filter(|(_, c)| in_flow(c) && is_grow(c)).count();
                 if grow_count > 0 {
                     let fixed_main: f32 = container.children.iter()
-                        .filter(|(_, c)| c.is_active && !is_grow(c))
+                        .filter(|(_, c)| in_flow(c) && !is_grow(c))
                         .map(|(_, c)| match direction {
                             Orientation::Vertical => c.transform.height,
                             Orientation::Horizontal => c.transform.width,
@@ -707,7 +744,7 @@ impl UiNode {
                         Orientation::Vertical => content_h,
                         Orientation::Horizontal => content_w,
                     };
-                    let available = (content_main - fixed_main - gap * (active_count.saturating_sub(1) as f32)).max(0.0);
+                    let available = (content_main - fixed_main - gap * (flow_count.saturating_sub(1) as f32)).max(0.0);
                     let grow_size = available / grow_count as f32;
                     for (_, child) in &mut container.children {
                         if child.is_active && is_grow(child) {
@@ -733,7 +770,7 @@ impl UiNode {
                 // container's real current content_w/content_h keeps it correct
                 // regardless of how ancestors resize.
                 for (_, child) in &mut container.children {
-                    if !child.is_active {
+                    if !in_flow(child) {
                         continue;
                     }
                     match direction {
@@ -751,12 +788,12 @@ impl UiNode {
 
                 // Calculate total children size for centering/end alignment on main axis
                 let total_children_main: f32 = container.children.iter()
-                    .filter(|(_, c)| c.is_active)
+                    .filter(|(_, c)| in_flow(c))
                     .map(|(_, c)| match direction {
                         Orientation::Vertical => c.transform.height,
                         Orientation::Horizontal => c.transform.width,
                     })
-                    .sum::<f32>() + gap * (active_count.saturating_sub(1) as f32);
+                    .sum::<f32>() + gap * (flow_count.saturating_sub(1) as f32);
 
                 // Scroll (see UiNode::set_scrollable) - Vertical orientation only.
                 // max_scroll is how much of total_children_main doesn't fit in
@@ -809,7 +846,7 @@ impl UiNode {
                 // borrows container.children) since that loop's borrow otherwise
                 // outlives this function's return, see the E0502 this avoided.
                 let horizontal_cross_natural_height: f32 = container.children.iter()
-                    .filter(|(_, c)| c.is_active)
+                    .filter(|(_, c)| in_flow(c))
                     .map(|(_, c)| c.transform.height)
                     .fold(0.0f32, |a, b| a.max(b));
 
@@ -828,6 +865,20 @@ impl UiNode {
                 };
 
                 let mut end_extent = cursor;
+                // A hovered container can ask every label under it to draw in
+                // its hover text color, so one row lights up as a whole. A
+                // container that has its own hover text color keeps that for
+                // the moment it is actually hovered, and does not pass a
+                // parent's color through while it is resting - the arrow
+                // square uses this so the row's white doesn't recolor the
+                // triangle until the square itself is hovered.
+                let child_hover_text = if self.is_hovered {
+                    self.hover.as_ref().and_then(|style| style.text_color).or(ancestor_hover_text)
+                } else if self.hover.as_ref().and_then(|style| style.text_color).is_some() {
+                    None
+                } else {
+                    ancestor_hover_text
+                };
 
                 for (_id, child) in &mut container.children {
                     if !child.is_active {
@@ -848,14 +899,10 @@ impl UiNode {
                         // known until its own layout pass runs below, so (like every
                         // other per-frame measurement in this function) this has to
                         // be recomputed fresh each frame, not resolved once.
-                        // Doesn't advance the cursor or consume a gap - the
-                        // auto_width/auto_height/total_children_main math above still
-                        // counts this child's own size as if it were in flow, so
-                        // mixing a self-positioned child into a Fit/Center/End-anchored
-                        // container alongside flow siblings can still throw off their
-                        // sizing/centering; out of scope for this to handle generally,
-                        // fine for a self-positioned child that's the only one at its
-                        // level (e.g. a single title/panel offset from a corner).
+                        // Out of the stacking flow entirely (`in_flow`): no cursor
+                        // slot, no gap, and not counted in the parent's Fit size,
+                        // so it can hang over later siblings. Put it after those
+                        // siblings in the child list so it paints on top of them.
                         child.transform.resolve_position_in_rect(x, y, &content_rect);
                     } else {
                         // Position on main axis
@@ -893,7 +940,7 @@ impl UiNode {
                         child.transform.apply_transformation();
                     }
 
-                    let (child_text_areas, _cv, _ci) = child.node_content_preparation(size, dpi_scale, ui, font_system, delta_time, hit_testable, child_clip_rect);
+                    let (child_text_areas, _cv, _ci) = child.node_content_preparation(size, dpi_scale, ui, font_system, text_cache, delta_time, hit_testable, child_clip_rect, child_hover_text);
                     text_areas.extend(child_text_areas);
                 }
 
@@ -911,6 +958,7 @@ impl UiNode {
                 // already captured as plain locals before that loop ran, not from
                 // `container` directly, for the same reason.
                 if scrollable && max_scroll > 0.0 {
+                    ui.use_material(None);
                     const BAR_WIDTH: f32 = 5.0;
                     let bar_left = content_right - BAR_WIDTH;
 
@@ -965,8 +1013,9 @@ impl UiNode {
                 // see apply_padding) box - same treatment as Text, though there's no
                 // background quad behind an Image node today to show through the gap.
                 let inner_rect = Self::inner_rect(&self.transform, &self.padding);
-                let vertices = Self::compute_image_vertices(&inner_rect, size, current.alpha);
-                ui.image_quads.entry(image.path.clone()).or_default().extend_from_slice(&vertices);
+                let vertices = Self::compute_image_vertices(&inner_rect, size, current.alpha, image.quarter_turns);
+                let material = ui.material_key(self.material.as_ref());
+                ui.image_quads.entry((material, image.path.clone())).or_default().extend_from_slice(&vertices);
             },
         }
 
@@ -975,21 +1024,22 @@ impl UiNode {
 
     /// Debug-only: draws an outline (transparent fill, opaque border - reuses the
     /// same border rendering every node's own border color already gets, see
-    /// text_shader.wgsl) at this node's resolved `rect`, recursing into children.
+    /// ui_template.wgsl) at this node's resolved `rect`, recursing into children.
     /// Call after `node_content_preparation` has already run this frame (needs
     /// `self.transform.rect` to be current) - see `App::prepare_ui_content`, gated
-    /// behind `Ui::debug_bounds` (toggled by "toggle_ui_debug", F2).
+    /// behind `Ui::debug_bounds` (no key any more).
     pub fn debug_bounds_preparation(&self, size: &Size, dpi_scale: f32, ui: &mut UiRendering) {
         if !self.is_active {
             return;
         }
         let outline = Visibility::new(Fill::Solid(UiColor::TRANSPARENT), Fill::Solid(UiColor::Rgb(255, 0, 0)), 0.0, 2.0, BorderEdges::ALL, 0.0);
         // Deliberately unclipped, even for a node inside a scrollable container -
-        // a debug overlay (F2) showing exactly where every node's real rect is,
+        // a debug overlay showing exactly where every node's real rect is,
         // including whatever's currently scrolled out of view, is more useful for
         // debugging than a clipped one would be.
         let (vertices_slice, indice_slice) = Self::compute_quad(&self.transform, &outline, size, dpi_scale, ui.num_vertices, Self::NO_CLIP);
 
+        ui.use_material(None);
         ui.num_vertices += vertices_slice.len() as u16;
         ui.num_indices += indice_slice.len() as u32;
         ui.vertices.extend_from_slice(&vertices_slice);
@@ -1040,17 +1090,24 @@ impl UiNode {
 
     // ── Vertex/Index helpers ──
 
-    fn compute_image_vertices(rect: &Rect, screen_size: &Size, alpha: f32) -> [ImageVertex; 4] {
+    fn compute_image_vertices(rect: &Rect, screen_size: &Size, alpha: f32, quarter_turns: u8) -> [ImageVertex; 4] {
         let top = 1.0 - (rect.top / (screen_size.height as f32 / 2.0));
         let left = (rect.left / (screen_size.width as f32 / 2.0)) - 1.0;
         let bottom = 1.0 - (rect.bottom / (screen_size.height as f32 / 2.0));
         let right = (rect.right / (screen_size.width as f32 / 2.0)) - 1.0;
 
+        // Texture corners in the same TL, BL, BR, TR order as the quad's own
+        // corners below. Rotating the image one quarter turn clockwise means
+        // each screen corner shows the texture corner one step further round
+        // (screen TL shows texture BL, ...), hence the offset index.
+        const CORNER_UVS: [[f32; 2]; 4] = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
+        let uv = |corner: usize| CORNER_UVS[(corner + quarter_turns as usize) % 4];
+
         [
-            ImageVertex { position: vector![left, top, 0.0].into(), uv: [0.0, 0.0], alpha },
-            ImageVertex { position: vector![left, bottom, 0.0].into(), uv: [0.0, 1.0], alpha },
-            ImageVertex { position: vector![right, bottom, 0.0].into(), uv: [1.0, 1.0], alpha },
-            ImageVertex { position: vector![right, top, 0.0].into(), uv: [1.0, 0.0], alpha },
+            ImageVertex { position: vector![left, top, 0.0].into(), uv: uv(0), alpha },
+            ImageVertex { position: vector![left, bottom, 0.0].into(), uv: uv(1), alpha },
+            ImageVertex { position: vector![right, bottom, 0.0].into(), uv: uv(2), alpha },
+            ImageVertex { position: vector![right, top, 0.0].into(), uv: uv(3), alpha },
         ]
     }
 
@@ -1072,7 +1129,7 @@ impl UiNode {
     /// this call will add, i.e. `ui.num_vertices` at the call site.
     // "No clip" sentinel for VertexUi::clip_rect ([top, left, bottom, right] -
     // same packing as VertexUi::rect) - large enough that no on-screen fragment
-    // ever falls outside it, so text_shader.wgsl's clip discard never triggers
+    // ever falls outside it, so ui_template.wgsl's clip discard never triggers
     // for the overwhelming majority of nodes that were never inside a
     // scrollable container (see UiNode::set_scrollable). Same "off by default"
     // shape as background_blur's own 0.0 default.
@@ -1091,7 +1148,7 @@ impl UiNode {
 
         // Unlike ndc_x/y above (self-contained NDC, resolution-independent), the
         // `rect` VertexUi carries gets compared fragment-by-fragment in
-        // text_shader.wgsl against `@builtin(position)`, which WGPU always gives
+        // ui_template.wgsl against `@builtin(position)`, which WGPU always gives
         // in real backing pixels, never points - so `rect` (and `clip`, same
         // packing) has to already be in that space too, same reasoning as
         // Label::text_area's own dpi_scale doc comment. Left unscaled, every
@@ -1108,7 +1165,7 @@ impl UiNode {
         let clip = clip.map(|v| v * dpi_scale);
 
         let border_edges = visibility.border_edges.to_bits();
-        // Same reasoning as `rect`/`clip` above - text_shader.wgsl's SDF (dist)
+        // Same reasoning as `rect`/`clip` above - ui_template.wgsl's SDF (dist)
         // and per-edge border bands compare directly against `@builtin(position)`
         // (real pixels), so corner_radius/border_width (authored in points, same
         // as everything else) have to be converted to that space too, or a
@@ -1307,6 +1364,16 @@ impl UiNode {
         Self::base(transform, Style::default(), content)
     }
 
+    /// Draws this image node's texture rotated clockwise by `quarter_turns`
+    /// quarter turns (see `ImageNode::quarter_turns`). No-op on other node
+    /// types.
+    pub fn rotate_image(mut self, quarter_turns: u8) -> Self {
+        if let UiNodeContent::Image(image) = &mut self.content {
+            image.quarter_turns = quarter_turns % 4;
+        }
+        self
+    }
+
     /// Create an empty container node from code, positioned at the origin and sized
     /// to fit its children (`SizeValue::Fit` on both axes) by default - configure
     /// both through the builder instead of the constructor: `.set_size(...)` then
@@ -1466,6 +1533,20 @@ impl UiNode {
         self
     }
 
+    /// Draws this node's own box (or image) with `material` - a Ui shader
+    /// (see engine::rendering::shader_library), engine/ui otherwise. Its
+    /// children keep their own; its text is drawn as before.
+    pub fn set_material(mut self, material: Material) -> Self {
+        self.material = Some(material);
+        self
+    }
+
+    /// `set_material`, on a node that's already built - None back to
+    /// engine/ui. The UI is drawn again with it.
+    pub fn replace_material(&mut self, material: Option<Material>) {
+        self.material = material;
+    }
+
     /// Registers a callback that runs once, on the frame this node gets clicked
     /// (mouse button pressed while over it - see the `is_clicked` hit-test in
     /// `node_content_preparation`, and `App::fire_ui_click_handlers` for how it
@@ -1518,6 +1599,16 @@ impl UiNode {
     /// `size`/old font_size would drift from font hinting) - every call site
     /// already has one in scope (`app.ui.text.font_system`), same as `label(...)`
     /// itself needs.
+    /// Which typeface/weight a label draws with (see `Font`) - inert on
+    /// content types other than Text. Call before `.set_font_size(...)`, so
+    /// that one sizes the box for this font's own glyph widths.
+    pub fn set_font(mut self, font_system: &mut FontSystem, font: Font) -> Self {
+        if let UiNodeContent::Text(label) = &mut self.content {
+            label.set_font(font_system, font);
+        }
+        self
+    }
+
     pub fn set_font_size(mut self, font_system: &mut FontSystem, size: f32) -> Self {
         self.style.font_size = Some(size);
         if let UiNodeContent::Text(label) = &self.content {
@@ -1694,7 +1785,7 @@ impl UiNode {
     /// own alpha: the blur radius comes from here, while the *background color's
     /// alpha* controls how much of that blur shows through versus how strongly
     /// the flat color tints it (an opaque background_color fully hides the blur;
-    /// a translucent one lets it show through, tinted) - see text_shader.wgsl's
+    /// a translucent one lets it show through, tinted) - see ui_template.wgsl's
     /// fill_color. Every node crossfades between the same shared, precomputed
     /// full-resolution blur based on its own radius (see BlurRender), rather than
     /// each sampling the live scene independently at an arbitrary radius - the

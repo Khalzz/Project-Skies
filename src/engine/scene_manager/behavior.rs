@@ -1,6 +1,7 @@
 use std::any::Any;
 
 use crate::app::App;
+use crate::engine::physics::physics_handler::RenderMessage;
 use crate::engine::rendering::camera::handler::SceneCameras;
 
 use super::node::Node;
@@ -69,9 +70,18 @@ pub trait Behavior: Any + AsAny {
     /// thread (see `engine::physics::physics_handler::Physics::physics_thread`)
     /// would require making the whole property system `Send`-safe - not worth
     /// it for logic that reacts to results rather than computing forces or
-    /// collisions itself (that belongs in a `PhysicsTick` impl instead, which
-    /// already runs on the real physics thread and never touches `Node`).
-    fn fixed_update(&mut self, node: &mut Node, cameras: &mut SceneCameras, app: &mut App, dt: f32) {
-        let _ = (node, cameras, app, dt);
+    /// collisions itself (that belongs in a `PhysicsBehavior` attached via
+    /// `Node::add_physics_behavior` instead, which runs at the real fixed
+    /// rate on the physics thread and never touches `Node`).
+    ///
+    /// `physics_message` is this node's own entry from that frame's physics
+    /// results (`None` until the physics thread has actually reported back
+    /// for this node, e.g. a node whose id never registered a `Physics`
+    /// property in the first place) - see `SceneNodes::fixed_update`'s own
+    /// doc comment. This is the generic version of what used to be a scene
+    /// hand-picking one node by name to feed its physics results to (see
+    /// `Plane::fixed_update`'s own doc comment for the case this replaced).
+    fn fixed_update(&mut self, node: &mut Node, cameras: &mut SceneCameras, app: &mut App, dt: f32, physics_message: Option<&RenderMessage>) {
+        let _ = (node, cameras, app, dt, physics_message);
     }
 }

@@ -8,22 +8,82 @@
         (action: "rudder_right", bindings: [Key("e"), ControllerButton("RightShoulder")]),
         (action: "throttle_up", bindings: [Key("Up"), ControllerAxis(axis: "TriggerRight", positive: true)]),
         (action: "throttle_down", bindings: [Key("Down"), ControllerAxis(axis: "TriggerLeft", positive: true)]),
+        // A throttle lever (a HOTAS throttle's axis) - read as a position, not
+        // pressed/not: where the lever is is the throttle (see Plane).
+        (action: "throttle_axis", bindings: []),
         (action: "change_camera", bindings: [Key("v"), ControllerButton("Y")]),
+        // Right-stick camera look - deadzone must match LOOK_STICK_DEADZONE
+        // in play::camera::camera.
+        (action: "look_left", bindings: [ControllerAxis(axis: "RightX", positive: false, deadzone: 0.1)]),
+        (action: "look_right", bindings: [ControllerAxis(axis: "RightX", positive: true, deadzone: 0.1)]),
+        (action: "look_up", bindings: [ControllerAxis(axis: "RightY", positive: false, deadzone: 0.1)]),
+        (action: "look_down", bindings: [ControllerAxis(axis: "RightY", positive: true, deadzone: 0.1)]),
         (action: "fix_view", bindings: [Key("space")]),
+        // The helmet display (the visor's HUD, looking outside) on and off.
+        (action: "toggle_hmd", bindings: [Key("y")]),
+        // Zoom (the cockpit and free views' field of view): in/out while
+        // held, and a zoom lever - read as a position, end to end from the
+        // widest view to the narrowest (see play::camera::camera).
+        (action: "zoom_in", bindings: [Key("PageUp")]),
+        (action: "zoom_out", bindings: [Key("PageDown")]),
+        (action: "zoom_axis", bindings: []),
         (action: "test", bindings: [Key("t")]),
         (action: "up_wheel", bindings: [Key("Right")]),
         (action: "down_wheel", bindings: [Key("Left")]),
         (action: "toggle_landing_gear", bindings: [Key("g")]),
+        (action: "toggle_fbw_pitch", bindings: [Key("b")]),
+        (action: "wheel_brake", bindings: [Key("x")]),
+        (action: "toggle_parking_brake", bindings: [Key("p")]),
+        (action: "quick_menu_up", bindings: [ControllerButton("DPadUp")]),
+        (action: "quick_menu_right", bindings: [ControllerButton("DPadRight")]),
+        (action: "quick_menu_down", bindings: [ControllerButton("DPadDown")]),
+        (action: "quick_menu_left", bindings: [ControllerButton("DPadLeft")]),
         (action: "landing_gear_up", bindings: []),
         (action: "landing_gear_down", bindings: []),
-        (action: "toggle_debug", bindings: [Key("F1")]),
-        (action: "toggle_ui_debug", bindings: [Key("F2")]),
-        (action: "toggle_console", bindings: [Key("F3")]),
-        (action: "toggle_pause", bindings: [Key("F12")]),
+        // The speed brake: toggle opens or closes it. The extend/retract
+        // pair is for a switch that holds a direction (no default key).
+        (action: "toggle_air_brake", bindings: [Key("h")]),
+        (action: "air_brake_extend", bindings: []),
+        (action: "air_brake_retract", bindings: []),
+        // Weapons: the next one in the HUD's weapon list (round to OFF), and
+        // the trigger.
+        (action: "next_weapon", bindings: [Key("Tab"), ControllerButton("B")]),
+        (action: "fire_weapon", bindings: [Key("Return"), ControllerButton("A")]),
+        // Locks the seeker on what's in the diamond - again lets it go. Held
+        // past half a second: the vertical lock, while it's held (locks the
+        // first enemy through the line over the nose).
+        (action: "toggle_lock", bindings: [Key("r"), ControllerButton("X")]),
+        // Countermeasures: one release, a quick burst, and what they release
+        // (flares, chaff, both).
+        (action: "countermeasure_single", bindings: [Key("f")]),
+        (action: "countermeasure_program", bindings: [Key("c")]),
+        (action: "countermeasure_mode", bindings: [Key("z")]),
+        // F1-F4: what the camera follows. F1: your jet, in the cockpit - again
+        // steps through its views; F2: the next other aircraft, free view.
+        (action: "camera_player", bindings: [Key("F1")]),
+        (action: "camera_next_aircraft", bindings: [Key("F2")]),
+        (action: "camera_next_ground_unit", bindings: [Key("F3")]),
+        (action: "camera_next_missile", bindings: [Key("F4")]),
+        // F5-F8: debugging and editing the map.
+        // F10: the tactical map.
+        // F5 / F9: the debug view - colliders, and while spectating (F2-F4)
+        // what's followed: its telemetry and the path it's flying.
+        (action: "toggle_debug", bindings: [Key("F5"), Key("F9")]),
+        (action: "toggle_debug_mouse", bindings: [Key("F7")]),
+        // F8: the heat view - what an IR seeker sees.
+        (action: "toggle_heat_view", bindings: [Key("F8")]),
+        // F6: the center HUD drawn far ahead of the jet, only through its glass.
+        (action: "toggle_collimated_hud", bindings: [Key("F6")]),
+        // F11: live size and center of the cockpit HUD.
+        (action: "toggle_hud_layout", bindings: [Key("F11")]),
+        // F10: the editor - the world seen through a free editor camera, the
+        // hierarchy, properties and timeline around it.
+        (action: "toggle_editor", bindings: [Key("F10")]),
+        // M: the map - the battle as lines on a dark screen.
+        (action: "toggle_tactical_map", bindings: [Key("m")]),
+        // The sandbox camera's orbit toggle - no key.
+        (action: "follow_cam_toggle", bindings: []),
         (action: "toggle_pause_menu", bindings: [Key("Escape")]),
-        (action: "toggle_camera_debug", bindings: [Key("F4")]),
-        (action: "toggle_camera_offset_debug", bindings: [Key("F5")]),
-        (action: "toggle_water_debug_view", bindings: [Key("F6")]),
         (action: "debug_cam_forward", bindings: [Key("w")]),
         (action: "debug_cam_back", bindings: [Key("s")]),
         (action: "debug_cam_left", bindings: [Key("a")]),

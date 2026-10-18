@@ -9,15 +9,17 @@
 //! `level_planning.ron` had to toggle all of them individually.
 
 use glyphon::cosmic_text::Align;
+use glyphon::Weight;
 
 use crate::app::App;
+use crate::engine::ui::components::label::Font;
 use crate::engine::rendering::ui::ui::Ui;
 use crate::engine::ui::color::UiColor;
 use crate::engine::ui::layer::Layer;
 use crate::engine::ui::ui_node::UiNode;
 use crate::engine::ui::ui_transform::{Orientation, PositionValue, SizeValue};
 use crate::game::scenes::main_menu::ui as main_menu_ui;
-use crate::game::ui::{button, label, with_left_accent};
+use crate::game::ui::{button, label, with_left_accent, HUD_FONT};
 
 // Small green HUD readout - the shape data_box's own children and compass/
 // speed all share (matches what assets/ui/game_ui.ron used to declare for
@@ -27,6 +29,7 @@ use crate::game::ui::{button, label, with_left_accent};
 fn hud_label(app: &mut App, text: &str, width: f32, height: f32) -> UiNode {
     label(app, text)
         .set_size(SizeValue::Pixels(width), SizeValue::Pixels(height))
+        .set_font(&mut app.ui.text.font_system, HUD_FONT)
         .set_font_size(&mut app.ui.text.font_system, 10.0)
         .set_text_color(UiColor::Rgb(0, 255, 0))
         .set_border_color(UiColor::Rgb(0, 255, 0))
@@ -42,6 +45,155 @@ fn hud_label(app: &mut App, text: &str, width: f32, height: f32) -> UiNode {
 /// "velocity_marker" is deliberately NOT included here despite being part of
 /// the same HUD reveal - see `build_velocity_marker`'s own doc comment for
 /// why it has to stay independent instead.
+/// The HUD's readouts - each its own top-level node (like the velocity
+/// marker), placed every frame inside the HUD's frame (see
+/// GameLogic::update_hud): (key, text, font size, width).
+pub const HUD_READOUTS: [(&str, &str, f32, f32); 9] = [
+    ("hud_speed", "0", 12.0, 64.0),
+    ("hud_altitude", "0", 12.0, 64.0),
+    // The heading, in the middle of the heading tape.
+    ("hud_heading", "0", 16.0, 64.0),
+    // The G, bottom left - in the Fox-2 mode only.
+    ("hud_g", "1.0G", 12.0, 64.0),
+    // "WARN" (or "BINGO") inside the square.
+    ("hud_altitude_warning", "WARN", HUD_WARN_FONT, HUD_WARN_SIZE.0),
+    // The selected weapon, on the square's bottom edge, in attack.
+    ("hud_weapon", "", 13.0, 160.0),
+    // Left of the fuel bar: percent of the tanks left.
+    ("hud_corner_fuel", "0%", 14.0, HUD_FUEL_PERCENT_WIDTH),
+    // Just outside the right line's bottom corner.
+    ("hud_radar_altitude", "R: 0", 12.0, HUD_RADAR_ALTITUDE_WIDTH),
+    // The countermeasure setting, shown only just after it changes.
+    ("hud_cms_cue", "", 16.0, 160.0),
+];
+
+/// The fuel percent's and the radar altitude's boxes (px, before the HUD's
+/// scale) - the scene places them against the side lines by these.
+pub const HUD_FUEL_PERCENT_WIDTH: f32 = 44.0;
+pub const HUD_RADAR_ALTITUDE_WIDTH: f32 = 64.0;
+/// A HUD readout's box (px).
+pub const HUD_READOUT_SIZE: (f32, f32) = (64.0, 20.0);
+/// The low-altitude WARN cue: font size, and the box the text is clipped to
+/// (px). Taller than a readout so the larger glyphs aren't cut off.
+pub const HUD_WARN_FONT: f32 = 32.0;
+pub const HUD_WARN_SIZE: (f32, f32) = (160.0, 48.0);
+/// Inter Thin, the lighter face loaded with the HUD font. Regular is the
+/// only other weight bundled, so this is the thinner step available.
+pub const HUD_WARN_FACE: Font = Font { family: Some("Inter"), weight: Weight::THIN };
+
+/// One of `HUD_READOUTS` - built hidden. The HUD's text is the regular
+/// weight, a touch heavier than the thin default.
+pub fn build_hud_readout(app: &mut App, text: &str, font_size: f32, width: f32) -> UiNode {
+    label(app, text)
+        .set_size(SizeValue::Pixels(width), SizeValue::Pixels(HUD_READOUT_SIZE.1))
+        .set_font(&mut app.ui.text.font_system, HUD_FONT)
+        .set_font_size(&mut app.ui.text.font_system, font_size)
+        .set_text_color(UiColor::Rgb(0, 255, 77))
+        .set_background_color(UiColor::TRANSPARENT)
+        .set_align(Align::Center)
+        .active(false)
+}
+
+/// How many pitch ladder numbers there can be on screen at once - each its
+/// own top-level node like the readouts, placed (and given its number) every
+/// frame by GameLogic::update_hud. Enough for every one: two per line, a
+/// line every 5° from -90° to 90° but the horizon.
+pub const HUD_PITCH_LABELS: usize = 2 * 36;
+/// The same for the heading tape's numbers - it shows 60°, a number every
+/// 10°.
+pub const HUD_HEADING_LABELS: usize = 8;
+/// A pitch ladder or heading tape number's box (px).
+pub const HUD_SMALL_LABEL_SIZE: (f32, f32) = (28.0, 14.0);
+
+pub fn hud_pitch_label_key(index: usize) -> String {
+    format!("hud_pitch_{index}")
+}
+
+pub fn hud_heading_label_key(index: usize) -> String {
+    format!("hud_heading_{index}")
+}
+
+/// The kill feed (see GameLogic::update_kill_feed): how many rows at most,
+/// each one's height, its text's size, the room either side of the text
+/// inside its box and between its pieces (px), and how many pieces of text
+/// a row has - who, what they did, which plane, the rest - each its own
+/// label, in its own color.
+pub const KILL_FEED_ROWS: usize = 8;
+pub const KILL_FEED_ROW_HEIGHT: f32 = 26.0;
+pub const KILL_FEED_FONT_SIZE: f32 = 13.0;
+pub const KILL_FEED_PADDING: f32 = 10.0;
+pub const KILL_FEED_GAP: f32 = 5.0;
+pub const KILL_FEED_PIECES: usize = 4;
+/// The widest a piece of text can be (px) - its label's own width.
+const KILL_FEED_PIECE_MAX_WIDTH: f32 = 320.0;
+
+/// A row's box.
+pub fn kill_feed_key(row: usize) -> String {
+    format!("kill_feed_{row}")
+}
+
+/// A row's piece of text `piece`.
+pub fn kill_feed_piece_key(row: usize, piece: usize) -> String {
+    format!("kill_feed_{row}_{piece}")
+}
+
+/// A kill feed row's box - dark, see-through, rounded, sized to its text
+/// every frame. Built hidden.
+pub fn build_kill_feed_box(app: &mut App) -> UiNode {
+    label(app, "")
+        .set_size(SizeValue::Pixels(KILL_FEED_PIECE_MAX_WIDTH), SizeValue::Pixels(KILL_FEED_ROW_HEIGHT))
+        .set_background_color(UiColor::Rgba(0, 0, 0, 150))
+        .set_corner_radius(4.0)
+        .active(false)
+}
+
+/// A piece of a kill feed row's text - on no box of its own (the row's is
+/// under it), its color set with its text. Built hidden.
+pub fn build_kill_feed_piece(app: &mut App) -> UiNode {
+    label(app, "")
+        .set_size(SizeValue::Pixels(KILL_FEED_PIECE_MAX_WIDTH), SizeValue::Pixels(KILL_FEED_ROW_HEIGHT))
+        .set_font(&mut app.ui.text.font_system, HUD_FONT)
+        .set_font_size(&mut app.ui.text.font_system, KILL_FEED_FONT_SIZE)
+        .set_text_color(UiColor::Rgb(230, 230, 230))
+        .set_background_color(UiColor::TRANSPARENT)
+        .set_align(Align::Left)
+        .active(false)
+}
+
+/// How many heat sources the F8 heat view can label at once (see
+/// GameLogic::update_heat_view), and a label's box (px).
+pub const HEAT_LABELS: usize = 16;
+pub const HEAT_LABEL_SIZE: (f32, f32) = (110.0, 14.0);
+
+pub fn heat_label_key(index: usize) -> String {
+    format!("heat_view_{index}")
+}
+
+/// One of the `HEAT_LABELS` - built hidden, white so it reads over the
+/// heat colors.
+pub fn build_heat_label(app: &mut App) -> UiNode {
+    label(app, "0")
+        .set_size(SizeValue::Pixels(HEAT_LABEL_SIZE.0), SizeValue::Pixels(HEAT_LABEL_SIZE.1))
+        .set_font(&mut app.ui.text.font_system, HUD_FONT)
+        .set_font_size(&mut app.ui.text.font_system, 10.0)
+        .set_text_color(UiColor::Rgb(255, 255, 255))
+        .set_background_color(UiColor::TRANSPARENT)
+        .set_align(Align::Center)
+        .active(false)
+}
+
+/// One of the `HUD_PITCH_LABELS` or `HUD_HEADING_LABELS` - built hidden.
+pub fn build_hud_small_label(app: &mut App) -> UiNode {
+    label(app, "0")
+        .set_size(SizeValue::Pixels(HUD_SMALL_LABEL_SIZE.0), SizeValue::Pixels(HUD_SMALL_LABEL_SIZE.1))
+        .set_font(&mut app.ui.text.font_system, HUD_FONT)
+        .set_font_size(&mut app.ui.text.font_system, 10.0)
+        .set_text_color(UiColor::Rgb(0, 255, 77))
+        .set_background_color(UiColor::TRANSPARENT)
+        .set_align(Align::Center)
+        .active(false)
+}
+
 pub fn build_game_ui(app: &mut App) -> UiNode {
     let data_box = UiNode::container()
         .set_size(SizeValue::Fit, SizeValue::Fit)
@@ -52,28 +204,96 @@ pub fn build_game_ui(app: &mut App) -> UiNode {
         .set_child("timer", hud_label(app, "00:00:00:00", 250.0, 35.0))
         .set_child("framerate", hud_label(app, "100fps", 250.0, 35.0))
         .set_child("g", hud_label(app, "1g", 250.0, 35.0))
-        .set_child("power", hud_label(app, "0%", 250.0, 35.0));
+        .set_child("power", hud_label(app, "0%", 250.0, 35.0))
+        .set_child("fuel", hud_label(app, "Fuel: 0 kg", 250.0, 35.0))
+        // The selected weapon and its lock - see GameLogic::update_weapons.
+        .set_child("weapons", hud_label(app, "WPN OFF", 250.0, 35.0))
+        // Flares and chaff left, and what's released - see
+        // GameLogic::update_weapons.
+        .set_child("countermeasures", hud_label(app, "", 250.0, 35.0));
 
     let compass = hud_label(app, "90°", 100.0, 35.0)
         .set_position(PositionValue::Center(0.0), PositionValue::Start(10.0));
-    let speed = hud_label(app, "SPD", 100.0, 35.0)
-        .set_position(PositionValue::Center(0.0), PositionValue::Start(50.0));
-    // "altitude" - matches the key ui_control's own Ui::get_ui_node lookup
-    // already expects (see scene.rs's own stale-reference comment at the top
-    // of that file) - that formatting/update logic was already there, this
-    // node just never existed for it to actually find.
-    let altitude = hud_label(app, "ALT", 100.0, 35.0)
-        .set_position(PositionValue::Center(0.0), PositionValue::Start(90.0));
-
     UiNode::container()
         .set_size(SizeValue::Percent(100.0), SizeValue::Percent(100.0))
         .set_position(PositionValue::Start(0.0), PositionValue::Start(0.0))
         .set_background_color(UiColor::TRANSPARENT)
         .set_child("data_box", data_box)
         .set_child("compass", compass)
-        .set_child("speed", speed)
-        .set_child("altitude", altitude)
+        .set_child("hud_stores", build_hud_stores(app))
         .active(false)
+}
+
+/// Bottom-right stores, top to bottom. A box is shown only while the jet
+/// has something for it (see GameLogic::update_hud). Another page (a radar,
+/// later) is another child of `hud_stores` plus a line in that update.
+const STORE_ROW_WIDTH: f32 = 168.0;
+const STORE_ROW_HEIGHT: f32 = 18.0;
+/// How many weapon rows the weapons box has room for.
+pub const WEAPON_LIST_ROWS: usize = 8;
+
+fn store_label(app: &mut App, text: &str, font_size: f32) -> UiNode {
+    label(app, text)
+        .set_size(SizeValue::Pixels(STORE_ROW_WIDTH), SizeValue::Pixels(STORE_ROW_HEIGHT))
+        .set_font(&mut app.ui.text.font_system, HUD_FONT)
+        .set_font_size(&mut app.ui.text.font_system, font_size)
+        .set_text_color(UiColor::Rgb(0, 255, 77))
+        .set_background_color(UiColor::TRANSPARENT)
+        .set_align(Align::Left)
+}
+
+fn store_box(app: &mut App, title: &str, rows: &[(&str, &str)]) -> UiNode {
+    let mut box_node = UiNode::container()
+        .set_orientation(Orientation::Vertical)
+        .set_size(SizeValue::Fit, SizeValue::Fit)
+        .set_padding(8.0)
+        .set_gap(2.0)
+        .set_background_color(UiColor::Rgba(0, 0, 0, 140))
+        .set_child("title", store_label(app, title, 11.0));
+    for (id, text) in rows {
+        box_node = box_node.set_child(*id, store_label(app, text, 13.0));
+    }
+    box_node
+}
+
+/// The bottom-right column: the weapon list. Text is left-aligned. Fuel and
+/// radar altitude sit on the HUD square instead, and the countermeasure
+/// setting is a cue that fades. Built hidden.
+fn build_hud_stores(app: &mut App) -> UiNode {
+    let mut weapons = store_box(app, "WPN", &[]);
+    for row in 0..WEAPON_LIST_ROWS {
+        weapons = weapons.set_child(format!("row{row}"), store_label(app, "", 13.0).active(false));
+    }
+    UiNode::container()
+        .set_orientation(Orientation::Vertical)
+        .set_size(SizeValue::Fit, SizeValue::Fit)
+        .set_position(PositionValue::End(-16.0), PositionValue::End(-16.0))
+        .set_gap(8.0)
+        .set_background_color(UiColor::TRANSPARENT)
+        .set_child("weapons", weapons)
+        .active(false)
+}
+
+/// Fills the weapons box from `entries` - each one's name and whether it's
+/// the one selected. A `>` marks only that row. Rows past the last entry
+/// are hidden.
+pub fn update_weapon_list(app: &mut App, entries: &[(String, bool)]) {
+    for row in 0..WEAPON_LIST_ROWS {
+        let key = format!("game_ui/hud_stores/weapons/row{row}");
+        let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &key) else { continue };
+        match entries.get(row) {
+            Some((text, selected)) => {
+                node.set_active(true);
+                let color = if *selected { UiColor::Rgb(0, 255, 77) } else { UiColor::Rgb(0, 140, 50) };
+                node.update_style(|style| style.set_text_color(color));
+                if let Some(label) = node.as_label_mut() {
+                    let text = if *selected { format!("> {text}") } else { text.clone() };
+                    label.set_text(&mut app.ui.text.font_system, &text, true);
+                }
+            }
+            None => node.set_active(false),
+        }
+    }
 }
 
 /// Stays a fully independent top-level node rather than nested inside
@@ -184,11 +404,12 @@ pub fn open_pause_menu(app: &mut App) {
 /// explain why, see `App::is_paused`'s own doc comment).
 pub fn close_pause_menu(app: &mut App) {
     app.is_paused = false;
-    // Restores mouse-look. Harmless even for Restart/Back-to-menu (both
-    // call this right before SceneManager::open_scene) - whichever scene
-    // that switches to sets its own correct mode in its own constructor the
-    // very next frame anyway.
-    app.window_manager.context.mouse().set_relative_mouse_mode(true);
+    // Restores mouse-look - unless F8 had the mouse freed for the debug
+    // overlay (App::debug_mouse_free). Harmless even for Restart/Back-to-
+    // menu (both call this right before SceneManager::open_scene) - whichever
+    // scene that switches to sets its own correct mode in its own
+    // constructor the very next frame anyway.
+    app.window_manager.context.mouse().set_relative_mouse_mode(!app.mouse_free());
     if let Some(backdrop) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "PauseBackdrop") {
         backdrop.set_active(false);
     }
@@ -271,6 +492,7 @@ pub fn build_pause_menu(app: &mut App) {
 /// "quite instantly", per the request this came out of) - unlike the pause
 /// menu's own gradient backdrop, which is meant to be a translucent overlay,
 /// not a hard cut.
+#[allow(dead_code)] // not shown for now - see play::scene::GameLogic::check_crash
 pub fn open_death_screen(app: &mut App) {
     // Frees the cursor so Restart/Back to Main Menu are actually clickable -
     // same reasoning as open_pause_menu's own doc comment.
@@ -367,7 +589,9 @@ pub fn build_debug_panel(app: &mut App) -> UiNode {
         .set_background_color(UiColor::Rgba(0, 0, 0, 128))
         .set_background_blur(20.0)
         .set_child("fps", stats_line(app, "0 FPS"))
-        .set_child("position", stats_line(app, "Player position: (0, 0, 0)"));
+        .set_child("position", stats_line(app, "Player position: (0, 0, 0)"))
+        .set_child("bank", stats_line(app, "Bank: 0°"))
+        .set_child("ocean", stats_line(app, "Ocean: -"));
 
     UiNode::container()
         .set_size(SizeValue::Percent(100.0), SizeValue::Percent(100.0))

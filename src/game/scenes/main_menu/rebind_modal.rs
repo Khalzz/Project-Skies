@@ -3,11 +3,11 @@
 //! `begin_capture`/`captured_binding`/`cancel_capture` - this module is the
 //! "future rebinding menu" that doc comment already anticipated).
 //!
-//! Opened via `open(app, action, edit_index)` from a settings chip or its "+"
-//! button (see `main_menu::ui::controller_chip_nodes`) - `edit_index: Some(i)`
-//! replaces that action's existing binding `i` in place (and shows "Delete
-//! Bind"); `None` appends a brand new one instead (nothing to delete yet, so
-//! that button stays hidden).
+//! Opened via `open(app, action, edit_index)` from the controller page's
+//! "Add input" button (see `main_menu::ui::add_selected_input`) -
+//! `edit_index: Some(i)` replaces that action's existing binding `i` in place
+//! (and shows "Delete Bind"); `None` appends a brand new one instead (nothing
+//! to delete yet, so that button stays hidden). Add input always passes `None`.
 //!
 //! Opening the modal does NOT start capturing by itself - it shows a "Bind"
 //! button/chip (see `BIND_PATH`) displaying either the existing binding
@@ -42,7 +42,7 @@ use crate::engine::ui::color::UiColor;
 use crate::engine::ui::ui_node::UiNode;
 use crate::engine::ui::ui_transform::{Anchor, Orientation, SizeValue};
 use crate::game::ui::{button, card, label};
-use super::ui::{controller_chip_nodes, keycap_style};
+use super::ui::keycap_style;
 
 const MODAL_KEY: &str = "RebindModal";
 const TITLE_PATH: &str = "RebindModal/Card/Title";
@@ -52,6 +52,11 @@ const SAVE_PATH: &str = "RebindModal/Card/Actions/Save";
 
 const CLICK_TO_BIND: &str = "Click here to bind";
 const LISTENING_LABEL: &str = "Press any key, button or axis...";
+const LISTENING_LEVER_LABEL: &str = "Push the lever toward more...";
+
+/// Actions read as a position, not pressed/not (see `input::absolute_value`)
+/// - an axis bound to one becomes a lever: its whole travel, end to end.
+const LEVER_ACTIONS: [&str; 2] = ["throttle_axis", "zoom_axis"];
 
 struct RebindModalState {
     // Which action this modal is currently capturing a binding for - None means
@@ -109,7 +114,7 @@ fn delete_current(app: &mut App) {
         }
     };
     input::unbind(&action, index);
-    refresh_chips(app, &action);
+    super::ui::refresh_controller_chips(app, &action);
     close(app);
 }
 
@@ -129,23 +134,8 @@ fn save_current(app: &mut App) {
         Some(index) => input::rebind_at(&action, index, binding),
         None => input::rebind(&action, binding),
     }
-    refresh_chips(app, &action);
+    super::ui::refresh_controller_chips(app, &action);
     close(app);
-}
-
-/// Rebuilds `action`'s chip row (see `main_menu::ui::controller_chip_nodes`)
-/// after anything that changes its bindings (add/replace/delete), leaving the
-/// rest of its section (the name label, the section's own hover/background)
-/// untouched.
-fn refresh_chips(app: &mut App, action: &str) {
-    let chips = controller_chip_nodes(app, action);
-    let path = format!("Settings/Content/Controller/List/{action}/Chips");
-    if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &path) {
-        if let Some(container) = node.as_container_mut() {
-            container.children = chips;
-        }
-        app.ui.has_changed = true;
-    }
 }
 
 /// Opens the modal for `action` without starting capture yet - see this
@@ -216,7 +206,8 @@ fn start_capture(app: &mut App) {
     if let Some(save_button) = Ui::get_ui_node(&mut app.ui.renderizable_elements, SAVE_PATH) {
         save_button.set_active(false);
     }
-    set_bind_display(app, LISTENING_LABEL, UiColor::Rgb(255, 210, 120));
+    let lever = STATE.lock().unwrap().open_action.as_deref().is_some_and(|action| LEVER_ACTIONS.contains(&action));
+    set_bind_display(app, if lever { LISTENING_LEVER_LABEL } else { LISTENING_LABEL }, UiColor::Rgb(255, 210, 120));
 }
 
 /// Polls for a newly captured binding while the modal's open - call every
@@ -237,10 +228,15 @@ pub fn update(app: &mut App) {
     if !capturing {
         return;
     }
-    let Some(binding) = input::captured_binding() else { return };
+    let Some(mut binding) = input::captured_binding() else { return };
 
     {
         let mut state = STATE.lock().unwrap();
+        // A lever action's axis spans its whole travel - pushed toward "more"
+        // while capturing, so that way is positive.
+        if state.open_action.as_deref().is_some_and(|action| LEVER_ACTIONS.contains(&action)) {
+            binding = binding.as_full_range();
+        }
         state.capturing = false;
         state.captured = Some(binding.clone());
     }

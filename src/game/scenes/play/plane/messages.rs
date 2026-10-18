@@ -1,0 +1,115 @@
+//! The contract between an aircraft's two halves - the ONLY data that
+//! crosses between `Plane` (main thread) and `AircraftPhysics` (physics
+//! thread). Anything not in here stays private to whichever half owns it.
+//!
+//! main → physics:
+//! - `PlaneControls` (latest value, see controls.rs) - `node.set_physics_input`
+//! - `AircraftEvent` (one-shot)                      - `node.push_physics_event`
+//! - `AircraftReload` (one-shot, data.ron edited)     - `node.push_physics_event`
+//!
+//! physics → main:
+//! - `AircraftState` - published once per frame, read with
+//!   `node.physics_state::<AircraftState>()`.
+
+use std::collections::HashMap;
+
+use nalgebra::Vector3;
+
+use crate::engine::game_nodes::game_object::ColliderType;
+
+use super::aero_spec::AeroSpec;
+use super::engine::EngineSpec;
+use super::flight_data::FlightData;
+use super::physics::wheels::wheel::WheelData;
+
+/// One-shot pilot commands - queued, so each is seen by exactly one physics
+/// step no matter how many steps run per frame.
+#[derive(Clone, Copy, Debug)]
+pub enum AircraftEvent {
+    ToggleGear,
+    GearUp,
+    GearDown,
+    /// Open or close the speed brake.
+    ToggleSpeedBrake,
+    SpeedBrakeExtend,
+    SpeedBrakeRetract,
+    /// Crashed (hit the water) - from here on the jet is just a wreck: no
+    /// thrust, lift, wheels or flight controls, only whatever else acts on
+    /// the body (gravity, the water - see engine::physics::water_contact).
+    Wreck,
+    /// Hit by a missile in the air - the engine's dead and the controls
+    /// gone (the surfaces jammed into a roll), but the airframe still
+    /// flies: its wings keep lifting and dragging as it goes down. A
+    /// `Wreck` follows when it hits the water.
+    ShotDown,
+    /// The tanks are dry - thrust and the afterburner stop. The airframe
+    /// keeps flying.
+    EngineOut,
+    /// Internal fuel, kg in the tanks and the tanks' maximum. The body's
+    /// mass is its full-tanks mass minus what's been burned.
+    Fuel { kg: f32, capacity: f32 },
+    /// A warhead at `at` (world). `radius` is how far it reaches;
+    /// `damage` is the HP it takes off a surface it touches, and `impulse`
+    /// (N·s) is the shove at that point. Both fall to nothing at `radius`.
+    Blast { at: Vector3<f32>, radius: f32, damage: f32, impulse: f32 },
+}
+
+/// Turns one aerodynamic profile on or off. On restores its full HP; off
+/// leaves it producing nothing. From the flight editor (F10).
+#[derive(Clone)]
+pub struct ProfileSwitch {
+    pub label: String,
+    pub on: bool,
+}
+
+/// The plane's data.ron was edited while flying - new wings/surfaces/pilot
+/// seat and mass to apply on the running jet, without restarting the level
+/// (see `flight_manager::update`). `colliders` are only used to recompute
+/// the rotational inertia for the new mass - the collision shapes
+/// themselves don't change live.
+#[derive(Clone)]
+pub struct AircraftReload {
+    pub aero: AeroSpec,
+    pub engine: EngineSpec,
+    pub gear: super::gear_spec::GearSpec,
+    pub effects: Vec<super::effects::EffectSpec>,
+    pub mass: f32,
+    pub center_of_mass: Vector3<f32>,
+    pub colliders: Vec<ColliderType>,
+}
+
+/// Everything the physics half reports back each frame.
+#[derive(Clone)]
+pub struct AircraftState {
+    /// HUD/debug readouts - speed, altitude, g, AoA, turn rates...
+    pub flight_data: FlightData,
+    /// Landing gear extension, 0 = stowed, 1 = down and locked.
+    pub gear_deploy: f32,
+    /// Speed brake extension, 0 = stowed, 1 = fully open.
+    pub speed_brake: f32,
+    /// Each wheel's suspension contact point, keyed by wheel mesh name.
+    pub wheels: HashMap<String, WheelData>,
+    /// What the simulated elevator wing is actually doing (after any
+    /// fly-by-wire solve), in the same convention as `-controls.elevator` -
+    /// the elevator meshes animate off this instead of raw stick.
+    pub elevator_control_input: f32,
+    /// How lit the afterburner is, 0..1 - from the engine's own gate, so the
+    /// flame always matches the thrust.
+    pub afterburner: f32,
+    /// Each wing's last lift force, keyed by wing label (F7 overlay).
+    pub wing_lift_forces: HashMap<String, Vector3<f32>>,
+    /// The G the pitch fly-by-wire is commanding right now (what the stick
+    /// asks for, after its AoA limiter) - 1 with fly-by-wire off.
+    pub g_command: f32,
+    /// Each profile in the order it is defined, and the HP it has left.
+    /// 0: that profile is off.
+    pub profiles: Vec<(String, f32)>,
+    /// A blast has reached the pilot's seat. Stays set.
+    pub pilot_hit: bool,
+    /// The fuselage has hit the ground hard enough to break the jet up.
+    /// Stays set. A wing strike does not set this - that surface comes off.
+    pub fuselage_struck: bool,
+    /// How many warheads this jet has taken. Advances with the HP below,
+    /// so the main thread can see which drop came from a blast.
+    pub blasts_handled: u32,
+}

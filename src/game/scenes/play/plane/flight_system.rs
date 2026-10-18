@@ -1,6 +1,6 @@
 use nalgebra::{Vector3, clamp};
-use rapier3d::prelude::RigidBody;
 use crate::game::scenes::play::plane::utils;
+use crate::game::scenes::play::plane::engine;
 
 pub struct AoA {
     pub aoa_pitch: f32,
@@ -15,10 +15,18 @@ pub struct FlightSystem {
     pub last_velocity: nalgebra::Vector3<f32>,
     pub g_force: f32,
     pub input: Vector3<f32>, // x = roll, y = pitch, z = yaw
+    /// Actual spooled net thrust (N), lagging behind the commanded/target
+    /// value (see `engine::target_thrust`). This is what's applied to the
+    /// rigidbody, not the instantaneous throttle demand.
+    pub current_thrust: f32,
+    /// This plane's engine - see `engine::EngineSpec`.
+    pub engine: engine::EngineSpec,
+    /// Throttle at the last `compute_thrust` - for `afterburner_activation`.
+    last_throttle: f32,
 }
 
 impl FlightSystem {
-    pub fn new() -> Self {
+    pub fn new(engine: engine::EngineSpec) -> Self {
         Self {
             velocity: nalgebra::Vector3::new(0.0, 0.0, 0.0),
             local_velocity: nalgebra::Vector3::new(0.0, 0.0, 0.0),
@@ -30,12 +38,43 @@ impl FlightSystem {
             last_velocity: nalgebra::Vector3::new(0.0, 0.0, 0.0),
             g_force: 0.0,
             input: Vector3::new(0.0, 0.0, 0.0),
+            current_thrust: 0.0,
+            engine,
+            last_throttle: 0.0,
         }
     }
 
-    pub fn update_thrust(&mut self, rigidbody: &mut RigidBody, deltaTime: f32, throttle: f32) {
-        let thrust_local = nalgebra::Vector3::new(0.0, 0.0, 129000.0) * throttle;
-        let thrust_world = rigidbody.rotation() * thrust_local;
-        rigidbody.add_force(thrust_world, true);
+    /// Spool the engine toward the throttle/altitude-commanded thrust and
+    /// return the resulting force in world space, along the body's forward
+    /// axis (+Z local). Only needs read access to the rigidbody
+    /// (`altitude_m`/`rotation` snapshotted by the caller) - applying the
+    /// force is the caller's job (see `AircraftPhysics::fixed_update`).
+    ///
+    /// `dt` is the fixed physics step - this runs exactly once per step, so
+    /// the spool lag advances in simulated time, in lockstep with the world.
+    /// How lit the afterburner is right now, 0..1 - see
+    /// `EngineSpec::afterburner_activation`.
+    pub fn afterburner_activation(&self) -> f32 {
+        self.engine.afterburner_activation(self.last_throttle)
+    }
+
+    /// Thrust and the afterburner off at once - a wreck, or tanks run dry.
+    pub fn cut_engine(&mut self) {
+        self.current_thrust = 0.0;
+        self.last_throttle = 0.0;
+    }
+
+    pub fn compute_thrust(&mut self, altitude_m: f32, rotation: nalgebra::UnitQuaternion<f32>, throttle: f32, dt: f32) -> Vector3<f32> {
+        self.last_throttle = throttle;
+        let target = self.engine.target_thrust(throttle, altitude_m);
+
+        // First-order lag toward target. alpha = 1 - e^(-dt/tau) composes
+        // correctly for any dt.
+        let tau = self.engine.spool_seconds(self.current_thrust, target, throttle).max(1e-3);
+        let alpha = 1.0 - (-dt / tau).exp();
+        self.current_thrust += (target - self.current_thrust) * alpha;
+
+        let thrust_local = nalgebra::Vector3::new(0.0, 0.0, self.current_thrust);
+        rotation * thrust_local
     }
 }

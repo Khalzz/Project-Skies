@@ -2,9 +2,12 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 
 use crate::app::App;
+use crate::engine::physics::physics_behavior::{PhysicsBehavior, PhysicsInput, PhysicsPayload};
+use crate::engine::physics::physics_handler::RenderMessage;
 use crate::engine::rendering::camera::handler::SceneCameras;
 
 use super::behavior::Behavior;
+use super::properties::Space;
 
 /// A single entity in a scene: an id, an open set of typed properties
 /// (position, model, whatever a future property type needs), and an open set
@@ -19,6 +22,21 @@ pub struct Node {
     pub id: String,
     properties: HashMap<TypeId, Box<dyn Any>>,
     behaviors: Vec<Box<dyn Behavior>>,
+    // This node's physics-thread half (see `PhysicsBehavior`) - only held
+    // here until the scene's physics starts, then moved onto that thread for
+    // good (see `take_physics_behaviors`).
+    physics_behaviors: Vec<Box<dyn PhysicsBehavior>>,
+    // Main → physics messages written this frame, sent once per frame.
+    physics_input: PhysicsInput,
+    // Latest state each physics behavior published, keyed by its concrete type.
+    physics_states: HashMap<TypeId, PhysicsPayload>,
+    // Nodes given with `with_child`, waiting to be spawned right after this
+    // one (see `Scene::spawn_node`) - empty once it's in the scene.
+    children: Vec<Node>,
+    // How this node is placed under the parent it's given to with
+    // `with_child` - see `global`/`follow_position_only`.
+    space: Space,
+    inherit_rotation: bool,
 }
 
 impl Node {
@@ -27,7 +45,68 @@ impl Node {
             id: id.into(),
             properties: HashMap::new(),
             behaviors: Vec::new(),
+            physics_behaviors: Vec::new(),
+            physics_input: PhysicsInput::default(),
+            physics_states: HashMap::new(),
+            children: Vec::new(),
+            space: Space::Local,
+            inherit_rotation: true,
         }
+    }
+
+    /// Adds `child` under this node, builder-style - spawned right after it,
+    /// with a `Parent` property put on for you (this node's id, `child`'s
+    /// space and whether it turns with this node). By default `child`'s
+    /// `Transform3D` is `local`: an offset from this node's origin, moving
+    /// and turning with it. Mark it `.global()` for a place in the world
+    /// that stays put whatever this node does. Children can have children.
+    pub fn with_child(mut self, child: Node) -> Self {
+        self.children.push(child);
+        self
+    }
+
+    /// Given to a parent with `with_child`: its `Transform3D` is an offset
+    /// from the parent's origin, and it moves with the parent - the default.
+    pub fn local(mut self) -> Self {
+        self.space = Space::Local;
+        self
+    }
+
+    /// Given to a parent with `with_child`: its `Transform3D` is a place in
+    /// the world, disconnected from the parent - it stays there whatever the
+    /// parent does.
+    pub fn global(mut self) -> Self {
+        self.space = Space::Global;
+        self
+    }
+
+    /// Given to a parent with `with_child` as `local`: follows the parent's
+    /// position only, keeping its own rotation - its offset is along the
+    /// world's axes, not turned with the parent.
+    pub fn follow_position_only(mut self) -> Self {
+        self.inherit_rotation = false;
+        self
+    }
+
+    /// The children given with `with_child`, and how each wants placing -
+    /// taken once, when the node spawns.
+    pub(crate) fn take_children(&mut self) -> Vec<Node> {
+        std::mem::take(&mut self.children)
+    }
+
+    pub(crate) fn placement(&self) -> (Space, bool) {
+        (self.space, self.inherit_rotation)
+    }
+
+    /// Puts `property` on (or replaces it) in place - `add_property` for a
+    /// node that's already built.
+    pub fn set_property<T: 'static>(&mut self, property: T) {
+        self.properties.insert(TypeId::of::<T>(), Box::new(property));
+    }
+
+    /// Takes the property of type `T` off, if it has one.
+    pub fn remove_property<T: 'static>(&mut self) -> Option<T> {
+        self.properties.remove(&TypeId::of::<T>())?.downcast::<T>().ok().map(|boxed| *boxed)
     }
 
     /// Attaches a property, builder-style (chains like `ui_node.rs`'s
@@ -66,6 +145,53 @@ impl Node {
         self.behaviors.iter_mut().find_map(|behavior| behavior.as_any_mut().downcast_mut::<B>())
     }
 
+    /// Attaches this node's physics-thread half, builder-style. Only picked up
+    /// if the node is spawned *before* the scene's physics starts (same as a
+    /// `Physics` property's rigidbody) - and it needs that rigidbody to act
+    /// on, so the node must also carry a `Physics` property.
+    pub fn add_physics_behavior<P: PhysicsBehavior + 'static>(mut self, physics_behavior: P) -> Self {
+        self.physics_behaviors.push(Box::new(physics_behavior));
+        self
+    }
+
+    /// Latest `T` this node's physics half published (see
+    /// `PhysicsBehavior::publish`) - a copy from the last frame the physics
+    /// thread reported back, `None` until it has.
+    pub fn physics_state<T: Any>(&self) -> Option<&T> {
+        self.physics_states.get(&TypeId::of::<T>())?.downcast_ref::<T>()
+    }
+
+    /// Sets a latest-value input for this node's physics half (read there via
+    /// `PhysicsCtx::input::<T>()`) - a newer `T` replaces the older one.
+    pub fn set_physics_input<T: Any + Send>(&mut self, input: T) {
+        self.physics_input.set_state(input);
+    }
+
+    /// Queues a one-shot event for this node's physics half (read there via
+    /// `PhysicsCtx::events::<T>()`) - seen by exactly one fixed step.
+    pub fn push_physics_event<T: Any + Send>(&mut self, event: T) {
+        self.physics_input.push_event(event);
+    }
+
+    pub(crate) fn take_physics_behaviors(&mut self) -> Vec<Box<dyn PhysicsBehavior>> {
+        std::mem::take(&mut self.physics_behaviors)
+    }
+
+    pub(crate) fn take_physics_input(&mut self) -> Option<PhysicsInput> {
+        if self.physics_input.is_empty() {
+            return None;
+        }
+        Some(std::mem::take(&mut self.physics_input))
+    }
+
+    pub(crate) fn set_physics_states(&mut self, states: Vec<PhysicsPayload>) {
+        for state in states {
+            // `&*state`, not `state` - the Box's own TypeId would be
+            // `Box<dyn Any + Send>`, not the type inside it.
+            self.physics_states.insert(Any::type_id(&*state), state);
+        }
+    }
+
     /// Runs `on_spawn` on every attached behavior. Called once by
     /// `SceneNodes::spawn`, right after the node is actually in the scene -
     /// not part of construction, since a behavior's `on_spawn` may want to see
@@ -89,10 +215,10 @@ impl Node {
         self.behaviors = behaviors;
     }
 
-    pub(crate) fn run_fixed_update(&mut self, cameras: &mut SceneCameras, app: &mut App, dt: f32) {
+    pub(crate) fn run_fixed_update(&mut self, cameras: &mut SceneCameras, app: &mut App, dt: f32, physics_message: Option<&RenderMessage>) {
         let mut behaviors = std::mem::take(&mut self.behaviors);
         for behavior in behaviors.iter_mut() {
-            behavior.fixed_update(self, cameras, app, dt);
+            behavior.fixed_update(self, cameras, app, dt, physics_message);
         }
         self.behaviors = behaviors;
     }

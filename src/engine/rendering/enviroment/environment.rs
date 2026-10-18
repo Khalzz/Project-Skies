@@ -23,6 +23,11 @@ pub struct SkyboxFaces {
 pub enum Environment {
     Color(wgpu::Color),
     Skybox(SkyboxFaces),
+    /// Procedural clear-day "sea sky" - a computed atmospheric gradient with a
+    /// sun disc and glow, no cubemap needed. See `sky.wgsl` /
+    /// `SkyboxRender::new_procedural`. Still lands in `SceneEnvironment::skybox`
+    /// like a real skybox does - it renders through the same path.
+    ProceduralSky,
 }
 
 impl Default for Environment {

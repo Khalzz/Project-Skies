@@ -27,7 +27,7 @@ pub struct LightUniform {
     // and rewritten once a frame (see App::run's own "lighting update"
     // block); water.wgsl is the only shader that reads it today, but it's
     // not otherwise light-specific. Devices here cap bind groups at 4 (see
-    // WaterRenderData's own doc comment for why a dedicated 5th group isn't
+    // engine::rendering::shader_library's module doc for why a dedicated 5th group isn't
     // an option), so reusing an existing one was the only way to get a
     // per-frame value into a second pipeline without also touching every
     // other pipeline's layout.
@@ -120,6 +120,8 @@ impl Light {
                 Some(Texture::DEPTH_FORMAT),
                 &[model::ModelVertex::desc()],
                 shader,
+                Some(wgpu::Face::Back),
+                true,
             )
         };
 

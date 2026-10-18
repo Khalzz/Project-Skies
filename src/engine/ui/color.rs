@@ -42,6 +42,12 @@ impl UiColor {
         UiColor::Rgba(r, g, b, (alpha.clamp(0.0, 1.0) * 255.0).round() as u8)
     }
 
+    /// 0..=1 per channel, alpha last - for shaders that take colors
+    /// straight (see `SdfText::push`).
+    pub fn to_rgba_f32(&self) -> [f32; 4] {
+        self.to_rgba_u8().map(|channel| channel as f32 / 255.0)
+    }
+
     fn to_rgba_u8(&self) -> [u8; 4] {
         match *self {
             UiColor::Rgb(r, g, b) => [r, g, b, 255],

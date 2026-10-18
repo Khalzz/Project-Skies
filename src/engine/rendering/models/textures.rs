@@ -3,6 +3,7 @@ use wgpu::{BindGroupLayoutDescriptor, Device, Extent3d, Queue, Sampler, TextureV
 use anyhow::*;
 
 /// This code is dedicated to generation of textures and creation of rendering data for it
+#[derive(Clone)]
 pub struct Texture {
     pub texture: wgpu::Texture,
     pub view: TextureView,

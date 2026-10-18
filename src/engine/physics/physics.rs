@@ -7,34 +7,43 @@ use nalgebra::Point3;
 
 use crate::engine::rendering::ui::physics_rendering::RenderPhysics;
 use crate::engine::rendering::camera::handler::CameraResources;
-use crate::engine::physics::physics_handler::{Physics, RenderMessage, PhysicsCommand, PhysicsTick};
+use crate::engine::physics::physics_handler::{Physics, RenderMessage, PhysicsCommand};
+use crate::engine::physics::physics_behavior::{PhysicsBehavior, PhysicsInput, PhysicsPayload};
 use crate::engine::physics::physics_resources::{load_physics_from_definitions, PhysicsObjectDef};
-use crate::game::scenes::play::plane::plane::PlaneControls;
 use crate::engine::primitive::manual_vertex::ManualVertex;
 
 #[derive(Clone)]
 pub enum DebugPhysicsMessageType {
-    RenderizableLines([ManualVertex; 2]),
+    /// A world-space line. `owner` is the node whose body it was drawn on,
+    /// so the render thread can carry it forward with that body's
+    /// extrapolated pose (see `physics_pose_now`). `None` stays where it
+    /// was drawn.
+    RenderizableLines { owner: Option<String>, line: [ManualVertex; 2] },
     RenderizablePoint(Point3<f32>),
 }
 
 pub struct PhysicsDataTransmission {
     pub physics_data_rx: Receiver<HashMap<String, RenderMessage>>,
     pub request_data_tx: Sender<PhysicsCommand>,
-    pub plane_control_tx: Sender<PlaneControls>,
     pub debug_physics_rx: Receiver<Vec<DebugPhysicsMessageType>>,
+    // Node-level physics halves (see PhysicsBehavior): input batches going
+    // in, published states coming back, both keyed by node id.
+    pub node_input_tx: Sender<HashMap<String, PhysicsInput>>,
+    pub node_state_rx: Receiver<HashMap<String, Vec<PhysicsPayload>>>,
 }
 
-// Always starts the physics thread - callers only call this when a scene's
-// Scene::physics() actually returned Some(...); see App::run.
-pub fn physics_handling(device: &Device, config: &SurfaceConfiguration, camera: &CameraResources, physics_bodies: Vec<PhysicsObjectDef>, physics_tick: Box<dyn PhysicsTick + Send>) -> PhysicsDataTransmission {
+// Always starts the physics thread - callers only call this when the scene
+// actually wants physics; see Scene::start_physics.
+pub fn physics_handling(device: &Device, config: &SurfaceConfiguration, camera: &CameraResources, physics_bodies: Vec<PhysicsObjectDef>, node_behaviors: Vec<(String, Vec<Box<dyn PhysicsBehavior>>)>) -> PhysicsDataTransmission {
     // Data channels
     let (physics_data_tx, physics_data_rx) = channel::<HashMap<String, RenderMessage>>();
     let (request_data_tx, request_data_rx) = channel::<PhysicsCommand>();
 
-    let (plane_control_tx, plane_control_rx) = channel::<PlaneControls>();
     
     let (debug_physics_tx, debug_physics_rx) = channel::<Vec<DebugPhysicsMessageType>>();
+
+    let (node_input_tx, node_input_rx) = channel::<HashMap<String, PhysicsInput>>();
+    let (node_state_tx, node_state_rx) = channel::<HashMap<String, Vec<PhysicsPayload>>>();
 
     let render_physics = RenderPhysics::new(&device, &config, &camera);
 
@@ -55,14 +64,15 @@ pub fn physics_handling(device: &Device, config: &SurfaceConfiguration, camera: 
 
         let mut physics = Physics::new();
         load_physics_from_definitions(&physics_bodies, &mut physics.collider_set, &mut physics.rigidbody_set, &mut physics.physics_elements);
-        physics.physics_thread(physics_data_tx, request_data_rx, plane_control_rx, debug_physics_tx, physics_tick);
+        physics.physics_thread(physics_data_tx, request_data_rx, debug_physics_tx, node_behaviors, node_input_rx, node_state_tx);
     });
 
     return PhysicsDataTransmission {
         physics_data_rx, // Physics data for representation
         request_data_tx, // Transmisor to requesat data from the physics thread
-        plane_control_tx, // Transmisor to send plane controls to the physics thread
         debug_physics_rx, // Receiver to receive debug physics messages
+        node_input_tx, // Transmisor to send node inputs/events to their physics halves
+        node_state_rx, // Receiver to receive states published by node physics halves
     };
 }
 

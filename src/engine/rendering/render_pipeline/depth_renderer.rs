@@ -34,7 +34,7 @@ pub struct DepthRender {
     pub texture: Texture,
     // A per-frame snapshot of `texture`, taken right after the opaque pass
     // finishes (see App::render_scene_passes/render_pass.rs's own
-    // render_water_pass) - the water shader samples this to find out what's
+    // the frame plan's CopyDepth) - a shader that `reads: [Depth]` (the ocean) samples this to find out what's
     // behind/around it (for shore-intersection foam) without reading the
     // same texture object it's still being depth-tested/written against in
     // its own pass, which wgpu doesn't allow within a single render pass.

@@ -19,7 +19,7 @@ const BLUR_STEPS: [f32; 3] = [1.0, 2.0, 4.0];
 
 /// The pixel radius UiNode::set_background_blur maps to "fully blurred" - values
 /// at or above this sample `blurred` outright, values in between linearly
-/// crossfade between `scene_color` (sharp) and `blurred` (see text_shader.wgsl).
+/// crossfade between `scene_color` (sharp) and `blurred` (see ui_template.wgsl).
 /// Matches Tailwind's backdrop-blur-3xl (~64px).
 pub const MAX_BLUR_RADIUS: f32 = 64.0;
 
@@ -120,9 +120,9 @@ fn fullscreen_pipeline(device: &Device, layout: &wgpu::PipelineLayout, shader: &
 /// `render_transparent_pass`) instead of straight into the swapchain, since the UI
 /// pass needs something already-rendered to sample from before it draws.
 ///
-/// `render` then (1) blits that sharp copy onto the swapchain, so the scene still
-/// looks completely normal everywhere nothing's actually blurred, and (2) builds
-/// `blurred`: a full-resolution, densely-sampled blur reached by chaining three
+/// The frame plan's Fullscreen step copies that sharp copy onto the screen (see
+/// shader_library's engine/blit), and `blur_scene` builds `blurred`: a
+/// full-resolution, densely-sampled blur reached by chaining three
 /// 9-tap separable Gaussian passes (H+V each) at growing step sizes (see
 /// BLUR_STEPS) rather than one pass with a huge, sparse tap spread - the latter
 /// is what produced a "same element repeated" ghosting artifact an earlier
@@ -133,11 +133,14 @@ fn fullscreen_pipeline(device: &Device, layout: &wgpu::PipelineLayout, shader: &
 /// smooth and artifact-free at every strength, which matters more for a UI
 /// effect.
 pub struct BlurRender {
+    /// The world drawn this frame - what the frame plan's Fullscreen step
+    /// copies onto the screen (its "scene" input, see shader_library).
     pub scene_color: Texture,
+    /// The frame plan's "hud" target - transparent where nothing's drawn
+    /// (a Fullscreen shader's "hud" input).
+    pub hud_color: Texture,
     blur_a: Texture,
     pub blurred: Texture,
-    blit_bind_group: BindGroup,
-    blit_pipeline: RenderPipeline,
     // One bind group per compounding pass, in order - even indices are H passes
     // (write into blur_a), odd are V passes (write into blurred), see `render`.
     blur_passes: Vec<BindGroup>,
@@ -149,31 +152,11 @@ pub struct BlurRender {
 impl BlurRender {
     pub fn new(device: &Device, config: &SurfaceConfiguration) -> Self {
         let scene_color = offscreen_texture(device, config.width, config.height, config.format, "scene_color");
+        let hud_color = offscreen_texture(device, config.width, config.height, config.format, "hud_color");
         let blur_a = offscreen_texture(device, config.width, config.height, config.format, "blur_a");
         let blurred = offscreen_texture(device, config.width, config.height, config.format, "blurred_scene");
 
-        // ── Blit pipeline (scene_color -> swapchain, unblurred) ──
-        let blit_layout = Texture::create_bind_group_layout(device);
-        let blit_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("scene_blit_bind_group"),
-            layout: &blit_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&scene_color.view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&scene_color.sampler) },
-            ],
-        });
-        let blit_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("scene_blit_pipeline_layout"),
-            bind_group_layouts: &[&blit_layout],
-            push_constant_ranges: &[],
-        });
-        let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Scene Blit Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/scene_blit.wgsl").into()),
-        });
-        let blit_pipeline = fullscreen_pipeline(device, &blit_pipeline_layout, &blit_shader, config.format);
-
-        // ── Blur pipeline (compounding separable Gaussian, see BLUR_STEPS) ──
+        // Texture + sampler + one uniform (each blur pass's direction).
         let blur_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("blur_bind_group_layout"),
             entries: &[
@@ -206,6 +189,7 @@ impl BlurRender {
             ],
         });
 
+        // ── Blur pipeline (compounding separable Gaussian, see BLUR_STEPS) ──
         // Six passes total (H then V per step): scene_color -> blur_a -> blurred
         // -> blur_a -> blurred -> blur_a -> blurred - `blurred` always ends up
         // holding the final result regardless of BLUR_STEPS' length. Only the
@@ -248,10 +232,9 @@ impl BlurRender {
 
         Self {
             scene_color,
+            hud_color,
             blur_a,
             blurred,
-            blit_bind_group,
-            blit_pipeline,
             blur_passes,
             blur_pipeline,
             vertex_buffer,
@@ -286,13 +269,10 @@ impl BlurRender {
         render_pass.draw_indexed(0..QUAD_INDICES.len() as u32, 0, 0..1);
     }
 
-    /// Runs every frame (see `App::render_scene_passes`), after the 3D scene has
-    /// rendered into `scene_color` and before the UI pass: blits that sharp copy
-    /// onto `view` (the swapchain), then rebuilds `blurred` via the compounding
-    /// blur chain, ready for the UI pass to crossfade toward per node.
-    pub fn render(&self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
-        self.draw_pass(encoder, &self.blit_pipeline, view, &self.blit_bind_group, "Scene Blit Pass");
-
+    /// Rebuilds `blurred` from `scene_color` via the compounding blur chain,
+    /// ready for the UI to crossfade toward per node - once a frame, once the
+    /// world's drawn, before the UI (see App::run_frame_plan).
+    pub fn blur_scene(&self, encoder: &mut wgpu::CommandEncoder) {
         for (i, bind_group) in self.blur_passes.iter().enumerate() {
             let target = if i % 2 == 0 { &self.blur_a.view } else { &self.blurred.view };
             self.draw_pass(encoder, &self.blur_pipeline, target, bind_group, "Blur Pass");

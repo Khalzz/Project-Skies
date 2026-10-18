@@ -129,7 +129,13 @@ impl App {
         let start = Instant::now();
         loop {
             self.time.update();
-            input::update(event_pump, self.time.delta_time, false);
+            // See App::run's own comment on why this bool matters now (used
+            // to be silently discarded here, meaning the window's close
+            // button/Cmd+Q did nothing while the splash screen was up).
+            if input::update(event_pump, self.time.delta_time, false) {
+                self.should_quit = true;
+                break;
+            }
 
             let elapsed = start.elapsed();
             if elapsed >= config.duration {

@@ -1,0 +1,311 @@
+(
+  model: (
+    model: "model/f16.glb",
+    scale: 14.0,
+    double_sided: ["Afterburner"], // It disables the backface culling of the afterburner mesh
+    hud_glass: "Glass", // The HUD's glass - in the cockpit, the horizon and pitch ladder only show through it
+  ),
+  physics: (
+    rigidbody: (
+      is_static: false,
+      mass: 11900.0, // With the internal tanks full. Empty is this minus fuel.capacity_kg.
+      // 8% of the wing's mean chord (3.36 m) behind its aerodynamic center
+      // (z 2.51). Slightly unstable, like the real jet: the tail holds it.
+      center_of_mass: (0.0, 0.029, 2.244),
+      initial_velocity: (0.0, 0.0, 0.0),
+    ),
+    colliders: [
+      Cuboid(half_extents: (0.669, 0.669, 4.681), position: (0.0, 0.029, 1.458)),
+      // The wings follow their aero shape (taper, sweep, span - see ero),
+      // as thin slabs: they collide where the wings really are.
+      Wing(label: "Left wing", thickness: 0.3),
+      Wing(label: "Right wing", thickness: 0.3),
+      Wing(label: "Right elevator wing", thickness: 0.2),
+      Wing(label: "Left elevator wing", thickness: 0.2),
+      Wing(label: "Rudder wing", thickness: 0.2),
+    ],
+  ),
+  // The flight physics: every lifting surface, and where the pilot sits.
+  // Positions in meters in the jet's own frame (+X left wing, +Y up, +Z
+  // nose); airfoil tables are relative to this folder.
+  aero: (
+    wings: [
+      // Main wings - fixed, rolled by their flaperons (+ = trailing edge up).
+      (
+        label: "Left wing",
+        hp: 100.0,
+        // The real wing, measured off the model: leading edge swept 38.3 deg
+        // from the centerline (the reference trapezoid, carried in through
+        // the fuselage) out to the tip. Works out to 13.75 m2 (published:
+        // 13.94) and a 3.44 m mean aerodynamic chord (published: 3.45).
+        shape: Trapezoid(
+          root_leading_edge: (0.0, 0.25, 4.77),
+          span: 4.5,
+          root_chord: 4.8,
+          tip_chord: 1.18,
+          sweep_deg: 38.3,
+        ),
+        // Lift at a quarter of the mean chord (z 2.51), ahead of the
+        // center of mass, so the wing pitches the nose up on its own.
+        airfoil_path: "aero/f16-wing-body.ron",
+        normal: (1.0, 0.0, 0.0),
+        is_roll_axis: true,
+        stable: false,
+        incidence_angle: 0.0,
+        control_surface_area: 0.0,
+        surfaces: [
+          // Span and chord share measured off the flaperon mesh.
+          (label: "Left flaperon", kind: Aileron, span_start: 0.23, span_end: 0.776, chord_ratio: 0.2, max_deflection_deg: 21.5),
+        ],
+      ),
+      (
+        label: "Right wing",
+        hp: 100.0,
+        // The real wing, measured off the model: leading edge swept 38.3 deg
+        // from the centerline (the reference trapezoid, carried in through
+        // the fuselage) out to the tip. Works out to 13.75 m2 (published:
+        // 13.94) and a 3.44 m mean aerodynamic chord (published: 3.45).
+        shape: Trapezoid(
+          root_leading_edge: (0.0, 0.25, 4.77),
+          span: -4.5,
+          root_chord: 4.8,
+          tip_chord: 1.18,
+          sweep_deg: 38.3,
+        ),
+        // Lift at a quarter of the mean chord (z 2.51), ahead of the
+        // center of mass, so the wing pitches the nose up on its own.
+        airfoil_path: "aero/f16-wing-body.ron",
+        normal: (1.0, 0.0, 0.0),
+        is_roll_axis: true,
+        stable: false,
+        incidence_angle: 0.0,
+        control_surface_area: 0.0,
+        surfaces: [
+          // Span and chord share measured off the flaperon mesh.
+          (label: "Right flaperon", kind: Aileron, span_start: 0.23, span_end: 0.776, chord_ratio: 0.2, max_deflection_deg: 21.5),
+        ],
+      ),
+      
+      // All-moving stabilators (their labels are mirrored: "Right" sits at +X).
+      (
+        label: "Right elevator wing",
+        hp: 40.0,
+        // Your stabilator shape, carried in to the centerline like the main
+        // wings (the reference trapezoid): 5.57 m2 per side.
+        shape: Trapezoid(
+          root_leading_edge: (0.0, 0.0, -0.261),
+          span: 2.8,
+          root_chord: 3.078,
+          tip_chord: 0.9,
+          sweep_deg: 40.0,
+        ),
+        // Lift at a quarter of the mean chord (z -1.77).
+        airfoil_path: "aero/f16-elevators.ron",
+        normal: (1.0, 0.0, 0.0),
+        is_roll_axis: false,
+        stable: false,
+        incidence_angle: -1.26,
+        // All-moving: on a shaped surface, set to its whole area automatically.
+        control_surface_area: 5.569,
+        surfaces: [],
+      ),
+      (
+        label: "Left elevator wing",
+        hp: 40.0,
+        // Your stabilator shape, carried in to the centerline like the main
+        // wings (the reference trapezoid): 5.57 m2 per side.
+        shape: Trapezoid(
+          root_leading_edge: (0.0, 0.0, -0.261),
+          span: -2.8,
+          root_chord: 3.078,
+          tip_chord: 0.9,
+          sweep_deg: 40.0,
+        ),
+        // Lift at a quarter of the mean chord (z -1.77).
+        airfoil_path: "aero/f16-elevators.ron",
+        normal: (1.0, 0.0, 0.0),
+        is_roll_axis: false,
+        stable: false,
+        incidence_angle: -1.26,
+        // All-moving: on a shaped surface, set to its whole area automatically.
+        control_surface_area: 5.569,
+        surfaces: [],
+      ),
+      // The fin, flying as a real wing standing upright: its angle of attack
+      // is the sideslip, so it weathervanes the nose into the airflow harder
+      // the faster the jet goes. The rudder is a hinged strip on its trailing
+      // edge, following the pedals.
+      (
+        label: "Rudder wing",
+        hp: 40.0,
+        shape: Trapezoid(
+          root_leading_edge: (0.0, 1.0, -0.25),
+          span: 2.2,
+          root_chord: 2.6,
+          tip_chord: 1.2,
+          sweep_deg: 49.0,
+        ),
+        airfoil_path: "aero/f16-elevators.ron",
+        normal: (0.0, 1.0, 0.0),
+        is_roll_axis: false,
+        stable: false,
+        incidence_angle: 0.0,
+        control_surface_area: 0.0,  // not all-moving - the rudder below is the moving part
+        surfaces: [
+          // F-16 rudder travel is +-30 deg.
+          (label: "Rudder", kind: Rudder, span_start: 0.1, span_end: 0.96, chord_ratio: 0.23, max_deflection_deg: 30.0),
+        ],
+      ),
+    ],
+    // Where the pilot sits - G at the seat is measured here.
+    pilot_position: (0.0, 0.97, 6.485),
+  ),
+  // The engine - a GE F110-GE-129. Thrust in newtons at sea level (it falls
+  // with altitude); spool times in seconds.
+  engine: (
+    idle_thrust: 4000.0,
+    military_thrust: 76000.0,    // max without afterburner (~76 kN)
+    max_thrust: 129000.0,        // full afterburner (~129 kN)
+    afterburner_gate: 0.85,      // throttle past this lights the afterburner
+    spool_up_seconds: 1.4,       // idle -> military
+    spool_afterburner_seconds: 0.5,
+    spool_down_seconds: 0.8,     // throttle chop
+    altitude_lapse_exponent: 0.7,
+  ),
+  // Internal fuel. The rigidbody mass above is the jet with these tanks
+  // full, so empty is that mass minus capacity_kg. Burn is kg/s: idle at
+  // the bottom of the lever, military at the afterburner gate, full
+  // afterburner at the top. The lever blends between them the same way the
+  // thrust does.
+  fuel: (
+    capacity_kg: 3240.0,
+    idle_kg_s: 0.18,
+    military_kg_s: 1.6,
+    afterburner_kg_s: 7.0,
+  ),
+  // The landing gear: each wheel is a suspension strut casting straight
+  // down from `position` (meters in the jet's frame: +X left, +Y up, +Z
+  // nose) up to `suspension_length`; `mesh` is the model's wheel it moves.
+  // `steerable` wheels turn with the pedals, `braked` ones brake. The rear
+  // wheels must sit behind the center of mass and the front one well ahead
+  // of it, or the jet tips onto its tail on the ground. Saved mid-flight,
+  // it applies right away.
+  //
+  // The springs and dampers come from the jet's weight (mass and
+  // center_of_mass above, tanks full): each wheel carries the share of the
+  // weight its place gives it - here the nose ~30,500 N, each main
+  // ~43,100 N - and gets the spring that sinks it `static_compression`
+  // under that, and `damping_ratio` of the damping that just stops it
+  // bouncing. The same sink on every strut keeps the jet sitting the way
+  // its wheel positions put it; less sink is a harder, quicker ride
+  // (0.15 m bounces ~1.3 Hz), and a damping_ratio under ~0.5 bobs, over 1
+  // jars. Change the mass or center of mass and they follow. A wheel can
+  // still give its own `static_compression`/`damping_ratio`, or its own
+  // `stiffness` (spring force at full compression, N) and `damping` (N per
+  // m/s) outright.
+  //
+  // With the gear up a wheel tucks straight up to its `position`, unless it
+  // gives `retracted_position: (x, y, z)` - where its middle sits in its bay
+  // (meters, same frame) - and/or `retracted_rotation: (x, y, z)` - degrees
+  // it's turned about the jet's X, Y and Z axes, in that order, about its
+  // own middle. Only the look: the strut stays at `position`.
+  gear: (
+    static_compression: 0.15,
+    damping_ratio: 0.7,
+    wheels: [
+      (mesh: "wheel-f", position: (0.0, 0.0, 5.2), suspension_length: 2.2, steerable: true),
+      (mesh: "wheel-lb", position: (-1.4, 0.0, 1.2), suspension_length: 2.2, braked: true, retracted_position: (0.0, 0.0, 1.2), retracted_rotation: (0.0, 0.0, 90.0)),
+      (mesh: "wheel-rb", position: (1.4, 0.0, 1.2), suspension_length: 2.2, braked: true, retracted_position: (0.0, 0.0, 1.2), retracted_rotation: (0.0, 0.0, -90.0)),
+    ],
+    // Nose-wheel steering: full lock at taxi speed, tapering to a few
+    // degrees by takeoff speed (ground speeds in m/s). Optional.
+    steering: (
+      max_angle_deg: 32.0,
+      high_speed_angle_deg: 4.0,
+      taper_start_speed: 8.0,
+      taper_end_speed: 40.0,
+    ),
+  ),
+  // Every particle effect the plane can make, and where it comes from (meters
+  // in the jet's frame: +X left, +Y up, +Z nose). `effect` is what it is:
+  //   WingtipVortex - condensation trailing off a wingtip under G
+  //   WreckSmoke    - smoke off the wreck after a crash
+  // Each wheel in `gear` also gets tyre smoke at touchdown on its own. F1
+  // shows every emitter (orange cross with a tick up). Saved mid-flight, it
+  // applies right away.
+  effects: [
+    (name: "left_vortex", effect: WingtipVortex, position: (4.51, 0.23, 0.36)),
+    (name: "right_vortex", effect: WingtipVortex, position: (-4.51, 0.23, 0.36)),
+    (name: "wreck_smoke", effect: WreckSmoke, position: (0.0, 0.0, 0.0)),
+  ],
+  // Where weapons can hang - the F-16's nine stations, numbered like the
+  // real jet's (1 the left wingtip, 9 the right). `position` is the
+  // weapon's center, meters in the jet's frame (+X left wing, +Y up, +Z
+  // nose) - placed off the wing's shape (sweep, chord); check them with F5
+  // and nudge to the model. `accepts`: Missile, Bomb, Gun - every kind when
+  // left out. What's loaded on them is each aircraft's loadout, in the
+  // flight management (F6 editor / map.ron), not here.
+  pylons: [
+    (name: "1 Left wingtip", position: (4.55, 0.25, 0.6), accepts: [Missile]),
+    (name: "2 Left outer", position: (3.6, 0.05, 1.0), accepts: [Missile]),
+    (name: "3 Left middle", position: (2.7, -0.05, 1.3)),
+    (name: "4 Left inner", position: (1.8, -0.1, 1.7)),
+    (name: "5 Centerline", position: (0.0, -0.85, 1.5)),
+    (name: "6 Right inner", position: (-1.8, -0.1, 1.7)),
+    (name: "7 Right middle", position: (-2.7, -0.05, 1.3)),
+    (name: "8 Right outer", position: (-3.6, 0.05, 1.0), accepts: [Missile]),
+    (name: "9 Right wingtip", position: (-4.55, 0.25, 0.6), accepts: [Missile]),
+  ],
+  // The camera views (V / F1 step through them, the cockpit first), each
+  // where it sits - meters in the jet's frame (+X left, +Y up, +Z nose) -
+  // and its field of view (deg). All optional: left out, the cockpit sits at
+  // the pilot's seat and the others where the camera puts them by default.
+  //   cockpit      - the pilot's eyes
+  //   third_person - behind, looking ahead past the jet
+  //   free         - the point the free (mouse) view orbits round
+  //   front        - ahead of the nose, looking back at the jet
+  cameras: {
+    "third_person": (position: (0.0, 3.85, -23.77), fov: 45.0),
+    "free": (position: (0.0, 0.0, 0.0), fov: 80.0),
+    "front": (position: (0.0, 2.895, 16.84), fov: 40.0),
+  },
+  // How far the pilot's head can move from the cockpit camera (meters, the
+  // jet's frame: +X left, +Y up, +Z nose): head tracking, the G pushing it
+  // and looking over the shoulder all stop at this box, so the eye can't go
+  // through the canopy, the seat behind or the HUD ahead. Optional - left
+  // out, the head goes anywhere. Saved mid-flight, it applies right away.
+  head_limits: (
+    min: (-0.25, -0.15, -0.15),
+    max: (0.25, 0.12, 0.25),
+  ),
+  // The cockpit's sill: how far down (degrees below the jet's level) the
+  // pilot sees outside before the jet itself is in the way, looking that
+  // many degrees round from the nose (either side) - straight lines between
+  // the points. Below it is the panel, the floor, the wings and belly, the
+  // spine behind the seat - the helmet display blanks there (as it does on
+  // the HUD's glass) and shows everywhere else. Optional - left out, it
+  // only blanks on the glass. Saved mid-flight, it applies right away.
+  cockpit_sill: [
+    (0.0, -14.0),    // over the nose: the instrument panel below the HUD
+    (30.0, -20.0),
+    (60.0, -35.0),
+    (90.0, -42.0),   // straight out to the side, over the canopy rail
+    (120.0, -35.0),
+    (150.0, -20.0),
+    (180.0, -10.0),  // behind: the seat and the spine
+  ],
+  // Flares and chaff: how many it carries, and the dispensers they come out
+  // of - each `position` (meters in the jet's frame: +X left, +Y up, +Z
+  // nose), the `direction` it throws them (any length), how fast (m/s on top
+  // of the jet's speed, 25 when left out) and what it `carries` ([Flare,
+  // Chaff] when left out). Releases take turns between the dispensers that
+  // carry that kind. F single release, C burst, Z flares/chaff/both.
+  countermeasures: (
+    flares: 60,
+    chaff: 60,
+    dispensers: [
+      (position: (0.6, -0.5, -4.5), direction: (0.4, -1.0, -0.2), speed: 25.0),
+      (position: (-0.6, -0.5, -4.5), direction: (-0.4, -1.0, -0.2), speed: 25.0),
+    ],
+  ),
+)

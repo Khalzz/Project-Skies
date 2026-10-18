@@ -6,10 +6,15 @@
 /// own color/font_size.
 pub struct ImageNode {
     pub path: String,
+    /// Clockwise quarter turns (0-3) the image is drawn rotated by - a UV
+    /// remap, so it costs nothing and stays pixel-exact. The node's own box
+    /// isn't rotated: size it for the rotated image (e.g. width/height
+    /// swapped for 1 or 3 turns). See `UiNode::rotate_image`.
+    pub quarter_turns: u8,
 }
 
 impl ImageNode {
     pub fn new(path: String) -> Self {
-        Self { path }
+        Self { path, quarter_turns: 0 }
     }
 }

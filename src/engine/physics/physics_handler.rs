@@ -5,89 +5,74 @@ use rapier3d::prelude::{ColliderHandle, RigidBodyHandle};
 use std::sync::mpsc::{Sender, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
-use crate::game::scenes::play::plane::plane::{Plane, PlaneControls};
-use crate::game::scenes::play::plane::physics::wheels::wheel::WheelData;
 use serde::{Deserialize, Serialize};
 use crate::engine::physics::physics::DebugPhysicsMessageType;
+use crate::engine::physics::physics_behavior::{DebugDraw, PhysicsBehavior, PhysicsInput, PhysicsNode, PhysicsPayload};
+use crate::engine::physics::physics_resources::{load_physics_from_definitions, PhysicsObjectDef};
 
-#[derive(Debug, Clone)]
-pub struct ColliderDebugData {
-    pub half_extents: Vector3<f32>,
-    pub local_offset: Vector3<f32>,
-}
-
-#[derive(Debug, Clone)]
-pub struct WingDebugData {
-    pub pressure_center: Vector3<f32>,
-    pub last_lift_force: Vector3<f32>,
-}
-
-#[derive(Debug, Clone)]
-pub struct SuspensionDebugData {
-    pub local_origin: Vector3<f32>,
-    pub local_wheel: Vector3<f32>,
-}
-
-#[derive(Debug, Clone)]
-pub enum MetadataType {
-    Translation(Vector3<f32>),
-    Rotation(Quaternion<f32>),
-    Wheels(HashMap<String, WheelData>),
-    Colliders(Vec<ColliderDebugData>),
-    Wings(Vec<WingDebugData>),
-    Suspensions(Vec<SuspensionDebugData>),
-}
-
+#[derive(Clone, Copy)]
 pub struct RenderMessage {
     pub translation: Vector3<f32>,
     pub rotation: Quaternion<f32>,
     pub linvel: Vector3<f32>,
-    pub metadata: HashMap<String, MetadataType>
+    // World-space angular velocity (rad/s) - rapier's own RigidBody::angvel,
+    // straight through with no conversion. See Instrumentation::update
+    // for the body-frame rotation that turns this into pitch/yaw/roll rate.
+    pub angvel: Vector3<f32>,
+    /// When (wall clock) the body was where this says - the physics steps at
+    /// a fixed 120 Hz on its own thread, so by the time a frame draws it
+    /// it's moved on; see App's `physics_poses`.
+    pub sampled_at: Instant,
 }
 
-#[derive(Debug)]
 pub enum PhysicsCommand {
-    RequestData,      // Main thread requests physics data
+    // Main thread requests this frame's physics data. `debug_lines` asks for
+    // the F5 overlay's lines too (see PhysicsBehavior::debug_draw) - sent
+    // every frame rather than as a separate toggle, so it can never drift
+    // out of sync with the render side (e.g. across a scene restart).
+    RequestData { debug_lines: bool },
     Shutdown,         // Main thread signals shutdown
-    ToggleDebug,      // Toggle debug rendering
     TogglePause,      // Toggle physics pause
     /// Teleports a named rigidbody (see `Physics::physics_elements`) to an exact
-    /// translation/rotation/velocity - meant to be sent right before un-pausing
-    /// after a scripted cinematic (see `CameraTrack::LookAt` /
-    /// `GameLogic::update`'s cinematic handling) has been moving that object's
-    /// *render* transform directly while physics sat paused. Without this, the
-    /// rigidbody resumes stepping from wherever it was when it got paused -
-    /// wherever the script left it visually - causing a visible snap the instant
-    /// physics starts writing the render transform again.
+    /// translation/rotation/velocity - an aircraft respawned, put at the start
+    /// of a path an animation has it fly (see play::path_follow), or let go
+    /// where an animation left it (see `SetKinematic`). Without this, the
+    /// rigidbody carries on from wherever the physics last had it - a visible
+    /// snap the instant physics starts writing the node's transform again.
     SetTransform { name: String, translation: Vector3<f32>, rotation: Quaternion<f32>, linvel: Vector3<f32> },
+    /// A body (and its node's physics halves) for a node spawned after the
+    /// thread started - see `Scene::spawn_node_live`. Replaces any body
+    /// already under that id.
+    AddBody { def: PhysicsObjectDef, behaviors: Vec<Box<dyn PhysicsBehavior>> },
+    /// Removes the body (colliders and physics halves too) of a node that
+    /// was despawned - see `Scene::despawn_node`.
+    RemoveBody { name: String },
+    /// Holds a body still (kinematic: nothing pushes it, it doesn't fall)
+    /// while something else moves its node - an animation (see
+    /// `SceneContent::kinematic`) - or lets it go again. Letting go doesn't
+    /// move it: send a `SetTransform` first to start it where the animation
+    /// left it.
+    SetKinematic { name: String, kinematic: bool },
+}
+
+// By hand - a physics half (`Box<dyn PhysicsBehavior>`) isn't Debug.
+impl std::fmt::Debug for PhysicsCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PhysicsCommand::RequestData { debug_lines } => write!(f, "RequestData {{ debug_lines: {debug_lines} }}"),
+            PhysicsCommand::Shutdown => write!(f, "Shutdown"),
+            PhysicsCommand::TogglePause => write!(f, "TogglePause"),
+            PhysicsCommand::SetTransform { name, .. } => write!(f, "SetTransform {{ name: {name:?}, .. }}"),
+            PhysicsCommand::AddBody { def, behaviors } => write!(f, "AddBody {{ id: {:?}, behaviors: {} }}", def.id, behaviors.len()),
+            PhysicsCommand::RemoveBody { name } => write!(f, "RemoveBody {{ name: {name:?} }}"),
+            PhysicsCommand::SetKinematic { name, kinematic } => write!(f, "SetKinematic {{ name: {name:?}, kinematic: {kinematic} }}"),
+        }
+    }
 }
 
 pub struct PhysicsData {
     pub rigidbody_handle: RigidBodyHandle,
     pub collider_handles: Vec<ColliderHandle>,
-    pub metadata: HashMap<String, MetadataType>
-}
-
-/// Per-tick physics behavior, supplied by whichever scene wants physics (see
-/// Scene::physics) - this generic engine module doesn't know or care what kind of
-/// gameplay object is being simulated, only that something implements this.
-pub trait PhysicsTick {
-    fn tick(
-        &mut self,
-        controls: &PlaneControls,
-        collider_set: &ColliderSet,
-        rigidbody_set: &mut RigidBodySet,
-        query_pipeline: &QueryPipeline,
-        physics_elements: &mut HashMap<String, Option<PhysicsData>>,
-        debug_physics_tx: &Sender<Vec<DebugPhysicsMessageType>>,
-        delta_time: f32,
-    );
-
-    /// Toggles whatever debug visualization this tick implementation has (F2).
-    fn toggle_debug_rendering(&mut self);
-
-    /// Debug lines to forward to the render thread, refreshed each tick that sends data.
-    fn debug_lines(&self) -> &[DebugPhysicsMessageType];
 }
 
 pub struct Physics {
@@ -125,11 +110,15 @@ impl Physics {
         physics
     }
 
-    pub fn physics_thread(&mut self, tx: Sender<HashMap<String, RenderMessage>>, rx: Receiver<PhysicsCommand>, plane_control_rx: Receiver<PlaneControls>, debug_physics_tx: Sender<Vec<DebugPhysicsMessageType>>, mut physics_tick: Box<dyn PhysicsTick + Send>) {
+    // `node_behaviors` are every node's physics half, keyed by node id (see
+    // `SceneNodes::take_physics_behaviors`), talking to their main-thread
+    // halves through `node_input_rx`/`node_state_tx`.
+    pub fn physics_thread(&mut self, tx: Sender<HashMap<String, RenderMessage>>, rx: Receiver<PhysicsCommand>, debug_physics_tx: Sender<Vec<DebugPhysicsMessageType>>, node_behaviors: Vec<(String, Vec<Box<dyn PhysicsBehavior>>)>, node_input_rx: Receiver<HashMap<String, PhysicsInput>>, node_state_tx: Sender<HashMap<String, Vec<PhysicsPayload>>>) {
         const FIXED_TIMESTEP: f32 = 1.0 / 120.0; // Fixed timestep for 120 FPS for more responsive physics
         let mut accumulator = 0.0;
         let mut last_update = Instant::now();
         let mut should_send_data = false;
+        let mut send_debug_lines = false;
 
         let integration_parameters = IntegrationParameters { dt: FIXED_TIMESTEP, ..Default::default() };
         let mut island_manager = IslandManager::new();
@@ -141,17 +130,30 @@ impl Physics {
         let physics_hooks = ();
         let event_handler = ();
 
-        let mut plane_controls: PlaneControls = PlaneControls::new();
+        // A node's physics half needs a rigidbody to act on - one whose node
+        // never registered a `Physics` property has nothing to drive, so it's
+        // dropped here, loudly, instead of silently never running.
+        let mut physics_nodes: Vec<PhysicsNode> = node_behaviors.into_iter()
+            .filter_map(|(id, behaviors)| match self.physics_elements.get(&id) {
+                Some(Some(physics_data)) => Some(PhysicsNode::new(id, physics_data.rigidbody_handle, behaviors)),
+                _ => {
+                    eprintln!("node '{id}' has physics behaviors but no rigidbody (missing Physics property?) - they won't run");
+                    None
+                }
+            })
+            .collect();
+
         let mut paused = false;
         let mut shutdown = false;
 
         loop {
-            match plane_control_rx.try_recv() {
-                Ok(plane_control) => {
-                    plane_controls = plane_control;
-                },
-                Err(_) => {
-                    // No message available, continuing with physics
+            // Merge every input batch the main thread sent since last loop -
+            // states overwrite, events queue until a fixed step consumes them.
+            while let Ok(mut inputs) = node_input_rx.try_recv() {
+                for physics_node in physics_nodes.iter_mut() {
+                    if let Some(input) = inputs.remove(&physics_node.id) {
+                        physics_node.receive_input(input);
+                    }
                 }
             }
 
@@ -159,11 +161,6 @@ impl Physics {
             let elapsed = now.duration_since(last_update).as_secs_f32();
             accumulator += elapsed;
             last_update = now;
-
-            // Apply forces before physics step (only if not paused)
-            if !paused {
-                physics_tick.tick(&plane_controls, &self.collider_set, &mut self.rigidbody_set, &self.query_pipeline, &mut self.physics_elements, &debug_physics_tx, self.delta_time);
-            }
 
             // Step the physics pipeline with fixed timestep (only if not paused)
             while accumulator >= FIXED_TIMESTEP && !paused {
@@ -174,6 +171,12 @@ impl Physics {
                 
                 // Clamp delta time to prevent spiral of death
                 let clamped_delta_time = self.delta_time.min(FIXED_TIMESTEP * 2.0);
+
+                // Every node's physics half, at the real fixed rate, right
+                // before the world advances by exactly that step.
+                for physics_node in physics_nodes.iter_mut() {
+                    physics_node.fixed_update(&mut self.rigidbody_set, &mut self.collider_set, &narrow_phase, &self.query_pipeline, FIXED_TIMESTEP);
+                }
                 
                 self.physics_pipeline.step(
                     &self.gravity,
@@ -196,16 +199,14 @@ impl Physics {
 
             loop {
                 match rx.try_recv() {
-                    Ok(PhysicsCommand::RequestData) => {
+                    Ok(PhysicsCommand::RequestData { debug_lines }) => {
                         should_send_data = true;
+                        send_debug_lines = debug_lines;
                     },
                     Ok(PhysicsCommand::Shutdown) => {
                         println!("Physics thread received shutdown command");
                         shutdown = true;
                         break;
-                    },
-                    Ok(PhysicsCommand::ToggleDebug) => {
-                        physics_tick.toggle_debug_rendering();
                     },
                     Ok(PhysicsCommand::TogglePause) => {
                         paused = !paused;
@@ -222,6 +223,39 @@ impl Physics {
                                 rb.set_translation(translation, true);
                                 rb.set_rotation(nalgebra::Unit::new_normalize(rotation), true);
                                 rb.set_linvel(linvel, true);
+                                // A teleport starts the body fresh - no
+                                // leftover spin carried to the new attitude.
+                                rb.set_angvel(Vector3::zeros(), true);
+                            }
+                        }
+                    },
+                    Ok(PhysicsCommand::SetKinematic { name, kinematic }) => {
+                        if let Some(Some(physics_data)) = self.physics_elements.get(&name) {
+                            if let Some(rb) = self.rigidbody_set.get_mut(physics_data.rigidbody_handle) {
+                                // A static body (the ground) stays static.
+                                if !rb.is_fixed() {
+                                    let body_type = if kinematic { rapier3d::prelude::RigidBodyType::KinematicPositionBased } else { rapier3d::prelude::RigidBodyType::Dynamic };
+                                    rb.set_body_type(body_type, true);
+                                    if kinematic {
+                                        rb.set_linvel(Vector3::zeros(), true);
+                                        rb.set_angvel(Vector3::zeros(), true);
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    Ok(PhysicsCommand::RemoveBody { name }) => {
+                        self.remove_body(&name, &mut island_manager, &mut impulse_joint_set, &mut multibody_joint_set);
+                        physics_nodes.retain(|physics_node| physics_node.id != name);
+                    },
+                    Ok(PhysicsCommand::AddBody { def, behaviors }) => {
+                        let id = def.id.clone();
+                        self.remove_body(&id, &mut island_manager, &mut impulse_joint_set, &mut multibody_joint_set);
+                        physics_nodes.retain(|physics_node| physics_node.id != id);
+                        load_physics_from_definitions(std::slice::from_ref(&def), &mut self.collider_set, &mut self.rigidbody_set, &mut self.physics_elements);
+                        if !behaviors.is_empty() {
+                            if let Some(Some(physics_data)) = self.physics_elements.get(&id) {
+                                physics_nodes.push(PhysicsNode::new(id, physics_data.rigidbody_handle, behaviors));
                             }
                         }
                     },
@@ -237,14 +271,16 @@ impl Physics {
 
             if should_send_data {
                 let mut new_render_messages: HashMap<String, RenderMessage> = HashMap::new();
+                // The state is the last step's: `accumulator` seconds of real
+                // time have passed since the moment it stands for.
+                let sampled_at = Instant::now().checked_sub(std::time::Duration::from_secs_f32(accumulator.max(0.0))).unwrap_or_else(Instant::now);
 
                 for (key, physics_data) in &self.physics_elements {
                     match physics_data {
                         Some(physics_data) => {
-                            let metadata = physics_data.metadata.clone();
                             let rb = self.rigidbody_set.get(physics_data.rigidbody_handle).unwrap();
 
-                            new_render_messages.insert(key.clone(), RenderMessage { translation: *rb.translation(), rotation: rb.rotation().into_inner(), linvel: *rb.linvel(), metadata: metadata });
+                            new_render_messages.insert(key.clone(), RenderMessage { translation: *rb.translation(), rotation: rb.rotation().into_inner(), linvel: *rb.linvel(), angvel: *rb.angvel(), sampled_at });
                         },
                         None => {},
                     }
@@ -255,8 +291,48 @@ impl Physics {
                     break;
                 }
 
-                if let Err(e) = debug_physics_tx.send(physics_tick.debug_lines().to_vec()) {
+                // Empty whenever the overlay is off, so the render side
+                // drops whatever it was last showing.
+                let mut debug_draw = DebugDraw::default();
+                if send_debug_lines {
+                    for physics_node in &physics_nodes {
+                        debug_draw.set_owner(Some(physics_node.id.clone()));
+                        physics_node.debug_draw(&self.rigidbody_set, &mut debug_draw);
+                    }
+                    // Every collider on a moving body, as it really is - fixed
+                    // bodies (the ground/runway meshes) skipped, they'd bury
+                    // the screen.
+                    const COLLIDER_COLOR: [f32; 3] = [1.0, 0.55, 0.1];
+                    for (handle, body) in self.rigidbody_set.iter().filter(|(_, body)| body.is_dynamic()) {
+                        let owner = self.physics_elements.iter().find_map(|(id, data)| {
+                            data.as_ref().filter(|data| data.rigidbody_handle == handle).map(|_| id.clone())
+                        });
+                        debug_draw.set_owner(owner);
+                        for collider_handle in body.colliders() {
+                            if let Some(collider) = self.collider_set.get(*collider_handle) {
+                                // A broken surface's collider is switched off
+                                // (see AircraftPhysics::sync_surface_colliders)
+                                // and drops out of the overlay with it.
+                                if collider.is_enabled() {
+                                    debug_draw.collider(collider, COLLIDER_COLOR);
+                                }
+                            }
+                        }
+                    }
+                    debug_draw.set_owner(None);
+                }
+                if let Err(e) = debug_physics_tx.send(debug_draw.into_lines()) {
                     println!("Failed to send debug physics messages: {}", e);
+                }
+
+                let node_states: HashMap<String, Vec<PhysicsPayload>> = physics_nodes.iter()
+                    .map(|physics_node| (physics_node.id.clone(), physics_node.publish()))
+                    .filter(|(_, states)| !states.is_empty())
+                    .collect();
+                if !node_states.is_empty() {
+                    if let Err(e) = node_state_tx.send(node_states) {
+                        println!("Failed to send node physics states: {}", e);
+                    }
                 }
                 
                 should_send_data = false; // Reset flag after sending
@@ -264,6 +340,14 @@ impl Physics {
         }
     }
     
+    /// Drops the body under `name` with its colliders - nothing if there's
+    /// none.
+    fn remove_body(&mut self, name: &str, island_manager: &mut IslandManager, impulse_joint_set: &mut ImpulseJointSet, multibody_joint_set: &mut MultibodyJointSet) {
+        if let Some(Some(physics_data)) = self.physics_elements.remove(name) {
+            self.rigidbody_set.remove(physics_data.rigidbody_handle, island_manager, &mut self.collider_set, impulse_joint_set, multibody_joint_set, true);
+        }
+    }
+
     // Getter method to access delta time from other parts of the code
     pub fn get_delta_time(&self) -> f32 {
         self.delta_time
