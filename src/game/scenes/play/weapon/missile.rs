@@ -6,11 +6,10 @@
 //! sight to the target turns, as hard as the G it can pull at its speed
 //! allows. An infrared one sees heat (see play::weapon::heat): something
 //! clearly brighter in its seeker's view than what it's on pulls it off -
-//! another jet, or the sun, which it then just flies at. Its proximity fuze
-//! goes off at the target's closest pass inside
-//! `proximity_radius` (checked through each step, so nothing fast slips
-//! between two frames); it self-destructs after `max_flight_time`, and ends
-//! in the sea.
+//! another jet, or the sun, which it then just flies at. Its fuze goes off
+//! when `proximity_radius` reaches one of an aircraft's colliders, or when
+//! its path enters one (see play::weapon::fuze) - never the aircraft that
+//! launched it. It self-destructs after `max_flight_time`, and ends in the sea.
 //!
 //! Plain numbers in, plain numbers out - nothing of the scene's - so it can
 //! be tested on its own (see the tests below); play::weapon::missiles flies
@@ -20,6 +19,7 @@ use std::collections::HashSet;
 
 use nalgebra::{UnitQuaternion, Vector3};
 
+use super::fuze::{self, FuzeCollider};
 use super::heat;
 use super::weapon_spec::{Seeker, WeaponSpec, SPEED_OF_SOUND};
 use crate::game::scenes::play::world_collision::WorldCollision;
@@ -53,6 +53,15 @@ pub struct TargetTrack {
     /// A flare, not an aircraft - what a seeker's `flare_resistance` is
     /// about.
     pub decoy: bool,
+    /// How the aircraft is turned. Held through a fuze step (it translates
+    /// with `velocity`).
+    pub rotation: UnitQuaternion<f32>,
+    /// Fuselage and wing colliders, in the aircraft's frame. Empty on a
+    /// flare - nothing for the fuze to hit.
+    pub colliders: Vec<FuzeCollider>,
+    /// How far those colliders reach from the aircraft's origin (m). The
+    /// fuze skips the precise test past this plus its proximity radius.
+    pub reach: f32,
 }
 
 /// What a missile's seeker is on.
@@ -67,8 +76,11 @@ pub enum Track {
 /// What's around a missile that it can run into.
 pub struct Surroundings<'a> {
     /// Every aircraft still flying - its target among them. Any of them
-    /// close enough sets the proximity fuze off.
+    /// whose colliders the fuze reaches sets it off, except `shooter`.
     pub aircraft: &'a [TargetTrack],
+    /// The aircraft that launched this missile, by name. Its colliders
+    /// never set the fuze off.
+    pub shooter: &'a str,
     /// The land and runway - `None`: none.
     pub ground: Option<&'a WorldCollision>,
     /// Where the water is.
@@ -80,7 +92,7 @@ pub struct Surroundings<'a> {
 impl<'a> Surroundings<'a> {
     /// Just these aircraft over the sea at `sea_level`, no sun.
     pub fn open(aircraft: &'a [TargetTrack], sea_level: f32) -> Self {
-        Self { aircraft, ground: None, sea_level, sun: None }
+        Self { aircraft, ground: None, sea_level, sun: None, shooter: "" }
     }
 }
 
@@ -226,16 +238,29 @@ impl MissileFlight {
             let step_start = elapsed;
             elapsed += h;
 
-            // The fuze, once armed: the closest any aircraft came during
-            // this step - the nearest pass if several did.
-            if self.time >= spec.fuze.arm_delay {
+            // The fuze, once armed: the earliest detonation along this
+            // step, against any aircraft that isn't the one that fired it.
+            // A collider the sphere reaches, or a path that enters one.
+            if spec.fuze.collider_proximity && self.time >= spec.fuze.arm_delay {
                 let nearest = surroundings.aircraft.iter()
-                    .map(|track| {
-                        let (track_start, track_end) = (track.position + track.velocity * step_start, track.position + track.velocity * elapsed);
-                        let (closest, at) = closest_approach(start - track_start, self.position - track_end, start, self.position);
-                        (closest, at, track)
+                    .filter(|track| track.name != surroundings.shooter && !track.colliders.is_empty())
+                    .filter_map(|track| {
+                        let track_start = track.position + track.velocity * step_start;
+                        let track_end = track.position + track.velocity * elapsed;
+                        // Every collider sits inside `reach` of the aircraft.
+                        // Farther than that plus the fuze, this step cannot
+                        // touch one, so the precise test is skipped. A close
+                        // pass or a hit still runs it.
+                        let relative_start = start - track_start;
+                        let relative_end = self.position - track_end;
+                        let (gap, _) = closest_approach(relative_start, relative_end, start, self.position);
+                        if gap > track.reach + spec.fuze.proximity_radius {
+                            return None;
+                        }
+                        let t = fuze::detonation_t(&track.rotation, track_start, track_end, start, self.position, &track.colliders, spec.fuze.proximity_radius)?;
+                        let at = start + (self.position - start) * t;
+                        Some((t, at, track))
                     })
-                    .filter(|(closest, _, _)| *closest <= spec.fuze.proximity_radius)
                     .min_by(|a, b| a.0.total_cmp(&b.0));
                 if let Some((_, at, track)) = nearest {
                     return Outcome::Detonated { at, target: track.name.clone() };
@@ -375,7 +400,7 @@ mod tests {
         let dt = 1.0 / 60.0;
         let mut time = 0.0;
         while time < seconds {
-            let track = TargetTrack { name: "bandit".into(), position: target_start + target_velocity * time, velocity: target_velocity, heat: heat::MILITARY_HEAT, decoy: false };
+            let track = fuselage("bandit", target_start + target_velocity * time, target_velocity);
             let outcome = missile.step(spec, dt, &Surroundings::open(std::slice::from_ref(&track), -1000.0));
             time += dt;
             if outcome != Outcome::Flying {
@@ -403,7 +428,8 @@ mod tests {
 
     #[test]
     fn it_hits_a_target_ahead() {
-        let spec = aim9();
+        let mut spec = aim9();
+        spec.fuze.collider_proximity = true;
         let mut missile = MissileFlight::launch(Vector3::new(0.0, 3000.0, 0.0), Vector3::new(0.0, 0.0, 250.0), UnitQuaternion::identity(), Some("bandit".into()));
         let (outcome, time) = fly(&mut missile, &spec, Vector3::new(200.0, 3100.0, 3000.0), Vector3::new(0.0, 0.0, 200.0), 20.0);
         assert!(matches!(outcome, Outcome::Detonated { .. }), "{outcome:?} after {time:.1} s");
@@ -412,7 +438,8 @@ mod tests {
     #[test]
     fn it_hits_a_target_crossing_its_nose() {
         // 2 km ahead, crossing left to right at 250 m/s - it has to lead it.
-        let spec = aim9();
+        let mut spec = aim9();
+        spec.fuze.collider_proximity = true;
         let mut missile = MissileFlight::launch(Vector3::new(0.0, 3000.0, 0.0), Vector3::new(0.0, 0.0, 250.0), UnitQuaternion::identity(), Some("bandit".into()));
         let (outcome, time) = fly(&mut missile, &spec, Vector3::new(600.0, 3000.0, 2000.0), Vector3::new(-250.0, 0.0, 0.0), 20.0);
         assert!(matches!(outcome, Outcome::Detonated { .. }), "{outcome:?} after {time:.1} s");
@@ -497,7 +524,7 @@ mod tests {
         // A flat square of land 2 km across, 100 m up.
         let vertices = [Vector3::new(-1.0, 0.1, -1.0), Vector3::new(1.0, 0.1, -1.0), Vector3::new(1.0, 0.1, 1.0), Vector3::new(-1.0, 0.1, 1.0)];
         ground.add_mesh(&vertices, &[[0, 1, 2], [0, 2, 3]], Vector3::zeros(), Vector3::new(1000.0, 1000.0, 1000.0));
-        let surroundings = Surroundings { aircraft: &[], ground: Some(&ground), sea_level: 0.0, sun: None };
+        let surroundings = Surroundings { aircraft: &[], ground: Some(&ground), sea_level: 0.0, sun: None, shooter: "" };
         let down = UnitQuaternion::rotation_between(&Vector3::z(), &Vector3::new(0.0, -1.0, 1.0)).unwrap();
         let mut missile = MissileFlight::launch(Vector3::new(0.0, 400.0, 0.0), Vector3::new(0.0, -150.0, 150.0), down, None);
         let mut outcome = Outcome::Flying;
@@ -514,14 +541,15 @@ mod tests {
     #[test]
     fn any_aircraft_close_by_sets_it_off() {
         // Not its target - another jet in its way.
-        let spec = aim9();
+        let mut spec = aim9();
+        spec.fuze.collider_proximity = true;
         let launch = || MissileFlight::launch(Vector3::new(0.0, 3000.0, 0.0), Vector3::new(0.0, 0.0, 250.0), UnitQuaternion::identity(), None);
         // Parked right where it'll be 3 s after launch.
         let mut path = launch();
         for _ in 0..(3 * 60) {
             path.step(&spec, 1.0 / 60.0, &Surroundings::open(&[], -1000.0));
         }
-        let bystander = TargetTrack { name: "wingman".into(), position: path.position + Vector3::new(3.0, 0.0, 0.0), velocity: Vector3::zeros(), heat: heat::MILITARY_HEAT, decoy: false };
+        let bystander = fuselage("wingman", path.position + Vector3::new(3.0, 0.0, 0.0), Vector3::zeros());
         let mut missile = launch();
         let mut outcome = Outcome::Flying;
         for _ in 0..600 {
@@ -545,7 +573,32 @@ mod tests {
     }
 
     fn jet(name: &str, position: Vector3<f32>, heat: f32) -> TargetTrack {
-        TargetTrack { name: name.into(), position, velocity: Vector3::zeros(), heat, decoy: false }
+        TargetTrack { name: name.into(), position, velocity: Vector3::zeros(), heat, decoy: false, rotation: UnitQuaternion::identity(), colliders: Vec::new(), reach: 0.0 }
+    }
+
+    /// An aircraft with a fuselage box about its origin - what the fuze
+    /// used to treat as the whole jet, now a collider.
+    fn fuselage(name: &str, position: Vector3<f32>, velocity: Vector3<f32>) -> TargetTrack {
+        let colliders = vec![FuzeCollider::Cuboid { half_extents: Vector3::new(0.7, 0.7, 4.7), position: Vector3::new(0.0, 0.0, 1.5) }];
+        let reach = fuze::reach_of(&colliders);
+        TargetTrack {
+            name: name.into(),
+            position,
+            velocity,
+            heat: heat::MILITARY_HEAT,
+            decoy: false,
+            rotation: UnitQuaternion::identity(),
+            colliders,
+            reach,
+        }
+    }
+
+    /// The AIM-9 with its fuze already armed.
+    fn armed() -> WeaponSpec {
+        let mut spec = aim9();
+        spec.fuze.arm_delay = 0.0;
+        spec.fuze.collider_proximity = true;
+        spec
     }
 
     #[test]
@@ -624,6 +677,69 @@ mod tests {
             missile.step(&spec, 1.0 / 60.0, &surroundings);
         }
         assert!(missile.velocity.angle(&sun).to_degrees() < 3.0, "{:?}", missile.velocity);
+    }
+
+    #[test]
+    fn a_wing_off_the_origin_sets_the_fuze_off() {
+        // The aircraft's middle is 30 m from the path. Only a wing out there
+        // is close, and that is enough.
+        let spec = armed();
+        let mut wing = jet("bandit", Vector3::zeros(), heat::MILITARY_HEAT);
+        wing.colliders = vec![FuzeCollider::Cuboid { half_extents: Vector3::new(2.0, 0.3, 2.0), position: Vector3::new(30.0, 0.0, 0.0) }];
+        wing.reach = fuze::reach_of(&wing.colliders);
+        let mut missile = MissileFlight::launch(Vector3::new(30.0, 0.0, -5.0), Vector3::new(0.0, 0.0, 600.0), UnitQuaternion::identity(), None);
+        let outcome = missile.step(&spec, 1.0 / 60.0, &Surroundings::open(std::slice::from_ref(&wing), -1000.0));
+        assert!(matches!(outcome, Outcome::Detonated { ref target, .. } if target == "bandit"), "{outcome:?}");
+    }
+
+    #[test]
+    fn passing_the_origin_without_a_collider_does_not() {
+        // Close to where the aircraft sits, and nowhere near its only collider.
+        let spec = armed();
+        let mut away = jet("bandit", Vector3::zeros(), heat::MILITARY_HEAT);
+        away.colliders = vec![FuzeCollider::Cuboid { half_extents: Vector3::new(1.0, 1.0, 1.0), position: Vector3::new(100.0, 0.0, 0.0) }];
+        away.reach = fuze::reach_of(&away.colliders);
+        let mut missile = MissileFlight::launch(Vector3::new(0.0, 0.0, -5.0), Vector3::new(0.0, 0.0, 300.0), UnitQuaternion::identity(), None);
+        let outcome = missile.step(&spec, 1.0 / 60.0, &Surroundings::open(std::slice::from_ref(&away), -1000.0));
+        assert_eq!(outcome, Outcome::Flying);
+    }
+
+    #[test]
+    fn hitting_a_thin_wing_detonates_on_contact() {
+        // One step clears the slab. The sphere is tiny, so only entering it
+        // sets the fuze off, on the near face.
+        let mut spec = armed();
+        spec.fuze.proximity_radius = 0.01;
+        let mut points = Vec::new();
+        for x in [-2.0_f32, 2.0] {
+            for y in [-1.0_f32, 1.0] {
+                for z in [-0.1_f32, 0.1] {
+                    points.push(Vector3::new(x, y, z));
+                }
+            }
+        }
+        let mut wing = jet("bandit", Vector3::zeros(), heat::MILITARY_HEAT);
+        wing.colliders = vec![FuzeCollider::hull(points)];
+        wing.reach = fuze::reach_of(&wing.colliders);
+        let mut missile = MissileFlight::launch(Vector3::new(0.0, 0.0, -2.0), Vector3::new(0.0, 0.0, 800.0), UnitQuaternion::identity(), None);
+        match missile.step(&spec, 1.0 / 240.0, &Surroundings::open(std::slice::from_ref(&wing), -1000.0)) {
+            Outcome::Detonated { at, .. } => assert!((at.z + 0.1).abs() < 0.15, "{at:?}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_shooters_colliders_do_not_set_it_off() {
+        let spec = armed();
+        let shooter = fuselage("viper", Vector3::zeros(), Vector3::zeros());
+        // Launched inside that fuselage.
+        let mut missile = MissileFlight::launch(Vector3::zeros(), Vector3::new(0.0, 0.0, 50.0), UnitQuaternion::identity(), None);
+        let surroundings = Surroundings { shooter: "viper", ..Surroundings::open(std::slice::from_ref(&shooter), -1000.0) };
+        assert_eq!(missile.step(&spec, 1.0 / 60.0, &surroundings), Outcome::Flying);
+        // The same pass at someone else does.
+        let mut missile = MissileFlight::launch(Vector3::zeros(), Vector3::new(0.0, 0.0, 50.0), UnitQuaternion::identity(), None);
+        let other = Surroundings { shooter: "other", ..Surroundings::open(std::slice::from_ref(&shooter), -1000.0) };
+        assert!(matches!(missile.step(&spec, 1.0 / 60.0, &other), Outcome::Detonated { .. }));
     }
 
     #[test]

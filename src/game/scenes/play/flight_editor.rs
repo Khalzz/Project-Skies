@@ -54,6 +54,8 @@ pub enum EditorRequest {
     Timeline(TimelineRequest),
     /// The editor camera to this node, looking at it.
     Focus(String),
+    /// Turn one of this aircraft's aerodynamic profiles on or off.
+    SetProfile { aircraft: String, label: String, on: bool },
 }
 
 /// What the timeline's transport was asked to do, to which node's
@@ -184,6 +186,9 @@ pub struct FlightEditor {
     pub weapons: Vec<(String, WeaponCategory)>,
     /// Each aircraft as it is right now, by name - filled every frame.
     pub live: HashMap<String, LiveAircraft>,
+    /// Each aircraft's aerodynamic profiles, in definition order: the label
+    /// and the HP left. Filled every frame. HP 0 is off.
+    pub profiles: HashMap<String, Vec<(String, f32)>>,
     /// Every node in the scene - filled every frame.
     pub nodes: Vec<SceneNodeInfo>,
     /// What the camera's on, while it isn't the player's jet - see
@@ -677,10 +682,16 @@ impl FlightEditor {
                                 text: aircraft.name.clone(),
                                 text_color: match live {
                                     None => Some(ERROR_COLOR),
-                                    Some(live) if live.wrecked => Some(visuals.weak_text_color()),
+                                    Some(live) if live.wrecked || live.pilot_dead => Some(visuals.weak_text_color()),
                                     Some(_) => None,
                                 },
-                                detail: if live.is_some_and(|live| live.wrecked) { format!("{} · wrecked", aircraft.plane) } else { aircraft.plane.clone() },
+                                detail: if live.is_some_and(|live| live.wrecked) {
+                                    format!("{} · wrecked", aircraft.plane)
+                                } else if live.is_some_and(|live| live.pilot_dead) {
+                                    format!("{} · pilot killed", aircraft.plane)
+                                } else {
+                                    aircraft.plane.clone()
+                                },
                             };
                             let selected = self.selection == Selection::Aircraft(aircraft.name.clone());
                             if tree_row(ui, selected, row) == RowClick::Select {
@@ -868,8 +879,10 @@ impl FlightEditor {
         let pylons = self.pylons.get(plane_of_aircraft).cloned().unwrap_or_default();
         let plane_countermeasures = self.countermeasures.get(plane_of_aircraft).copied();
         let live = self.live.get(name).copied();
+        let profiles = self.profiles.get(name).cloned().unwrap_or_default();
         let aircraft = &mut self.map.coalitions[coalition_index].aircraft[index];
         let loadout_open = &mut self.loadout_open;
+        let mut profile_toggles = Vec::new();
 
         section(ui, "Flight", |ui| {
             property(ui, "Start", |ui| {
@@ -945,6 +958,23 @@ impl FlightEditor {
             });
         });
 
+        section(ui, "Aero profiles", |ui| {
+            if profiles.is_empty() {
+                ui.label(RichText::new("Not in the air").weak());
+            }
+            for (label, hp) in &profiles {
+                let on = *hp > 0.0;
+                ui.horizontal(|ui| {
+                    let text = if on { "On" } else { "Off" };
+                    if ui.add(egui::Button::new(text).min_size(egui::vec2(48.0, 0.0))).clicked() {
+                        profile_toggles.push(EditorRequest::SetProfile { aircraft: name.to_owned(), label: label.clone(), on: !on });
+                    }
+                    let color = if on { ui.visuals().text_color() } else { ERROR_COLOR };
+                    ui.label(RichText::new(label).color(color));
+                });
+            }
+        });
+
         section(ui, "Status", |ui| {
             match live {
                 Some(live) => {
@@ -999,6 +1029,8 @@ impl FlightEditor {
                     property(ui, "State", |ui| {
                         if live.wrecked {
                             ui.label(RichText::new("Wrecked").color(ERROR_COLOR));
+                        } else if live.pilot_dead {
+                            ui.label(RichText::new("Pilot killed").color(ERROR_COLOR));
                         } else {
                             ui.label(RichText::new("Flying").color(OK_COLOR));
                         }
@@ -1017,6 +1049,7 @@ impl FlightEditor {
                 changes.push(Change::RemoveAircraft(coalition_index, index));
             }
         });
+        self.requests.extend(profile_toggles);
     }
 
     fn apply(&mut self, change: Change) {
@@ -1194,7 +1227,7 @@ fn loadout_editor(ui: &mut egui::Ui, name: &str, aircraft: &mut AircraftPlacemen
             property(ui, "Bingo", |ui| {
                 let mut kilos = aircraft.bingo_kg.unwrap_or(0.0);
                 let response = ui.add_sized([ui.available_width(), 20.0], egui::DragValue::new(&mut kilos).speed(10.0).range(0.0..=capacity).suffix(" kg").max_decimals(0))
-                    .on_hover_text("The fuel line marks once what's left is at or under this. 0 is no bingo");
+                    .on_hover_text("Where the red mark sits on the fuel bar, in kg of what's left. 0 is no bingo");
                 if response.changed() {
                     aircraft.bingo_kg = (kilos > 0.5).then_some(kilos);
                 }
@@ -1370,6 +1403,7 @@ fn status_line(ui: &mut egui::Ui, live: Option<LiveAircraft>) {
     let (state, color) = match live {
         None => ("Not in the scene", ERROR_COLOR),
         Some(live) if live.wrecked => ("Wrecked", ERROR_COLOR),
+        Some(live) if live.pilot_dead => ("Pilot killed", ERROR_COLOR),
         Some(_) => ("Flying", OK_COLOR),
     };
     ui.horizontal(|ui| {

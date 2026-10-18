@@ -175,7 +175,7 @@ impl Physics {
                 // Every node's physics half, at the real fixed rate, right
                 // before the world advances by exactly that step.
                 for physics_node in physics_nodes.iter_mut() {
-                    physics_node.fixed_update(&mut self.rigidbody_set, &self.collider_set, &self.query_pipeline, FIXED_TIMESTEP);
+                    physics_node.fixed_update(&mut self.rigidbody_set, &mut self.collider_set, &narrow_phase, &self.query_pipeline, FIXED_TIMESTEP);
                 }
                 
                 self.physics_pipeline.step(
@@ -310,7 +310,12 @@ impl Physics {
                         debug_draw.set_owner(owner);
                         for collider_handle in body.colliders() {
                             if let Some(collider) = self.collider_set.get(*collider_handle) {
-                                debug_draw.collider(collider, COLLIDER_COLOR);
+                                // A broken surface's collider is switched off
+                                // (see AircraftPhysics::sync_surface_colliders)
+                                // and drops out of the overlay with it.
+                                if collider.is_enabled() {
+                                    debug_draw.collider(collider, COLLIDER_COLOR);
+                                }
                             }
                         }
                     }

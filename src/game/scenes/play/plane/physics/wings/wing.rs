@@ -3,6 +3,7 @@ use std::f32::consts::PI;
 
 use super::airfoil::AirFoil;
 use super::super::super::aero_spec::{ControlSurfaceSpec, SurfaceKind, WingShape};
+use crate::game::scenes::play::weapon::fuze::{closest_point_on_triangle, point_triangle_distance};
 
 pub struct Wing {
     pub label: String,
@@ -42,6 +43,10 @@ pub struct Wing {
     /// Flap setting, -1..1 of each Flap's travel. TODO: nothing sets this
     /// yet (no flap lever) - always 0.
     pub flap_input: f32,
+    /// What's left of this profile. At 0 it applies no forces.
+    pub hp: f32,
+    /// The HP it was given. Turning it back on (see `ProfileSwitch`) restores this.
+    pub max_hp: f32,
 }
 
 pub const AIR_DENSITY: f32 = 1.225;
@@ -114,7 +119,7 @@ fn flap_lift_center(chord_ratio: f32) -> f32 {
 }
 
 impl Wing {
-    pub fn new(label: String, pressure_center: nalgebra::Vector3<f32>, wing_area: f32, chord: f32, air_foil: AirFoil, normal: nalgebra::Vector3<f32>, is_roll_axis: bool, stable: bool, incidence_angle: f32, control_surface_area: f32, surfaces: Vec<ControlSurfaceSpec>) -> Self {
+    pub fn new(label: String, pressure_center: nalgebra::Vector3<f32>, wing_area: f32, chord: f32, air_foil: AirFoil, normal: nalgebra::Vector3<f32>, is_roll_axis: bool, stable: bool, incidence_angle: f32, control_surface_area: f32, surfaces: Vec<ControlSurfaceSpec>, hp: f32) -> Self {
         Self {
             label,
             wing_area,
@@ -133,7 +138,55 @@ impl Wing {
             surfaces,
             flap_input: 0.0,
             shape: None,
+            hp,
+            max_hp: hp,
         }
+    }
+
+    /// The point on this profile's planform closest to `local_point` (the
+    /// jet's frame). The pressure center, when the wing has no shape.
+    pub fn closest_on_planform(&self, local_point: nalgebra::Vector3<f32>) -> nalgebra::Vector3<f32> {
+        let Some(shape) = &self.shape else {
+            return self.pressure_center;
+        };
+        let corners = shape.corners(&self.normal);
+        let first = closest_point_on_triangle(local_point, corners[0], corners[1], corners[2]);
+        let second = closest_point_on_triangle(local_point, corners[0], corners[2], corners[3]);
+        if (local_point - first).magnitude() <= (local_point - second).magnitude() { first } else { second }
+    }
+
+    /// Distance from `local_point` (the jet's frame) to this profile's
+    /// planform. The pressure center, when the wing has no shape.
+    pub fn distance_to_planform(&self, local_point: nalgebra::Vector3<f32>) -> f32 {
+        let Some(shape) = &self.shape else {
+            return (local_point - self.pressure_center).magnitude();
+        };
+        let corners = shape.corners(&self.normal);
+        point_triangle_distance(local_point, corners[0], corners[1], corners[2])
+            .min(point_triangle_distance(local_point, corners[0], corners[2], corners[3]))
+    }
+
+    /// Spends HP from a blast at `local_point` (the jet's frame). Full
+    /// `damage` on the planform, nothing at `radius`, a straight line
+    /// between. At 0 the profile is gone.
+    pub fn take_blast(&mut self, local_point: nalgebra::Vector3<f32>, radius: f32, damage: f32) {
+        if self.hp <= 0.0 || radius <= 0.0 || damage <= 0.0 {
+            return;
+        }
+        let mut distance = self.distance_to_planform(local_point);
+        // The wing's collision slab sits off the planform by half its
+        // thickness (0.15 m on a main wing). A contact detonation is on
+        // that slab, so this close still counts as touching the surface:
+        // full damage, and a fresh wing is deleted. Anything past it falls
+        // off toward the edge of the blast.
+        if distance < 0.2 {
+            distance = 0.0;
+        }
+        if distance >= radius {
+            return;
+        }
+        let dealt = damage * (1.0 - distance / radius);
+        self.hp = (self.hp - dealt).max(0.0);
     }
 
     /// Where a surface's extra lift acts, in the plane's frame: midway along
@@ -219,6 +272,10 @@ impl Wing {
     }
 
     pub fn physics_force(&mut self, rigidbody: &mut RigidBody) {
+        if self.hp <= 0.0 {
+            self.last_lift_force = nalgebra::Vector3::zeros();
+            return;
+        }
         let world_pressure_center = rigidbody.rotation() * self.pressure_center
             + rigidbody.translation();
 
@@ -294,49 +351,13 @@ impl Wing {
 
             let lift_force = lift_dir * (dynamic_pressure * self.wing_area * lift_coefficient);
             let drag_force = rigidbody.rotation() * (-velocity_dir_local * dynamic_pressure * self.wing_area * drag_coefficient);
-            let damping_coefficient = 235.0;
-            // Pitch/yaw only - the roll axis gets no artificial damping: the
-            // wings' own lift already resists rolling (each wing's airflow
-            // includes the roll's own motion - see angular_contribution
-            // above), and this on top of it was most of why the physics roll
-            // came out far slower than the roll-rate curve.
-            let roll_axis = rigidbody.rotation() * nalgebra::Vector3::z();
-            let angular_vel = rigidbody.angvel() - roll_axis * rigidbody.angvel().dot(&roll_axis);
-            let angular_vel = &angular_vel;
-            let arm = rigidbody.rotation() * self.pressure_center;
-            let damping_velocity = angular_vel.cross(&arm);
-            let damping_force = -damping_velocity * damping_coefficient * self.wing_area;
 
             self.last_lift_force = lift_force;
-            lift_force + drag_force + damping_force
+            lift_force + drag_force
         };
 
-        // Parasitic drag: opposes forward airspeed only (local Z), not gravity
-        let parasitic_cd = 0.02;
-        let forward_drag = -local_velocity.z.signum() * local_velocity.z * local_velocity.z * 0.5 * air_density * self.wing_area * parasitic_cd;
-        let parasitic_drag_local = nalgebra::Vector3::new(0.0, 0.0, forward_drag);
-        let parasitic_drag = rigidbody.rotation() * parasitic_drag_local;
-        let total_force = total_force + parasitic_drag;
-
-        let flat_plate_cd = 1.28;
-        let thickness_ratio = 0.04; // 4% thick airfoil
-        // Square to the surface - up for a wing, sideways for a fin.
-        let wing_normal_world = rigidbody.rotation() * lift_up_axis(&self.normal);
-        let normal_speed = world_velocity.dot(&wing_normal_world);
-        let normal_drag_magnitude = 0.5 * air_density * normal_speed * normal_speed.abs() * self.wing_area * thickness_ratio * flat_plate_cd;
-        let normal_drag = -wing_normal_world * normal_drag_magnitude;
-        let total_force = total_force + normal_drag;
-
-        // Lateral (spanwise) drag: air hitting the wing edge during sideslip
-        // Frontal area ~ chord * thickness, approximated as wing_area * 0.1
-        let lateral_cd = 1.0;
-        let lateral_area = self.wing_area * 0.1;
-        let span_axis_world = rigidbody.rotation() * self.normal;
-        let lateral_speed = world_velocity.dot(&span_axis_world);
-        let lateral_drag_magnitude = 0.5 * air_density * lateral_speed * lateral_speed.abs() * lateral_area * lateral_cd;
-        let lateral_drag = -span_axis_world * lateral_drag_magnitude;
-        let total_force = total_force + lateral_drag;
-
+        // Profile, induced and post-stall drag all come from the airfoil
+        // table. The fuselage's own share is applied in AircraftPhysics.
         rigidbody.add_force_at_point(total_force.into(), world_pressure_center.into(), true);
 
         self.apply_surface_forces(rigidbody, roll_command);

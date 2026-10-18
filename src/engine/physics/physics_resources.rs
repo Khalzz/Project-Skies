@@ -39,7 +39,7 @@ pub(crate) fn compute_principal_inertia(mass: f32, center_of_mass: Vector3<f32>,
             position: *position,
         }),
         // Counted as the box around it - close enough for a thin wing slab.
-        game_object::ColliderType::ConvexHull { points } if !points.is_empty() => {
+        game_object::ColliderType::ConvexHull { points, .. } if !points.is_empty() => {
             let (low, high) = points.iter().fold((points[0], points[0]), |(low, high), point| (low.inf(point), high.sup(point)));
             let half = (high - low) * 0.5;
             let center = (high + low) * 0.5;
@@ -140,10 +140,16 @@ pub fn load_physics_from_definitions(defs: &[PhysicsObjectDef], collider_set: &m
                 game_object::ColliderType::HalfSpace { normal } => {
                     ColliderBuilder::halfspace(Unit::new_normalize(*normal)).build()
                 },
-                game_object::ColliderType::ConvexHull { points } => {
+                game_object::ColliderType::ConvexHull { points, wing } => {
                     let points: Vec<Point3<f32>> = points.iter().map(|point| Point3::from(*point)).collect();
                     match ColliderBuilder::convex_hull(&points) {
-                        Some(builder) => builder.build(),
+                        Some(builder) => {
+                            let builder = match wing {
+                                Some(label) => builder.user_data(game_object::wing_collider_id(label)),
+                                None => builder,
+                            };
+                            builder.build()
+                        }
                         None => {
                             eprintln!("convex collider for '{}' couldn't be built (its points are flat or too few)", def.id);
                             continue;

@@ -29,6 +29,10 @@
         "look_up",
         "look_down",
         "fix_view",
+        "zoom_in",
+        "zoom_out",
+        "zoom_axis",
+        "toggle_hmd",
     ]),
     (name: "Gear", actions: [
         "up_wheel",

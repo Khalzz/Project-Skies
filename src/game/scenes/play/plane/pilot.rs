@@ -62,6 +62,9 @@ pub struct Pilot {
     unconscious: f32,
     /// Killed by a crash - see IMPACT_FATAL_G.
     dead: bool,
+    /// Killed by a blast at the seat, still in the air. The jet keeps
+    /// flying on whatever profiles are left until it hits something.
+    killed_by_blast: bool,
     /// Seconds since killed - drives the fade out and back (DEATH_*).
     dead_for: f32,
     /// How long the pilot has been feeling the plane, for IMPACT_GRACE_SECONDS.
@@ -70,7 +73,7 @@ pub struct Pilot {
 
 impl Pilot {
     pub fn new() -> Self {
-        Self { blackout: 0.0, redout: 0.0, unconscious: 0.0, dead: false, dead_for: 0.0, feeling_for: 0.0 }
+        Self { blackout: 0.0, redout: 0.0, unconscious: 0.0, dead: false, killed_by_blast: false, dead_for: 0.0, feeling_for: 0.0 }
     }
 
     /// Killed, and the view is fully black right now - the moment to cut to
@@ -89,11 +92,48 @@ impl Pilot {
         self.dead
     }
 
+    /// Dead from a blast, still airborne until the jet hits the ground or the water.
+    pub fn killed_by_blast(&self) -> bool {
+        self.killed_by_blast
+    }
+
+    /// A crash load past what a strapped-in body takes - see `IMPACT_FATAL_G`.
+    pub fn impact_is_fatal(impact_g: [f32; 3]) -> bool {
+        impact_g.iter().zip(IMPACT_FATAL_G).any(|(felt, limit)| *felt > limit)
+    }
+
+    /// The seat was inside a blast. Dead, but the airframe is not a wreck
+    /// yet - it keeps flying on the profiles the blast didn't take.
+    pub fn kill(&mut self) {
+        if self.dead {
+            return;
+        }
+        self.dead = true;
+        self.killed_by_blast = true;
+        self.blackout = if self.unconscious > 0.0 { 1.0 } else { self.blackout.max(self.redout) };
+        self.redout = 0.0;
+        self.unconscious = 0.0;
+        println!("Pilot killed");
+    }
+
+    /// The fuselage hit the ground. Dead, and unlike a blast this is a crash:
+    /// the airframe breaks up with the pilot.
+    pub fn killed_in_crash(&mut self) {
+        if self.dead {
+            return;
+        }
+        self.dead = true;
+        self.blackout = if self.unconscious > 0.0 { 1.0 } else { self.blackout.max(self.redout) };
+        self.redout = 0.0;
+        self.unconscious = 0.0;
+        println!("Pilot killed on impact");
+    }
+
     /// One frame at load factor `g` (the HUD's G, positive = pushed into
     /// the seat) and crash load `impact_g` (see FlightData::impact_g).
     pub fn update(&mut self, g: f32, impact_g: [f32; 3], delta_time: f32) {
         self.feeling_for += delta_time;
-        let fatal = impact_g.iter().zip(IMPACT_FATAL_G).any(|(felt, limit)| *felt > limit);
+        let fatal = Self::impact_is_fatal(impact_g);
         if !self.dead && self.feeling_for > IMPACT_GRACE_SECONDS && fatal {
             self.dead = true;
             // The death fade runs on `blackout` - start it from however

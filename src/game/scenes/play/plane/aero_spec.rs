@@ -4,6 +4,10 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 pub struct WingSpec {
     pub label: String,
+    /// Hit points. A blast spends them by how close it is; at 0 the wing
+    /// is gone (no lift, drag or control). See `Wing::take_blast`.
+    #[serde(default = "default_wing_hp")]
+    pub hp: f32,
     /// The wing's planform, in meters - when given, `pressure_center`,
     /// `wing_area` and `chord` are worked out from it (see `resolve_shape`)
     /// and needn't be written. Without it, they're given directly.
@@ -32,6 +36,10 @@ pub struct WingSpec {
     pub incidence_angle: f32,
     pub control_surface_area: f32,
     pub surfaces: Vec<ControlSurfaceSpec>,
+}
+
+fn default_wing_hp() -> f32 {
+    100.0
 }
 
 impl WingSpec {

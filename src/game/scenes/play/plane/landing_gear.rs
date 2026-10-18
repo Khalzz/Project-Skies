@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use nalgebra::Vector3;
+use nalgebra::{UnitQuaternion, Vector3};
 
 use crate::engine::rendering::models::model::Model as LoadedModel;
 use crate::engine::utils::lerps::lerp_vector3;
@@ -93,8 +93,11 @@ impl LandingGear {
 ///   suspension ray returns (its middle one tyre radius above it): the
 ///   ground where it touches, or the ray's full length (the suspension's
 ///   max extension) when there's nothing under it;
-/// - retracted: tucked straight up to its suspension's mount point;
-/// - in between: blended by `deploy`.
+/// - retracted: in its bay - the wheel's `retracted_position`, turned by
+///   its `retracted_rotation` (data.ron), or with those left out tucked
+///   straight up to its suspension's mount point;
+/// - in between: blended by `deploy` - moved along the line between the
+///   two, and turned a matching part of the way about its own middle.
 pub struct GearMeshes {
     /// Each wheel's suspension mount (model space), by mesh name, from the
     /// last wheel data that had it - the wheels (the plane's data.ron gear)
@@ -104,15 +107,28 @@ pub struct GearMeshes {
     /// physics thread has reported the gear. An air start is up on the
     /// first frame instead of sitting in the model's gear-down pose.
     armed: Option<(Vec<(String, Vector3<f32>)>, f32)>,
+    /// Each wheel's pose with the gear up, by mesh name: where its middle
+    /// goes (the jet's frame; None - its mount) and how it's turned - from
+    /// the plane's data.ron gear (see `set_gear`).
+    stowed: HashMap<String, (Option<Vector3<f32>>, UnitQuaternion<f32>)>,
 }
 
 impl GearMeshes {
     pub fn new() -> Self {
-        Self { mounts: HashMap::new(), armed: None }
+        Self { mounts: HashMap::new(), armed: None, stowed: HashMap::new() }
+    }
+
+    /// Where `gear`'s wheels go with the gear up - set at spawn, and again
+    /// when the data.ron is saved.
+    pub fn set_gear(&mut self, gear: &super::gear_spec::GearSpec) {
+        self.stowed = gear.wheels.iter()
+            .map(|wheel| (wheel.mesh.clone(), (wheel.retracted_position, wheel.retracted_turn())))
+            .collect();
     }
 
     /// Show `gear` at `down` until physics reports. `down`: extended.
     pub fn arm(&mut self, gear: &super::gear_spec::GearSpec, down: bool) {
+        self.set_gear(gear);
         self.armed = Some((
             gear.wheels.iter().map(|wheel| (wheel.mesh.clone(), wheel.position)).collect(),
             if down { 1.0 } else { 0.0 },
@@ -165,7 +181,8 @@ impl GearMeshes {
             // ground, with nothing to set by hand.
             let radius = meshes.iter().map(|mesh| mesh.depth_below_center()).fold(0.0f32, f32::max);
 
-            let retracted = *mount;
+            let (stowed_at, stowed_turn) = self.stowed.get(name).copied().unwrap_or((None, UnitQuaternion::identity()));
+            let retracted = stowed_at.map_or(*mount, to_model);
             let deployed = match wheel_data.get(name) {
                 // The tyre's bottom on the suspension's end point - the
                 // ground contact, or the ray's full length in the air.
@@ -173,11 +190,16 @@ impl GearMeshes {
                 None => modelled,
             };
 
-            // The wheel's middle goes there - its mesh position is offset by
-            // wherever the geometry sits relative to its origin.
+            // The wheel's middle goes there, turned the part of the way to
+            // its stowed angle the gear is up - about that middle: its mesh
+            // position is offset by wherever the (turned) geometry sits
+            // relative to its origin.
             let center = lerp_vector3(retracted, deployed, deploy);
+            let turn = UnitQuaternion::identity().slerp(&stowed_turn, (1.0 - deploy).clamp(0.0, 1.0));
             for mesh in meshes.iter_mut() {
-                mesh.transform.position = center - mesh.center_offset();
+                let modelled_rotation = UnitQuaternion::from_quaternion(mesh.base_transform.rotation);
+                mesh.transform.rotation = (turn * modelled_rotation).into_inner();
+                mesh.transform.position = center - turn * mesh.center_offset();
                 mesh.update_transform(queue);
             }
         }

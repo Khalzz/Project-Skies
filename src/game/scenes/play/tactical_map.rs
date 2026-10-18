@@ -388,7 +388,7 @@ mod tests {
     }
 
     fn live(position: Vector3<f32>, wrecked: bool) -> LiveAircraft {
-        LiveAircraft { position, rotation: UnitQuaternion::identity(), speed_kt: 0.0, altitude: position.y, wrecked, next_path_point: None, waypoint: None, g: 1.0, g_felt: true, stick_pull: 0.0, g_command: 1.0, autopilot: false, flown_by: "", stick_target_pull: 0.0 }
+        LiveAircraft { position, rotation: UnitQuaternion::identity(), speed_kt: 0.0, altitude: position.y, wrecked, pilot_dead: false, next_path_point: None, waypoint: None, g: 1.0, g_felt: true, stick_pull: 0.0, g_command: 1.0, autopilot: false, flown_by: "", stick_target_pull: 0.0 }
     }
 
     #[test]

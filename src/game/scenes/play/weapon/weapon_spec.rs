@@ -154,7 +154,12 @@ pub struct Guidance {
 /// `fuze: ( ... )` - when it goes off.
 #[derive(Clone, Debug, Deserialize)]
 pub struct Fuze {
-    /// It goes off passing this close to the target (m).
+    /// The collider proximity fuze: the blast sphere against each collider,
+    /// plus a contact detonation. Off, a missile does not go off against
+    /// aircraft. The test stays in place.
+    #[serde(default)]
+    pub collider_proximity: bool,
+    /// It goes off passing this close to a collider (m).
     pub proximity_radius: f32,
     /// Seconds after launch before it can go off at all.
     #[serde(default)]
@@ -167,8 +172,19 @@ pub struct Fuze {
 #[derive(Clone, Debug, Deserialize)]
 pub struct Warhead {
     pub mass: f32,
-    /// Within this far of the blast (m), an aircraft is destroyed.
+    /// How far the blast reaches (m). Damage falls from `damage` where it
+    /// touches a surface to nothing at this distance. A pilot this close
+    /// to the blast is killed.
     pub lethal_radius: f32,
+    /// HP removed from a surface the blast touches. Less, in a straight
+    /// line, the farther that surface is, out to `lethal_radius`.
+    #[serde(default)]
+    pub damage: f32,
+    /// Newton-seconds of shove where the blast touches the jet, applied at
+    /// that point so an off-center hit also spins it. Nothing at
+    /// `lethal_radius`.
+    #[serde(default)]
+    pub impulse: f32,
 }
 
 /// `data.ron` as written - plane-like: model, physics, then its systems.
@@ -182,6 +198,10 @@ struct WeaponData {
     guidance: Guidance,
     fuze: Fuze,
     warhead: Warhead,
+    /// How long the trigger is held before it leaves the rail (s). 0 fires
+    /// on the press.
+    #[serde(default)]
+    hold_to_launch: f32,
 }
 
 fn one() -> f32 { 1.0 }
@@ -203,6 +223,9 @@ pub struct WeaponSpec {
     pub guidance: Guidance,
     pub fuze: Fuze,
     pub warhead: Warhead,
+    /// How long the trigger is held before it leaves the rail (s). 0 fires
+    /// on the press.
+    pub hold_to_launch: f32,
 }
 
 impl WeaponSpec {
@@ -278,6 +301,7 @@ impl WeaponSpec {
             guidance: data.guidance,
             fuze: data.fuze,
             warhead: data.warhead,
+            hold_to_launch: data.hold_to_launch,
         };
         spec.check().map_err(|error| format!("weapon '{id}': {error}"))?;
         Ok(spec)
@@ -320,6 +344,15 @@ impl WeaponSpec {
         positive(self.fuze.proximity_radius, "fuze.proximity_radius")?;
         positive(self.fuze.max_flight_time, "fuze.max_flight_time")?;
         positive(self.warhead.lethal_radius, "warhead.lethal_radius")?;
+        if self.warhead.damage < 0.0 {
+            return Err(format!("warhead.damage can't be negative (it's {})", self.warhead.damage));
+        }
+        if self.warhead.impulse < 0.0 {
+            return Err(format!("warhead.impulse can't be negative (it's {})", self.warhead.impulse));
+        }
+        if self.hold_to_launch < 0.0 {
+            return Err(format!("hold_to_launch can't be negative (it's {})", self.hold_to_launch));
+        }
         Ok(())
     }
 

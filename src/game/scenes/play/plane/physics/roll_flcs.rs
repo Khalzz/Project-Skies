@@ -46,6 +46,8 @@ const MIN_ACTIVE_SPEED: f32 = 20.0;
 pub struct RollFlcs {
     /// Accumulated roll-rate error (deg).
     integral: f32,
+    /// Last tick's stick (-1..1), so a release can be told from a hold.
+    last_stick: f32,
     /// Last tick's commanded and measured roll rate (deg/s).
     pub last_command_deg_s: f32,
     pub last_measured_deg_s: f32,
@@ -53,7 +55,7 @@ pub struct RollFlcs {
 
 impl RollFlcs {
     pub fn new() -> Self {
-        Self { integral: 0.0, last_command_deg_s: 0.0, last_measured_deg_s: 0.0 }
+        Self { integral: 0.0, last_stick: 0.0, last_command_deg_s: 0.0, last_measured_deg_s: 0.0 }
     }
 
     pub fn reset(&mut self) {
@@ -95,15 +97,27 @@ impl RollFlcs {
         let error = command - measured;
         let feed_forward = command * KFF * authority_schedule;
         let proportional = error * KP * gain_schedule;
-        let integral_command = self.integral * KI * gain_schedule;
 
-        // Only integrate while there's authority left to use - otherwise it
-        // winds up while pinned against full travel.
-        let unsaturated = (feed_forward + proportional + integral_command).abs() < 1.0;
-        if unsaturated {
-            self.integral += error * dt;
-            let limit = MAX_INTEGRAL_COMMAND / (KI * gain_schedule);
-            self.integral = self.integral.clamp(-limit, limit);
+        // The integrator trims a stick the pilot is holding. The stick
+        // eases back to center rather than snapping, and through that whole
+        // ease the rate is still above the command, so the integral winds
+        // the ailerons the other way. It is still there after the rate hits
+        // zero, and the jet rolls back. Drop it as soon as the stick eases
+        // off. The proportional term still stops whatever rate is left.
+        let easing_off = aileron.abs() + 0.001 < self.last_stick.abs();
+        self.last_stick = aileron;
+        if command.abs() < 0.5 || easing_off {
+            self.integral = 0.0;
+        } else {
+            let integral_command = self.integral * KI * gain_schedule;
+            // Only integrate while there's authority left to use - otherwise it
+            // winds up while pinned against full travel.
+            let unsaturated = (feed_forward + proportional + integral_command).abs() < 1.0;
+            if unsaturated {
+                self.integral += error * dt;
+                let limit = MAX_INTEGRAL_COMMAND / (KI * gain_schedule);
+                self.integral = self.integral.clamp(-limit, limit);
+            }
         }
 
         (feed_forward + proportional + self.integral * KI * gain_schedule).clamp(-1.0, 1.0)

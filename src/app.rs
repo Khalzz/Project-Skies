@@ -117,6 +117,13 @@ pub struct App {
     // camera, with the editor's panels round it and `editor_lines` (cameras'
     // views, paths, links) over it (see render_editor_lines_pass).
     pub editor_active: bool,
+    // F10 on the title (see main_menu::scene). The shot's camera, jet, and
+    // which way the sea travels. Drawn by the egui overlay while `open`.
+    pub menu_shot: crate::game::scenes::main_menu::scene::MenuShot,
+    // F11 while flying (see play::scene::HudLayout). The cockpit HUD's size,
+    // center, and where the jet plate sits. Drawn by the egui overlay while
+    // `open`.
+    pub hud_layout: crate::game::scenes::play::scene::HudLayout,
     // The debug view (F5/F9) while spectating - what the camera's on, as
     // the play scene sees it (see play::scene's telemetry), drawn over the
     // game by the egui overlay pass. None otherwise.
@@ -143,6 +150,13 @@ pub struct App {
     // HUD lines in screen pixels (the speed/altitude tapes, the range
     // scale) - see ThickLines::screen_space.
     pub hud_screen_lines: crate::engine::rendering::thick_lines::ThickLines,
+    // HUD text laid on the HUD's glass or plate in the world, so it grows and
+    // shrinks with them (zoom) - drawn after the HUD's lines, inside its
+    // `mask`; refilled every frame. See SdfText.
+    pub hud_text: crate::engine::rendering::sdf_text::SdfText,
+    // The helmet display's text (the F-16's JHMCS: speed and altitude while
+    // looking away from the HUD) - in screen pixels; refilled every frame.
+    pub hmd_text: crate::engine::rendering::sdf_text::SdfText,
     // F8 heat blobs, also in screen pixels, drawn after the grey grade so
     // they keep their color (see play::scene::update_heat_view).
     pub heat_screen_lines: crate::engine::rendering::thick_lines::ThickLines,
@@ -360,6 +374,9 @@ impl App {
         let hud_horizon_lines = crate::engine::rendering::thick_lines::ThickLines::new(&renderer.device, renderer.config.format, &camera_resources);
         let mut hud_screen_lines = crate::engine::rendering::thick_lines::ThickLines::new(&renderer.device, renderer.config.format, &camera_resources);
         hud_screen_lines.screen_space = true;
+        let hud_text = crate::engine::rendering::sdf_text::SdfText::new(&renderer.device, renderer.config.format, &camera_resources);
+        let mut hmd_text = crate::engine::rendering::sdf_text::SdfText::new(&renderer.device, renderer.config.format, &camera_resources);
+        hmd_text.screen_space = true;
         let mut heat_screen_lines = crate::engine::rendering::thick_lines::ThickLines::new(&renderer.device, renderer.config.format, &camera_resources);
         heat_screen_lines.screen_space = true;
 
@@ -392,9 +409,13 @@ impl App {
             hud_lines,
             editor_lines,
             editor_active: false,
+            menu_shot: crate::game::scenes::main_menu::scene::MenuShot::default(),
+            hud_layout: crate::game::scenes::play::scene::HudLayout::default(),
             spectate_telemetry: None,
             hud_horizon_lines,
             hud_screen_lines,
+            hud_text,
+            hmd_text,
             heat_screen_lines,
             egui_cursor: None,
             infinite_drag: None,
@@ -570,9 +591,10 @@ impl App {
     }
 
     /// Whether the mouse is a pointer for clicking debug windows (F7, F10's
-    /// flight editor or the F10 tactical map open) instead of looking around.
+    /// flight editor, the F10 tactical map, or F11's HUD layout) instead of
+    /// looking around.
     pub fn mouse_free(&self) -> bool {
-        self.debug_mouse_free || self.tactical_map_active || self.editor_active
+        self.debug_mouse_free || self.tactical_map_active || self.editor_active || self.hud_layout.open
     }
 
     /// Whether the F7 debug overlay is up.
@@ -663,7 +685,7 @@ impl App {
                 // container establishes its own clip for its descendants
                 // further down the recursion (see node_content_preparation's
                 // Container branch/clip_rect's own doc comment).
-                let (textareas_to_merge, _vertices_to_add, _indices_to_add) = $ui_node.node_content_preparation(&self.window_manager.size, dpi_scale, &mut self.ui.ui_rendering, &mut self.ui.text.font_system, self.time.delta_time, $hit_testable, None);
+                let (textareas_to_merge, _vertices_to_add, _indices_to_add) = $ui_node.node_content_preparation(&self.window_manager.size, dpi_scale, &mut self.ui.ui_rendering, &mut self.ui.text.font_system, &mut self.ui.text.text_cache, self.time.delta_time, $hit_testable, None, None);
                 $text_areas.extend(textareas_to_merge);
             };
         }
@@ -738,12 +760,25 @@ impl App {
     // and mutate ANY UI node via Ui::get_ui_node while it runs, including its own
     // node or an ancestor (e.g. a button hiding the panel it's inside of).
     fn fire_ui_click_handlers(&mut self) {
+        // The title shot panel (F10) and the HUD layout panel (F11) sit on
+        // top of the game's own UI. A click on either must not also hit the
+        // button underneath.
+        if (self.menu_shot.open || self.hud_layout.open) && self.egui_overlay.ctx.is_pointer_over_area() {
+            return;
+        }
         let mut pending: Vec<(String, Box<dyn FnMut(&mut App)>)> = Vec::new();
         for (id, node) in self.ui.renderizable_elements.iter_mut() {
             node.take_click_handlers(id, &mut pending);
         }
-        for (path, mut on_click) in pending {
-            on_click(self);
+        // A click can land on several overlapping nodes (a dropdown drawn over
+        // the row under it, and that row). The walk is parent-then-children, so
+        // the last one is the one painted on top. Only that one runs; the rest
+        // still get their closures put back.
+        let topmost = pending.len().saturating_sub(1);
+        for (index, (path, mut on_click)) in pending.into_iter().enumerate() {
+            if index == topmost {
+                on_click(self);
+            }
             if let Some(node) = Ui::get_ui_node(&mut self.ui.renderizable_elements, &path) {
                 node.restore_click_handler(on_click);
             }
@@ -857,6 +892,8 @@ impl App {
                 self.hud_lines.dynamic.clear();
                 self.hud_horizon_lines.dynamic.clear();
                 self.hud_screen_lines.dynamic.clear();
+                self.hud_text.clear();
+                self.hmd_text.clear();
                 self.heat_screen_lines.dynamic.clear();
 
                 // The scene doesn't exist yet at this point - SceneManager::create_scene/
@@ -1144,6 +1181,7 @@ impl App {
                     // position/orientation this frame (see SceneCameras::
                     // update's own doc comment).
                     scene.cameras.update(&scene.content.renderizable_instances);
+                    scene.run_after_cameras(&mut self);
 
                     self.scene_manager.active_scene = Some(scene);
                 } else {

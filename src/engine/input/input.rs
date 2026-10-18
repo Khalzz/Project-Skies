@@ -491,6 +491,16 @@ impl InputSubsystem {
         self.save_bindings();
     }
 
+    /// Drops every binding on `action`. One save, whether it had one key or several.
+    pub fn clear_bindings(&mut self, action: &str) {
+        let Some(action) = self.actions.get_mut(action) else { return };
+        if action.bindings.is_empty() {
+            return;
+        }
+        action.bindings.clear();
+        self.save_bindings();
+    }
+
     /// Aborts an in-progress begin_capture() without producing a binding - e.g. a
     /// rebinding menu's own "cancel" button, or closing the menu while still
     /// waiting on input.
@@ -661,6 +671,10 @@ pub fn action_bindings(action: &str) -> Vec<Binding> {
 
 pub fn unbind(action: &str, index: usize) {
     with_input_mut(|input| input.unbind(action, index));
+}
+
+pub fn clear_bindings(action: &str) {
+    with_input_mut(|input| input.clear_bindings(action));
 }
 
 pub fn cancel_capture() {

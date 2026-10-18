@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use nalgebra::Vector3;
+use nalgebra::{Point3, Vector3};
 use rapier3d::prelude::RigidBody;
 
 use crate::engine::physics::physics_behavior::{DebugDraw, PhysicsBehavior, PhysicsCtx, PhysicsPayload};
@@ -10,8 +10,8 @@ use super::airframe::{dynamic_drag, Airframe};
 use super::controls::PlaneControls;
 use super::flight_system::FlightSystem;
 use super::instrumentation::Instrumentation;
-use super::messages::{AircraftEvent, AircraftReload, AircraftState};
-use crate::engine::game_nodes::game_object::ColliderType;
+use super::messages::{AircraftEvent, AircraftReload, AircraftState, ProfileSwitch};
+use crate::engine::game_nodes::game_object::{wing_collider_id, ColliderType};
 use crate::engine::physics::physics_resources::compute_principal_inertia;
 use super::physics::rolling_rate::{commanded_roll_rate_deg_s, RollRateParams};
 use super::physics::wheels::wheel_manager::{WheelInputs, WheelManager};
@@ -42,6 +42,12 @@ const TYRE_FORCE_COLOR: [f32; 3] = [1.0, 0.3, 1.0];
 const PRESSURE_CENTER_COLOR: [f32; 3] = [1.0, 1.0, 1.0];
 const WING_OUTLINE_COLOR: [f32; 3] = [0.6, 0.6, 0.6];
 const SURFACE_COLOR: [f32; 3] = [1.0, 0.9, 0.2];
+// One step of the whole jet's weight is about 1,000 N·s. A contact past
+// these is a strike, not the airframe resting on the surface.
+/// Fuselage into the ground: the jet breaks up.
+const FUSELAGE_STRIKE_IMPULSE: f32 = 8_000.0;
+/// A wing, stabilator or fin into the ground: that surface is torn off.
+const SURFACE_STRIKE_IMPULSE: f32 = 2_500.0;
 const MARKER_SIZE: f32 = 0.6;
 // The rigidbody's center of mass, and the pilot's seat (where seat G is
 // measured).
@@ -89,6 +95,14 @@ pub struct AircraftPhysics {
     fuel_capacity: f32,
     /// Tanks ran dry - no thrust until fuel is added.
     engine_out: bool,
+    /// A blast reached the pilot's seat. Never cleared.
+    pilot_hit: bool,
+    /// The fuselage has hit the ground hard enough to break the jet up.
+    /// Stays set. A wing strike does not: that surface comes off instead.
+    fuselage_struck: bool,
+    /// Warheads applied. The main thread diffs part HP when this advances,
+    /// so a ground strike or an F10 toggle is not credited as a hit.
+    blasts_handled: u32,
 }
 
 impl AircraftPhysics {
@@ -109,6 +123,9 @@ impl AircraftPhysics {
             fuel_kg: 0.0,
             fuel_capacity: 0.0,
             engine_out: false,
+            pilot_hit: false,
+            fuselage_struck: false,
+            blasts_handled: 0,
         }
     }
 
@@ -129,6 +146,12 @@ impl AircraftPhysics {
         let mass_properties = rapier3d::prelude::MassProperties::new(reload.center_of_mass.into(), reload.mass, inertia);
         ctx.rigidbody_mut().set_additional_mass_properties(mass_properties, true);
         self.apply_fuel_mass(ctx);
+    }
+
+    /// One profile on or off. On gives it back the HP it was defined with.
+    fn set_profile(&mut self, label: &str, on: bool) {
+        let Some(wing) = self.wing_manager.wings.iter_mut().find(|wing| wing.label == label) else { return };
+        wing.hp = if on { wing.max_hp } else { 0.0 };
     }
 
     /// The body's mass with the fuel that's left. `full_mass` is the jet
@@ -188,11 +211,86 @@ impl AircraftPhysics {
                 self.flight_system.cut_engine();
             }
             AircraftEvent::Fuel { kg, capacity } => self.apply_fuel(kg, capacity, ctx),
+            AircraftEvent::Blast { at, radius, damage, impulse } => self.apply_blast(at, radius, damage, impulse, ctx),
         }
     }
 
-    /// Thrust plus fuselage side-drag, applied fresh this step - forces are
+    /// A warhead at `at`. Each wing loses HP by how far the blast is from
+    /// its planform. The pilot dies when the seat is inside the sphere.
+    /// The jet is shoved at the closest point on it, so a hit off the
+    /// center also spins it.
+    fn apply_blast(&mut self, at: Vector3<f32>, radius: f32, damage: f32, impulse: f32, ctx: &mut PhysicsCtx) {
+        self.blasts_handled = self.blasts_handled.saturating_add(1);
+        let rigidbody = ctx.rigidbody();
+        let rotation = *rigidbody.rotation();
+        let translation = *rigidbody.translation();
+        let local = rotation.inverse() * (at - translation);
+        let contact_local = self.blast_contact(local);
+        for wing in &mut self.wing_manager.wings {
+            wing.take_blast(local, radius, damage);
+        }
+        let seat = rotation * self.instrumentation.pilot_position() + translation;
+        if (seat - at).magnitude() <= radius {
+            self.pilot_hit = true;
+        }
+        self.shove(at, radius, impulse, rotation, translation, contact_local, ctx);
+    }
+
+    /// Closest point on the jet to a blast in the jet's frame: a wing
+    /// planform or the fuselage box, whichever is nearer.
+    fn blast_contact(&self, local: Vector3<f32>) -> Vector3<f32> {
+        let mut best = self.com;
+        let mut best_distance = (local - self.com).magnitude();
+        for wing in &self.wing_manager.wings {
+            let point = wing.closest_on_planform(local);
+            let distance = (local - point).magnitude();
+            if distance < best_distance {
+                best = point;
+                best_distance = distance;
+            }
+        }
+        for collider in &self.colliders {
+            let ColliderType::Cuboid { half_extents, position } = collider else { continue };
+            let center = Vector3::new(position.0, position.1, position.2);
+            let half = Vector3::new(half_extents.0, half_extents.1, half_extents.2);
+            let point = closest_on_cuboid(local, center, half);
+            let distance = (local - point).magnitude();
+            if distance < best_distance {
+                best = point;
+                best_distance = distance;
+            }
+        }
+        best
+    }
+
+    /// Pushes the jet away from the blast, at `contact_local`. Full
+    /// `impulse` on the surface, nothing at `radius`.
+    fn shove(&self, at: Vector3<f32>, radius: f32, impulse: f32, rotation: nalgebra::UnitQuaternion<f32>, translation: Vector3<f32>, contact_local: Vector3<f32>, ctx: &mut PhysicsCtx) {
+        if impulse <= 0.0 || radius <= 0.0 {
+            return;
+        }
+        let contact = rotation * contact_local + translation;
+        let to_contact = contact - at;
+        let distance = to_contact.magnitude();
+        if distance >= radius {
+            return;
+        }
+        let mut direction = to_contact;
+        if direction.magnitude() < 1e-3 {
+            direction = rotation * self.com + translation - at;
+        }
+        let length = direction.magnitude();
+        if length < 1e-3 {
+            return;
+        }
+        let push = direction / length * impulse * (1.0 - distance / radius);
+        ctx.rigidbody_mut().apply_impulse_at_point(push, Point3::from(contact), true);
+    }
+
+    /// Thrust plus fuselage drag, applied fresh this step - forces are
     /// reset first, since rapier keeps user forces until told otherwise.
+    /// Side, belly and axial drag are the body's own share; the wings and
+    /// tails carry theirs in their airfoil tables.
     fn apply_body_forces(&mut self, ctx: &mut PhysicsCtx, controls: &PlaneControls, dt: f32, engine_alive: bool) {
         let rigidbody = ctx.rigidbody_mut();
         rigidbody.reset_forces(true);
@@ -205,12 +303,22 @@ impl AircraftPhysics {
             Vector3::zeros()
         };
 
-        let sideslip_speed = (rotation.inverse() * rigidbody.linvel()).x;
+        let local_velocity = rotation.inverse() * rigidbody.linvel();
         let air_density = 1.225f32;
         let fuselage_side_area = 20.0; // m² - approximate F-16 fuselage side profile
         let fuselage_cd = 1.2;         // bluff body drag coefficient
-        let fuselage_side_force_mag = -0.5 * air_density * sideslip_speed * sideslip_speed.abs() * fuselage_side_area * fuselage_cd;
-        let fuselage_side_force = rotation * Vector3::new(fuselage_side_force_mag, 0.0, 0.0);
+        let fuselage_side_force_mag = -0.5 * air_density * local_velocity.x * local_velocity.x.abs() * fuselage_side_area * fuselage_cd;
+        // The wing and tail tables already carry about 0.012 of drag
+        // coefficient on the 27.9 m² wing. This area brings a clean jet to
+        // about 0.02 while the wind is on the nose.
+        let fuselage_axial_area = 0.24;
+        let fuselage_axial_mag = -0.5 * air_density * local_velocity.z * local_velocity.z.abs() * fuselage_axial_area;
+        // Forebody and inlet, missing from the wing reference. With the
+        // wings and the stalled stabilators this puts the whole jet near
+        // 1.9 (on that wing area) when the belly is square to the wind.
+        let fuselage_belly_area = 4.5;
+        let fuselage_belly_mag = -0.5 * air_density * local_velocity.y * local_velocity.y.abs() * fuselage_belly_area * fuselage_cd;
+        let fuselage_force = rotation * Vector3::new(fuselage_side_force_mag, fuselage_belly_mag, fuselage_axial_mag);
 
         // Gear and the speed brake: extra flat-plate area into the wind,
         // scaled by how far each is out. The gear's struts are the smaller
@@ -221,43 +329,23 @@ impl AircraftPhysics {
         let drag = dynamic_drag(*rigidbody.linvel(), air_density, drag_area);
 
         rigidbody.add_force(thrust_force, true);
-        rigidbody.add_force(fuselage_side_force, true);
+        rigidbody.add_force(fuselage_force, true);
         rigidbody.add_force(drag, true);
     }
 
     /// Undoes the rigidbody's blanket `angular_damping` (see
-    /// `load_physics_from_definitions`) on the YAW axis only, while any wheel
-    /// is on the ground. That damping is an in-flight stability aid; on the
-    /// ground the tyres already provide real yaw damping, and on top of them
-    /// it resisted yaw ~6x harder than all the tyre grip combined - which
-    /// capped nose-wheel steering at a few deg/s. Pitch and roll keep it.
-    ///
-    /// Rapier applies damping by scaling angvel by 1 / (1 + dt * damping)
-    /// each step, so pre-scaling the yaw component by (1 + dt * damping)
-    /// cancels it.
-    fn cancel_ground_yaw_damping(&self, ctx: &mut PhysicsCtx, dt: f32) {
-        let on_ground = self.wheel_manager.renderizable_wheels.values().any(|wheel| wheel.grounded);
-        if !on_ground {
-            return;
-        }
-
+    /// `load_physics_from_definitions`) on pitch, yaw and roll. Rapier
+    /// scales angvel by 1 / (1 + dt * damping) each step, so pre-scaling
+    /// every axis by (1 + dt * damping) cancels it. Off on all three for
+    /// the tailless-jet test; pitch and yaw used to keep it.
+    fn cancel_angular_damping(&self, ctx: &mut PhysicsCtx, dt: f32) {
         let rigidbody = ctx.rigidbody_mut();
         let rotation = *rigidbody.rotation();
         let mut local_angvel = rotation.inverse() * rigidbody.angvel();
-        local_angvel.y *= 1.0 + dt * rigidbody.angular_damping();
-        rigidbody.set_angvel(rotation * local_angvel, true);
-    }
-
-    /// Undoes the rigidbody's blanket `angular_damping` on the ROLL axis,
-    /// always - same pre-scaling trick as `cancel_ground_yaw_damping`. That
-    /// damping is a generic stability aid; on roll it stacked on top of the
-    /// wings' own aerodynamic roll damping and held the physics roll to a
-    /// fraction of the roll-rate curve. Pitch/yaw keep it.
-    fn cancel_roll_damping(&self, ctx: &mut PhysicsCtx, dt: f32) {
-        let rigidbody = ctx.rigidbody_mut();
-        let rotation = *rigidbody.rotation();
-        let mut local_angvel = rotation.inverse() * rigidbody.angvel();
-        local_angvel.z *= 1.0 + dt * rigidbody.angular_damping();
+        let undo = 1.0 + dt * rigidbody.angular_damping();
+        local_angvel.x *= undo;
+        local_angvel.y *= undo;
+        local_angvel.z *= undo;
         rigidbody.set_angvel(rotation * local_angvel, true);
     }
 
@@ -290,6 +378,76 @@ impl AircraftPhysics {
         let new_local_angvel = Vector3::new(local_angvel.x, local_angvel.y, commanded_rate_rad_s);
         rigidbody.set_angvel(rotation * new_local_angvel, true);
     }
+
+    /// Contacts against the ground (anything fixed) from the step that just
+    /// ran. A hard hit on the fuselage breaks the jet up. The same hit on a
+    /// wing, stabilator or fin tears that surface off and leaves the rest
+    /// flying. The impulse is what the solver applied, so a strike still
+    /// counts after it has already stopped the impact.
+    fn ground_strikes(&mut self, ctx: &PhysicsCtx) {
+        let handles: Vec<_> = ctx.rigidbody().colliders().iter().copied().collect();
+        let mut hits: Vec<(u128, f32)> = Vec::new();
+        for handle in handles {
+            let (id, enabled) = {
+                let Some(collider) = ctx.colliders.get(handle) else { continue };
+                (collider.user_data, collider.is_enabled())
+            };
+            if !enabled {
+                continue;
+            }
+            let mut impulse = 0.0;
+            for pair in ctx.narrow_phase.contact_pairs_with(handle) {
+                if !pair.has_any_active_contact {
+                    continue;
+                }
+                let other = if pair.collider1 == handle { pair.collider2 } else { pair.collider1 };
+                let Some(other_collider) = ctx.colliders.get(other) else { continue };
+                let Some(other_body) = other_collider.parent().and_then(|body| ctx.bodies.get(body)) else { continue };
+                if !other_body.is_fixed() {
+                    continue;
+                }
+                for manifold in &pair.manifolds {
+                    for point in &manifold.points {
+                        if point.dist > 0.05 {
+                            continue;
+                        }
+                        impulse += point.data.impulse.abs();
+                    }
+                }
+            }
+            if impulse > 0.0 {
+                hits.push((id, impulse));
+            }
+        }
+
+        for (id, impulse) in hits {
+            if id == 0 {
+                if impulse >= FUSELAGE_STRIKE_IMPULSE {
+                    self.fuselage_struck = true;
+                }
+            } else if impulse >= SURFACE_STRIKE_IMPULSE {
+                if let Some(wing) = self.wing_manager.wings.iter_mut().find(|wing| wing_collider_id(&wing.label) == id) {
+                    wing.hp = 0.0;
+                }
+            }
+        }
+    }
+
+    /// A surface at 0 HP no longer collides: its slab is switched off, and
+    /// the F5 overlay skips disabled colliders. Turning the profile back on
+    /// brings the slab back.
+    fn sync_surface_colliders(&self, ctx: &mut PhysicsCtx) {
+        let handles: Vec<_> = ctx.rigidbody().colliders().iter().copied().collect();
+        for handle in handles {
+            let Some(collider) = ctx.colliders.get_mut(handle) else { continue };
+            let id = collider.user_data;
+            if id == 0 {
+                continue;
+            }
+            let alive = self.wing_manager.wings.iter().any(|wing| wing.hp > 0.0 && wing_collider_id(&wing.label) == id);
+            collider.set_enabled(alive);
+        }
+    }
 }
 
 /// A shot-down jet's jammed surfaces: the stick roll they hold (either way
@@ -311,10 +469,20 @@ impl PhysicsBehavior for AircraftPhysics {
         for reload in reloads {
             self.apply_reload(reload, ctx);
         }
+        let switches: Vec<ProfileSwitch> = ctx.events::<ProfileSwitch>().cloned().collect();
+        for switch in switches {
+            self.set_profile(&switch.label, switch.on);
+        }
         if self.wrecked {
+            self.sync_surface_colliders(ctx);
             self.instrumentation.update(ctx.rigidbody(), dt);
             return;
         }
+        // Before the wings push: a surface torn off on this hit must not
+        // still be lifting, and its collider has to be gone before the
+        // world steps again.
+        self.ground_strikes(ctx);
+        self.sync_surface_colliders(ctx);
         // Shot down: whatever the pilot does, nothing answers - engine off,
         // no fly-by-wire, the surfaces jammed.
         let controls = match self.shot_down {
@@ -340,15 +508,14 @@ impl PhysicsBehavior for AircraftPhysics {
         };
         self.wheel_manager.update(self.airframe.landing_gear.deploy, &wheel_inputs, ctx.body, ctx.colliders, ctx.bodies, ctx.query);
         self.airframe.landing_gear.any_grounded = self.wheel_manager.renderizable_wheels.values().any(|wheel| wheel.grounded);
-        self.cancel_ground_yaw_damping(ctx, dt);
 
         self.wing_manager.update(&controls, ctx.rigidbody_mut(), dt);
         self.apply_kinematic_roll(ctx, &controls);
 
         self.instrumentation.update(ctx.rigidbody(), dt);
-        // After instrumentation, so it reads the real roll rate, not the
-        // pre-scaled one Rapier's damping will bring back down this step.
-        self.cancel_roll_damping(ctx, dt);
+        // After instrumentation, so it reads the real rates, not the
+        // pre-scaled ones Rapier's damping will bring back down this step.
+        self.cancel_angular_damping(ctx, dt);
     }
 
     fn publish(&self) -> Option<PhysicsPayload> {
@@ -367,6 +534,10 @@ impl PhysicsBehavior for AircraftPhysics {
             afterburner: self.flight_system.afterburner_activation(),
             wing_lift_forces: wings.iter().map(|wing| (wing.label.clone(), wing.last_lift_force)).collect(),
             g_command: self.wing_manager.pitch_flcs.last_g_cmd,
+            profiles: wings.iter().map(|wing| (wing.label.clone(), wing.hp)).collect(),
+            pilot_hit: self.pilot_hit,
+            fuselage_struck: self.fuselage_struck,
+            blasts_handled: self.blasts_handled,
         }))
     }
 
@@ -378,6 +549,11 @@ impl PhysicsBehavior for AircraftPhysics {
         let to_world = |local: Vector3<f32>| body.rotation() * local + body.translation();
 
         for wing in &self.wing_manager.wings {
+            // Gone: no outline, no lift arrow. The collider itself is off,
+            // so the F5 collider pass doesn't draw it either.
+            if wing.hp <= 0.0 {
+                continue;
+            }
             draw.ray(to_world(wing.pressure_center), wing.last_lift_force * LIFT_DRAW_SCALE, LIFT_COLOR);
             draw.cross(to_world(wing.pressure_center), MARKER_SIZE, PRESSURE_CENTER_COLOR);
 
@@ -463,4 +639,25 @@ impl PhysicsBehavior for AircraftPhysics {
             ], SPEED_BRAKE_COLOR);
         }
     }
+}
+
+/// Closest point on a box to `point`. A point inside the box lands on the
+/// nearest face, so the shove has a direction.
+fn closest_on_cuboid(point: Vector3<f32>, center: Vector3<f32>, half: Vector3<f32>) -> Vector3<f32> {
+    let d = point - center;
+    let inside = d.x.abs() <= half.x && d.y.abs() <= half.y && d.z.abs() <= half.z;
+    if !inside {
+        return center + Vector3::new(d.x.clamp(-half.x, half.x), d.y.clamp(-half.y, half.y), d.z.clamp(-half.z, half.z));
+    }
+    let (px, py, pz) = (half.x - d.x.abs(), half.y - d.y.abs(), half.z - d.z.abs());
+    let sign = |value: f32| if value == 0.0 { 1.0 } else { value.signum() };
+    let mut out = d;
+    if px <= py && px <= pz {
+        out.x = half.x * sign(d.x);
+    } else if py <= pz {
+        out.y = half.y * sign(d.y);
+    } else {
+        out.z = half.z * sign(d.z);
+    }
+    center + out
 }

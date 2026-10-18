@@ -61,7 +61,7 @@ impl Default for Font {
 }
 
 impl Font {
-    fn attrs(&self) -> Attrs<'static> {
+    pub(crate) fn attrs(&self) -> Attrs<'static> {
         let family = match self.family {
             Some(name) => Family::Name(name),
             None => BASE_FONT,
@@ -146,6 +146,16 @@ impl Label {
         buffer.shape_until_scroll(font_system, true);
 
         Self { buffer, text: text.to_owned(), font: Font::default() }
+    }
+
+    /// The text shown.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// The typeface/weight it's shaped with.
+    pub fn font(&self) -> Font {
+        self.font
     }
 
     /// Switches the typeface/weight and re-shapes the current text with it.

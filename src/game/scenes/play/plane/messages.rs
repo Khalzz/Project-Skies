@@ -48,6 +48,18 @@ pub enum AircraftEvent {
     /// Internal fuel, kg in the tanks and the tanks' maximum. The body's
     /// mass is its full-tanks mass minus what's been burned.
     Fuel { kg: f32, capacity: f32 },
+    /// A warhead at `at` (world). `radius` is how far it reaches;
+    /// `damage` is the HP it takes off a surface it touches, and `impulse`
+    /// (N·s) is the shove at that point. Both fall to nothing at `radius`.
+    Blast { at: Vector3<f32>, radius: f32, damage: f32, impulse: f32 },
+}
+
+/// Turns one aerodynamic profile on or off. On restores its full HP; off
+/// leaves it producing nothing. From the flight editor (F10).
+#[derive(Clone)]
+pub struct ProfileSwitch {
+    pub label: String,
+    pub on: bool,
 }
 
 /// The plane's data.ron was edited while flying - new wings/surfaces/pilot
@@ -89,4 +101,15 @@ pub struct AircraftState {
     /// The G the pitch fly-by-wire is commanding right now (what the stick
     /// asks for, after its AoA limiter) - 1 with fly-by-wire off.
     pub g_command: f32,
+    /// Each profile in the order it is defined, and the HP it has left.
+    /// 0: that profile is off.
+    pub profiles: Vec<(String, f32)>,
+    /// A blast has reached the pilot's seat. Stays set.
+    pub pilot_hit: bool,
+    /// The fuselage has hit the ground hard enough to break the jet up.
+    /// Stays set. A wing strike does not set this - that surface comes off.
+    pub fuselage_struck: bool,
+    /// How many warheads this jet has taken. Advances with the HP below,
+    /// so the main thread can see which drop came from a blast.
+    pub blasts_handled: u32,
 }

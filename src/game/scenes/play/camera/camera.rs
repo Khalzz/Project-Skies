@@ -15,6 +15,10 @@ use super::head_motion::{HeadInput, HeadMotion};
 
 pub const NORMAL_CAMERA_FOV: f32 = 45.0;
 
+/// The most the pilot's head rolls either way (degrees) - the tracker's roll
+/// and the G's together.
+const MAX_HEAD_ROLL_DEG: f32 = 45.0;
+
 /// Looking behind in the cockpit: the pilot is strapped into the seat, so
 /// to see behind they twist and look over their own shoulder - the eyes
 /// move off the seat's center toward the side they're looking, up to clear
@@ -84,6 +88,17 @@ const FREE_DISTANCE: f32 = 21.5;
 /// see the wreck and the water around it, eased out to at FREE_DISTANCE_RATE.
 const WRECK_DISTANCE: f32 = 43.0;
 const FREE_DISTANCE_RATE: f32 = 2.0;
+/// Cockpit/Free zoom (see `ZoomInput`): the narrowest and widest field of
+/// view (deg), how much one wheel notch changes it, and how fast "zoom_in"/
+/// "zoom_out" change it while held (deg/s). A zoom lever ("zoom_axis") end
+/// to end is ZOOM_MAX_FOV..ZOOM_MIN_FOV.
+const ZOOM_MIN_FOV: f32 = 20.0;
+const ZOOM_MAX_FOV: f32 = 120.0;
+const ZOOM_PER_NOTCH: f32 = 5.0;
+const ZOOM_RATE_DEG_S: f32 = 60.0;
+/// How far the zoom lever has to move (0..1) to count as moved - it only
+/// sets the zoom when it moves, so the wheel and keys still work meanwhile.
+const ZOOM_LEVER_MOVED: f32 = 0.002;
 /// After a crash: the camera stays at least this high above the water, and
 /// looks at the wreck no lower than the surface - so once it sinks the view
 /// holds on the spot where it went down instead of following it under.
@@ -197,6 +212,41 @@ impl MouseLook {
     }
 }
 
+/// This frame's zoom from the bindings: "zoom_out" minus "zoom_in" held, and
+/// where the zoom lever ("zoom_axis") set the field of view, if it moved.
+struct ZoomInput {
+    held: f32,
+    lever_fov: Option<f32>,
+}
+
+impl ZoomInput {
+    fn none() -> Self {
+        Self { held: 0.0, lever_fov: None }
+    }
+
+    /// `last_lever` is where the lever was the last time it set the zoom.
+    fn read(last_lever: &mut Option<f32>) -> Self {
+        let held = input::get_axis("zoom_in", "zoom_out");
+        let mut lever_fov = None;
+        if let Some(lever) = input::absolute_value("zoom_axis") {
+            if last_lever.is_none_or(|last| (last - lever).abs() > ZOOM_LEVER_MOVED) {
+                lever_fov = Some(lerp(ZOOM_MAX_FOV, ZOOM_MIN_FOV, lever));
+                *last_lever = Some(lever);
+            }
+        } else {
+            *last_lever = None;
+        }
+        Self { held, lever_fov }
+    }
+
+    /// `fov` (a view's target field of view) zoomed by this, and `scroll`
+    /// wheel notches.
+    fn apply(&self, fov: f32, scroll: f32, delta_time: f32) -> f32 {
+        let fov = self.lever_fov.unwrap_or(fov) - scroll * ZOOM_PER_NOTCH + self.held * ZOOM_RATE_DEG_S * delta_time;
+        fov.clamp(ZOOM_MIN_FOV, ZOOM_MAX_FOV)
+    }
+}
+
 /// The views of an aircraft, in the order the camera key steps through
 /// them - the cockpit first.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -272,6 +322,8 @@ pub struct Camera {
     /// looking around or switching views meanwhile: the view eases back to
     /// its center.
     pub look_locked: bool,
+    // Where the zoom lever was the last time it set the zoom - see `ZoomInput`.
+    zoom_lever: Option<f32>,
 }
 
 impl Camera {
@@ -309,6 +361,7 @@ impl Camera {
             tactical: None,
             editor: None,
             look_locked: false,
+            zoom_lever: None,
         }
     }
 
@@ -680,6 +733,7 @@ impl Camera {
 
 impl Behavior for Camera {
     fn update(&mut self, node: &mut Node, _cameras: &mut SceneCameras, app: &mut App, delta_time: f32) {
+        crate::game::head_tracking::poll(app);
         // F10 - the editor camera takes over while it's up.
         if self.editor.is_some() {
             self.update_editor(node, _cameras, app, delta_time);
@@ -709,6 +763,7 @@ impl Behavior for Camera {
         // looking around (see App::mouse_free). The animation camera owns the
         // view meanwhile, so the player's own look stays put.
         let mouse = MouseLook::read(app.mouse_free() || locked || cinematic);
+        let zoom = if locked || cinematic { ZoomInput::none() } else { ZoomInput::read(&mut self.zoom_lever) };
         if locked {
             let ease = (delta_time * LOOK_CENTER_RATE).clamp(0.0, 1.0);
             self.cockpit_yaw += (0.0 - self.cockpit_yaw) * ease;
@@ -732,24 +787,52 @@ impl Behavior for Camera {
                 CameraState::Cockpit => {
                     let base_pos = target.rotation * Self::named(&target, COCKPIT_CAMERA, (Vector3::new(0.0, 0.2, 1.3), 70.0)).0;
                     lens.znear = 0.01;
+                    let trackir_look = crate::game::head_tracking::trackir_receiving();
 
-                    // Mouse wheel adjusts target FOV
-                    let scroll = mouse.scroll;
-                    if scroll != 0.0 {
-                        self.cockpit_target_fov = (self.cockpit_target_fov - scroll * 5.0).clamp(20.0, 120.0);
-                    }
+                    // Mouse wheel and the zoom bindings adjust target FOV. While
+                    // TrackIR is delivering frames, the mouse is not a cockpit
+                    // camera input.
+                    let scroll = if trackir_look { 0.0 } else { mouse.scroll };
+                    self.cockpit_target_fov = zoom.apply(self.cockpit_target_fov, scroll, delta_time);
                     // Lerp current FOV toward target
                     self.cockpit_current_fov = lerp(self.cockpit_current_fov, self.cockpit_target_fov, delta_time * 8.0);
                     let head = self.head_motion.pose(GAME_SETTINGS.lock().unwrap().head_g_reaction);
+                    let tracked = crate::game::head_tracking::tracked_pose();
+                    // The tracker's axes are the pilot's: right, up, toward
+                    // the screen. The plane's +X is the left wing, +Y is up,
+                    // +Z is forward, and a positive pitch looks down.
+                    // Never behind the seat's resting eye (z below 0): the
+                    // pilot's back is against the seat - only the G
+                    // (`head.offset`) can press the head back from there.
+                    let track_offset = Vector3::new(-tracked.x, tracked.y, tracked.z.max(0.0)) * 0.01;
+                    // The head rolls MAX_HEAD_ROLL_DEG at most either way:
+                    // the tracker gets what the G's own roll leaves.
+                    let track_roll = tracked.roll
+                        .max(-MAX_HEAD_ROLL_DEG - head.roll_deg)
+                        .min(MAX_HEAD_ROLL_DEG - head.roll_deg);
+                    // Turn, then tilt, then nod - the nod about the tilted
+                    // head's own sideways axis, so pitching with the head
+                    // rolled 45° looks up along the rolled head (diagonally
+                    // across the cockpit), not straight up as if level.
+                    let track_rotation = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), (-tracked.yaw).to_radians())
+                        * UnitQuaternion::from_axis_angle(&Vector3::z_axis(), track_roll.to_radians())
+                        * UnitQuaternion::from_axis_angle(&Vector3::x_axis(), (-tracked.pitch).to_radians());
                     lens.fovy = self.cockpit_current_fov;
 
                     let max_yaw: f32 = 170.0;
                     let max_pitch: f32 = 70.0;
                     let sens = input::mouse_sensitivity();
 
-                    // Update yaw/pitch from relative mouse, clamp immediately so no over-accumulation
-                    self.cockpit_yaw = (self.cockpit_yaw - mouse.rel_x * sens.0).clamp(-max_yaw, max_yaw);
-                    self.cockpit_pitch = (self.cockpit_pitch + mouse.rel_y * sens.1).clamp(-max_pitch, max_pitch);
+                    // While TrackIR is delivering frames, it owns the cockpit look.
+                    // A leftover mouse offset eases back to center.
+                    if trackir_look {
+                        let ease = (delta_time * LOOK_CENTER_RATE).clamp(0.0, 1.0);
+                        self.cockpit_yaw += (0.0 - self.cockpit_yaw) * ease;
+                        self.cockpit_pitch += (0.0 - self.cockpit_pitch) * ease;
+                    } else {
+                        self.cockpit_yaw = (self.cockpit_yaw - mouse.rel_x * sens.0).clamp(-max_yaw, max_yaw);
+                        self.cockpit_pitch = (self.cockpit_pitch + mouse.rel_y * sens.1).clamp(-max_pitch, max_pitch);
+                    }
 
                     // Right stick: same absolute mapping as the fixed
                     // modes' orbit, added on top of the mouse look and kept
@@ -787,13 +870,21 @@ impl Behavior for Camera {
                         COCKPIT_LOOK_BEHIND.up,
                         COCKPIT_LOOK_BEHIND.forward,
                     ) * behind;
-                    let head_offset = target.rotation * (shoulder_offset + head.offset);
+                    // Everything moving the head together, kept inside the
+                    // cockpit's head box (its data.ron `head_limits`) so the
+                    // eye can't go through the canopy, the seat or the HUD.
+                    let local_offset = shoulder_offset + head.offset + track_offset;
+                    let local_offset = target.cameras.as_ref()
+                        .and_then(|cameras| cameras.get(COCKPIT_CAMERA))
+                        .and_then(|camera| camera.head_limits)
+                        .map_or(local_offset, |limits| limits.clamp(local_offset));
+                    let head_offset = target.rotation * local_offset;
 
                     let target_pos = target.position + base_pos + head_offset;
 
-                    // The G tilt sits under the pilot's own look - the neck
-                    // leans, and the head turns on top of that.
-                    let head_rotation = target.rotation * head.tilt;
+                    // The G tilt sits under the tracked head, and the pilot's
+                    // own look turns on top of both.
+                    let head_rotation = target.rotation * head.tilt * track_rotation;
                     let look_dir = head_rotation * self.cockpit_current_rotation * Vector3::new(0.0, 0.0, 100.0);
                     let look_at = target_pos + look_dir;
                     (target_pos, look_at, head_rotation * *Vector3::y_axis())
@@ -809,11 +900,8 @@ impl Behavior for Camera {
                 CameraState::Free => {
                     lens.znear = 0.1;
 
-                    // Mouse wheel adjusts target FOV
-                    let scroll = mouse.scroll;
-                    if scroll != 0.0 {
-                        self.free_target_fov = (self.free_target_fov - scroll * 5.0).clamp(20.0, 120.0);
-                    }
+                    // Mouse wheel and the zoom bindings adjust target FOV
+                    self.free_target_fov = zoom.apply(self.free_target_fov, mouse.scroll, delta_time);
                     self.free_current_fov = lerp(self.free_current_fov, self.free_target_fov, delta_time * 8.0);
                     lens.fovy = self.free_current_fov;
 

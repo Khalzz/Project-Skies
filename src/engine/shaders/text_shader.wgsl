@@ -121,10 +121,29 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let half_size = vec2<f32>((right - left) * 0.5, (bottom - top) * 0.5);
     let center = vec2<f32>(left + half_size.x, top + half_size.y);
-    // Radius can't exceed half the box's shorter side - past that a rounded
-    // rect is just a stadium/circle, and the SDF above stops making sense.
-    let radius = min(in.corner_radius, min(half_size.x, half_size.y));
-    let dist = sd_rounded_box(in.clip_position.xy - center, half_size, radius);
+    // A negative corner radius is not a rounded box. It fills this quad with a
+    // plain triangle: a small negative value points right, and anything past
+    // -40 (after DPI scaling) points left. The head-tracking stepper uses this
+    // so the marks stay geometric.
+    var dist: f32;
+    if (in.corner_radius < 0.0) {
+        var px = in.clip_position.x - center.x;
+        let py = in.clip_position.y - center.y;
+        if (in.corner_radius < -40.0) {
+            px = -px;
+        }
+        let along = (half_size.x - px) / max(half_size.x * 2.0, 0.0001);
+        let d_slant = abs(py) - half_size.y * along;
+        let d_base = -half_size.x - px;
+        let d_apex = px - half_size.x;
+        dist = max(d_slant, max(d_base, d_apex));
+        border_width = 0.0;
+    } else {
+        // Radius can't exceed half the box's shorter side - past that a rounded
+        // rect is just a stadium/circle, and the SDF above stops making sense.
+        let radius = min(in.corner_radius, min(half_size.x, half_size.y));
+        dist = sd_rounded_box(in.clip_position.xy - center, half_size, radius);
+    }
 
     // fwidth(dist) is roughly how much `dist` changes between this fragment and
     // its neighbors - halving it as the smoothstep *half*-width keeps the

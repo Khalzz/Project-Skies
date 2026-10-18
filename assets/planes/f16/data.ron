@@ -9,7 +9,9 @@
     rigidbody: (
       is_static: false,
       mass: 11900.0, // With the internal tanks full. Empty is this minus fuel.capacity_kg.
-      center_of_mass: (0.0, 0.029, 1.459),
+      // 8% of the wing's mean chord (3.36 m) behind its aerodynamic center
+      // (z 2.51). Slightly unstable, like the real jet: the tail holds it.
+      center_of_mass: (0.0, 0.029, 2.244),
       initial_velocity: (0.0, 0.0, 0.0),
     ),
     colliders: [
@@ -31,6 +33,7 @@
       // Main wings - fixed, rolled by their flaperons (+ = trailing edge up).
       (
         label: "Left wing",
+        hp: 100.0,
         // The real wing, measured off the model: leading edge swept 38.3 deg
         // from the centerline (the reference trapezoid, carried in through
         // the fuselage) out to the tip. Works out to 13.75 m2 (published:
@@ -42,12 +45,8 @@
           tip_chord: 1.18,
           sweep_deg: 38.3,
         ),
-        // The computed lift point would be (span 40%, chord 25%) - z 2.50,
-        // the real aerodynamic center. Held at today's tuned point (z 0.79)
-        // until the center of mass is moved forward to match - lift that
-        // far ahead of the current center of mass would pitch the jet up
-        // harder than the tail can hold. Remove this line once it is.
-        aerodynamic_center: (0.5944, 0.6918),
+        // Lift at a quarter of the mean chord (z 2.51), ahead of the
+        // center of mass, so the wing pitches the nose up on its own.
         airfoil_path: "aero/f16-wing-body.ron",
         normal: (1.0, 0.0, 0.0),
         is_roll_axis: true,
@@ -61,6 +60,7 @@
       ),
       (
         label: "Right wing",
+        hp: 100.0,
         // The real wing, measured off the model: leading edge swept 38.3 deg
         // from the centerline (the reference trapezoid, carried in through
         // the fuselage) out to the tip. Works out to 13.75 m2 (published:
@@ -72,12 +72,8 @@
           tip_chord: 1.18,
           sweep_deg: 38.3,
         ),
-        // The computed lift point would be (span 40%, chord 25%) - z 2.50,
-        // the real aerodynamic center. Held at today's tuned point (z 0.79)
-        // until the center of mass is moved forward to match - lift that
-        // far ahead of the current center of mass would pitch the jet up
-        // harder than the tail can hold. Remove this line once it is.
-        aerodynamic_center: (0.5944, 0.6918),
+        // Lift at a quarter of the mean chord (z 2.51), ahead of the
+        // center of mass, so the wing pitches the nose up on its own.
         airfoil_path: "aero/f16-wing-body.ron",
         normal: (1.0, 0.0, 0.0),
         is_roll_axis: true,
@@ -93,6 +89,7 @@
       // All-moving stabilators (their labels are mirrored: "Right" sits at +X).
       (
         label: "Right elevator wing",
+        hp: 40.0,
         // Your stabilator shape, carried in to the centerline like the main
         // wings (the reference trapezoid): 5.57 m2 per side.
         shape: Trapezoid(
@@ -102,9 +99,7 @@
           tip_chord: 0.9,
           sweep_deg: 40.0,
         ),
-        // Holds today's tuned tail lift point (z -3.22) - same reason as the
-        // main wings: remove once the center of mass moves forward.
-        aerodynamic_center: (0.7164, 0.8434),
+        // Lift at a quarter of the mean chord (z -1.77).
         airfoil_path: "aero/f16-elevators.ron",
         normal: (1.0, 0.0, 0.0),
         is_roll_axis: false,
@@ -116,6 +111,7 @@
       ),
       (
         label: "Left elevator wing",
+        hp: 40.0,
         // Your stabilator shape, carried in to the centerline like the main
         // wings (the reference trapezoid): 5.57 m2 per side.
         shape: Trapezoid(
@@ -125,9 +121,7 @@
           tip_chord: 0.9,
           sweep_deg: 40.0,
         ),
-        // Holds today's tuned tail lift point (z -3.22) - same reason as the
-        // main wings: remove once the center of mass moves forward.
-        aerodynamic_center: (0.7164, 0.8434),
+        // Lift at a quarter of the mean chord (z -1.77).
         airfoil_path: "aero/f16-elevators.ron",
         normal: (1.0, 0.0, 0.0),
         is_roll_axis: false,
@@ -143,6 +137,7 @@
       // edge, following the pedals.
       (
         label: "Rudder wing",
+        hp: 40.0,
         shape: Trapezoid(
           root_leading_edge: (0.0, 1.0, -0.25),
           span: 2.2,
@@ -191,24 +186,36 @@
   // The landing gear: each wheel is a suspension strut casting straight
   // down from `position` (meters in the jet's frame: +X left, +Y up, +Z
   // nose) up to `suspension_length`; `mesh` is the model's wheel it moves.
-  // `stiffness` is the spring force at full compression (N), `damping`
-  // resists how fast the strut is closing (N per m/s). `steerable` wheels
-  // turn with the pedals, `braked` ones brake. The rear wheels must sit
-  // behind the center of mass and the front one well ahead of it, or the
-  // jet tips onto its tail on the ground. Saved mid-flight, it applies right
-  // away.
+  // `steerable` wheels turn with the pedals, `braked` ones brake. The rear
+  // wheels must sit behind the center of mass and the front one well ahead
+  // of it, or the jet tips onto its tail on the ground. Saved mid-flight,
+  // it applies right away.
   //
-  // Tuning: a strut's spring rate is stiffness / suspension_length (N/m),
-  // the weight it carries sets how far it sinks, and damping about 0.7 of
-  // "critical" - 2 * sqrt(rate * load / 9.81) - stops it bouncing without
-  // making it rock hard (lower bounces, higher jars). With the center of
-  // mass at z 1.459 the nose carries ~7,600 N (critical ~11,900) and each
-  // main ~54,600 N (critical ~100,600).
+  // The springs and dampers come from the jet's weight (mass and
+  // center_of_mass above, tanks full): each wheel carries the share of the
+  // weight its place gives it - here the nose ~30,500 N, each main
+  // ~43,100 N - and gets the spring that sinks it `static_compression`
+  // under that, and `damping_ratio` of the damping that just stops it
+  // bouncing. The same sink on every strut keeps the jet sitting the way
+  // its wheel positions put it; less sink is a harder, quicker ride
+  // (0.15 m bounces ~1.3 Hz), and a damping_ratio under ~0.5 bobs, over 1
+  // jars. Change the mass or center of mass and they follow. A wheel can
+  // still give its own `static_compression`/`damping_ratio`, or its own
+  // `stiffness` (spring force at full compression, N) and `damping` (N per
+  // m/s) outright.
+  //
+  // With the gear up a wheel tucks straight up to its `position`, unless it
+  // gives `retracted_position: (x, y, z)` - where its middle sits in its bay
+  // (meters, same frame) - and/or `retracted_rotation: (x, y, z)` - degrees
+  // it's turned about the jet's X, Y and Z axes, in that order, about its
+  // own middle. Only the look: the strut stays at `position`.
   gear: (
+    static_compression: 0.15,
+    damping_ratio: 0.7,
     wheels: [
-      (mesh: "wheel-f", position: (0.0, 0.0, 5.2), suspension_length: 2.2, stiffness: 100000.0, damping: 8500.0, steerable: true),
-      (mesh: "wheel-lb", position: (-1.4, 0.0, 1.2), suspension_length: 2.2, stiffness: 1000000.0, damping: 70000.0, braked: true),
-      (mesh: "wheel-rb", position: (1.4, 0.0, 1.2), suspension_length: 2.2, stiffness: 1000000.0, damping: 70000.0, braked: true),
+      (mesh: "wheel-f", position: (0.0, 0.0, 5.2), suspension_length: 2.2, steerable: true),
+      (mesh: "wheel-lb", position: (-1.4, 0.0, 1.2), suspension_length: 2.2, braked: true, retracted_position: (0.0, 0.0, 1.2), retracted_rotation: (0.0, 0.0, 90.0)),
+      (mesh: "wheel-rb", position: (1.4, 0.0, 1.2), suspension_length: 2.2, braked: true, retracted_position: (0.0, 0.0, 1.2), retracted_rotation: (0.0, 0.0, -90.0)),
     ],
     // Nose-wheel steering: full lock at taxi speed, tapering to a few
     // degrees by takeoff speed (ground speeds in m/s). Optional.
@@ -262,6 +269,31 @@
     "free": (position: (0.0, 0.0, 0.0), fov: 80.0),
     "front": (position: (0.0, 2.895, 16.84), fov: 40.0),
   },
+  // How far the pilot's head can move from the cockpit camera (meters, the
+  // jet's frame: +X left, +Y up, +Z nose): head tracking, the G pushing it
+  // and looking over the shoulder all stop at this box, so the eye can't go
+  // through the canopy, the seat behind or the HUD ahead. Optional - left
+  // out, the head goes anywhere. Saved mid-flight, it applies right away.
+  head_limits: (
+    min: (-0.25, -0.15, -0.15),
+    max: (0.25, 0.12, 0.25),
+  ),
+  // The cockpit's sill: how far down (degrees below the jet's level) the
+  // pilot sees outside before the jet itself is in the way, looking that
+  // many degrees round from the nose (either side) - straight lines between
+  // the points. Below it is the panel, the floor, the wings and belly, the
+  // spine behind the seat - the helmet display blanks there (as it does on
+  // the HUD's glass) and shows everywhere else. Optional - left out, it
+  // only blanks on the glass. Saved mid-flight, it applies right away.
+  cockpit_sill: [
+    (0.0, -14.0),    // over the nose: the instrument panel below the HUD
+    (30.0, -20.0),
+    (60.0, -35.0),
+    (90.0, -42.0),   // straight out to the side, over the canopy rail
+    (120.0, -35.0),
+    (150.0, -20.0),
+    (180.0, -10.0),  // behind: the seat and the spine
+  ],
   // Flares and chaff: how many it carries, and the dispensers they come out
   // of - each `position` (meters in the jet's frame: +X left, +Y up, +Z
   // nose), the `direction` it throws them (any length), how fast (m/s on top

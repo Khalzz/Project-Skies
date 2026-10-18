@@ -120,14 +120,14 @@ async fn main() -> Result<(), String> {
             app.scene_manager.create_loaded_scene(
                 "playing",
                 // Play uses the procedural clear-day sea sky (see sky.wgsl)
-                // instead of the cubemap - default_skybox() is still used by
-                // main_menu / sandbox below.
+                // instead of the cubemap - the title does too. default_skybox()
+                // is still used by sandbox below.
                 |device, queue, layout, config, reporter| play::scene::GameLogic::prepare(device, queue, layout, config, reporter, Environment::ProceduralSky),
                 play::scene::GameLogic::finish,
             );
             // Its models load under its loading screen, not as it spawns them.
             app.scene_manager.preload_models("playing", play::scene::GameLogic::models);
-            app.scene_manager.create_scene("main_menu", |scene, app| main_menu::scene::GameLogic::new(scene, app, default_skybox()));
+            app.scene_manager.create_scene("main_menu", |scene, app| main_menu::scene::GameLogic::new(scene, app, Environment::ProceduralSky));
             app.scene_manager.create_scene("sandbox", |scene, app| sandbox::scene::GameLogic::new(scene, app, default_skybox()));
             // Follow-point camera testbed - island/water/sky + a static MQ-9
             // and the free-fly camera. Uses the procedural sea sky like play.

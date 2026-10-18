@@ -32,8 +32,10 @@ use super::effect::{Blend, EmissionShape, Facing, ParticleEffect, ParticleShape,
 use super::emitter::{Emitter, EmitterKind};
 use crate::engine::rendering::models::textures::Texture;
 
-/// Particle slots across every emitter (64 bytes each - 4 MB).
-const PARTICLE_CAPACITY: u32 = 1 << 16;
+/// Particle slots across every emitter (64 bytes each - 16 MB). Room for
+/// dozens of missiles' smoke trails at once (4096 puffs each, kept while they
+/// fade - see play::weapon::missiles) on top of every jet's own effects.
+const PARTICLE_CAPACITY: u32 = 1 << 18;
 /// The most one particle emitter can hold.
 const MAX_PARTICLES_PER_EMITTER: u32 = 16384;
 /// Particle emitters alive at once (their settings live in a GPU table).

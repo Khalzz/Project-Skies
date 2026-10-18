@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::engine::game_nodes::game_object::{Cameras, ColliderType, Physics};
+use crate::engine::game_nodes::game_object::{Cameras, ColliderType, HeadLimits, Physics};
 
 use super::aero_spec::AeroSpec;
 use super::engine::EngineSpec;
@@ -63,6 +63,14 @@ pub struct AircraftSpec {
     /// `position` (m, the plane's frame) and a `fov` - see
     /// play::camera::camera's defaults for the ones left out.
     pub cameras: Cameras,
+    /// How far the pilot's head can move from the cockpit camera -
+    /// `data.ron`'s `head_limits: (min: (..), max: (..))` (optional: no
+    /// limit). See `HeadLimits`.
+    pub head_limits: Option<HeadLimits>,
+    /// Where the jet itself blocks the view from the cockpit - `data.ron`'s
+    /// `cockpit_sill: [(azimuth, elevation), ...]` (optional: nowhere). See
+    /// `sill_elevation`.
+    pub cockpit_sill: Vec<(f32, f32)>,
     /// Its flares and chaff, and the dispensers they come out of -
     /// `data.ron`'s `countermeasures: ( ... )` (optional: none).
     pub countermeasures: Option<CountermeasureSpec>,
@@ -85,6 +93,10 @@ struct PlaneData {
     pylons: Vec<PylonSpec>,
     #[serde(default)]
     cameras: Cameras,
+    #[serde(default)]
+    head_limits: Option<HeadLimits>,
+    #[serde(default)]
+    cockpit_sill: Vec<(f32, f32)>,
     #[serde(default)]
     countermeasures: Option<CountermeasureSpec>,
 }
@@ -172,19 +184,25 @@ impl AircraftSpec {
         let mut physics = data.physics;
         for collider in &mut physics.colliders {
             let ColliderType::Wing { label, thickness } = collider else { continue };
-            let wing = aero.wings.iter().find(|wing| wing.label == *label)
+            let label = label.clone();
+            let thickness = *thickness;
+            let wing = aero.wings.iter().find(|wing| wing.label == label)
                 .ok_or_else(|| format!("plane '{name}': collider Wing(label: \"{label}\") - no wing has that label"))?;
             let shape = wing.shape.as_ref()
                 .ok_or_else(|| format!("plane '{name}': collider Wing(label: \"{label}\") - that wing has no `shape` to follow"))?;
             // The planform's corners, pushed half the thickness either way
             // across the wing (perpendicular to its span and to the chord).
             let across = shape.span_axis(&wing.normal).cross(&nalgebra::Vector3::z()).try_normalize(1e-6).unwrap_or_else(nalgebra::Vector3::y);
-            let half = across * (*thickness * 0.5);
+            let half = across * (thickness * 0.5);
             let points = shape.corners(&wing.normal).iter().flat_map(|corner| [corner + half, corner - half]).collect();
-            *collider = ColliderType::ConvexHull { points };
+            *collider = ColliderType::ConvexHull { points, wing: Some(label) };
         }
 
         pylon_spec::check(&data.pylons).map_err(|error| format!("plane '{name}': {error}"))?;
+
+        // Struts not given a spring or damper get them from the jet's weight.
+        let mut gear = data.gear;
+        gear.resolve(physics.rigidbody.mass, physics.rigidbody.center_of_mass).map_err(|error| format!("plane '{name}': {error}"))?;
 
         Ok(AircraftSpec {
             name: name.to_owned(),
@@ -198,17 +216,51 @@ impl AircraftSpec {
             aero,
             engine: data.engine,
             fuel: data.fuel,
-            gear: data.gear,
+            gear,
             effects: data.effects,
             pylons: data.pylons,
             cameras: data.cameras,
+            head_limits: data.head_limits,
+            cockpit_sill: data.cockpit_sill,
             countermeasures: data.countermeasures,
         })
     }
 }
 
+/// How far down (degrees, negative below the jet's horizontal) the pilot
+/// sees outside before the jet itself is in the way, looking `azimuth`
+/// degrees round from the nose (either side, 0..180) - along the cockpit's
+/// sill (`sill`: (azimuth, elevation) points, from the nose round to the
+/// tail, straight lines between them; past either end, the end's). None
+/// without a sill - nothing of the jet blocks the view.
+pub fn sill_elevation(sill: &[(f32, f32)], azimuth: f32) -> Option<f32> {
+    let azimuth = azimuth.abs().min(180.0);
+    let first = sill.first()?;
+    if azimuth <= first.0 {
+        return Some(first.1);
+    }
+    for pair in sill.windows(2) {
+        let ((a0, e0), (a1, e1)) = (pair[0], pair[1]);
+        if azimuth <= a1 {
+            let t = if a1 > a0 { (azimuth - a0) / (a1 - a0) } else { 1.0 };
+            return Some(e0 + (e1 - e0) * t);
+        }
+    }
+    sill.last().map(|last| last.1)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_sill_runs_straight_between_its_points() {
+        let sill = [(0.0, -10.0), (90.0, -40.0), (180.0, -10.0)];
+        assert_eq!(super::sill_elevation(&sill, 0.0), Some(-10.0));
+        assert_eq!(super::sill_elevation(&sill, 45.0), Some(-25.0));
+        assert_eq!(super::sill_elevation(&sill, -90.0), Some(-40.0), "either side");
+        assert_eq!(super::sill_elevation(&sill, 180.0), Some(-10.0));
+        assert_eq!(super::sill_elevation(&[], 45.0), None);
+    }
+
     use super::*;
 
     #[test]

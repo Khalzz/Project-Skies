@@ -92,6 +92,10 @@ pub trait SceneBehaviour {
     /// hierarchy is resolved and the cameras placed - where an animation
     /// goes, so it has the last word on what it moves.
     fn late_update(&mut self, scene: &mut Scene, app: &mut App, ctx: &mut FrameContext) { let _ = (scene, app, ctx); }
+    /// After this frame's cameras and renderable transforms are the ones
+    /// that will be drawn. The collimated HUD is placed here so it shares
+    /// that pose with the combiner glass.
+    fn after_cameras(&mut self, scene: &mut Scene, app: &mut App) { let _ = (scene, app); }
 }
 
 /// A "screen" the game can be in (main menu, plane selection, playing, ...) -
@@ -372,6 +376,13 @@ impl Scene {
     pub(crate) fn run_late_update(&mut self, app: &mut App, ctx: &mut FrameContext) {
         if let Some(mut behaviour) = self.behaviour.take() {
             behaviour.late_update(self, app, ctx);
+            self.behaviour = Some(behaviour);
+        }
+    }
+
+    pub(crate) fn run_after_cameras(&mut self, app: &mut App) {
+        if let Some(mut behaviour) = self.behaviour.take() {
+            behaviour.after_cameras(self, app);
             self.behaviour = Some(behaviour);
         }
     }

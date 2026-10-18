@@ -28,8 +28,17 @@ use super::weapon_spec::{Seeker, WeaponSpec};
 pub const FLYING_VARIANT: &str = "flying";
 /// The plume's mesh in a missile's model.
 const PLUME_MESH: &str = "fire";
-/// How long (s) a puff of smoke hangs in the air, at most.
-const SMOKE_SECONDS: f32 = 6.0;
+/// How long (s) a puff of smoke hangs in the air, at most - long enough that
+/// the trail from the launch is still there when the motor burns out.
+const SMOKE_SECONDS: f32 = 18.0;
+/// The smoke trail: a puff every 1/this meters, and how many one missile's
+/// trail can hold. Its emitter is a ring - once full, each new puff replaces
+/// the oldest - so this many puffs is how long the trail can be: 4096 at
+/// 0.6 a meter is ~6.8 km, a whole burn at Mach 3 (an AIM-9X burns 5.2 s and
+/// covers ~3-4 km). Too few and the trail is wiped from behind as fast as
+/// it's laid (600 at 2.5 a meter used to keep only the last ~240 m).
+const SMOKE_PUFFS_PER_METER: f32 = 0.6;
+const SMOKE_MAX_PUFFS: u32 = 4096;
 /// How long (s) an explosion's node is kept - its longest particle.
 const EXPLOSION_SECONDS: f32 = 6.0;
 
@@ -68,11 +77,15 @@ pub struct MissileTelemetry {
     pub trail: Vec<Vector3<f32>>,
 }
 
-/// An aircraft a missile's warhead got - who it was, who fired it, with
-/// what (the weapon's id).
+/// A warhead going off - where, how far it reaches, how much HP it takes
+/// off a surface it touches, and who fired it.
 #[derive(Clone, Debug)]
-pub struct Kill {
-    pub victim: String,
+pub struct BlastEvent {
+    pub at: Vector3<f32>,
+    pub radius: f32,
+    pub damage: f32,
+    /// Newton-seconds of shove where the blast touches a jet.
+    pub impulse: f32,
     pub shooter: String,
     pub weapon: String,
 }
@@ -95,9 +108,8 @@ struct Leftover {
 /// What happened to the missiles this frame.
 #[derive(Default)]
 pub struct MissileEvents {
-    /// What was inside a warhead's lethal radius when it went off - by
-    /// name: aircraft, and flares (which the scene leaves be).
-    pub destroyed: Vec<Kill>,
+    /// Each warhead that went off.
+    pub blasts: Vec<BlastEvent>,
 }
 
 #[derive(Default)]
@@ -193,10 +205,12 @@ impl Missiles {
     /// Call once a frame while the game runs; `update_plumes` every frame.
     pub fn update(&mut self, scene: &mut Scene, app: &mut App, aircraft: &[TargetTrack], ground: &WorldCollision, sun: Option<Vector3<f32>>, delta_time: f32) -> MissileEvents {
         let mut events = MissileEvents::default();
-        let surroundings = Surroundings { aircraft, ground: Some(ground), sea_level: app.water.ocean.sea_level(), sun };
+        let sea_level = app.water.ocean.sea_level();
 
         let mut ended = Vec::new();
         for (index, missile) in self.flying.iter_mut().enumerate() {
+            let shooter = missile.shooter.clone();
+            let surroundings = Surroundings { aircraft, ground: Some(ground), sea_level, sun, shooter: &shooter };
             let outcome = missile.flight.step(&missile.spec, delta_time, &surroundings);
 
             // Burnt out: over to the plain copy, plume gone.
@@ -233,31 +247,35 @@ impl Missiles {
                 }
             }
 
-            let (at, fuzed_by) = match outcome {
+            let at = match outcome {
                 Outcome::Flying => continue,
                 Outcome::Detonated { at, target } => {
                     println!("{} detonated by {target}", missile.spec.id);
-                    (at, Some(target))
+                    at
                 }
                 Outcome::HitGround { at } => {
                     println!("{} hit the ground", missile.spec.id);
-                    (at, None)
+                    at
                 }
                 Outcome::HitWater { at } => {
                     println!("{} went into the sea", missile.spec.id);
-                    (at, None)
+                    at
                 }
                 Outcome::SelfDestructed { at } => {
                     println!("{} self-destructed", missile.spec.id);
-                    (at, None)
+                    at
                 }
             };
-            // What set the fuze off, and anything else inside the blast.
-            let kill = |victim: String| Kill { victim, shooter: missile.shooter.clone(), weapon: missile.spec.id.clone() };
-            events.destroyed.extend(fuzed_by.clone().map(kill));
-            events.destroyed.extend(aircraft.iter()
-                .filter(|track| Some(&track.name) != fuzed_by.as_ref() && (track.position - at).magnitude() <= missile.spec.warhead.lethal_radius)
-                .map(|track| kill(track.name.clone())));
+            // The blast is the warhead, wherever it went off. What it breaks
+            // is decided from here, against each aircraft's own surfaces.
+            events.blasts.push(BlastEvent {
+                at,
+                radius: missile.spec.warhead.lethal_radius,
+                damage: missile.spec.warhead.damage,
+                impulse: missile.spec.warhead.impulse,
+                shooter: missile.shooter.clone(),
+                weapon: missile.spec.id.clone(),
+            });
             ended.push((index, Some(at)));
         }
 
@@ -346,25 +364,27 @@ fn missile_node(node_id: &str, spec: &WeaponSpec, (position, rotation): (Vector3
         .add_property(model.scaled(spec.model.scale))
 }
 
-/// The white smoke a rocket motor leaves - puffs laid every few meters
-/// along its path (however fast it goes), small at the missile, billowing
-/// out, drifting and fading as they hang there.
+/// The white smoke a rocket motor leaves. Puffs are spaced on the order of
+/// their own size: a 9 m puff every 0.3 m meant dozens of them covered each
+/// pixel, and that overdraw is what a launch cost. A soft billboard, not a
+/// faceted ball, so the ones that do overlap stay cheap.
 fn smoke_puffs() -> ParticleEffect {
     ParticleEffect::new()
         .rate(0.0)
-        .per_meter(0.3)
-        .lifetime(SMOKE_SECONDS * 0.6, SMOKE_SECONDS)
-        .shape(EmissionShape::Sphere { radius: 0.3 })
+        .per_meter(SMOKE_PUFFS_PER_METER)
+        .lifetime(SMOKE_SECONDS * 0.75, SMOKE_SECONDS)
+        .shape(EmissionShape::Sphere { radius: 0.4 })
         .world_direction(Vector3::y())
         .cone(180.0)
         .speed(0.5, 2.5)
         .forces(Forces { gravity: -0.02, drag: 1.0, wind: 0.5, turbulence: 0.4 })
         .spin(-30.0, 30.0)
-        .faceted(6)
-        .size_over_life(0.8, 9.0)
+        // Puffs SMOKE_PUFFS_PER_METER apart, born big enough to overlap the
+        // next, so the trail reads as one unbroken line.
+        .size_over_life(1.6, 14.0)
         .color_over_life([0.95, 0.95, 0.95, 0.7], [0.85, 0.85, 0.85, 0.0])
         .lit()
-        .max_particles(2500)
+        .max_particles(SMOKE_MAX_PUFFS)
 }
 
 /// A warhead going off: a quick fireball and a puff of dark smoke.

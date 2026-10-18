@@ -64,7 +64,7 @@ impl WindowManager {
       };
 
       // Create window in windowed mode first to avoid device loss
-      let window: Window = video_susbsystem.window(&window_settings.tittle, width, height as u32).metal_view().allow_highdpi().build().expect("The window wasn't created");
+      let window: Window = video_susbsystem.window(&window_settings.tittle, width, height as u32).vulkan().allow_highdpi().build().expect("The window wasn't created");
 
       let mut canvas = window.into_canvas().accelerated().build().expect("the canvas wasn't builded");
       canvas.set_blend_mode(sdl2::render::BlendMode::Blend);

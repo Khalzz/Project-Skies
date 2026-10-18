@@ -1,3 +1,5 @@
+use std::sync::Mutex;
+
 use serde::Deserialize;
 
 use crate::app::App;
@@ -5,14 +7,30 @@ use crate::engine::input::input;
 use crate::engine::rendering::ui::ui::Ui;
 use crate::engine::ui::color::{Fill, UiColor};
 use crate::engine::ui::layer::Layer;
-use crate::game::game_settings::{GameSettings, COCKPIT_VIEW_PITCH_MAX, GAME_SETTINGS, HEAD_G_REACTION_MAX};
+use crate::game::game_settings::{GameSettings, HeadTrackingSource, COCKPIT_VIEW_PITCH_MAX, GAME_SETTINGS, HEAD_G_REACTION_MAX};
+use crate::game::head_tracking;
 use crate::engine::ui::ui_node::UiNode;
 use crate::engine::ui::ui_transform::{Anchor, BorderEdges, Orientation, PositionValue, SizeValue};
 use crate::game::selected_level::{SelectedLevel, SELECTED_LEVEL};
 use crate::game::ui::{button, label, main_fade_gradient, set_slider, set_toggle_switch, slider, slider_fraction_at, toggle_switch, with_left_accent};
 use super::rebind_modal;
 
-const SETTINGS_TABS: [&str; 3] = ["Video", "Controller", "Audio"];
+const SETTINGS_TABS: [&str; 4] = ["Video", "Controller", "Audio", "Head Tracking"];
+const CONNECTED_COLOR: UiColor = UiColor::Rgb(80, 220, 120);
+const DISCONNECTED_COLOR: UiColor = UiColor::Rgb(160, 160, 160);
+const METHOD_TEXT: UiColor = UiColor::Rgb(155, 155, 155);
+/// Same border the video and head-tracking rows use while hovered. A selected
+/// controller row keeps it after the cursor leaves.
+const SELECTED_ROW: UiColor = UiColor::Rgba(255, 255, 255, 160);
+const CHIP_TEXT: UiColor = UiColor::Rgb(220, 220, 220);
+
+/// The controller row chosen for Add input / Clear input. None until a row is clicked.
+static SELECTED_CONTROLLER: Mutex<Option<String>> = Mutex::new(None);
+
+#[cfg(windows)]
+const HEAD_SOURCES: [HeadTrackingSource; 2] = [HeadTrackingSource::TrackIr, HeadTrackingSource::OpenTrack];
+#[cfg(not(windows))]
+const HEAD_SOURCES: [HeadTrackingSource; 1] = [HeadTrackingSource::OpenTrack];
 const SETTINGS_BACKDROP: UiColor = UiColor::Rgba(0, 0, 0, 250);
 const SETTINGS_BLUR: f32 = 64.0;
 
@@ -42,26 +60,24 @@ fn show_panel(app: &mut App, id: &str) {
     }
 }
 
-fn show_settings_tab(app: &mut App, id: &str) {
+/// Shows one section to the right of the name list. The list, and its Back
+/// button at the bottom, stay where they are.
+fn open_settings_section(app: &mut App, id: &str) {
+    if let Some(content) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "Settings/Content") {
+        content.set_active(true);
+    }
     for tab_id in SETTINGS_TABS {
         if let Some(tab) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &format!("Settings/Content/{tab_id}")) {
             tab.set_active(tab_id == id);
         }
-        // Persistent "this is the open tab" indicator on the sidebar button itself -
-        // direct style mutation (same pattern as e.g. play.rs's blinking altitude
-        // alert), not on_hover/on_press, since it needs to stay showing regardless
-        // of whether the mouse is currently over/down on the button at all. Both
-        // border and text color are driven from here so they can't drift out of
-        // sync with each other as the selected tab changes. Only border_color needs
-        // touching - border_edges/border_width are already set once, identically
-        // for every state, by with_left_accent (see its own doc comment on why).
-        if let Some(button) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &format!("Settings/Sidebar/{tab_id}")) {
+        if let Some(button) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &format!("Settings/List/{tab_id}")) {
             let selected = tab_id == id;
             let border = if selected { UiColor::WHITE } else { UiColor::TRANSPARENT };
             let text = if selected { UiColor::WHITE } else { UiColor::Rgb(200, 200, 200) };
-            button.update_style(|s| s.set_border_color(border).set_text_color(text));
+            button.update_style(|style| style.set_border_color(border).set_text_color(text));
         }
     }
+    app.ui.has_changed = true;
 }
 
 /// A `with_left_accent` button sized for a sidebar row - `button()`'s own
@@ -81,29 +97,20 @@ pub fn grow_spacer() -> UiNode {
     UiNode::container().set_size(SizeValue::Grow, SizeValue::Grow).set_background_color(UiColor::TRANSPARENT)
 }
 
-/// Same visual language as the main menu itself (see `build`, below) - shares
-/// its background with "Main Menu" via the persistent "Backdrop" node (see
-/// `show_panel`) instead of a boxed/blurred panel of its own, a left-aligned
-/// sidebar of `with_left_accent`-styled buttons (persistent accent on the
-/// selected tab, hover preview on the others) instead of a tab strip with
-/// borders on every side, and a transparent content area to its right.
+/// Settings opens on a list of names. Choosing one shows that section to the
+/// right; the list and its Back button stay put at the bottom. Back is
+/// `on_back` (main menu, or the pause menu - see `play::ui`).
 ///
-/// `on_back` is what the sidebar's own "Back" button does - the main menu's
-/// own call site passes `|app| show_panel(app, "Main Menu")`, but this fn has
-/// no dependency on that panel existing (see `play::ui`'s pause-menu reuse of
-/// this same fn, which passes its own equivalent instead) - only the tab
-/// switching (`show_settings_tab`, hardcoded to this node's own
-/// "Settings/Content/{tab}"/"Settings/Sidebar/{tab}" children) assumes this
-/// tree is always registered under the literal id "Settings", which is safe
-/// across scenes since only one scene's UI tree is ever alive at a time (see
-/// `SceneManager`'s reset semantics, which clear `app.ui` before a scene
-/// rebuilds its own).
+/// The section pages stay direct children of "Settings/Content/{tab}", which
+/// is what the slider, toggle and controller rows look up. Safe across scenes
+/// because only one scene's UI tree is alive at a time.
 pub(crate) fn settings_ui(app: &mut App, on_back: impl Fn(&mut App) + 'static) -> UiNode {
     UiNode::container()
+        .set_orientation(Orientation::Horizontal)
         .set_background_color(UiColor::TRANSPARENT)
         .set_size(SizeValue::Grow, SizeValue::Grow)
-        .set_orientation(Orientation::Horizontal)
-        .set_child("Sidebar",
+        .set_child_anchor(Anchor::Start, Anchor::Start)
+        .set_child("List",
             UiNode::container()
                 .set_orientation(Orientation::Vertical)
                 .set_background_color(UiColor::TRANSPARENT)
@@ -112,12 +119,17 @@ pub(crate) fn settings_ui(app: &mut App, on_back: impl Fn(&mut App) + 'static) -
                 .set_child_anchor(Anchor::Start, Anchor::Start)
                 .set_gap(8.0)
                 .set_child("Title", label(app, "Settings").set_font_size(&mut app.ui.text.font_system, 32.0).set_text_color(UiColor::WHITE))
-                .set_child("Controller", sidebar_button(app, "Controller", |app| show_settings_tab(app, "Controller")))
-                .set_child("Video", sidebar_button(app, "Video", |app| show_settings_tab(app, "Video")))
-                .set_child("Audio", sidebar_button(app, "Audio", |app| show_settings_tab(app, "Audio")))
+                .set_child("Controller", sidebar_button(app, "Controller", |app| open_settings_section(app, "Controller")))
+                .set_child("Video", sidebar_button(app, "Video", |app| open_settings_section(app, "Video")))
+                .set_child("Audio", sidebar_button(app, "Audio", |app| open_settings_section(app, "Audio")))
+                .set_child("Head Tracking", sidebar_button(app, "Head Tracking", |app| open_settings_section(app, "Head Tracking")))
                 .set_child("BackSpacer", grow_spacer())
                 .set_child("Back", sidebar_button(app, "Back", on_back))
         )
+        .set_child("Divider",
+            UiNode::container()
+                .set_size(SizeValue::Pixels(1.0), SizeValue::Grow)
+                .set_background_color(UiColor::Rgba(255, 255, 255, 40)))
         .set_child("Content",
             UiNode::container()
                 .set_background_color(UiColor::TRANSPARENT)
@@ -127,6 +139,7 @@ pub(crate) fn settings_ui(app: &mut App, on_back: impl Fn(&mut App) + 'static) -
                 .set_gap(20.0)
                 .set_child("Controller",
                     UiNode::container()
+                        .set_orientation(Orientation::Vertical)
                         .set_background_color(UiColor::TRANSPARENT)
                         // Grow, not Fit - needs to fill Content's full available
                         // height so List (below) has a real bounded remainder to
@@ -136,10 +149,12 @@ pub(crate) fn settings_ui(app: &mut App, on_back: impl Fn(&mut App) + 'static) -
                         .set_gap(20.0)
                         .set_child("Title", label(app, "Controller").set_font_size(&mut app.ui.text.font_system, 26.0).set_text_color(UiColor::WHITE))
                         .set_child("List", controller_settings_list(app))
-                        .active(true))
+                        .set_child("Actions", controller_action_buttons(app))
+                        .active(false))
                 .set_child("Video", video_settings(app).active(false))
                 .set_child("Audio", label(app, "Audio Settings").set_font_size(&mut app.ui.text.font_system, 26.0).set_text_color(UiColor::WHITE).active(false))
-        )
+                .set_child("Head Tracking", head_tracking_settings(app).active(false))
+                .active(false))
         .active(false)
 }
 
@@ -164,6 +179,174 @@ fn video_settings(app: &mut App) -> UiNode {
         .set_child("ShowAircraftNames", settings_toggle_row(app, "Video", "ShowAircraftNames", "Show aircraft names",
             |settings| settings.show_aircraft_names,
             |settings| settings.show_aircraft_names = !settings.show_aircraft_names))
+        .set_child("HudStaysWithJet", settings_toggle_row(app, "Video", "HudStaysWithJet", "HUD stays with the jet",
+            |settings| settings.hud_stays_with_jet,
+            |settings| settings.hud_stays_with_jet = !settings.hud_stays_with_jet))
+}
+
+/// The Head Tracking tab. The method row is a `settings_row`; the picker and
+/// Retry sit in it.
+fn head_tracking_settings(app: &mut App) -> UiNode {
+    head_tracking::ensure_started(app);
+
+    UiNode::container()
+        .set_background_color(UiColor::TRANSPARENT)
+        .set_size(SizeValue::Grow, SizeValue::Fit)
+        .set_gap(20.0)
+        .set_child("Title", label(app, "Head Tracking").set_font_size(&mut app.ui.text.font_system, 26.0).set_text_color(UiColor::WHITE))
+        .set_child("Row", head_tracking_row(app))
+}
+
+/// One settings line: gray name on the left, whatever the caller adds on the
+/// right. Hovering the line draws a border around it and turns its labels
+/// white. The name and the spacer are already in place; callers append the
+/// control (`Control`/`Retry`, a switch, a slider).
+fn settings_row(app: &mut App, name: &str) -> UiNode {
+    UiNode::container()
+        .set_orientation(Orientation::Horizontal)
+        .set_background_color(UiColor::TRANSPARENT)
+        .set_border_width(1.0)
+        .set_border_color(UiColor::TRANSPARENT)
+        .set_corner_radius(6.0)
+        .set_padding(14.0)
+        .set_size(SizeValue::Grow, SizeValue::Fit)
+        .set_child_anchor(Anchor::Start, Anchor::Center)
+        .set_gap(16.0)
+        .set_transition(80.0)
+        .on_hover(|style| style.set_border_color(UiColor::Rgba(255, 255, 255, 160)).set_text_color(UiColor::WHITE))
+        .set_child("Name", label(app, name).set_size(SizeValue::Pixels(260.0), SizeValue::Fit).set_text_color(METHOD_TEXT))
+        .set_child("Spacer", grow_spacer())
+}
+
+fn head_tracking_row(app: &mut App) -> UiNode {
+    settings_row(app, "Tracking method")
+        .set_child("Control", head_tracking_control(app))
+        .set_child("Retry", retry_button(app))
+}
+
+fn head_tracking_control(app: &mut App) -> UiNode {
+    let selected = GAME_SETTINGS.lock().unwrap().head_tracking;
+    UiNode::container()
+        .set_orientation(Orientation::Horizontal)
+        .set_background_color(UiColor::TRANSPARENT)
+        .set_size(SizeValue::Fit, SizeValue::Fit)
+        .set_child_anchor(Anchor::Start, Anchor::Center)
+        .set_gap(10.0)
+        .set_child("Left", step_triangle(true, |app| step_head_tracking(app, -1)))
+        .set_child("Middle", head_tracking_value(app, selected))
+        .set_child("Right", step_triangle(false, |app| step_head_tracking(app, 1)))
+}
+
+/// The method name with its status dot sitting just to the right of it.
+fn head_tracking_value(app: &mut App, selected: HeadTrackingSource) -> UiNode {
+    UiNode::container()
+        .set_orientation(Orientation::Horizontal)
+        .set_background_color(UiColor::TRANSPARENT)
+        .set_size(SizeValue::Fit, SizeValue::Fit)
+        .set_child_anchor(Anchor::Start, Anchor::Center)
+        .set_gap(8.0)
+        .set_child("Name", label(app, selected.label()).set_text_color(METHOD_TEXT))
+        .set_child("Dot", status_dot(head_tracking::source_connected(selected)))
+}
+
+/// A gray triangle in a rounded square, the same 22px and corner as Retry.
+/// The square stays clear until hover, then fills white while the triangle
+/// turns black. A negative corner radius is what asks the UI shader to draw
+/// the triangle (see `text_shader.wgsl`); `points_left` picks the direction.
+fn step_triangle(points_left: bool, on_click: impl Fn(&mut App) + 'static) -> UiNode {
+    UiNode::container()
+        .set_size(SizeValue::Pixels(22.0), SizeValue::Pixels(22.0))
+        .set_child_anchor(Anchor::Center, Anchor::Center)
+        .set_background_color(UiColor::TRANSPARENT)
+        .set_border_width(0.0)
+        .set_corner_radius(4.0)
+        .set_transition(50.0)
+        .on_hover(|style| style.set_background_color(UiColor::WHITE).set_text_color(UiColor::BLACK))
+        .on_click(on_click)
+        .set_child("Mark", UiNode::container()
+            .set_size(SizeValue::Pixels(8.0), SizeValue::Pixels(10.0))
+            .set_background_color(METHOD_TEXT)
+            .set_border_width(0.0)
+            .set_border_color(METHOD_TEXT)
+            .set_corner_radius(if points_left { -100.0 } else { -1.0 }))
+}
+
+fn step_head_tracking(app: &mut App, delta: isize) {
+    let current = GAME_SETTINGS.lock().unwrap().head_tracking;
+    let index = HEAD_SOURCES.iter().position(|source| *source == current).unwrap_or(0);
+    let len = HEAD_SOURCES.len() as isize;
+    let next = (index as isize + delta).rem_euclid(len) as usize;
+    GAME_SETTINGS.lock().unwrap().head_tracking = HEAD_SOURCES[next];
+    head_tracking::selection_changed();
+    refresh_head_tracking(app);
+}
+
+/// White label on a clear square. Hover fills the square white and turns the
+/// label black, same as the method arrows beside it - the row's own hover
+/// would otherwise keep the word white and hide it on that fill.
+fn retry_button(app: &mut App) -> UiNode {
+    UiNode::container()
+        .set_size(SizeValue::Fit, SizeValue::Pixels(22.0))
+        .set_child_anchor(Anchor::Center, Anchor::Center)
+        .set_padding((8.0, 0.0))
+        .set_background_color(UiColor::TRANSPARENT)
+        .set_border_width(0.0)
+        .set_corner_radius(4.0)
+        .set_transition(50.0)
+        .on_hover(|style| style.set_background_color(UiColor::WHITE).set_text_color(UiColor::BLACK))
+        .on_click(|app| {
+            head_tracking::retry(app);
+            refresh_head_tracking(app);
+        })
+        .set_child("Label", label(app, "Retry")
+            .set_text_color(UiColor::WHITE)
+            .set_font_size(&mut app.ui.text.font_system, 14.0)
+            .set_align(glyphon::cosmic_text::Align::Center)
+            .set_size(SizeValue::Fit, SizeValue::Pixels(22.0)))
+}
+
+fn status_dot(connected: bool) -> UiNode {
+    UiNode::container()
+        .set_size(SizeValue::Pixels(8.0), SizeValue::Pixels(8.0))
+        .set_corner_radius(4.0)
+        .set_background_color(if connected { CONNECTED_COLOR } else { DISCONNECTED_COLOR })
+}
+
+/// Rewrites the method name, its dot, and the Retry label when the tracker
+/// changed them. No-op until something has changed, and when this section
+/// isn't in the tree.
+pub(crate) fn refresh_head_tracking_if_needed(app: &mut App) {
+    // The countdown has to repaint every second, not only on the click, so
+    // a wait in progress refreshes even when nothing else about the tracker
+    // changed this frame.
+    let counting = head_tracking::retry_caption() != "Retry";
+    if head_tracking::take_changed() || counting {
+        refresh_head_tracking(app);
+    }
+}
+
+/// Rewrites the method name, its dot, and the Retry label. No-op when this
+/// section isn't in the tree.
+fn refresh_head_tracking(app: &mut App) {
+    let selected = GAME_SETTINGS.lock().unwrap().head_tracking;
+    let name_path = "Settings/Content/Head Tracking/Row/Control/Middle/Name";
+    if let Some(name) = Ui::get_ui_node(&mut app.ui.renderizable_elements, name_path) {
+        if let Some(label) = name.as_label_mut() {
+            label.set_text(&mut app.ui.text.font_system, selected.label(), true);
+        }
+    }
+    let dot_path = "Settings/Content/Head Tracking/Row/Control/Middle/Dot";
+    if let Some(dot) = Ui::get_ui_node(&mut app.ui.renderizable_elements, dot_path) {
+        let color = if head_tracking::source_connected(selected) { CONNECTED_COLOR } else { DISCONNECTED_COLOR };
+        dot.update_style(|style| style.set_background_color(color));
+    }
+    let retry_path = "Settings/Content/Head Tracking/Row/Retry/Label";
+    if let Some(retry) = Ui::get_ui_node(&mut app.ui.renderizable_elements, retry_path) {
+        if let Some(label) = retry.as_label_mut() {
+            label.set_text(&mut app.ui.text.font_system, head_tracking::retry_caption(), true);
+        }
+    }
+    app.ui.has_changed = true;
 }
 
 /// A `settings_slider_row`'s values: `min` at the left end, `max` at the
@@ -203,26 +386,17 @@ thread_local! {
     static SLIDER_DRAG: std::cell::RefCell<Option<SliderDrag>> = const { std::cell::RefCell::new(None) };
 }
 
-/// One setting over `range`: its name, a `slider`, and the value (as
-/// `range.format` shows it). Pressing on the slider jumps it to the mouse and starts a drag that
-/// `update_settings_sliders` follows every frame until the button's let go.
-/// `tab`/`key` are this row's own place in the tree, as for
-/// `settings_toggle_row`.
+/// One setting over `range`, on a `settings_row`: a `slider` and the value
+/// (as `range.format` shows it) after the name. Pressing on the slider jumps
+/// it to the mouse and starts a drag that `update_settings_sliders` follows
+/// every frame until the button's let go. `tab`/`key` are this row's own
+/// place in the tree, as for `settings_toggle_row`. `Slider` and `Value`
+/// stay direct children so that drag can find them.
 fn settings_slider_row(app: &mut App, tab: &str, key: &str, name: &str, range: SliderRange, read: fn(&GameSettings) -> f32, write: fn(&mut GameSettings, f32)) -> UiNode {
     let row_path = format!("Settings/Content/{tab}/{key}");
     let value = read(&GAME_SETTINGS.lock().unwrap());
 
-    UiNode::container()
-        .set_orientation(Orientation::Horizontal)
-        .set_background_color(UiColor::TRANSPARENT)
-        .set_border_edges(BorderEdges::BOTTOM)
-        .set_border_width(1.0)
-        .set_border_color(UiColor::Rgba(255, 255, 255, 25))
-        .set_padding(14.0)
-        .set_size(SizeValue::Grow, SizeValue::Fit)
-        .set_child_anchor(Anchor::Start, Anchor::Center)
-        .set_gap(16.0)
-        .set_child("Name", label(app, name).set_size(SizeValue::Pixels(260.0), SizeValue::Fit).set_text_color(UiColor::Rgb(200, 200, 200)))
+    settings_row(app, name)
         .set_child("Slider", slider(range.fraction(value)).on_click(move |app| {
             SLIDER_DRAG.with(|drag| *drag.borrow_mut() = Some(SliderDrag { row_path: row_path.clone(), range, write }));
             update_settings_sliders(app);
@@ -266,27 +440,17 @@ pub(crate) fn update_settings_sliders(app: &mut App) {
     });
 }
 
-/// One on/off setting: its name beside a `toggle_switch`, laid out like a
-/// controller settings row (bare row, thin bottom border). Clicking anywhere
-/// on the row flips it in `GAME_SETTINGS` via `flip`, then re-reads it with
-/// `read` to move the switch - so the switch always shows what's actually
-/// stored. `tab`/`key` must be this row's own place in the tree
+/// One on/off setting on a `settings_row`: its name beside a `toggle_switch`.
+/// Clicking anywhere on the row flips it in `GAME_SETTINGS` via `flip`, then
+/// re-reads it with `read` to move the switch - so the switch always shows
+/// what's actually stored. The switch has no click of its own, so the row
+/// still receives it. `tab`/`key` must be this row's own place in the tree
 /// ("Settings/Content/{tab}/{key}"), which is how the click finds its switch.
 fn settings_toggle_row(app: &mut App, tab: &str, key: &str, name: &str, read: fn(&GameSettings) -> bool, flip: fn(&mut GameSettings)) -> UiNode {
     let switch_path = format!("Settings/Content/{tab}/{key}/Switch");
     let on = read(&GAME_SETTINGS.lock().unwrap());
 
-    UiNode::container()
-        .set_orientation(Orientation::Horizontal)
-        .set_background_color(UiColor::TRANSPARENT)
-        .set_border_edges(BorderEdges::BOTTOM)
-        .set_border_width(1.0)
-        .set_border_color(UiColor::Rgba(255, 255, 255, 25))
-        .set_padding(14.0)
-        .set_size(SizeValue::Grow, SizeValue::Fit)
-        .set_child_anchor(Anchor::Start, Anchor::Center)
-        .set_gap(16.0)
-        .set_child("Name", label(app, name).set_size(SizeValue::Pixels(260.0), SizeValue::Fit).set_text_color(UiColor::Rgb(200, 200, 200)))
+    settings_row(app, name)
         .set_child("Switch", toggle_switch(on))
         .on_click(move |app| {
             let on = {
@@ -341,7 +505,7 @@ fn controller_settings_list(app: &mut App) -> UiNode {
             .set_orientation(Orientation::Vertical)
             .set_background_color(UiColor::TRANSPARENT)
             .set_size(SizeValue::Grow, SizeValue::Fit)
-            .set_gap(0.0)
+            .set_gap(4.0)
             .set_child(
                 "Title",
                 label(app, &section.name)
@@ -378,43 +542,97 @@ pub(crate) fn refresh_controller_states(app: &mut App) {
     }
 }
 
-/// A single action's settings section - a bare row (no resting background)
-/// separated from the next one by a thin bottom border rather than each being
-/// its own tinted card, holding its display name beside every one of its
-/// current bindings as its own small clickable "chip" (see
-/// `controller_chip_nodes`) laid out horizontally, ending in a "+" chip to add
-/// another. Clicking an existing chip opens the rebind modal (see
-/// `rebind_modal::open`) to replace *that* binding in place (and offers
-/// "Delete Bind"); clicking "+" opens the same modal to append a new one
-/// instead (no "Delete Bind" - there's nothing to delete yet).
-///
-/// The row itself has no hover effect of its own (tried a background tint -
-/// even a fairly strong one never read as clearly "changing" next to the
-/// chips' own much more decisive hover darken right beside it) - only the
-/// chips (see `controller_chip_nodes`) highlight on hover.
+/// A single action's row, in the same hover treatment as the video and
+/// head-tracking lines. Clicking it selects that action for the Add input
+/// and Clear input buttons at the bottom of the page. The chips on the right
+/// are the keys already bound to it; they don't open the rebind modal.
 fn controller_settings_section(app: &mut App, action: &str) -> UiNode {
     let mut chips = UiNode::container()
         .set_orientation(Orientation::Horizontal)
         .set_background_color(UiColor::TRANSPARENT)
         .set_size(SizeValue::Fit, SizeValue::Fit)
+        .set_child_anchor(Anchor::Start, Anchor::Center)
         .set_gap(6.0);
     for (key, chip) in controller_chip_nodes(app, action) {
         chips = chips.set_child(key, chip);
     }
 
+    let action_name = action.to_owned();
+    settings_row(app, &rebind_modal::display_name(action))
+        .set_child("State", label(app, "off").set_size(SizeValue::Pixels(48.0), SizeValue::Fit).set_align(glyphon::cosmic_text::Align::Center).set_text_color(UiColor::Rgb(130, 130, 130)))
+        .set_child("Chips", chips)
+        .on_click(move |app| select_controller_action(app, &action_name))
+}
+
+/// Add input and Clear input, pinned under the scrolling list. They act on
+/// whichever row was clicked last.
+fn controller_action_buttons(app: &mut App) -> UiNode {
     UiNode::container()
         .set_orientation(Orientation::Horizontal)
         .set_background_color(UiColor::TRANSPARENT)
-        .set_border_edges(BorderEdges::BOTTOM)
-        .set_border_width(1.0)
-        .set_border_color(UiColor::Rgba(255, 255, 255, 25))
-        .set_padding(14.0)
         .set_size(SizeValue::Grow, SizeValue::Fit)
         .set_child_anchor(Anchor::Start, Anchor::Center)
-        .set_gap(16.0)
-        .set_child("Name", label(app, &rebind_modal::display_name(action)).set_size(SizeValue::Pixels(150.0), SizeValue::Fit).set_text_color(UiColor::Rgb(200, 200, 200)))
-        .set_child("State", label(app, "off").set_size(SizeValue::Pixels(48.0), SizeValue::Fit).set_align(glyphon::cosmic_text::Align::Center).set_text_color(UiColor::Rgb(130, 130, 130)))
-        .set_child("Chips", chips)
+        .set_gap(10.0)
+        .set_child("Add", keycap_style(button(app, "Add input", add_selected_input)))
+        .set_child("Clear", keycap_style(button(app, "Clear input", clear_selected_input)))
+}
+
+fn select_controller_action(app: &mut App, action: &str) {
+    *SELECTED_CONTROLLER.lock().unwrap() = Some(action.to_owned());
+    paint_controller_selection(app);
+}
+
+fn add_selected_input(app: &mut App) {
+    let Some(action) = SELECTED_CONTROLLER.lock().unwrap().clone() else { return };
+    rebind_modal::open(app, &action, None);
+}
+
+fn clear_selected_input(app: &mut App) {
+    let Some(action) = SELECTED_CONTROLLER.lock().unwrap().clone() else { return };
+    input::clear_bindings(&action);
+    refresh_controller_chips(app, &action);
+}
+
+/// Lights the selected row the way a video row looks while the cursor is on it,
+/// and puts the others back to rest.
+fn paint_controller_selection(app: &mut App) {
+    let selected = SELECTED_CONTROLLER.lock().unwrap().clone();
+    for section in controller_sections() {
+        for action in section.actions {
+            let path = format!("Settings/Content/Controller/List/{}/{action}", section.name);
+            let on = selected.as_deref() == Some(action.as_str());
+            if let Some(row) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &path) {
+                let border = if on { SELECTED_ROW } else { UiColor::TRANSPARENT };
+                row.update_style(|style| style.set_border_color(border));
+            }
+            if let Some(name) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &format!("{path}/Name")) {
+                let color = if on { UiColor::WHITE } else { METHOD_TEXT };
+                name.update_style(|style| style.set_text_color(color));
+            }
+            if let Some(chips) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &format!("{path}/Chips")) {
+                if let Some(container) = chips.as_container_mut() {
+                    let color = if on { UiColor::WHITE } else { CHIP_TEXT };
+                    for (_, chip) in &mut container.children {
+                        chip.update_style(|style| style.set_text_color(color));
+                    }
+                }
+            }
+        }
+    }
+    app.ui.has_changed = true;
+}
+
+/// Rebuilds `action`'s chip row after a binding is added or cleared.
+pub(crate) fn refresh_controller_chips(app: &mut App, action: &str) {
+    let chips = controller_chip_nodes(app, action);
+    let Some(path) = controller_action_path(action).map(|path| format!("{path}/Chips")) else { return };
+    if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &path) {
+        if let Some(container) = node.as_container_mut() {
+            container.children = chips;
+        }
+        app.ui.has_changed = true;
+    }
+    paint_controller_selection(app);
 }
 
 /// The "keycap" color/hover treatment shared by the settings chips (see
@@ -455,49 +673,26 @@ pub fn keycap_style(node: UiNode) -> UiNode {
         .set_transition(120.0)
 }
 
-/// Shared look for a small binding chip / the trailing "+" chip (see
-/// `controller_chip_nodes`) - `keycap_style` squared into a compact,
-/// roughly-square pill rather than a full-width row button (see
-/// `set_min_width_to_height`).
+/// Shared look for a binding chip (see `controller_chip_nodes`) - `keycap_style`
+/// squared into a compact pill. Display only: the row click selects the action,
+/// and Add input / Clear input at the bottom of the page change its bindings.
 fn chip_style(node: UiNode) -> UiNode {
     keycap_style(node)
+        .set_border_width(1.0)
         .set_min_width_to_height()
 }
 
-/// The chip nodes for `controller_settings_row`'s "Chips" child - one per
-/// current binding, keyed `"chip_{index}"` (that index is exactly what a click
-/// opens the rebind modal with, see `rebind_modal::open`'s `edit_index`), plus
-/// a trailing `"chip_add"` "+" chip that opens the same modal with no index
-/// (appending a new binding instead of replacing one). Also called directly by
-/// `rebind_modal::refresh_chips` to rebuild just this row's chips in place
-/// after a binding's added/replaced/deleted, without touching the rest of the
-/// settings tree.
+/// The chip nodes for a controller row's "Chips" child - one per current
+/// binding, keyed `"chip_{index}"`. Also called by `refresh_controller_chips`
+/// after a binding is added or cleared.
 pub fn controller_chip_nodes(app: &mut App, action: &str) -> Vec<(String, UiNode)> {
     let bindings = input::action_bindings(action);
-    let mut nodes = Vec::with_capacity(bindings.len() + 1);
+    let mut nodes = Vec::with_capacity(bindings.len());
 
     for (index, binding) in bindings.iter().enumerate() {
-        let action = action.to_owned();
-        // No with_left_accent here (unlike most other buttons in this file) -
-        // its hover-in white left-edge bar isn't wanted on these small chips,
-        // just the plain background/text hover button() already gives.
-        let chip = chip_style(button(app, &binding.label().to_uppercase(), move |app| rebind_modal::open(app, &action, Some(index))));
+        let chip = chip_style(label(app, &binding.label().to_uppercase()));
         nodes.push((format!("chip_{index}"), chip));
     }
-
-    let action = action.to_owned();
-    let add_chip = chip_style(button(app, "+", move |app| rebind_modal::open(app, &action, None)))
-        .set_text_color(UiColor::WHITE)
-        // A lone "+" glyph doesn't use any descender space, so centering it
-        // by the font's full line-height (see `Label::vertical_positioning_
-        // in_rect`) - which reads correctly for a letter/word chip, whose
-        // glyphs roughly fill that box - visibly sits it low here. Nudging
-        // top/bottom padding asymmetrically (top+bottom sum unchanged, so
-        // `set_min_width_to_height`'s already-computed box size above isn't
-        // affected) shifts the inner content rect's own center up without
-        // resizing the chip.
-        .set_padding([4.0, 8.0, 10.0, 10.0]);
-    nodes.push(("chip_add".to_owned(), add_chip));
 
     nodes
 }
@@ -532,9 +727,9 @@ fn levels() -> Vec<LevelInfo> {
 /// `SELECTED_LEVEL`, which `play::scene::GameLogic::new` reads back once the
 /// chosen scene actually opens - see its own doc comment for why this static
 /// exists at all), fills in Content's name/description text, and updates
-/// every sidebar button's persistent selected-highlight - same direct-style-
-/// mutation pattern as `show_settings_tab`, see its own doc comment for why
-/// (needs to stay showing regardless of hover/press state). No-op if `id`
+/// every sidebar button's persistent selected-highlight with a direct style
+/// write, because it needs to stay showing regardless of hover/press state.
+/// No-op if `id`
 /// isn't in `assets/levels.ron`.
 fn show_level(app: &mut App, id: &str) {
     let Some(level) = levels().into_iter().find(|l| l.id == id) else { return };
@@ -693,7 +888,8 @@ pub fn build(app: &mut App) {
         .build(app);
     app.ui.always_on_bottom.push("Backdrop".to_owned());
     app.ui.always_on_top.push("RebindModal".to_owned());
-    show_settings_tab(app, "Controller");
+    // Settings opens on the name list (List is active, Content is not). A
+    // section is shown only after its name is chosen.
     // Selects the first level so Content/Play aren't empty/dead the first time
     // the player opens the Play screen, before ever clicking a level button.
     if let Some(first) = levels().first() {

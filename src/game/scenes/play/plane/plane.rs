@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use nalgebra::{UnitQuaternion, Vector3};
 
@@ -24,11 +24,24 @@ use super::messages::{AircraftEvent, AircraftState};
 use super::effects::{self, EffectKind, EffectSpec};
 use super::pilot::Pilot;
 use crate::engine::particles::ParticleEmitters;
+use crate::engine::game_nodes::game_object::ColliderType;
 use crate::engine::physics::physics_handler::RenderMessage;
 use super::autopilot::{Autopilot, Speed};
 use crate::game::scenes::play::map::Difficulty;
 use super::quick_list::QuickList;
 use super::quick_menu::{GearStatus, QuickAction, QuickMenuStatus};
+
+/// Damage one warhead dealt to one surface, waiting for the kill feed.
+pub struct PartHit {
+    pub shooter: String,
+    pub weapon: String,
+    /// The surface's label, as in the plane's data ("Left wing").
+    pub part: String,
+    /// HP that surface lost.
+    pub dealt: f32,
+    /// The surface's HP hit 0.
+    pub destroyed: bool,
+}
 
 /// How long after an animation lets an aircraft go its pilot still feels
 /// no G (s) - long enough for the physics to settle it from being placed
@@ -119,6 +132,31 @@ pub struct Plane {
     pub radar_warn_m: f32,
     gear_meshes: GearMeshes,
     quick_menu: QuickList,
+    /// Fuselage and wing colliders, for a missile's fuze. The shapes the
+    /// plane loaded with (and a data.ron reload).
+    colliders: Vec<ColliderType>,
+    /// A blast already sent, whose result a later physics state answers.
+    /// Kept until that answer arrives: the physics thread can be several
+    /// frames behind, and an empty frame must not drop the credit.
+    inflight_blast: Option<(String, String)>,
+    /// A blast sent this frame, not the one the current state answers.
+    queued_blast: Option<(String, String)>,
+    /// A pilot kill the scene hasn't shown in the feed yet: who fired,
+    /// with what.
+    pub kill_report: Option<(String, String)>,
+    /// Part damage the feed hasn't shown, from the latest warhead: who
+    /// fired, with what, which surface, how much HP it lost, and whether
+    /// that emptied it.
+    part_hits: Vec<PartHit>,
+    /// Wing labels already reported destroyed.
+    lost_wings: HashSet<String>,
+    /// Last published HP per surface, so a new blast's drop can be measured.
+    last_profile_hp: HashMap<String, f32>,
+    /// `AircraftState::blasts_handled` already accounted for.
+    reported_blasts: u32,
+    /// Each lifting surface's full HP, so damage smoke scales off what's
+    /// left (see `update_effects`). From the plane's data.ron.
+    surface_max: HashMap<String, f32>,
 }
 
 /// Tyre smoke: from this ground speed at touchdown (m/s, ~50 kt) - slower
@@ -188,6 +226,101 @@ impl Plane {
             radar_warn_m: crate::game::scenes::play::map::DEFAULT_RADAR_WARN_M,
             gear_meshes: GearMeshes::new(),
             quick_menu: QuickList::new(),
+            colliders: Vec::new(),
+            inflight_blast: None,
+            queued_blast: None,
+            kill_report: None,
+            part_hits: Vec::new(),
+            lost_wings: HashSet::new(),
+            last_profile_hp: HashMap::new(),
+            reported_blasts: 0,
+            surface_max: HashMap::new(),
+        }
+    }
+
+    /// Full HP of each lifting surface, for the damage smoke and fire.
+    /// Spawn, and a data.ron reload.
+    pub fn set_surface_max(&mut self, wings: &[super::aero_spec::WingSpec]) {
+        self.surface_max = wings.iter().map(|wing| (wing.label.clone(), wing.hp.max(1.0))).collect();
+        // So the first warhead can be measured even before a physics state
+        // has published the undamaged HP.
+        if self.last_profile_hp.is_empty() {
+            self.last_profile_hp.clone_from(&self.surface_max);
+        }
+    }
+
+    /// The colliders a missile's fuze tests - see `set_colliders`.
+    pub fn fuze_colliders(&self) -> &[ColliderType] {
+        &self.colliders
+    }
+
+    /// Replaces the fuze colliders (spawn, or a data.ron reload).
+    pub fn set_colliders(&mut self, colliders: Vec<ColliderType>) {
+        self.colliders = colliders;
+    }
+
+    /// A warhead from `shooter` with `weapon` was sent to this aircraft.
+    /// The first one waiting on the physics state is the one a pilot kill
+    /// is credited to.
+    pub fn note_blast(&mut self, shooter: &str, weapon: &str) {
+        self.queued_blast = Some((shooter.to_owned(), weapon.to_owned()));
+    }
+
+    /// The pilot kill the feed hasn't shown, if there is one.
+    pub fn take_kill_report(&mut self) -> Option<(String, String)> {
+        self.kill_report.take()
+    }
+
+    /// Part damage the feed hasn't shown, from warheads since last time.
+    pub fn take_part_hits(&mut self) -> Vec<PartHit> {
+        std::mem::take(&mut self.part_hits)
+    }
+
+    /// A published blast result: kill the pilot when the seat was inside
+    /// it, record how much HP each surface lost to that warhead, and log
+    /// each wing whose HP just hit 0. Then the blast sent this frame waits
+    /// for the next state.
+    fn read_blast_result(&mut self, node: &Node) {
+        if let Some(state) = node.physics_state::<AircraftState>() {
+            if state.pilot_hit && !self.pilot.is_dead() {
+                self.pilot.kill();
+                // The aircraft is a kill the moment the pilot dies, even
+                // while the airframe is still in the air.
+                self.kill_report = Some(
+                    self.inflight_blast.clone()
+                        .or_else(|| self.queued_blast.clone())
+                        .unwrap_or_else(|| ("Unknown".to_owned(), "blast".to_owned())),
+                );
+            }
+            // Only a new warhead. A ground strike or an F10 toggle changes
+            // HP without advancing this, and those are not a hit to credit.
+            if state.blasts_handled > self.reported_blasts {
+                self.reported_blasts = state.blasts_handled;
+                if let Some((shooter, weapon)) = self.inflight_blast.clone().or_else(|| self.queued_blast.clone()) {
+                    for (label, hp) in &state.profiles {
+                        let Some(before) = self.last_profile_hp.get(label).copied() else { continue };
+                        let dealt = before - *hp;
+                        if dealt > 0.5 {
+                            self.part_hits.push(PartHit {
+                                shooter: shooter.clone(),
+                                weapon: weapon.clone(),
+                                part: label.clone(),
+                                dealt,
+                                destroyed: *hp <= 0.0,
+                            });
+                        }
+                    }
+                }
+            }
+            for (label, hp) in &state.profiles {
+                if *hp <= 0.0 && self.lost_wings.insert(label.clone()) {
+                    println!("{}: {label} destroyed", node.id);
+                }
+                self.last_profile_hp.insert(label.clone(), *hp);
+            }
+        }
+        if let Some(blast) = self.queued_blast.take() {
+            self.inflight_blast = Some(blast);
         }
     }
 
@@ -278,6 +411,12 @@ impl Plane {
     /// The wheels show `down` until physics reports the gear.
     pub fn arm_gear(&mut self, gear: &super::gear_spec::GearSpec, down: bool) {
         self.gear_meshes.arm(gear, down);
+    }
+
+    /// Where the wheels go with the gear up, from `gear` (data.ron edited
+    /// mid-flight).
+    pub fn set_gear_look(&mut self, gear: &super::gear_spec::GearSpec) {
+        self.gear_meshes.set_gear(gear);
     }
 
     /// What each of the node's emitters is - the plane's data.ron effects.
@@ -403,10 +542,13 @@ impl Plane {
     }
 
     /// Any part of the plane touching the water (see the node's
-    /// `WaterContact`), a missile (`shot_down`), or a crash that kills the pilot anywhere (see
-    /// `Pilot`), wrecks it: the physics half stops flying it, and the
-    /// controls go neutral with the throttle closed and stay that way. The
-    /// water ends it in a splash, the ground in an explosion (`crash`).
+    /// `WaterContact`), the fuselage hitting the ground, a pilot killed by
+    /// the impact, or `shot_down`, wrecks it: the physics half stops flying
+    /// it, and the controls go neutral with the throttle closed and stay
+    /// that way. A pilot killed by a blast stays in the air on the profiles
+    /// that survived, until the fuselage hits the ground or the jet hits
+    /// the water. A wing hitting the ground tears that wing off; it does
+    /// not wreck the jet.
     fn check_wreck(&mut self, node: &mut Node) {
         let water_impact = node.physics_state::<WaterContactState>().and_then(|state| state.impact);
         // Going down after a missile hit: still flying until the water - or
@@ -433,7 +575,18 @@ impl Plane {
             println!("Shot down");
             self.going_down = true;
             AircraftEvent::ShotDown
-        } else if self.pilot.is_dead() {
+        } else if node.physics_state::<AircraftState>().is_some_and(|state| state.fuselage_struck) {
+            println!("Went into the ground");
+            self.crash = Some(Crash::Ground);
+            if !self.pilot.is_dead() {
+                self.pilot.killed_in_crash();
+            }
+            AircraftEvent::Wreck
+        } else if self.pilot.is_dead() && !self.pilot.killed_by_blast() {
+            self.crash = Some(Crash::Ground);
+            AircraftEvent::Wreck
+        } else if self.pilot.killed_by_blast() && node.physics_state::<AircraftState>().is_some_and(|state| Pilot::impact_is_fatal(state.flight_data.impact_g)) {
+            println!("Went into the ground");
             self.crash = Some(Crash::Ground);
             AircraftEvent::Wreck
         } else {
@@ -513,6 +666,7 @@ impl Plane {
         let resting = self.wrecked && moving < WRECK_REST_SPEED;
         self.wreck_rest = lerp(self.wreck_rest, if resting { 1.0 } else { 0.0 }, (delta_time * WRECK_REST_RATE).min(1.0));
         let burning = self.wrecked && !self.in_water;
+        let profiles = state.map(|state| state.profiles.clone()).unwrap_or_default();
 
         let Some(emitters) = node.get_property_mut::<ParticleEmitters>() else { return };
         for (name, kind) in &self.effects {
@@ -543,6 +697,25 @@ impl Plane {
             emitter.enabled = *left > 0.0;
             emitter.intensity = smoke_strength.max(0.2);
             *left = (*left - delta_time).max(0.0);
+        }
+
+        // A hit surface smokes from the first HP it loses. Fire joins once
+        // about half of it is gone, and both are full when the surface is.
+        // A wreck has its own plume, so these stop.
+        let aloft = !self.wrecked && !self.in_water;
+        for (label, hp) in &profiles {
+            let max = self.surface_max.get(label).copied().unwrap_or(1.0).max(1.0);
+            let damage = (1.0 - hp / max).clamp(0.0, 1.0);
+            let smoking = aloft && damage > 0.02;
+            let fire = ((damage - 0.5) / 0.5).clamp(0.0, 1.0);
+            if let Some(smoke) = emitters.get_mut(&effects::damage_smoke_name(label)) {
+                smoke.enabled = smoking;
+                smoke.intensity = damage;
+            }
+            if let Some(flame) = emitters.get_mut(&effects::damage_fire_name(label)) {
+                flame.enabled = smoking && fire > 0.0;
+                flame.intensity = fire;
+            }
         }
     }
     /// The pilot feels the plane's G - frozen while paused, resting during
@@ -633,11 +806,14 @@ impl Behavior for Plane {
         }
         // 1. Input → physics half.
         self.update_pilot(node, app, delta_time);
+        self.read_blast_result(node);
         self.check_wreck(node);
         if !app.is_paused {
             self.update_effects(node, delta_time);
         }
-        self.flown_by = if !self.is_player || self.scripted {
+        self.flown_by = if self.pilot.is_dead() && !self.wrecked {
+            "nobody (pilot killed)"
+        } else if !self.is_player || self.scripted {
             "autopilot"
         } else if self.wrecked {
             "nobody (wrecked)"
@@ -648,7 +824,15 @@ impl Behavior for Plane {
         } else {
             "the pilot"
         };
-        if !self.is_player || self.scripted {
+        if self.pilot.is_dead() && !self.wrecked {
+            // Hands off, throttle closed. The profiles the blast left keep
+            // flying; a centered stick does not hold the jet up.
+            self.controls.elevator = 0.0;
+            self.controls.aileron = 0.0;
+            self.controls.rudder = 0.0;
+            self.controls.throttle = 0.0;
+            self.controls.fly_by_wire_pitch_autotrim = false;
+        } else if !self.is_player || self.scripted {
             // A bot (or one a timeline's flying): its autopilot flies its
             // path; without one its controls are left as they are.
             let flight_data = node.physics_state::<AircraftState>().map(|state| state.flight_data.clone());
@@ -674,7 +858,9 @@ impl Behavior for Plane {
             self.update_quick_menu(node, app);
         }
         self.update_fuel(node, app, delta_time);
-        self.controls.fly_by_wire_pitch_autotrim = self.fcs.pitch_autotrim;
+        if !(self.pilot.is_dead() && !self.wrecked) {
+            self.controls.fly_by_wire_pitch_autotrim = self.fcs.pitch_autotrim;
+        }
         node.set_physics_input(self.controls.clone());
 
         // 2. Physics half → model. `None` until the physics thread has

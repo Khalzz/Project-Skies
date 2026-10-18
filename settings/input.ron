@@ -19,6 +19,14 @@
         (action: "look_up", bindings: [ControllerAxis(axis: "RightY", positive: false, deadzone: 0.1)]),
         (action: "look_down", bindings: [ControllerAxis(axis: "RightY", positive: true, deadzone: 0.1)]),
         (action: "fix_view", bindings: [Key("space")]),
+        // The helmet display (the visor's HUD, looking outside) on and off.
+        (action: "toggle_hmd", bindings: [Key("y")]),
+        // Zoom (the cockpit and free views' field of view): in/out while
+        // held, and a zoom lever - read as a position, end to end from the
+        // widest view to the narrowest (see play::camera::camera).
+        (action: "zoom_in", bindings: [Key("PageUp")]),
+        (action: "zoom_out", bindings: [Key("PageDown")]),
+        (action: "zoom_axis", bindings: []),
         (action: "test", bindings: [Key("t")]),
         (action: "up_wheel", bindings: [Key("Right")]),
         (action: "down_wheel", bindings: [Key("Left")]),
@@ -41,7 +49,9 @@
         // the trigger.
         (action: "next_weapon", bindings: [Key("Tab"), ControllerButton("B")]),
         (action: "fire_weapon", bindings: [Key("Return"), ControllerButton("A")]),
-        // Locks the seeker on what's in the diamond - again lets it go.
+        // Locks the seeker on what's in the diamond - again lets it go. Held
+        // past half a second: the vertical lock, while it's held (locks the
+        // first enemy through the line over the nose).
         (action: "toggle_lock", bindings: [Key("r"), ControllerButton("X")]),
         // Countermeasures: one release, a quick burst, and what they release
         // (flares, chaff, both).
@@ -62,6 +72,10 @@
         (action: "toggle_debug_mouse", bindings: [Key("F7")]),
         // F8: the heat view - what an IR seeker sees.
         (action: "toggle_heat_view", bindings: [Key("F8")]),
+        // F6: the center HUD drawn far ahead of the jet, only through its glass.
+        (action: "toggle_collimated_hud", bindings: [Key("F6")]),
+        // F11: live size and center of the cockpit HUD.
+        (action: "toggle_hud_layout", bindings: [Key("F11")]),
         // F10: the editor - the world seen through a free editor camera, the
         // hierarchy, properties and timeline around it.
         (action: "toggle_editor", bindings: [Key("F10")]),

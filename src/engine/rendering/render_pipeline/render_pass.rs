@@ -635,7 +635,9 @@ impl App {
     // open (its text fields need it).
     fn render_aero_debug_overlay_pass(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
         let show_debug = self.debug_overlay_visible();
-        if !show_debug && !self.tactical_map_active && !self.editor_active && self.spectate_telemetry.is_none() {
+        let title_shot = self.scene_manager.active == "main_menu" && self.menu_shot.open;
+        let hud_panel = self.scene_manager.active == "playing" && self.hud_layout.open;
+        if !show_debug && !self.tactical_map_active && !self.editor_active && self.spectate_telemetry.is_none() && !title_shot && !hud_panel {
             // No egui - back to the plain arrow (the pause menu's, say), and
             // the mouse let go if a drag had it.
             self.end_infinite_drag();
@@ -712,8 +714,9 @@ impl App {
         }
         // Back to where the pointer is now, after any presses elsewhere.
         raw_input.events.push(egui::Event::PointerMoved(pointer_pos));
-        // Typing for the editor's text fields - F10's editor.
-        if self.editor_active {
+        // Typing for text fields - F10's editor, the title shot panel, and
+        // F11's HUD layout.
+        if self.editor_active || title_shot || hud_panel {
             raw_input.events.extend(input::typed_input().iter().filter_map(egui_typing_event));
         }
 
@@ -791,6 +794,8 @@ impl App {
         let tactical_map_active = self.tactical_map_active;
         let editor_active = self.editor_active;
         let spectate_telemetry = self.spectate_telemetry.clone();
+        let mut menu_shot = self.menu_shot;
+        let mut hud_layout = self.hud_layout;
         // The map draws on the whole screen now - F10's editor is round the
         // world instead.
         let tactical_viewport = None;
@@ -804,6 +809,16 @@ impl App {
             pixels_per_point,
             raw_input,
             |ctx| {
+                if title_shot {
+                    if let Some(text) = crate::game::scenes::main_menu::scene::draw_menu_shot(ctx, &mut menu_shot) {
+                        clipboard_text = Some(text);
+                    }
+                }
+                if hud_panel {
+                    if let Some(text) = crate::game::scenes::play::scene::draw_hud_layout(ctx, &mut hud_layout) {
+                        clipboard_text = Some(text);
+                    }
+                }
                 if editor_active {
                     flight_editor.draw_docked(ctx, &mut tactical_ui);
                 } else if tactical_map_active {
@@ -1387,6 +1402,12 @@ impl App {
         );
 
         self.debug_windows = windows;
+        self.menu_shot = menu_shot;
+        let closed_hud_panel = self.hud_layout.open && !hud_layout.open;
+        self.hud_layout = hud_layout;
+        if closed_hud_panel && !self.is_paused {
+            self.window_manager.context.mouse().set_relative_mouse_mode(!self.mouse_free());
+        }
 
         self.flight_editor = flight_editor;
         self.tactical_ui = tactical_ui;
@@ -1396,7 +1417,7 @@ impl App {
 
         if let Some(text) = clipboard_text {
             match self.window_manager.context.video().and_then(|video| video.clipboard().set_clipboard_text(&text)) {
-                Ok(()) => println!("Camera values copied to clipboard:\n{text}"),
+                Ok(()) => println!("Copied to clipboard:\n{text}"),
                 Err(error) => println!("Couldn't copy camera values ({error}):\n{text}"),
             }
         }
@@ -1592,7 +1613,7 @@ impl App {
     /// The HUD's symbols in the world (`hud_lines` - see App::hud_lines),
     /// over the 3D view - skipped when there are none.
     fn render_hud_lines_pass(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
-        if self.hud_lines.dynamic.is_empty() && self.hud_horizon_lines.dynamic.is_empty() && self.hud_screen_lines.dynamic.is_empty() {
+        if self.hud_lines.dynamic.is_empty() && self.hud_horizon_lines.dynamic.is_empty() && self.hud_screen_lines.dynamic.is_empty() && self.hud_text.is_empty() && self.hmd_text.is_empty() {
             return;
         }
         let camera_position = self.scene_manager.cameras().map(|c| c.active().camera.position()).unwrap_or_else(nalgebra::Point3::origin);
@@ -1621,6 +1642,22 @@ impl App {
             screen,
         );
         self.hud_horizon_lines.draw(
+            &self.renderer.device,
+            &self.renderer.queue,
+            &mut render_pass,
+            &self.camera_resources.bind_group,
+            [camera_position.x, camera_position.y, camera_position.z],
+            screen,
+        );
+        self.hud_text.draw(
+            &self.renderer.device,
+            &self.renderer.queue,
+            &mut render_pass,
+            &self.camera_resources.bind_group,
+            [camera_position.x, camera_position.y, camera_position.z],
+            screen,
+        );
+        self.hmd_text.draw(
             &self.renderer.device,
             &self.renderer.queue,
             &mut render_pass,

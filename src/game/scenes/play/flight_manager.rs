@@ -40,11 +40,15 @@ const WRECK_SINK_SECONDS: f32 = 6.0;
 /// the player in an F-16 on the runway, so the level still opens.
 /// A plane's views as its data.ron places them - the cockpit at the pilot's
 /// seat (`aero.pilot_position`) unless `cameras` says otherwise; the rest,
-/// the camera's own defaults (see play::camera::camera).
+/// the camera's own defaults (see play::camera::camera). The cockpit gets
+/// the plane's `head_limits`, when it has them.
 fn plane_cameras(spec: &AircraftSpec) -> Cameras {
     let mut cameras: Cameras = spec.cameras.clone();
-    cameras.entry(camera::COCKPIT_CAMERA.to_owned())
-        .or_insert(GameObjectCamera { position: spec.aero.pilot_position, fov: 70.0 });
+    let cockpit = cameras.entry(camera::COCKPIT_CAMERA.to_owned())
+        .or_insert(GameObjectCamera { position: spec.aero.pilot_position, fov: 70.0, head_limits: None });
+    if spec.head_limits.is_some() {
+        cockpit.head_limits = spec.head_limits;
+    }
     cameras
 }
 
@@ -201,6 +205,8 @@ struct SpawnedAircraft {
     data_initial_velocity: Vector3<f32>,
     /// Its HUD glass's points (m, the jet's frame) - see `hud_glass`.
     hud_glass: Option<Vec<Vector3<f32>>>,
+    /// Where the jet blocks the view from its cockpit - see `cockpit_sill`.
+    cockpit_sill: Vec<(f32, f32)>,
     /// Its flares and chaff - full again when it's respawned or rearmed.
     countermeasures: Option<CountermeasureSet>,
 }
@@ -214,6 +220,9 @@ pub struct LiveAircraft {
     pub speed_kt: f32,
     pub altitude: f32,
     pub wrecked: bool,
+    /// The pilot is dead. The airframe may still be in the air; the
+    /// aircraft still counts as destroyed (the kill feed, the roster).
+    pub pilot_dead: bool,
     /// The point of its path its autopilot is flying to (an index), for a
     /// bot flying its own flight plan.
     pub next_path_point: Option<usize>,
@@ -307,6 +316,7 @@ impl flight_manager {
             };
             if let Some(spawned) = self.spawned.get_mut(&plane.node_id) {
                 spawned.data_initial_velocity = spec.physics.rigidbody.initial_velocity;
+                spawned.cockpit_sill = spec.cockpit_sill.clone();
                 // Its dispensers where the file now puts them - what's left
                 // in them stays.
                 if let (Some(set), Some(countermeasures)) = (spawned.countermeasures.as_mut(), spec.countermeasures.as_ref()) {
@@ -322,11 +332,14 @@ impl flight_manager {
             // Its emitters, rebuilt where the file now puts them (the plane
             // switches them on again as needed next frame).
             if let Some(emitters) = node.get_property_mut::<ParticleEmitters>() {
-                *emitters = effects::plane_emitters(&spec.effects, &spec.gear);
+                *emitters = effects::plane_emitters(&spec.effects, &spec.gear, &spec.aero.wings);
             }
             if let Some(plane) = node.get_behavior_mut::<Plane>() {
                 plane.set_effects(&spec.effects);
+                plane.set_surface_max(&spec.aero.wings);
                 plane.set_fuel_spec(&spec.fuel);
+                plane.set_colliders(spec.physics.colliders.clone());
+                plane.set_gear_look(&spec.gear);
             }
             // What's left of its loadout's weight stays on.
             let loadout = remaining_loadout(&self.applied, &self.fired, &plane.node_id);
@@ -482,6 +495,7 @@ impl flight_manager {
             stick_target_pull: node.and_then(|node| node.get_behavior::<Plane>()).map(|plane| -plane.stick_target).unwrap_or(0.0),
             altitude: flight_data.map(|data| data.altimeter).unwrap_or(transform.position.y),
             wrecked: node.and_then(|node| node.get_behavior::<Plane>()).is_some_and(|plane| plane.wrecked),
+            pilot_dead: node.and_then(|node| node.get_behavior::<Plane>()).is_some_and(|plane| plane.pilot.is_dead()),
             // An animation's path isn't its flight plan - no point of that
             // to mark then.
             next_path_point: node.and_then(|node| node.get_behavior::<Plane>())
@@ -516,11 +530,13 @@ impl flight_manager {
             physics.rigidbody.initial_velocity = rotation * Vector3::new(0.0, 0.0, speed);
         }
         let mut plane = Plane::new().with_effects(&aircraft_spec.effects).with_throttle(placement.throttle).with_military(aircraft_spec.engine.afterburner_gate).with_fuel(&aircraft_spec.fuel);
+        plane.set_surface_max(&aircraft_spec.aero.wings);
         if let Some(kg) = placement.fuel_kg {
             plane.set_fuel_kg(kg);
         }
         plane.bingo_kg = placement.bingo_kg.filter(|kg| *kg > 0.0);
         plane.radar_warn_m = placement.radar_warn_m.unwrap_or(super::map::DEFAULT_RADAR_WARN_M).max(0.0);
+        plane.set_colliders(colliders.clone());
         plane.arm_gear(&aircraft_spec.gear, placement.start.gear_down());
         plane.set_path(&flight_plan.0, Speed::Hold(cruise_speed(placement)), placement.difficulty, flight_plan.1);
         let plane = if placement.player { plane } else { plane.bot() };
@@ -540,7 +556,7 @@ impl flight_manager {
                     .double_sided(DoubleSidedMeshes::Meshes(aircraft_spec.model.double_sided.clone()))
                     .variant(placement.name.clone())
                     .scaled(aircraft_spec.model.scale))
-                .add_property(effects::plane_emitters(&aircraft_spec.effects, &aircraft_spec.gear))
+                .add_property(effects::plane_emitters(&aircraft_spec.effects, &aircraft_spec.gear, &aircraft_spec.aero.wings))
                 .add_property(physics)
                 .add_physics_behavior(AircraftPhysics::new(&aircraft_spec.aero, &aircraft_spec.engine, &aircraft_spec.gear, &aircraft_spec.effects, center_of_mass, colliders, mass, placement.start.gear_down()))
                 .add_physics_behavior(WaterContact::new(app.water.ocean.sea_level()).sinks(WRECK_FLOAT_SECONDS, WRECK_SINK_SECONDS)),
@@ -572,7 +588,8 @@ impl flight_manager {
             }
         });
         let countermeasures = loaded_countermeasures(&aircraft_spec, placement);
-        self.spawned.insert(placement.name.clone(), SpawnedAircraft { data_initial_velocity, hud_glass, countermeasures });
+        let cockpit_sill = aircraft_spec.cockpit_sill.clone();
+        self.spawned.insert(placement.name.clone(), SpawnedAircraft { data_initial_velocity, hud_glass, cockpit_sill, countermeasures });
         self.fired.remove(&placement.name);
         self.hang_stores(scene, app, placement, &aircraft_spec);
 
@@ -647,6 +664,10 @@ impl flight_manager {
         }
         self.hang_stores(scene, app, placement, &spec);
         if let Some(node) = scene.content.nodes.get_mut(&placement.name) {
+            if let Some(plane) = node.get_behavior_mut::<Plane>() {
+                plane.set_colliders(spec.physics.colliders.clone());
+                plane.set_gear_look(&spec.gear);
+            }
             node.push_physics_event(reload_event(spec, &placement.loadout));
         }
     }
@@ -667,6 +688,13 @@ impl flight_manager {
     /// `None` without one (see its data.ron `model: hud_glass`).
     pub fn hud_glass(&self, name: &str) -> Option<&[Vector3<f32>]> {
         self.spawned.get(name).and_then(|spawned| spawned.hud_glass.as_deref())
+    }
+
+    /// Where the aircraft `name` blocks the view from its own cockpit (its
+    /// data.ron `cockpit_sill` - see aircraft_spec::sill_elevation). Empty:
+    /// nowhere.
+    pub fn cockpit_sill(&self, name: &str) -> &[(f32, f32)] {
+        self.spawned.get(name).map_or(&[], |spawned| spawned.cockpit_sill.as_slice())
     }
 
     /// The aircraft `name`'s flares and chaff - `None` without any (see its
@@ -702,6 +730,9 @@ impl flight_manager {
 
         let plane = self.applied.find(name).map(|(_, placement)| placement.plane.clone());
         if let (Some(spec), Some(node)) = (plane.and_then(|plane| AircraftSpec::load(&plane).ok()), scene.content.nodes.get_mut(name)) {
+            if let Some(aircraft) = node.get_behavior_mut::<Plane>() {
+                aircraft.set_colliders(spec.physics.colliders.clone());
+            }
             node.push_physics_event(reload_event(spec, &remaining_loadout(&self.applied, &self.fired, name)));
         }
         Some((transform.position + transform.rotation * store.offset, transform.rotation))

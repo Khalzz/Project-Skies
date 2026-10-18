@@ -2,7 +2,7 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 
 use nalgebra::Vector3;
-use rapier3d::prelude::{Collider, ColliderSet, QueryPipeline, RigidBody, RigidBodyHandle, RigidBodySet};
+use rapier3d::prelude::{Collider, ColliderSet, NarrowPhase, QueryPipeline, RigidBody, RigidBodyHandle, RigidBodySet};
 
 use crate::engine::physics::physics::DebugPhysicsMessageType;
 use crate::engine::primitive::manual_vertex::ManualVertex;
@@ -190,7 +190,10 @@ impl PhysicsInput {
 pub struct PhysicsCtx<'a> {
     pub body: RigidBodyHandle,
     pub bodies: &'a mut RigidBodySet,
-    pub colliders: &'a ColliderSet,
+    pub colliders: &'a mut ColliderSet,
+    /// Contacts from the step that just ran. This step's own contacts are
+    /// written when the world advances, after `fixed_update`.
+    pub narrow_phase: &'a NarrowPhase,
     pub query: &'a QueryPipeline,
     input: &'a PhysicsInput,
 }
@@ -237,8 +240,8 @@ impl PhysicsNode {
 
     /// Runs every behavior's `fixed_update` for one step, then consumes the
     /// queued events so the next step doesn't see them again.
-    pub(crate) fn fixed_update(&mut self, bodies: &mut RigidBodySet, colliders: &ColliderSet, query: &QueryPipeline, dt: f32) {
-        let mut ctx = PhysicsCtx { body: self.body, bodies, colliders, query, input: &self.input };
+    pub(crate) fn fixed_update(&mut self, bodies: &mut RigidBodySet, colliders: &mut ColliderSet, narrow_phase: &NarrowPhase, query: &QueryPipeline, dt: f32) {
+        let mut ctx = PhysicsCtx { body: self.body, bodies, colliders, narrow_phase, query, input: &self.input };
         for behavior in self.behaviors.iter_mut() {
             behavior.fixed_update(&mut ctx, dt);
         }

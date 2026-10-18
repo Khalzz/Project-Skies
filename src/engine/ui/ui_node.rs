@@ -1,4 +1,4 @@
-use glyphon::{cosmic_text::Align, Color as GlyphonColor, FontSystem, TextArea};
+use glyphon::{cosmic_text::Align, Color as GlyphonColor, FontSystem, SwashCache, TextArea};
 use nalgebra::vector;
 use crate::app::{App, Size};
 use crate::engine::input::input;
@@ -338,6 +338,13 @@ fn point_in_rect(x: f32, y: f32, rect: &Rect) -> bool {
     x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
 }
 
+/// In the stacking flow. A child that called `.set_position(...)` is placed
+/// on its own (see the container layout loop) and must not add to its
+/// parent's size or push its siblings down.
+fn in_flow(node: &UiNode) -> bool {
+    node.is_active && node.pending_position.is_none()
+}
+
 impl UiNode {
     /// Fills in every field every constructor (`label`/`image`/`container`/
     /// `from_component`) needs identically, so they only have to state what's
@@ -483,7 +490,10 @@ impl UiNode {
     /// there's no support for a scrollable container nested inside another
     /// scrollable container narrowing this further via intersection, since
     /// nothing in this codebase does that yet.
-    pub fn node_content_preparation(&mut self, size: &Size, dpi_scale: f32, ui: &mut UiRendering, font_system: &mut FontSystem, delta_time: f32, hit_testable: bool, clip_rect: Option<&Rect>) -> (Vec<TextArea>, u16, u32) {
+    /// `ancestor_hover_text` is a color an ancestor asked every descendant to
+    /// draw while that ancestor is hovered (its own `.on_hover` text color).
+    /// `None` leaves each label on its own color.
+    pub fn node_content_preparation(&mut self, size: &Size, dpi_scale: f32, ui: &mut UiRendering, font_system: &mut FontSystem, text_cache: &mut SwashCache, delta_time: f32, hit_testable: bool, clip_rect: Option<&Rect>, ancestor_hover_text: Option<UiColor>) -> (Vec<TextArea>, u16, u32) {
         // Inactive nodes render nothing and can't be hovered/clicked - their
         // *parent's* layout loop is what skips giving them any space (this alone
         // wouldn't stop them occupying a stacking slot), see the Container branch
@@ -584,7 +594,15 @@ impl UiNode {
         // .clone() (not moved) - current.text_color()/font_size/alpha are still
         // read further down, in each UiNodeContent branch below, and a method call
         // like .text_color() needs the whole struct intact, not just its own field.
-        let effective_visibility = Visibility::new(current.background_color.clone(), current.border_color.clone(), current.corner_radius, current.border_width, border_edges, current.background_blur);
+        let mut effective_visibility = Visibility::new(current.background_color.clone(), current.border_color.clone(), current.corner_radius, current.border_width, border_edges, current.background_blur);
+        // A triangle (negative corner radius) takes its hover color from the
+        // square around it, which passes that color down as text color.
+        if current.corner_radius < 0.0 {
+            if let Some(color) = ancestor_hover_text {
+                effective_visibility.background_color = Fill::Solid(color);
+                effective_visibility.border_color = Fill::Solid(color);
+            }
+        }
 
         match &mut self.content {
             UiNodeContent::Text(label) => {
@@ -597,10 +615,12 @@ impl UiNode {
                 // interpolable, so it always uses this frame's target directly.
                 label.apply_style(font_system, current.font_size, effective_style.align.unwrap_or(Align::Left));
 
-                let (text_area, added_vertices, added_indices) = label.ui_node_data_creation(size, dpi_scale, &mut ui.vertices, &vertices_slice, &mut ui.indices, &indice_slice, &inner_rect, current.text_color(), clip_rect);
-                text_areas.push(text_area);
-                ui.num_vertices += added_vertices;
-                ui.num_indices += added_indices;
+                let text_color = ancestor_hover_text.map(GlyphonColor::from).unwrap_or_else(|| current.text_color());
+                ui.vertices.extend_from_slice(&vertices_slice);
+                ui.indices.extend_from_slice(&indice_slice);
+                ui.num_vertices += vertices_slice.len() as u16;
+                ui.num_indices += indice_slice.len() as u32;
+                text_areas.push(label.text_area(&inner_rect, dpi_scale, text_color, clip_rect));
             },
             UiNodeContent::Container(container) => {
                 let auto_width = self.transform.width == 0.0 || self.transform.fit.horizontal;
@@ -610,7 +630,9 @@ impl UiNode {
                 // cursor, and never have node_content_preparation called on them (so
                 // they render nothing) - same as CSS `display: none`, not
                 // `visibility: hidden` (which would still reserve their space).
-                let active_count = container.children.iter().filter(|(_, c)| c.is_active).count();
+                // Positioned children stay out of this count: they paint over
+                // the flow, they don't reserve a slot or a gap in it.
+                let flow_count = container.children.iter().filter(|(_, c)| in_flow(c)).count();
 
                 // Fit/auto-size width: measure children first, then grow from
                 // whichever edge self_anchor didn't pin - an End/Center-anchored axis
@@ -625,9 +647,9 @@ impl UiNode {
                     // each sits at its own cross-axis offset, so the widest one
                     // determines the container's width.
                     let natural_width: f32 = match self.transform.direction {
-                        Orientation::Horizontal => container.children.iter().filter(|(_, c)| c.is_active).map(|(_, c)| c.transform.width).sum::<f32>()
-                            + container.gap * (active_count.saturating_sub(1) as f32),
-                        Orientation::Vertical => container.children.iter().filter(|(_, c)| c.is_active).map(|(_, c)| c.transform.width).fold(0.0f32, |a, b| a.max(b)),
+                        Orientation::Horizontal => container.children.iter().filter(|(_, c)| in_flow(c)).map(|(_, c)| c.transform.width).sum::<f32>()
+                            + container.gap * (flow_count.saturating_sub(1) as f32),
+                        Orientation::Vertical => container.children.iter().filter(|(_, c)| in_flow(c)).map(|(_, c)| c.transform.width).fold(0.0f32, |a, b| a.max(b)),
                     };
                     let new_width = natural_width + self.padding.left + self.padding.right;
                     self.transform.width = new_width;
@@ -651,9 +673,9 @@ impl UiNode {
                 if auto_height && self.transform.self_anchor.vertical != Anchor::Start {
                     let direction = &self.transform.direction;
                     let natural_height: f32 = match direction {
-                        Orientation::Vertical => container.children.iter().filter(|(_, c)| c.is_active).map(|(_, c)| c.transform.height).sum::<f32>()
-                            + container.gap * (active_count.saturating_sub(1) as f32),
-                        Orientation::Horizontal => container.children.iter().filter(|(_, c)| c.is_active).map(|(_, c)| c.transform.height).fold(0.0f32, |a, b| a.max(b)),
+                        Orientation::Vertical => container.children.iter().filter(|(_, c)| in_flow(c)).map(|(_, c)| c.transform.height).sum::<f32>()
+                            + container.gap * (flow_count.saturating_sub(1) as f32),
+                        Orientation::Horizontal => container.children.iter().filter(|(_, c)| in_flow(c)).map(|(_, c)| c.transform.height).fold(0.0f32, |a, b| a.max(b)),
                     };
                     let new_height = natural_height + self.padding.top + self.padding.bottom;
                     self.transform.height = new_height;
@@ -701,10 +723,10 @@ impl UiNode {
                     Orientation::Vertical => c.transform.grow.vertical,
                     Orientation::Horizontal => c.transform.grow.horizontal,
                 };
-                let grow_count = container.children.iter().filter(|(_, c)| c.is_active && is_grow(c)).count();
+                let grow_count = container.children.iter().filter(|(_, c)| in_flow(c) && is_grow(c)).count();
                 if grow_count > 0 {
                     let fixed_main: f32 = container.children.iter()
-                        .filter(|(_, c)| c.is_active && !is_grow(c))
+                        .filter(|(_, c)| in_flow(c) && !is_grow(c))
                         .map(|(_, c)| match direction {
                             Orientation::Vertical => c.transform.height,
                             Orientation::Horizontal => c.transform.width,
@@ -714,7 +736,7 @@ impl UiNode {
                         Orientation::Vertical => content_h,
                         Orientation::Horizontal => content_w,
                     };
-                    let available = (content_main - fixed_main - gap * (active_count.saturating_sub(1) as f32)).max(0.0);
+                    let available = (content_main - fixed_main - gap * (flow_count.saturating_sub(1) as f32)).max(0.0);
                     let grow_size = available / grow_count as f32;
                     for (_, child) in &mut container.children {
                         if child.is_active && is_grow(child) {
@@ -740,7 +762,7 @@ impl UiNode {
                 // container's real current content_w/content_h keeps it correct
                 // regardless of how ancestors resize.
                 for (_, child) in &mut container.children {
-                    if !child.is_active {
+                    if !in_flow(child) {
                         continue;
                     }
                     match direction {
@@ -758,12 +780,12 @@ impl UiNode {
 
                 // Calculate total children size for centering/end alignment on main axis
                 let total_children_main: f32 = container.children.iter()
-                    .filter(|(_, c)| c.is_active)
+                    .filter(|(_, c)| in_flow(c))
                     .map(|(_, c)| match direction {
                         Orientation::Vertical => c.transform.height,
                         Orientation::Horizontal => c.transform.width,
                     })
-                    .sum::<f32>() + gap * (active_count.saturating_sub(1) as f32);
+                    .sum::<f32>() + gap * (flow_count.saturating_sub(1) as f32);
 
                 // Scroll (see UiNode::set_scrollable) - Vertical orientation only.
                 // max_scroll is how much of total_children_main doesn't fit in
@@ -816,7 +838,7 @@ impl UiNode {
                 // borrows container.children) since that loop's borrow otherwise
                 // outlives this function's return, see the E0502 this avoided.
                 let horizontal_cross_natural_height: f32 = container.children.iter()
-                    .filter(|(_, c)| c.is_active)
+                    .filter(|(_, c)| in_flow(c))
                     .map(|(_, c)| c.transform.height)
                     .fold(0.0f32, |a, b| a.max(b));
 
@@ -835,6 +857,20 @@ impl UiNode {
                 };
 
                 let mut end_extent = cursor;
+                // A hovered container can ask every label under it to draw in
+                // its hover text color, so one row lights up as a whole. A
+                // container that has its own hover text color keeps that for
+                // the moment it is actually hovered, and does not pass a
+                // parent's color through while it is resting - the arrow
+                // square uses this so the row's white doesn't recolor the
+                // triangle until the square itself is hovered.
+                let child_hover_text = if self.is_hovered {
+                    self.hover.as_ref().and_then(|style| style.text_color).or(ancestor_hover_text)
+                } else if self.hover.as_ref().and_then(|style| style.text_color).is_some() {
+                    None
+                } else {
+                    ancestor_hover_text
+                };
 
                 for (_id, child) in &mut container.children {
                     if !child.is_active {
@@ -855,14 +891,10 @@ impl UiNode {
                         // known until its own layout pass runs below, so (like every
                         // other per-frame measurement in this function) this has to
                         // be recomputed fresh each frame, not resolved once.
-                        // Doesn't advance the cursor or consume a gap - the
-                        // auto_width/auto_height/total_children_main math above still
-                        // counts this child's own size as if it were in flow, so
-                        // mixing a self-positioned child into a Fit/Center/End-anchored
-                        // container alongside flow siblings can still throw off their
-                        // sizing/centering; out of scope for this to handle generally,
-                        // fine for a self-positioned child that's the only one at its
-                        // level (e.g. a single title/panel offset from a corner).
+                        // Out of the stacking flow entirely (`in_flow`): no cursor
+                        // slot, no gap, and not counted in the parent's Fit size,
+                        // so it can hang over later siblings. Put it after those
+                        // siblings in the child list so it paints on top of them.
                         child.transform.resolve_position_in_rect(x, y, &content_rect);
                     } else {
                         // Position on main axis
@@ -900,7 +932,7 @@ impl UiNode {
                         child.transform.apply_transformation();
                     }
 
-                    let (child_text_areas, _cv, _ci) = child.node_content_preparation(size, dpi_scale, ui, font_system, delta_time, hit_testable, child_clip_rect);
+                    let (child_text_areas, _cv, _ci) = child.node_content_preparation(size, dpi_scale, ui, font_system, text_cache, delta_time, hit_testable, child_clip_rect, child_hover_text);
                     text_areas.extend(child_text_areas);
                 }
 

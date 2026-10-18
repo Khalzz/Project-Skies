@@ -27,6 +27,13 @@ rayon = "1"
 serde = { version = "1.0", features = ["derive"] }
 ron = "*"
 
+# Head tracking (TrackIR / OpenTrack). `status()` is true only after a frame
+# has arrived, which is what the settings dot and the Retry button wait on.
+head-tracking-rs = "0.2"
+# Same crate sdl2's raw-window-handle feature already pulls in. Needed here so
+# TrackIR can be given this game's window handle.
+raw-window-handle = "0.6"
+
 # Tooling
 egui = "0.32"
 egui-wgpu = "0.32"

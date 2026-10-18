@@ -102,6 +102,9 @@ pub struct WaterRenderData {
     wake_source: Option<WakeSource>,
     wake_trail: VecDeque<WakePoint>,
     wake_sample_timer: f32,
+    // Extra XZ added to the camera when phasing the waves, then cleared.
+    // The title uses it so the sea streams past a camera that stays put.
+    flow: (f32, f32),
 }
 
 impl WaterRenderData {
@@ -143,7 +146,14 @@ impl WaterRenderData {
             true,
         );
 
-        Self { depth_bind_group_layout, depth_bind_group, render_pipeline, ocean, ocean_buffer, tier_altitudes: Vec::new(), tier: 0, tiles: HashMap::new(), freeze_culling: false, frozen_frustum: None, stats: OceanDrawStats::default(), wake_source: None, wake_trail: VecDeque::new(), wake_sample_timer: 0.0 }
+        Self { depth_bind_group_layout, depth_bind_group, render_pipeline, ocean, ocean_buffer, tier_altitudes: Vec::new(), tier: 0, tiles: HashMap::new(), freeze_culling: false, frozen_frustum: None, stats: OceanDrawStats::default(), wake_source: None, wake_trail: VecDeque::new(), wake_sample_timer: 0.0, flow: (0.0, 0.0) }
+    }
+
+    /// Slides the wave field by `x`/`z` (world units) for this frame, as if
+    /// the camera had moved there. Cleared by `update`, so a scene sets it
+    /// every frame it wants the sea to stream; every other scene stays put.
+    pub fn set_flow(&mut self, x: f32, z: f32) {
+        self.flow = (x, z);
     }
 
     /// Advances the waves and uploads them for this frame, phased around
@@ -153,7 +163,9 @@ impl WaterRenderData {
         self.update_tier(camera_position.y);
         self.ocean.advance(delta_time);
         let intensity = self.update_wake(delta_time);
-        let mut uniform = self.ocean.uniform(camera_position.x, camera_position.z);
+        let (flow_x, flow_z) = self.flow;
+        self.flow = (0.0, 0.0);
+        let mut uniform = self.ocean.uniform(camera_position.x + flow_x, camera_position.z + flow_z);
         self.write_wake(&mut uniform, camera_position, intensity);
         queue.write_buffer(&self.ocean_buffer, 0, bytemuck::cast_slice(&[uniform]));
     }
@@ -263,6 +275,15 @@ impl WaterRenderData {
         Some(ranges)
     }
 
+    /// Slides an already-laid foam trail by `x`/`z` (world units). The title
+    /// jet doesn't move, so its wake is carried along with the sea instead.
+    pub fn scroll_wake(&mut self, x: f32, z: f32) {
+        for point in &mut self.wake_trail {
+            point.x += x as f64;
+            point.z += z as f64;
+        }
+    }
+
     /// What's stirring up the water this frame - the game calls this every
     /// frame (`None` when nothing is), before the water updates. How strongly
     /// it shows depends on its speed and how close it is to the water (see
@@ -300,6 +321,15 @@ impl WaterRenderData {
         self.wake_sample_timer += delta_time;
         if self.wake_sample_timer >= WAKE_SAMPLE_SECONDS {
             self.wake_sample_timer = 0.0;
+            // A source that jumped (the title, then a level) must not drag
+            // one foam line between the two places.
+            if self.wake_trail.front().is_some_and(|point| {
+                let dx = point.x - source.position.x as f64;
+                let dz = point.z - source.position.z as f64;
+                dx * dx + dz * dz > 500.0 * 500.0
+            }) {
+                self.wake_trail.clear();
+            }
             if intensity > 0.0 || !self.wake_trail.is_empty() {
                 self.wake_trail.push_front(WakePoint { x: source.position.x as f64, z: source.position.z as f64, age: 0.0, intensity });
                 self.wake_trail.truncate(MAX_WAKE_POINTS);

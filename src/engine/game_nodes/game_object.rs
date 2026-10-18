@@ -45,8 +45,9 @@ pub enum ColliderType {
     Trimesh { vertices: Vec<Vector3<f32>>, indices: Vec<[u32; 3]> },
     // The smallest convex shape around `points` (in the body's frame) - a
     // shape that follows an outline more closely than a box, still cheap
-    // and stable for a moving body. What a `Wing` resolves into.
-    ConvexHull { points: Vec<Vector3<f32>> },
+    // and stable for a moving body. What a `Wing` resolves into. `wing` is
+    // that surface's label, so a broken one can be told from the fuselage.
+    ConvexHull { points: Vec<Vector3<f32>>, #[serde(default)] wing: Option<String> },
     // A plane's data.ron only: a thin slab following that wing's planform
     // (its aero `shape` - taper, sweep, span), `thickness` meters thick -
     // so the wing collides where it really is. Resolved into a `ConvexHull`
@@ -56,6 +57,19 @@ pub enum ColliderType {
 
 fn default_wing_thickness() -> f32 {
     0.25
+}
+
+/// Stable id stamped on a wing collider (`Collider::user_data`) so the
+/// physics half can enable or disable that one surface. Never 0 - 0 is the
+/// fuselage and anything that isn't a wing.
+pub fn wing_collider_id(label: &str) -> u128 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in label.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    let id = hash as u128;
+    if id == 0 { 1 } else { id }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -80,6 +94,28 @@ pub struct Camera {
     pub position: Vector3<f32>,
     #[serde(default = "default_camera_fov")]
     pub fov: f32,
+    /// How far a head at this camera can move from `position` - None: no
+    /// limit. Used by the cockpit view (see `HeadLimits`).
+    #[serde(default)]
+    pub head_limits: Option<HeadLimits>,
+}
+
+/// The box a pilot's head stays inside, as offsets from the camera's
+/// `position` (m, the owner's frame: +X left, +Y up, +Z forward) - everything
+/// that moves the head (head tracking, G, looking over the shoulder) is
+/// clamped into it, so the eye can't pass through the cockpit around it.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq)]
+pub struct HeadLimits {
+    pub min: Vector3<f32>,
+    pub max: Vector3<f32>,
+}
+
+impl HeadLimits {
+    /// `offset` held inside the box, axis by axis.
+    pub fn clamp(&self, offset: Vector3<f32>) -> Vector3<f32> {
+        let (low, high) = (self.min.inf(&self.max), self.min.sup(&self.max));
+        offset.sup(&low).inf(&high)
+    }
 }
 
 pub type Cameras = HashMap<String, Camera>;

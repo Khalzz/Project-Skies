@@ -59,12 +59,18 @@ pub const HUD_READOUTS: [(&str, &str, f32, f32); 9] = [
     ("hud_altitude_warning", "WARN", HUD_WARN_FONT, HUD_WARN_SIZE.0),
     // The selected weapon, on the square's bottom edge, in attack.
     ("hud_weapon", "", 13.0, 160.0),
-    // Outside the right line's bottom corner, left-aligned.
-    ("hud_corner_fuel", "FUEL: 0", 12.0, 130.0),
-    ("hud_radar_altitude", "R: 0", 12.0, 130.0),
+    // Left of the fuel bar: percent of the tanks left.
+    ("hud_corner_fuel", "0%", 14.0, HUD_FUEL_PERCENT_WIDTH),
+    // Just outside the right line's bottom corner.
+    ("hud_radar_altitude", "R: 0", 12.0, HUD_RADAR_ALTITUDE_WIDTH),
     // The countermeasure setting, shown only just after it changes.
     ("hud_cms_cue", "", 16.0, 160.0),
 ];
+
+/// The fuel percent's and the radar altitude's boxes (px, before the HUD's
+/// scale) - the scene places them against the side lines by these.
+pub const HUD_FUEL_PERCENT_WIDTH: f32 = 44.0;
+pub const HUD_RADAR_ALTITUDE_WIDTH: f32 = 64.0;
 /// A HUD readout's box (px).
 pub const HUD_READOUT_SIZE: (f32, f32) = (64.0, 20.0);
 /// The low-altitude WARN cue: font size, and the box the text is clipped to
@@ -110,9 +116,9 @@ pub fn hud_heading_label_key(index: usize) -> String {
 /// The kill feed (see GameLogic::update_kill_feed): how many rows at most,
 /// each one's height, its text's size, the room either side of the text
 /// inside its box and between its pieces (px), and how many pieces of text
-/// a row has - killer, "killed", victim, "with ..." - each its own label, in
-/// its own color.
-pub const KILL_FEED_ROWS: usize = 5;
+/// a row has - who, what they did, which plane, the rest - each its own
+/// label, in its own color.
+pub const KILL_FEED_ROWS: usize = 8;
 pub const KILL_FEED_ROW_HEIGHT: f32 = 26.0;
 pub const KILL_FEED_FONT_SIZE: f32 = 13.0;
 pub const KILL_FEED_PADDING: f32 = 10.0;

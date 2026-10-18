@@ -15,3 +15,6 @@ Cargo.lock
 
 # Your own control rebinds - written by the game (Settings > Controller)
 settings/bindings.ron
+
+# Snapshot of the drag model before the tail / fuselage / parasitic change.
+drag-polar-before/

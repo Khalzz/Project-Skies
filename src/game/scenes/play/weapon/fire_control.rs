@@ -3,9 +3,10 @@
 //!
 //! With a guided missile selected (see play::scene's weapon list):
 //! - unlocked, the seeker rests on the nose (boresight - the diamond on the
-//!   HUD);
+//!   HUD) - or, cued by the pilot's helmet (`cue`), where the pilot looks,
+//!   as long as that's inside its gimbal limit;
 //! - the pilot locks it (`lock`) on the enemy in its small field of view
-//!   there, inside its range - the nearest, if there are several;
+//!   where it rests, inside its range - the nearest, if there are several;
 //! - the lock then holds wherever the target goes, inside the gimbal limit
 //!   and the seeker's range - even going down in flames, its heat still
 //!   there - until the pilot lets it go (`unlock`) or it's lost. Missiles
@@ -61,11 +62,26 @@ pub struct FireControl {
     pub seeker_direction: Vector3<f32>,
     /// What the pilot's locked the seeker on, by name.
     pub seeker_target: Option<String>,
+    /// Where the pilot's helmet points the unlocked seeker (a world
+    /// direction - the helmet display's cross), None: the nose. Set every
+    /// frame by whoever knows where the pilot looks.
+    pub cue: Option<Vector3<f32>>,
 }
 
 impl FireControl {
     pub fn new() -> Self {
-        Self { seeker_direction: Vector3::z(), seeker_target: None }
+        Self { seeker_direction: Vector3::z(), seeker_target: None, cue: None }
+    }
+
+    /// Where the unlocked seeker rests: the helmet's `cue`, while that's
+    /// inside the gimbal limit of `seeker` (the selected missile's) -
+    /// otherwise the nose.
+    pub fn rest_direction(&self, own: &OwnShip, seeker: &Guidance) -> Vector3<f32> {
+        let boresight = own.boresight();
+        self.cue
+            .and_then(|cue| cue.try_normalize(1e-6))
+            .filter(|cue| boresight.angle(cue).to_degrees() <= seeker.gimbal_limit_deg)
+            .unwrap_or(boresight)
     }
 
     /// Lets go of the lock - the pilot's unlocked, or another weapon was
@@ -74,11 +90,12 @@ impl FireControl {
         self.seeker_target = None;
     }
 
-    /// Locks the seeker (`seeker` - the selected missile's) on the enemy on
-    /// the nose: inside its field of view there and its range, the nearest
-    /// - not one already going down. Whether it found one.
+    /// Locks the seeker (`seeker` - the selected missile's) on the enemy
+    /// where it rests (the nose, or the helmet's cue - see `rest_direction`):
+    /// inside its field of view there and its range, the nearest - not one
+    /// already going down. Whether it found one.
     pub fn lock(&mut self, own: &OwnShip, contacts: &[Contact], seeker: &Guidance) -> bool {
-        self.seeker_target = on_the_nose(own, contacts, seeker);
+        self.seeker_target = in_seeker_view(own, contacts, seeker, self.rest_direction(own, seeker));
         self.seeker_target.is_some()
     }
 
@@ -111,9 +128,16 @@ impl FireControl {
         if target.is_none() {
             self.seeker_target = None;
         }
-        // Where it looks: at its target, or the nose.
-        let cue = target.map(|contact| (contact.position - own.position).normalize()).unwrap_or(boresight);
-        self.slew(cue, delta_time);
+        // Where it looks: at its target, or where it rests. Unlocked and cued
+        // by the helmet, it's on the pilot's line of sight straight away -
+        // the cross is the seeker, no lag behind the head.
+        let rest = self.rest_direction(own, seeker);
+        if target.is_none() && rest != boresight {
+            self.seeker_direction = rest;
+            return;
+        }
+        let look = target.map(|contact| (contact.position - own.position).normalize()).unwrap_or(rest);
+        self.slew(look, delta_time);
     }
 
     /// Turns the seeker toward `direction`, at its slew rate.
@@ -138,11 +162,42 @@ impl FireControl {
 /// its range - the nearest, not one already going down. What a lock takes,
 /// and what a missile fired without one grabs coming off the rail.
 pub fn on_the_nose(own: &OwnShip, contacts: &[Contact], seeker: &Guidance) -> Option<String> {
-    let boresight = own.boresight();
+    in_seeker_view(own, contacts, seeker, own.boresight())
+}
+
+/// The vertical lock's strip (degrees, in the jet's frame): how far either
+/// side of its symmetry plane, and from how far under the nose to how far
+/// over it - the line the HUD draws.
+pub const VERTICAL_SCAN_HALF_WIDTH_DEG: f32 = 5.0;
+pub const VERTICAL_SCAN_DOWN_DEG: f32 = 10.0;
+pub const VERTICAL_SCAN_UP_DEG: f32 = 60.0;
+
+/// The enemy in the vertical lock's strip (see VERTICAL_SCAN_*) and in the
+/// seeker's range - the nearest, not one already going down. What the
+/// vertical lock takes as soon as one passes through it.
+pub fn in_vertical_scan(own: &OwnShip, contacts: &[Contact], seeker: &Guidance) -> Option<String> {
     let range = |contact: &Contact| (contact.position - own.position).magnitude();
     contacts.iter()
         .filter(|contact| !contact.falling && range(contact) <= seeker.lock_range)
-        .filter(|contact| boresight.angle(&(contact.position - own.position)).to_degrees() <= SEEKER_FIELD_DEG)
+        .filter(|contact| {
+            let local = own.rotation.inverse() * (contact.position - own.position);
+            let distance = local.magnitude().max(1e-3);
+            // Off the jet's symmetry plane, and up from the nose within it.
+            let off_plane = (local.x / distance).clamp(-1.0, 1.0).asin().to_degrees().abs();
+            let up = local.y.atan2(local.z).to_degrees();
+            off_plane <= VERTICAL_SCAN_HALF_WIDTH_DEG && (-VERTICAL_SCAN_DOWN_DEG..=VERTICAL_SCAN_UP_DEG).contains(&up)
+        })
+        .min_by(|a, b| range(a).total_cmp(&range(b)))
+        .map(|contact| contact.name.clone())
+}
+
+/// The enemy in the seeker's field of view looking along `look` (a world
+/// direction) and in its range - the nearest, not one already going down.
+pub fn in_seeker_view(own: &OwnShip, contacts: &[Contact], seeker: &Guidance, look: Vector3<f32>) -> Option<String> {
+    let range = |contact: &Contact| (contact.position - own.position).magnitude();
+    contacts.iter()
+        .filter(|contact| !contact.falling && range(contact) <= seeker.lock_range)
+        .filter(|contact| look.angle(&(contact.position - own.position)).to_degrees() <= SEEKER_FIELD_DEG)
         .min_by(|a, b| range(a).total_cmp(&range(b)))
         .map(|contact| contact.name.clone())
 }
@@ -258,6 +313,35 @@ mod tests {
         assert_eq!(fire_control.locked(&wide, &own()), Some("bandit"));
         run(&mut fire_control, &[bandit("bandit", Vector3::new(0.0, 3000.0, -2000.0))], 0.1);
         assert_eq!(fire_control.seeker_target, None);
+    }
+
+    #[test]
+    fn the_helmet_points_the_seeker_inside_its_gimbal_limit() {
+        // 40 degrees off the nose, where the pilot looks: that's what locks.
+        let off_nose = bandit("off", Vector3::new(3000.0 * 40f32.to_radians().tan(), 3000.0, 3000.0));
+        let mut fire_control = FireControl::new();
+        fire_control.cue = Some((off_nose.position - own().position).normalize());
+        // Unlocked, the seeker is on the cue at once - no slewing after it.
+        run(&mut fire_control, &[], 1.0 / 60.0);
+        assert!(fire_control.seeker_direction.angle(&fire_control.cue.unwrap()) < 1e-4);
+        assert!(fire_control.lock(&own(), std::slice::from_ref(&off_nose), &seeker()));
+        assert_eq!(fire_control.seeker_target.as_deref(), Some("off"));
+        // Looking behind - past the 90 degree gimbal limit: back on the nose.
+        let mut fire_control = FireControl::new();
+        fire_control.cue = Some(-Vector3::z());
+        assert_eq!(fire_control.rest_direction(&own(), &seeker()), own().boresight());
+        assert!(!fire_control.lock(&own(), &[off_nose], &seeker()));
+    }
+
+    #[test]
+    fn the_vertical_lock_takes_what_passes_over_the_nose() {
+        // 40 degrees up over the nose, in range: in the strip.
+        let above = bandit("above", Vector3::new(0.0, 3000.0 + 3000.0 * 40f32.to_radians().tan(), 3000.0));
+        assert_eq!(in_vertical_scan(&own(), std::slice::from_ref(&above), &seeker()).as_deref(), Some("above"));
+        // The same height but 20 degrees off to the side; and below the strip.
+        let aside = bandit("aside", Vector3::new(3000.0 * 20f32.to_radians().tan(), 3000.0 + 3000.0 * 40f32.to_radians().tan(), 3000.0));
+        let under = bandit("under", Vector3::new(0.0, 3000.0 - 3000.0 * 30f32.to_radians().tan(), 3000.0));
+        assert_eq!(in_vertical_scan(&own(), &[aside, under], &seeker()), None);
     }
 
     #[test]

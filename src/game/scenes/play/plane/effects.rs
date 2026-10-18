@@ -8,6 +8,7 @@ use serde::Deserialize;
 
 use crate::engine::particles::{Curve, Emitter, Gradient, EmitterKind, EmissionShape, Facing, Forces, IntensityScales, ParticleEffect, ParticleEmitters, TrailEffect};
 
+use super::aero_spec::WingSpec;
 use super::gear_spec::GearSpec;
 
 /// What an emitter in a plane's data.ron makes - each kind is one effect
@@ -199,10 +200,70 @@ pub fn tyre_smoke() -> ParticleEffect {
     effect
 }
 
-/// The plane's emitters: every one its data.ron's `effects` lists, plus a
+/// Smoke off a damaged surface, named by its wing label.
+pub fn damage_smoke_name(label: &str) -> String {
+    format!("damage:{label}")
+}
+
+/// Fire on a badly damaged surface, beside `damage_smoke_name`.
+pub fn damage_fire_name(label: &str) -> String {
+    format!("damage:{label}:fire")
+}
+
+/// A thin grey trail off a hit surface. `Plane::update_effects` turns it up
+/// with how much HP is gone, so a nick is a wisp and a ruined wing is a plume.
+pub fn damage_smoke() -> ParticleEffect {
+    let mut effect = ParticleEffect::new()
+        .rate(16.0)
+        .per_meter(0.45)
+        .lifetime(1.8, 3.2)
+        .shape(EmissionShape::Sphere { radius: 0.35 })
+        // Aft, in the jet's frame, so the trail peels off behind the surface.
+        .direction(Vector3::new(0.0, 0.35, -1.0))
+        .cone(28.0)
+        .speed(1.5, 4.0)
+        .inherit_velocity(0.05)
+        .forces(Forces { gravity: -0.15, drag: 1.2, wind: 0.4, turbulence: 0.8 })
+        .spin(-30.0, 30.0)
+        .faceted(6)
+        .size_over_life(0.45, 3.2)
+        .color_over_life([0.18, 0.18, 0.18, 0.7], [0.35, 0.35, 0.35, 0.0])
+        .lit()
+        .max_particles(160);
+    effect.intensity_scales = IntensityScales { rate: true, alpha: true, size: true, speed: false };
+    effect
+}
+
+/// Flames on a surface that's lost about half its HP or more. Small and
+/// quick, licking aft off the skin, under the smoke.
+pub fn damage_fire() -> ParticleEffect {
+    let mut effect = ParticleEffect::new()
+        .rate(28.0)
+        .per_meter(0.2)
+        .lifetime(0.25, 0.6)
+        .shape(EmissionShape::Sphere { radius: 0.3 })
+        .direction(Vector3::new(0.0, 0.45, -1.0))
+        .cone(22.0)
+        .speed(1.0, 3.0)
+        .inherit_velocity(0.05)
+        .forces(Forces { gravity: -0.4, drag: 1.6, wind: 0.2, turbulence: 1.5 })
+        .spin(-50.0, 50.0)
+        .faceted(5)
+        .size_over_life(0.7, 0.15)
+        .color_over_life([1.0, 0.72, 0.25, 0.95], [0.85, 0.2, 0.04, 0.0])
+        .brightness(4.5)
+        .additive()
+        .max_particles(48);
+    effect.intensity_scales = IntensityScales { rate: true, alpha: true, size: true, speed: false };
+    effect
+}
+
+/// The plane's emitters: every one its data.ron's `effects` lists, a
 /// tyre-smoke one per wheel in its `gear` (placed on the wheel's contact
-/// each frame). All start off - `Plane::update_effects` switches them on.
-pub fn plane_emitters(effects: &[EffectSpec], gear: &GearSpec) -> ParticleEmitters {
+/// each frame), and smoke plus fire on every lifting surface (off until
+/// that surface is damaged). All start off - `Plane::update_effects`
+/// switches them on.
+pub fn plane_emitters(effects: &[EffectSpec], gear: &GearSpec, wings: &[WingSpec]) -> ParticleEmitters {
     let mut emitters = ParticleEmitters::new();
     for spec in effects {
         let emitter = match spec.effect {
@@ -217,6 +278,10 @@ pub fn plane_emitters(effects: &[EffectSpec], gear: &GearSpec) -> ParticleEmitte
     }
     for wheel in &gear.wheels {
         emitters.insert(tyre_smoke_name(&wheel.mesh), Emitter::particles(tyre_smoke()).at(wheel.position).intensity(0.0).disabled());
+    }
+    for wing in wings {
+        emitters.insert(damage_smoke_name(&wing.label), Emitter::particles(damage_smoke()).at(wing.pressure_center).intensity(0.0).disabled());
+        emitters.insert(damage_fire_name(&wing.label), Emitter::particles(damage_fire()).at(wing.pressure_center).intensity(0.0).disabled());
     }
     emitters
 }

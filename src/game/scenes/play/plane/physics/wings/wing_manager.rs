@@ -39,7 +39,13 @@ impl WingManager {
   /// see messages::AircraftReload). The flight computers keep their state,
   /// so the controls don't jolt as it happens.
   pub fn set_wings(&mut self, spec: &AeroSpec) {
+    let remaining: Vec<(String, f32)> = self.wings.iter().map(|wing| (wing.label.clone(), wing.hp)).collect();
     self.wings = Self::build_wings(spec);
+    for wing in &mut self.wings {
+      if let Some((_, hp)) = remaining.iter().find(|(label, _)| label == &wing.label) {
+        wing.hp = (*hp).min(wing.hp);
+      }
+    }
   }
 
   fn build_wings(spec: &AeroSpec) -> Vec<Wing> {
@@ -55,6 +61,7 @@ impl WingManager {
       w.incidence_angle,
       w.control_surface_area,
       w.surfaces.clone(),
+      w.hp,
     ); wing.shape = w.shape.clone(); wing }).collect()
   }
 
@@ -131,4 +138,64 @@ impl WingManager {
 /// Surfaces" view.
 pub fn aileron_for_side(side_x: f32, aileron: f32) -> f32 {
   if side_x > 0.0 { (-aileron).clamp(-1.0, 1.0) } else { aileron.clamp(-1.0, 1.0) }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::game::scenes::play::plane::aircraft_spec::AircraftSpec;
+  use nalgebra::Vector3;
+
+  fn f16() -> WingManager {
+    let spec = AircraftSpec::load("f16").expect("the F-16 loads");
+    WingManager::new(&spec.aero)
+  }
+
+  fn wing<'a>(manager: &'a WingManager, label: &str) -> &'a Wing {
+    manager.wings.iter().find(|wing| wing.label == label).unwrap()
+  }
+
+  #[test]
+  fn a_blast_on_a_wing_deletes_it_and_misses_the_rudder() {
+    let mut manager = f16();
+    let point = {
+      let wing = wing(&manager, "Left wing");
+      let shape = wing.shape.as_ref().unwrap();
+      shape.point(&wing.normal, 0.5, 0.5)
+    };
+    let radius = 1.0;
+    assert!(wing(&manager, "Rudder wing").distance_to_planform(point) > radius);
+    let hp = wing(&manager, "Left wing").hp;
+    for wing in &mut manager.wings {
+      wing.take_blast(point, radius, hp);
+    }
+    assert_eq!(wing(&manager, "Left wing").hp, 0.0);
+    assert!(wing(&manager, "Rudder wing").hp > 0.0);
+  }
+
+  #[test]
+  fn a_blast_at_the_edge_of_the_radius_leaves_the_wing_flying() {
+    let mut manager = f16();
+    let (point, radius) = {
+      let wing = wing(&manager, "Left wing");
+      let shape = wing.shape.as_ref().unwrap();
+      let on_it = shape.point(&wing.normal, 0.5, 0.5);
+      (on_it + Vector3::y() * 5.0, 10.0)
+    };
+    let before = wing(&manager, "Left wing").hp;
+    for wing in &mut manager.wings {
+      wing.take_blast(point, radius, before);
+    }
+    let left = wing(&manager, "Left wing");
+    assert!(left.hp > 0.0 && left.hp < before, "hp {}", left.hp);
+  }
+
+  #[test]
+  fn the_seat_is_a_separate_point_from_the_wing() {
+    let spec = AircraftSpec::load("f16").expect("the F-16 loads");
+    let seat = spec.aero.pilot_position;
+    let radius = 10.0;
+    assert!((seat - seat).magnitude() <= radius);
+    assert!((seat - (seat + Vector3::z() * (radius + 1.0))).magnitude() > radius);
+  }
 }

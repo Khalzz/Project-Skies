@@ -316,7 +316,7 @@ impl Countermeasures {
     pub fn heat_tracks(&self) -> Vec<TargetTrack> {
         self.flying.iter()
             .filter(|decoy| decoy.kind == Kind::Flare)
-            .map(|decoy| TargetTrack { name: decoy.node_id.clone(), position: decoy.position, velocity: decoy.velocity, heat: decoy.heat(), decoy: true })
+            .map(|decoy| TargetTrack { name: decoy.node_id.clone(), position: decoy.position, velocity: decoy.velocity, heat: decoy.heat(), decoy: true, rotation: UnitQuaternion::identity(), colliders: Vec::new(), reach: 0.0 })
             .filter(|track| track.heat > 0.05)
             .collect()
     }

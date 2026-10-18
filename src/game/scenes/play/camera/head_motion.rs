@@ -94,6 +94,9 @@ pub struct HeadPose {
     pub offset: Vector3<f32>,
     /// Head roll and pitch, applied under the pilot's own look direction.
     pub tilt: UnitQuaternion<f32>,
+    /// The roll in `tilt` (degrees, about +Z) - so the camera can keep the
+    /// head's whole roll, this and the tracker's, inside its limit.
+    pub roll_deg: f32,
 }
 
 pub struct HeadMotion {
@@ -145,7 +148,7 @@ impl HeadMotion {
         let roll = UnitQuaternion::from_axis_angle(&Vector3::z_axis(), roll_deg.to_radians());
         let pitch = UnitQuaternion::from_axis_angle(&Vector3::x_axis(), pitch_deg.to_radians());
 
-        HeadPose { offset: Vector3::new(shift_x, 0.0, shift_z), tilt: roll * pitch }
+        HeadPose { offset: Vector3::new(shift_x, 0.0, shift_z), tilt: roll * pitch, roll_deg }
     }
 }
 

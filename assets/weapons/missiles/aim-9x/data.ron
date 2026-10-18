@@ -58,13 +58,18 @@
   // When it goes off: this close to the target (active laser proximity
   // fuze), armed after arm_delay, self-destructs after max_flight_time (s).
   fuze: (
+    collider_proximity: true,
     proximity_radius: 8.0,
     arm_delay: 0.6,
     max_flight_time: 60.0,
   ),
+  // How long the trigger is held before it leaves the rail (s).
+  hold_to_launch: 0.5,
   // WDU-17/B annular blast-fragmentation warhead.
   warhead: (
     mass: 9.4, // kg
-    lethal_radius: 10.0, // meters - an aircraft this close is destroyed
+    lethal_radius: 10.0, // meters - damage falls to nothing here; a pilot this close is killed
+    damage: 100.0, // HP removed where the blast touches a surface
+    impulse: 36000.0, // N·s where it touches - about 3 m/s on a 12 t jet, less farther out
   ),
 )
