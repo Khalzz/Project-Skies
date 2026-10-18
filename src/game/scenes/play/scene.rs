@@ -144,6 +144,9 @@ pub struct GameLogic {
     // camera has moved), read by the next update_weapons to point the
     // seeker in the Fox-2 mode (see FireControl::cue).
     hmd_cue: std::cell::Cell<Option<Vector3<f32>>>,
+    // Which of the scene's frame plans is up - the M map's or flying's (see
+    // game::frame_plans) - so it's swapped only when the map opens or closes.
+    showing_map_plan: bool,
     // The helmet display is switched on ("toggle_hmd") - see draw_hmd.
     hmd_enabled: bool,
     // The vertical lock is on: the first enemy through the strip over the
@@ -669,6 +672,10 @@ impl GameLogic {
     }
 
     pub fn finish(scene: &mut Scene, app: &mut App, prepared: PreparedPlayAssets) -> Self {
+        // What a frame draws while flying, and the line and text sets it
+        // draws - see game::frame_plans.
+        crate::game::frame_plans::register_flight_sets(app);
+        app.frame_plan = crate::game::frame_plans::flight();
         scene.environment.skybox = prepared.environment.skybox;
         scene.environment.clear_color = prepared.environment.clear_color;
         app.scene_openned = Some(LEVEL_FOLDER.to_owned());
@@ -859,6 +866,7 @@ impl GameLogic {
             hud_symbol: None,
             player_body_velocity: None,
             hmd_cue: std::cell::Cell::new(None),
+            showing_map_plan: false,
             hmd_enabled: true,
             vertical_scan: false,
             lock_held: 0.0,
@@ -907,12 +915,12 @@ impl GameLogic {
             contour_lines(&ground_trimesh.0, &ground_trimesh.1, ground_position, ground_scale, sea_level),
             contour_lines(&runway_trimesh.0, &runway_trimesh.1, runway_position, runway_scale, sea_level),
         ].concat();
-        app.thick_lines.set_static(&app.renderer.device, &contours);
+        app.render_sets.lines("tactical_lines").set_static(&app.renderer.device, &contours);
         // The same land, solid for missiles - the aircraft's is on the
         // physics thread (the colliders below).
         world_collision.add_mesh(&ground_trimesh.0, &ground_trimesh.1, ground_position, ground_scale);
         world_collision.add_mesh(&runway_trimesh.0, &runway_trimesh.1, runway_position, runway_scale);
-        app.thick_lines.dynamic.clear();
+        app.render_sets.lines("tactical_lines").dynamic.clear();
         app.tactical_map_active = false;
         app.editor_active = false;
         scene.spawn_node(app,
@@ -1028,6 +1036,7 @@ impl GameLogic {
                     scale: Vector3::new(1.0, 1.0, 1.0),
                 })
                 .add_property(Model::new(crate::OCEAN_SURFACE_MODEL))
+                .add_property(crate::engine::scene_manager::properties::Material::shader(crate::engine::rendering::shader_library::WATER))
         ).expect("play should only spawn 'world' once");
     }
 
@@ -1631,7 +1640,7 @@ impl GameLogic {
             self.tactical_map.record(&live, app.time.delta_time);
         }
         if !self.tactical_map.open {
-            app.thick_lines.dynamic.clear();
+            app.render_sets.lines("tactical_lines").dynamic.clear();
             return;
         }
 
@@ -1729,9 +1738,9 @@ impl GameLogic {
         // flight plan.
         let picked_path = app.tactical_ui.selected_path.as_deref().and_then(|name| self.flight_manager.map().named_path(name)).cloned();
         let plan_of = if picked_path.is_some() { None } else { selected.as_deref() };
-        app.thick_lines.dynamic = self.tactical_map.lines(self.flight_manager.map(), &live, self.flight_manager.player_id(), plan_of, hovered.as_deref(), &view, sea_level);
+        app.render_sets.lines("tactical_lines").dynamic = self.tactical_map.lines(self.flight_manager.map(), &live, self.flight_manager.player_id(), plan_of, hovered.as_deref(), &view, sea_level);
         if let Some(path) = &picked_path {
-            tactical_map::flight_plan(&mut app.thick_lines.dynamic, &path.points, path.looped, None, sea_level, &view);
+            tactical_map::flight_plan(&mut app.render_sets.lines("tactical_lines").dynamic, &path.points, path.looped, None, sea_level, &view);
         }
         // The missiles in the air, in their shooter's colors.
         for missile in self.missiles.in_flight() {
@@ -1740,7 +1749,7 @@ impl GameLogic {
                 Some((coalition, _)) => [coalition.color.0, coalition.color.1, coalition.color.2].map(|channel| channel as f32 / 255.0),
                 None => [1.0, 1.0, 1.0],
             };
-            tactical_map::missile_marker(&mut app.thick_lines.dynamic, missile.position, missile.velocity, rgb, &view);
+            tactical_map::missile_marker(&mut app.render_sets.lines("tactical_lines").dynamic, missile.position, missile.velocity, rgb, &view);
         }
         self.fill_tactical_ui(scene, app, &live, selected.as_deref());
     }
@@ -2317,7 +2326,7 @@ impl GameLogic {
     fn update_editor_gizmos(&self, scene: &Scene, app: &mut App) {
         let spectating = app.flight_editor.telemetry.is_some();
         if !app.editor_active && !spectating {
-            app.editor_lines.dynamic.clear();
+            app.render_sets.lines("editor_lines").dynamic.clear();
             return;
         }
         let active = scene.cameras.active();
@@ -2373,7 +2382,7 @@ impl GameLogic {
                 }
             }
         }
-        app.editor_lines.dynamic = lines;
+        app.render_sets.lines("editor_lines").dynamic = lines;
     }
 
     /// Every aircraft still flying - where it is, how it's moving, how hot
@@ -2460,7 +2469,7 @@ impl GameLogic {
         let to_pixels = app.window_manager.pixel_size.height as f32 / (height as f32).max(1.0);
         for index in 0..3 {
             let (start, end) = (corners[index] * to_pixels, corners[(index + 1) % 3] * to_pixels);
-            app.hud_screen_lines.dynamic.push(LineInstance { start: [start.x, start.y, 0.0], end: [end.x, end.y, 0.0], color: COLOR, width: WIDTH });
+            app.render_sets.lines("hud_screen_lines").dynamic.push(LineInstance { start: [start.x, start.y, 0.0], end: [end.x, end.y, 0.0], color: COLOR, width: WIDTH });
         }
     }
 
@@ -2474,7 +2483,7 @@ impl GameLogic {
     fn update_heat_view(&mut self, scene: &Scene, app: &mut App) {
         // Past this many meters from the camera - not the jet it's sitting in.
         const MIN_DISTANCE: f32 = 30.0;
-        app.heat_screen_lines.dynamic.clear();
+        app.render_sets.lines("heat_screen_lines").dynamic.clear();
         if input::is_action_just_pressed("toggle_heat_view") {
             self.heat_view = !self.heat_view;
         }
@@ -2517,8 +2526,8 @@ impl GameLogic {
             let glow = apparent / (apparent + 1.0);
             let radius = 4.0 + 30.0 * glow;
             let color = heat_color(glow);
-            heat_blob(&mut app.heat_screen_lines.dynamic, (x, y), radius * 2.0, [color[0], color[1], color[2], 0.25 * glow + 0.05], to_pixels);
-            heat_blob(&mut app.heat_screen_lines.dynamic, (x, y), radius, [color[0], color[1], color[2], 0.95], to_pixels);
+            heat_blob(&mut app.render_sets.lines("heat_screen_lines").dynamic, (x, y), radius * 2.0, [color[0], color[1], color[2], 0.25 * glow + 0.05], to_pixels);
+            heat_blob(&mut app.render_sets.lines("heat_screen_lines").dynamic, (x, y), radius, [color[0], color[1], color[2], 0.95], to_pixels);
 
             let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &play_ui::heat_label_key(index)).filter(|_| index < play_ui::HEAT_LABELS) else { continue };
             node.set_active(true);
@@ -3064,12 +3073,12 @@ impl GameLogic {
         // The velocity marker's "o" on the plate (px) - the screen one's.
         const VELOCITY_MARKER_FONT: f32 = 14.0;
 
-        app.hud_horizon_lines.dynamic.clear();
-        app.hud_screen_lines.dynamic.clear();
-        app.hud_lines.dynamic.clear();
-        app.hud_text.clear();
-        app.hud_text.mask = None;
-        app.hmd_text.clear();
+        app.render_sets.lines("hud_horizon_lines").dynamic.clear();
+        app.render_sets.lines("hud_screen_lines").dynamic.clear();
+        app.render_sets.lines("hud_lines").dynamic.clear();
+        app.render_sets.text("hud_text").clear();
+        app.render_sets.text("hud_text").mask = None;
+        app.render_sets.text("hmd_text").clear();
         self.hmd_cue.set(None);
 
         let (screen_width, screen_height) = (app.window_manager.size.width as f32, app.window_manager.size.height as f32);
@@ -3226,8 +3235,8 @@ impl GameLogic {
         let plate_mask = glass_on_screen.as_ref().map(|points| {
             points.as_ref().and_then(|points| convex_mask(points, 0.0)).unwrap_or_else(|| vec![[0.0, 0.0, -1.0]])
         });
-        app.hud_lines.mask = plate_mask.clone();
-        app.hud_text.mask = plate_mask.clone();
+        app.render_sets.lines("hud_lines").mask = plate_mask.clone();
+        app.render_sets.text("hud_text").mask = plate_mask.clone();
         // The seeker's symbol - from any view, on the plate while it's up.
         if let Some(symbol) = self.hud_symbol.clone() {
             Self::draw_hud_symbol(scene, app, symbol, fixed_map.as_ref().map(|map| (map, plate_print)));
@@ -3251,7 +3260,7 @@ impl GameLogic {
             let mut from = bottom;
             while from < top {
                 let to = (from + DASH_DEG).min(top);
-                app.hud_lines.dynamic.push(LineInstance { start: at(from).into(), end: at(to).into(), color: COLOR, width: 1.5 * scale * plate_print });
+                app.render_sets.lines("hud_lines").dynamic.push(LineInstance { start: at(from).into(), end: at(to).into(), color: COLOR, width: 1.5 * scale * plate_print });
                 from += DASH_DEG + DASH_GAP_DEG;
             }
         }
@@ -3268,7 +3277,7 @@ impl GameLogic {
             if let Some(direction) = (map.aircraft_rot * body_velocity).try_normalize(0.1) {
                 let at = map.ray_held_in_frame(direction, VELOCITY_MARKER_FONT * 0.5 * scale * map.meters_per_pixel());
                 let color = UiColor::Rgb(0, 255, 77).to_rgba_f32();
-                app.hud_text.push(&mut app.ui.text.font_system, "o", HUD_FONT, map.text_frame(at, VELOCITY_MARKER_FONT * scale), color);
+                app.render_sets.text("hud_text").push(&mut app.ui.text.font_system, "o", HUD_FONT, map.text_frame(at, VELOCITY_MARKER_FONT * scale), color);
             }
         }
         // The helmet display, looking away from the HUD.
@@ -3339,7 +3348,7 @@ impl GameLogic {
                 let color = node.style.text_color.unwrap_or(UiColor::Rgb(0, 255, 77)).to_rgba_f32();
                 let font_size = hud_readout_font(key) * scale;
                 if let Some(label) = node.as_label_mut() {
-                    app.hud_text.push(&mut app.ui.text.font_system, label.text(), label.font(), map.text_frame(map.at(x, y), font_size), color);
+                    app.render_sets.text("hud_text").push(&mut app.ui.text.font_system, label.text(), label.font(), map.text_frame(map.at(x, y), font_size), color);
                 }
             }
         }
@@ -3461,8 +3470,8 @@ impl GameLogic {
             Some(CollimatedHud { map, visible, gpu_mask, print_scale })
         }).flatten() };
         if let Some(hud) = &collimated {
-            app.hud_horizon_lines.mask = hud.gpu_mask.clone();
-            app.hud_text.mask = hud.gpu_mask.clone();
+            app.render_sets.lines("hud_horizon_lines").mask = hud.gpu_mask.clone();
+            app.render_sets.text("hud_text").mask = hud.gpu_mask.clone();
         }
         let collimating = collimated.is_some();
         let map_for_lines = collimated.as_ref().filter(|hud| hud.visible).map(|hud| hud.map);
@@ -3476,11 +3485,11 @@ impl GameLogic {
                 if let Some(map) = map_for_lines {
                     let start = map.at(start.0, start.1);
                     let end = map.at(end.0, end.1);
-                    app.hud_horizon_lines.dynamic.push(LineInstance { start: start.into(), end: end.into(), color: line_color.get(), width: width * print_scale });
+                    app.render_sets.lines("hud_horizon_lines").dynamic.push(LineInstance { start: start.into(), end: end.into(), color: line_color.get(), width: width * print_scale });
                 }
                 return;
             }
-            app.hud_screen_lines.dynamic.push(LineInstance {
+            app.render_sets.lines("hud_screen_lines").dynamic.push(LineInstance {
                 start: [snap(start.0), snap(start.1), 0.0],
                 end: [snap(end.0), snap(end.1), 0.0],
                 color: line_color.get(),
@@ -3632,7 +3641,7 @@ impl GameLogic {
                 let color = node.style.text_color.unwrap_or(UiColor::Rgb(0, 255, 77)).to_rgba_f32();
                 if let (Some(label), true) = (node.as_label_mut(), hud.visible) {
                     let frame = hud.map.text_frame(hud.map.at(middle_x, heading_y), hud_readout_font("hud_heading") * scale);
-                    app.hud_text.push(&mut app.ui.text.font_system, label.text(), label.font(), frame, color);
+                    app.render_sets.text("hud_text").push(&mut app.ui.text.font_system, label.text(), label.font(), frame, color);
                 }
             }
         } else if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "hud_heading") {
@@ -3646,7 +3655,7 @@ impl GameLogic {
         let ladder_box = [(left_line, line_top), (right_line, line_top), (right_line, line_bottom), (left_line, line_bottom)]
             .map(|(x, y)| [x * to_pixels, y * to_pixels]);
         if collimated.is_none() {
-            app.hud_horizon_lines.mask = convex_mask(&ladder_box, 2.0 * to_pixels);
+            app.render_sets.lines("hud_horizon_lines").mask = convex_mask(&ladder_box, 2.0 * to_pixels);
         }
         let across = Vector3::y().cross(&toward);
         let eye = collimated.as_ref().map(|hud| hud.map.eye_world()).unwrap_or_else(|| active.camera.position().coords);
@@ -3705,7 +3714,7 @@ impl GameLogic {
                         end = clipped_end;
                     }
                     let width = if collimated.is_some() { line_w * print_scale } else { line_w };
-                    app.hud_horizon_lines.dynamic.push(LineInstance { start: start.into(), end: end.into(), color: COLOR, width });
+                    app.render_sets.lines("hud_horizon_lines").dynamic.push(LineInstance { start: start.into(), end: end.into(), color: COLOR, width });
                 }
                 // Its number past each end - not the horizon's.
                 if step != 0 {
@@ -3737,7 +3746,7 @@ impl GameLogic {
             }
             let color = UiColor::Rgb(0, 255, 77).to_rgba_f32();
             for (at, text) in glass_labels {
-                app.hud_text.push(&mut app.ui.text.font_system, &text, HUD_FONT, hud.map.text_frame(at, SMALL_LABEL_FONT * scale), color);
+                app.render_sets.text("hud_text").push(&mut app.ui.text.font_system, &text, HUD_FONT, hud.map.text_frame(at, SMALL_LABEL_FONT * scale), color);
             }
             return;
         }
@@ -3801,7 +3810,7 @@ impl GameLogic {
         let corners = [tip, base + across * half_width, base - across * half_width].map(|corner| map.from_plane(corner.x, corner.y));
         for index in 0..3 {
             let (start, end) = (corners[index], corners[(index + 1) % 3]);
-            app.hud_lines.dynamic.push(LineInstance { start: start.into(), end: end.into(), color, width: LINE_WIDTH * scale * print_scale });
+            app.render_sets.lines("hud_lines").dynamic.push(LineInstance { start: start.into(), end: end.into(), color, width: LINE_WIDTH * scale * print_scale });
         }
     }
 
@@ -3915,7 +3924,7 @@ impl GameLogic {
             self.hmd_cue.set(Some(look));
             let color = [COLOR[0], COLOR[1], COLOR[2], 0.9 * alpha];
             let mut boresight_line = |start: (f32, f32), end: (f32, f32)| {
-                app.hud_screen_lines.dynamic.push(LineInstance { start: [start.0, start.1, 0.0], end: [end.0, end.1, 0.0], color, width: line_width });
+                app.render_sets.lines("hud_screen_lines").dynamic.push(LineInstance { start: [start.0, start.1, 0.0], end: [end.0, end.1, 0.0], color, width: line_width });
             };
             let nose = map.aircraft_rot * Vector3::z();
             if nose.angle(&look).to_degrees() > limit {
@@ -4013,7 +4022,7 @@ impl GameLogic {
         }
 
         for (start, end) in lines {
-            app.hud_screen_lines.dynamic.push(LineInstance { start: [start.0, start.1, 0.0], end: [end.0, end.1, 0.0], color: line_color, width: line_width });
+            app.render_sets.lines("hud_screen_lines").dynamic.push(LineInstance { start: [start.0, start.1, 0.0], end: [end.0, end.1, 0.0], color: line_color, width: line_width });
         }
         // The bearing where the head points (north +Z, east -X - as the HUD's
         // heading tape has it); straight up or down, the last one stands.
@@ -4025,7 +4034,7 @@ impl GameLogic {
                 ("hud_heading", Some(bearing)) => bearing.clone(),
                 _ => label.text().to_owned(),
             };
-            app.hmd_text.push(&mut app.ui.text.font_system, &text, HUD_FONT, TextFrame::screen(x, y, READOUT_FONT * to_pixels), text_color);
+            app.render_sets.text("hmd_text").push(&mut app.ui.text.font_system, &text, HUD_FONT, TextFrame::screen(x, y, READOUT_FONT * to_pixels), text_color);
         }
     }
 
@@ -4084,7 +4093,7 @@ impl GameLogic {
         };
         for index in 0..4 {
             let (start, end) = (corners[index], corners[(index + 1) % 4]);
-            app.hud_lines.dynamic.push(LineInstance { start: start.into(), end: end.into(), color: COLOR, width });
+            app.render_sets.lines("hud_lines").dynamic.push(LineInstance { start: start.into(), end: end.into(), color: COLOR, width });
         }
     }
 
@@ -4417,6 +4426,12 @@ impl SceneBehaviour for GameLogic {
     }
 
     fn after_cameras(&mut self, scene: &mut Scene, app: &mut App) {
+        // The M map draws instead of the world - its own frame plan, swapped
+        // in for this frame's drawing whenever it's opened or closed.
+        if app.tactical_map_active != self.showing_map_plan {
+            self.showing_map_plan = app.tactical_map_active;
+            app.frame_plan = if self.showing_map_plan { crate::game::frame_plans::tactical_map() } else { crate::game::frame_plans::flight() };
+        }
         // While paused the HUD stays as the last flying frame left it.
         if !app.is_paused {
             self.update_hud(scene, app);

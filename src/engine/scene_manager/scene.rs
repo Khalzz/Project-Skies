@@ -16,7 +16,7 @@ use crate::engine::physics::physics_handler::{PhysicsCommand, RenderMessage};
 use crate::engine::physics::physics_resources::PhysicsObjectDef;
 use crate::engine::scene_manager::node::Node;
 use crate::engine::scene_manager::physics_bridge;
-use crate::engine::scene_manager::properties::{CameraLens, Model as NodeModelProperty, Parent, Space, SpawnedLive, Transform3D};
+use crate::engine::scene_manager::properties::{CameraLens, Material, Model as NodeModelProperty, Parent, Space, SpawnedLive, Transform3D};
 use crate::engine::scene_manager::render_bridge;
 use crate::engine::scene_manager::scene_nodes::SceneNodes;
 use crate::engine::rendering::models::model::Model as LoadedModel;
@@ -305,9 +305,9 @@ impl Scene {
 
     /// Every node's renderer instance to where the node is - position,
     /// rotation, and scale (the node's times its model's, see
-    /// `Model::render_scale`). Called every frame by `App::run` after the
-    /// hierarchy's resolved, so a node's `Transform3D` is the one place its
-    /// pose is set from.
+    /// `Model::render_scale`) - and to its `Material`. Called every frame by
+    /// `App::run` after the hierarchy's resolved, so a node's `Transform3D`
+    /// is the one place its pose is set from.
     pub fn sync_render_instances(&mut self) {
         let SceneContent { nodes, renderizable_instances, .. } = &mut self.content;
         for node in nodes.iter() {
@@ -317,6 +317,10 @@ impl Scene {
             instance.instance.transform.position = transform.position;
             instance.instance.transform.rotation = transform.rotation;
             instance.instance.transform.scale = render_scale;
+            let material = node.get_property::<Material>().map_or(crate::engine::rendering::shader_library::STANDARD, |material| material.shader.as_str());
+            if instance.material != material {
+                instance.material = material.to_owned();
+            }
         }
     }
 

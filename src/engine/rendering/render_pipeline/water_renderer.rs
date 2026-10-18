@@ -64,7 +64,7 @@ pub struct OceanDrawStats {
 type Frustum = [Vector4<f32>; 4];
 
 /// A second draw pipeline, alongside `App::render_pipeline`, used only for
-/// model_refs in `App::water_shaded_models` (see `render_pass.rs`'s own
+/// models whose material is "engine/water" (see `render_pass.rs`'s own
 /// `render_water_pass`, which is what actually draws with this instead of
 /// the generic `draw_model_instanced_from_list` every other model goes
 /// through). Group 3 (light) still rides the same shared bind group every

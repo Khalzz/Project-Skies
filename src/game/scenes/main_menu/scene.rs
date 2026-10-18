@@ -136,6 +136,7 @@ impl GameLogic {
                     scale: Vector3::new(1.0, 1.0, 1.0),
                 })
                 .add_property(Model::new(crate::OCEAN_SURFACE_MODEL))
+                .add_property(crate::engine::scene_manager::properties::Material::shader(crate::engine::rendering::shader_library::WATER))
         ).expect("main_menu should only spawn 'world' once");
     }
 

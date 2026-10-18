@@ -829,6 +829,7 @@ fn prepare_level_assets(device: &Device, queue: &Queue, camera_position: Vector3
                                     model: correct_model,
                                     instance_count,
                                     instance_buffer,
+                                    material_ranges: Vec::new(),
                                 }
                             );
                         },
@@ -837,7 +838,7 @@ fn prepare_level_assets(device: &Device, queue: &Queue, camera_position: Vector3
                 }
 
                 for (i, instance_data) in model_instances.iter().enumerate() {
-                    renderizable_instances.insert(ids[i].clone(), InstanceData { renderizable_transform: instance_data.transform.clone(), instance: (**instance_data).clone(), model_ref: model_name.clone() });
+                    renderizable_instances.insert(ids[i].clone(), InstanceData { renderizable_transform: instance_data.transform.clone(), instance: (**instance_data).clone(), model_ref: model_name.clone(), material: crate::engine::rendering::shader_library::STANDARD.to_owned() });
                 }
             }
         },

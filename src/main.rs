@@ -75,6 +75,12 @@ async fn main() -> Result<(), String> {
     // Game Tooling
     match App::new("Pankarta Software", None, None).await {
         Ok(mut app) => {
+            // The game's own shaders, by name - assets/shaders/hologram.wgsl is
+            // "hologram" (see engine::rendering::shader_library).
+            app.shaders.add_folder("assets/shaders");
+            // What every scene draws unless it sets up its own frame plan.
+            app.default_frame_plan = game::frame_plans::standard();
+            app.frame_plan = game::frame_plans::standard();
             app.splash_screen = Some(
                 SplashScreenConfig::new(wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }, Duration::from_secs(3))
                     .with_text("A Pankarta Software Production")
@@ -105,11 +111,11 @@ async fn main() -> Result<(), String> {
             // The ocean surface - one level-of-detail mesh of nested square
             // rings, in altitude tiers (see OCEAN_TIERS). Spawn it at scale 1 and keep it
             // recentered under the camera (see play::scene::update_water_plane);
-            // drawn with the animated water shader (see App::water_shaded_models).
+            // drawn with the animated water shader (its nodes' material is
+            // "engine/water").
             if let Err(e) = resources::register_primitive_model(&mut app, OCEAN_SURFACE_MODEL, resources::PrimitiveShape::WaterRings { tiers: OCEAN_TIERS }) {
                 eprintln!("{e}");
             }
-            app.water_shaded_models.insert(OCEAN_SURFACE_MODEL.to_owned());
             // A stand-in model for nodes that need to exist in the render
             // world but are never drawn - e.g. the "sun" (only its position
             // is read, see App::run's lighting). Generated, so free to load.

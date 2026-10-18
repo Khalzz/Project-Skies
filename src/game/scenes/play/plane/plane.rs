@@ -5,7 +5,7 @@ use nalgebra::{UnitQuaternion, Vector3};
 use crate::app::App;
 use crate::engine::input::input;
 use crate::engine::physics::water_contact::WaterContactState;
-use crate::engine::rendering::render_pipeline::render_pass::AeroSample;
+use crate::game::debug_overlay::AeroSample;
 use crate::engine::rendering::camera::handler::SceneCameras;
 use crate::engine::scene_manager::behavior::Behavior;
 use crate::engine::scene_manager::node::Node;

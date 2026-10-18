@@ -9,6 +9,9 @@ pub struct InstanceData {
     pub renderizable_transform: Transform,
     pub instance: GameObject,
     pub model_ref: String,
+    /// The shader it's drawn with (its node's `Material`) - see
+    /// engine::rendering::shader_library.
+    pub material: String,
 }
 
 #[derive(Clone)]
@@ -36,6 +39,10 @@ pub struct ModelDataInstance {
     pub model: Model,
     pub instance_buffer: Buffer,
     pub instance_count: u32,
+    /// Which of this frame's instances (in the buffer, in order) each
+    /// material draws - they're written sorted by material, so each is one
+    /// run (see App::run). Empty until the first frame's written.
+    pub material_ranges: Vec<(String, std::ops::Range<u32>)>,
 }
 
 #[derive(Debug, Deserialize)]

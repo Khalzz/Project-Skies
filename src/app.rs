@@ -6,7 +6,7 @@ use wgpu::{BindGroupLayout, BindGroupLayoutDescriptor, Device, DeviceDescriptor,
 use sdl2::{JoystickSubsystem, GameControllerSubsystem, HapticSubsystem};
 use glyphon::{Cache, Resolution, TextArea, Viewport};
 
-use crate::engine::rendering::render_pipeline::render_pass::{AeroSample, DebugWindows};
+use crate::game::debug_overlay::{AeroSample, DebugWindows};
 use crate::engine::audio::audio::Audio;
 use crate::engine::physics::physics::{DebugPhysicsMessageType, PhysicsDataTransmission};
 use crate::engine::physics::physics_handler::{RenderMessage, PhysicsCommand};
@@ -60,24 +60,15 @@ pub struct App {
     // Placeholder pool/starting scene at construction time - the real configuration
     // is assigned by the caller (see main.rs) before App::run is called.
     pub scene_manager: SceneManager,
-    pub render_pipeline: wgpu::RenderPipeline,
-    // Model pipeline variants (see App::new):
-    //  _double_sided          - backface culling off (opaque pass), for meshes
-    //                           whose Mesh::double_sided is set (declared per
-    //                           model at registration, see resources::DoubleSided)
-    //  _transparent           - depth test but no depth write, so transparent
-    //                           faces don't occlude each other
-    //  _transparent_front_cull- front-culling variant of the above, for the
-    //                           first (far-side) pass of a double-sided
-    //                           transparent mesh
-    pub render_pipeline_double_sided: wgpu::RenderPipeline,
-    pub render_pipeline_transparent: wgpu::RenderPipeline,
-    pub render_pipeline_transparent_front_cull: wgpu::RenderPipeline,
-    // A second pipeline (water.wgsl) used only for model_refs listed in
-    // water_shaded_models - see render_pass.rs's own per-model pipeline
-    // selection and WaterRenderData's own doc comment.
+    // The shaders models are drawn with, by name (see engine::rendering::
+    // shader_library) - and where each material in use is drawn this frame
+    // (worked out at the start of the frame plan).
+    pub shaders: crate::engine::rendering::shader_library::ShaderLibrary,
+    pub material_placements: HashMap<String, crate::engine::rendering::shader_library::Placement>,
+    // The ocean's renderer (water.wgsl) - draws the models whose material
+    // is "engine/water", in the frame plan's "water" pass (see
+    // WaterRenderData's own doc comment).
     pub water: WaterRenderData,
-    pub water_shaded_models: HashSet<String>,
     // What a scene's background load is on right now (see LoadReporter) -
     // shown by the loading screen, None when nothing's loading.
     pub loading_step: Option<String>,
@@ -110,12 +101,21 @@ pub struct App {
     // play::scene::GameLogic::update_flight_editor) - drawn by the same egui
     // overlay pass.
     pub flight_editor: FlightEditor,
-    // M's map (see play::tactical_map) - while set, the world isn't drawn: a
-    // dark screen and `thick_lines` instead (see render_tactical_map_pass).
+    // M's map (see play::tactical_map) is up - the play scene draws it
+    // instead of the world (see game::frame_plans::tactical_map).
     pub tactical_map_active: bool,
+    // What a frame draws, in order (see engine::rendering::frame) - the
+    // active scene's, set in its start; back to `default_frame_plan` on a
+    // scene change, which the game sets once.
+    pub frame_plan: crate::engine::rendering::frame::FramePlan,
+    pub default_frame_plan: crate::engine::rendering::frame::FramePlan,
+    // The line and text sets the frame plan's steps draw - the active
+    // scene's, registered in its start, dropped on a scene change (see
+    // engine::rendering::render_sets).
+    pub render_sets: crate::engine::rendering::render_sets::RenderSets,
     // F10's editor - the world drawn as usual, seen through a free editor
-    // camera, with the editor's panels round it and `editor_lines` (cameras'
-    // views, paths, links) over it (see render_editor_lines_pass).
+    // camera, with the editor's panels round it and the "editor_lines" set
+    // (cameras' views, paths, links) over it.
     pub editor_active: bool,
     // F10 on the title (see main_menu::scene). The shot's camera, jet, and
     // which way the sea travels. Drawn by the egui overlay while `open`.
@@ -128,7 +128,6 @@ pub struct App {
     // the play scene sees it (see play::scene's telemetry), drawn over the
     // game by the egui overlay pass. None otherwise.
     pub spectate_telemetry: Option<crate::game::scenes::play::flight_editor::Telemetry>,
-    pub editor_lines: crate::engine::rendering::thick_lines::ThickLines,
     // The tactical map's buttons, selection and flight plan window (see
     // play::tactical_ui) - drawn by the egui overlay pass while it's up.
     pub tactical_ui: crate::game::scenes::play::tactical_ui::TacticalUi,
@@ -137,29 +136,6 @@ pub struct App {
     // FlightEditor::draw_docked), set by the egui pass each frame. None: the
     // whole screen.
     pub tactical_viewport: Option<[f32; 4]>,
-    // Lines a fixed number of pixels thick (see engine::rendering::
-    // thick_lines) - what the tactical map is drawn with.
-    pub thick_lines: crate::engine::rendering::thick_lines::ThickLines,
-    // The flight HUD's symbols drawn in the world - the seeker's diamond,
-    // the radar's target box (see play::scene::update_weapons_hud). Over the
-    // 3D view, under the UI; refilled every frame (`dynamic`).
-    pub hud_lines: crate::engine::rendering::thick_lines::ThickLines,
-    // The HUD's horizon and pitch ladder - like `hud_lines`, but only seen
-    // inside the HUD's box (its `mask`, set with them every frame).
-    pub hud_horizon_lines: crate::engine::rendering::thick_lines::ThickLines,
-    // HUD lines in screen pixels (the speed/altitude tapes, the range
-    // scale) - see ThickLines::screen_space.
-    pub hud_screen_lines: crate::engine::rendering::thick_lines::ThickLines,
-    // HUD text laid on the HUD's glass or plate in the world, so it grows and
-    // shrinks with them (zoom) - drawn after the HUD's lines, inside its
-    // `mask`; refilled every frame. See SdfText.
-    pub hud_text: crate::engine::rendering::sdf_text::SdfText,
-    // The helmet display's text (the F-16's JHMCS: speed and altitude while
-    // looking away from the HUD) - in screen pixels; refilled every frame.
-    pub hmd_text: crate::engine::rendering::sdf_text::SdfText,
-    // F8 heat blobs, also in screen pixels, drawn after the grey grade so
-    // they keep their color (see play::scene::update_heat_view).
-    pub heat_screen_lines: crate::engine::rendering::thick_lines::ThickLines,
     // The SDL cursor showing for egui's cursor request, and which one it is
     // - kept alive while it's set (see render_pass.rs's apply_egui_cursor).
     pub egui_cursor: Option<(egui::CursorIcon, sdl2::mouse::Cursor)>,
@@ -321,39 +297,10 @@ impl App {
             push_constant_ranges: &[],
         });
         
-        // SHADERING PROCESS
-        // Four variants of the same model pipeline (one shader + layout):
-        //   cull mode      : Back (default) | None (double-sided meshes)
-        //   depth write    : on (opaque pass) | off (transparent pass, so
-        //                    transparent faces test depth but don't occlude
-        //                    each other)
-        // draw_model_instanced_from_list picks cull per mesh from
-        // Mesh::double_sided; render_pass picks the depth-write pair per pass.
-        let make_model_pipeline = |cull_mode, depth_write| {
-            rendering_utils::create_render_pipeline(
-                &renderer.device,
-                &render_pipeline_layout,
-                renderer.config.format,
-                Some(Texture::DEPTH_FORMAT),
-                &[model::ModelVertex::desc(), InstanceRaw::desc()],
-                wgpu::ShaderModuleDescriptor {
-                    label: Some("Normal Shader"),
-                    source: wgpu::ShaderSource::Wgsl(include_str!("engine/shaders/depth.wgsl").into()),
-                },
-                cull_mode,
-                depth_write,
-            )
-        };
-        let render_pipeline = make_model_pipeline(Some(wgpu::Face::Back), true);
-        let render_pipeline_double_sided = make_model_pipeline(None, true);
-        let render_pipeline_transparent = make_model_pipeline(Some(wgpu::Face::Back), false);
-        // A double-sided TRANSPARENT mesh is drawn twice: back faces (far
-        // side) with this front-culling pipeline, then front faces (near
-        // side) with `render_pipeline_transparent`. That's automatically
-        // far-to-near for a roughly convex shell (the afterburner cone, a
-        // canopy), so the near wall blends over the far wall correctly with
-        // no per-triangle sorting.
-        let render_pipeline_transparent_front_cull = make_model_pipeline(Some(wgpu::Face::Front), false);
+        // Every model is drawn with a shader from here, by its material's
+        // name (see engine::rendering::shader_library) - built when first
+        // used, with these bind groups.
+        let shaders = crate::engine::rendering::shader_library::ShaderLibrary::new(renderer.device.clone(), renderer.config.format, render_pipeline_layout);
 
         let water = WaterRenderData::new(&renderer.device, &renderer.config, &camera_resources, &light, &renderer.depth_render.foam_depth_copy.view, &renderer.depth_render.foam_depth_copy.sampler);
 
@@ -368,17 +315,6 @@ impl App {
 
         // physics rendering
         let render_physics = RenderPhysics::new(&renderer.device, &renderer.config, &camera_resources);
-        let thick_lines = crate::engine::rendering::thick_lines::ThickLines::new(&renderer.device, renderer.config.format, &camera_resources);
-        let hud_lines = crate::engine::rendering::thick_lines::ThickLines::new(&renderer.device, renderer.config.format, &camera_resources);
-        let editor_lines = crate::engine::rendering::thick_lines::ThickLines::new(&renderer.device, renderer.config.format, &camera_resources);
-        let hud_horizon_lines = crate::engine::rendering::thick_lines::ThickLines::new(&renderer.device, renderer.config.format, &camera_resources);
-        let mut hud_screen_lines = crate::engine::rendering::thick_lines::ThickLines::new(&renderer.device, renderer.config.format, &camera_resources);
-        hud_screen_lines.screen_space = true;
-        let hud_text = crate::engine::rendering::sdf_text::SdfText::new(&renderer.device, renderer.config.format, &camera_resources);
-        let mut hmd_text = crate::engine::rendering::sdf_text::SdfText::new(&renderer.device, renderer.config.format, &camera_resources);
-        hmd_text.screen_space = true;
-        let mut heat_screen_lines = crate::engine::rendering::thick_lines::ThickLines::new(&renderer.device, renderer.config.format, &camera_resources);
-        heat_screen_lines.screen_space = true;
 
         let egui_overlay = crate::engine::rendering::egui_overlay::EguiOverlay::new(&renderer.device, renderer.config.format);
 
@@ -389,12 +325,9 @@ impl App {
             window_manager,
             renderer,
             scene_manager: SceneManager::new(),
-            render_pipeline,
-            render_pipeline_double_sided,
-            render_pipeline_transparent,
-            render_pipeline_transparent_front_cull,
+            shaders,
+            material_placements: HashMap::new(),
             water,
-            water_shaded_models: HashSet::new(),
             loading_step: None,
             particles,
             water_debug_view: false,
@@ -403,20 +336,15 @@ impl App {
             debug_mouse_free: false,
             flight_editor: FlightEditor::default(),
             tactical_map_active: false,
+            frame_plan: crate::engine::rendering::frame::FramePlan::engine_default(),
+            default_frame_plan: crate::engine::rendering::frame::FramePlan::engine_default(),
+            render_sets: Default::default(),
             tactical_ui: Default::default(),
             tactical_viewport: None,
-            thick_lines,
-            hud_lines,
-            editor_lines,
             editor_active: false,
             menu_shot: crate::game::scenes::main_menu::scene::MenuShot::default(),
             hud_layout: crate::game::scenes::play::scene::HudLayout::default(),
             spectate_telemetry: None,
-            hud_horizon_lines,
-            hud_screen_lines,
-            hud_text,
-            hmd_text,
-            heat_screen_lines,
             egui_cursor: None,
             infinite_drag: None,
             world_lines: Vec::new(),
@@ -524,6 +452,23 @@ impl App {
             })
         });
         self.particles.update(&self.renderer.device, &self.renderer.queue, &frame, sources);
+    }
+
+    /// Registers a line set for the frame plan's `Lines` steps - see
+    /// engine::rendering::render_sets. `screen_space`: in screen pixels, not
+    /// the world.
+    pub fn add_line_set(&mut self, name: &str, screen_space: bool) {
+        let mut lines = crate::engine::rendering::thick_lines::ThickLines::new(&self.renderer.device, self.renderer.config.format, &self.camera_resources);
+        lines.screen_space = screen_space;
+        self.render_sets.insert_lines(name, lines);
+    }
+
+    /// Registers an SDF text set for the frame plan's `Text` steps (see
+    /// `add_line_set`).
+    pub fn add_text_set(&mut self, name: &str, screen_space: bool) {
+        let mut text = crate::engine::rendering::sdf_text::SdfText::new(&self.renderer.device, self.renderer.config.format, &self.camera_resources);
+        text.screen_space = screen_space;
+        self.render_sets.insert_text(name, text);
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -888,13 +833,10 @@ impl App {
                 if let Some(old_physics) = physics_data_channel.take() {
                     let _ = old_physics.request_data_tx.send(PhysicsCommand::Shutdown);
                 }
-                // Nor does the flight HUD's symbology.
-                self.hud_lines.dynamic.clear();
-                self.hud_horizon_lines.dynamic.clear();
-                self.hud_screen_lines.dynamic.clear();
-                self.hud_text.clear();
-                self.hmd_text.clear();
-                self.heat_screen_lines.dynamic.clear();
+                // Nor do its frame plan and its line and text sets - the new
+                // scene sets up its own as it starts.
+                self.render_sets.clear();
+                self.frame_plan = self.default_frame_plan.clone();
 
                 // The scene doesn't exist yet at this point - SceneManager::create_scene/
                 // create_loaded_scene only registered its constructor. Clone it out first
@@ -1223,6 +1165,10 @@ impl App {
                             self.ui.always_on_bottom.clear();
                             self.ui.has_changed = true;
 
+                            // The loading screen's frame plan and sets go - the
+                            // scene sets up its own as it starts.
+                            self.render_sets.clear();
+                            self.frame_plan = self.default_frame_plan.clone();
                             // Its models are loaded already - spawning finds them.
                             resources::adopt_level_models(&mut self, prepared.models);
                             // Spawning the scene (its finish) is on this thread
@@ -1253,25 +1199,36 @@ impl App {
                     }
                 }
 
-                // Update instance buffers efficiently - group by model type
+                // Update instance buffers efficiently - group by model type,
+                // each model's sorted by material, so every material draws
+                // one run of them (ModelDataInstance::material_ranges).
                 let camera_position = self.scene_manager.cameras().map(|c| c.active().camera.position().coords).unwrap_or_else(nalgebra::Vector3::zeros);
-                let mut model_instances: HashMap<String, Vec<InstanceRaw>> = HashMap::new();
+                let mut model_instances: HashMap<&str, Vec<(&str, InstanceRaw)>> = HashMap::new();
 
                 if let Some(content) = self.scene_manager.content() {
                     for (_key, renderizable) in &content.renderizable_instances {
                         model_instances
-                            .entry(renderizable.model_ref.clone())
+                            .entry(renderizable.model_ref.as_str())
                             .or_insert_with(Vec::new)
-                            .push(renderizable.instance.transform.to_raw(camera_position));
+                            .push((renderizable.material.as_str(), renderizable.instance.transform.to_raw(camera_position)));
                     }
                 }
 
                 // Write all instances for each model type at once
-                for (model_ref, instances) in model_instances {
-                    if let Some(model) = self.game_models.get(&model_ref) {
-                        if !instances.is_empty() {
-                            self.renderer.queue.write_buffer(&model.instance_buffer, 0, bytemuck::cast_slice(&instances));
+                for (model_ref, model) in self.game_models.iter_mut() {
+                    model.material_ranges.clear();
+                    let Some(instances) = model_instances.get_mut(model_ref.as_str()) else { continue };
+                    instances.sort_by(|a, b| a.0.cmp(b.0));
+                    let mut start = 0;
+                    for index in 1..=instances.len() {
+                        if index == instances.len() || instances[index].0 != instances[start].0 {
+                            model.material_ranges.push((instances[start].0.to_owned(), start as u32..index as u32));
+                            start = index;
                         }
+                    }
+                    let raws: Vec<InstanceRaw> = instances.iter().map(|(_, raw)| *raw).collect();
+                    if !raws.is_empty() {
+                        self.renderer.queue.write_buffer(&model.instance_buffer, 0, bytemuck::cast_slice(&raws));
                     }
                 }
 
@@ -1317,6 +1274,8 @@ impl App {
                     self.camera_resources.update_buffer(&self.renderer.queue, cameras.active());
                 }
                 self.update_particles();
+                // A game shader's file saved: built again (see ShaderLibrary::watch).
+                self.shaders.watch();
                 self.renderer.queue.write_buffer(&self.renderer.depth_render.near_far_buffer, 0, bytemuck::cast_slice(&[self.renderer.depth_render.near_far_uniform]));
 
                 // TEMP: debug_text!/F3 messages have nowhere on-screen to render yet

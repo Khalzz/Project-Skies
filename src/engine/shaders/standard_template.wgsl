@@ -1,6 +1,12 @@
-// Define near and far planes for the depth calculation
-const NEAR: f32 = 0.1;  // Near plane distance
-const FAR: f32 = 10000.0;  // Far plane distance
+// The template every Surface shader is built from (see engine::rendering::
+// shader_library): the engine's inputs, the vertex and fragment work, and
+// two hooks the shader fills in - pasted where the HOOKS line is. A hook it
+// leaves out gets the default: `vertex` changes nothing, `fragment` returns
+// the lit color. "engine/standard" is this with both defaults.
+//
+// Inputs (the model pipelines' bind groups - there are only four):
+//   0 - the mesh's texture   1 - the camera
+//   2 - the mesh's transform 3 - the light (it carries the time too)
 
 struct CameraUniform {
     view_proj: mat4x4<f32>,
@@ -14,7 +20,14 @@ struct Transform {
 struct Light {
     position: vec3<f32>,
     color: vec3<f32>,
+    time: f32,
+    camera_position: vec3<f32>,
 }
+
+@group(0) @binding(0)
+var t_diffuse: texture_2d<f32>;
+@group(0) @binding(1)
+var s_diffuse: sampler;
 
 @group(1) @binding(0)
 var<uniform> camera: CameraUniform;
@@ -24,6 +37,48 @@ var<uniform> transform: Transform;
 
 @group(3) @binding(0)
 var<uniform> light: Light;
+
+// What every hook can read, as `engine`.
+struct Engine {
+    // Seconds, counting up (back to 0 every 10000 s).
+    time: f32,
+    // The camera's true position in the world - every position a hook gets
+    // is relative to it (add it back for the true world position).
+    camera_position: vec3<f32>,
+    // Which way the sun is, and its light's color.
+    sun_direction: vec3<f32>,
+    sun_color: vec3<f32>,
+}
+var<private> engine: Engine;
+
+fn engine_values() -> Engine {
+    return Engine(light.time, light.camera_position, normalize(light.position), light.color);
+}
+
+// The `vertex` hook's vertex: where it is (relative to the camera), its
+// normal and its texture coordinates.
+struct VertexIn {
+    position: vec3<f32>,
+    normal: vec3<f32>,
+    uv: vec2<f32>,
+}
+
+// The `fragment` hook's pixel.
+struct FragmentIn {
+    // Where it is: relative to the camera, and in the world.
+    position: vec3<f32>,
+    world_position: vec3<f32>,
+    // The surface's normal (unit length), facing the side that's seen.
+    normal: vec3<f32>,
+    uv: vec2<f32>,
+    // The mesh's own texture here, and the color engine/standard draws -
+    // lit by the sun, fogged far away.
+    base_color: vec4<f32>,
+    lit_color: vec4<f32>,
+    front_facing: bool,
+}
+
+//@HOOKS
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -53,6 +108,7 @@ struct VertexOutput {
 
 @vertex
 fn vs_main(model: VertexInput, instance: InstanceInput) -> VertexOutput {
+    engine = engine_values();
     let model_matrix = mat4x4<f32>(
         instance.model_matrix_0,
         instance.model_matrix_1,
@@ -66,29 +122,24 @@ fn vs_main(model: VertexInput, instance: InstanceInput) -> VertexOutput {
         instance.normal_matrix_2,
     );
 
+    let world_position = model_matrix * transform.model_matrix * vec4<f32>(model.position, 1.0);
+    let v = vertex(VertexIn(world_position.xyz, normal_matrix * model.normal, model.tex_coords));
+
     var out: VertexOutput;
-
-    out.tex_coords = model.tex_coords;
-    out.world_normal = normal_matrix * model.normal;
-    var world_position: vec4<f32> = model_matrix * transform.model_matrix * vec4<f32>(model.position, 1.0);
-    out.world_position = world_position.xyz;
-
-    out.tex_coords = model.tex_coords;
-    out.clip_position = camera.view_proj * world_position;
+    out.tex_coords = v.uv;
+    out.world_normal = v.normal;
+    out.world_position = v.position;
+    out.clip_position = camera.view_proj * vec4<f32>(v.position, 1.0);
 
     // Calculate view-space depth for fog, using the camera's view position
     out.view_depth = length(camera.view_pos.xyz - out.world_position);
-    
+
     return out;
 }
 
-@group(0) @binding(0)
-var t_diffuse: texture_2d<f32>;
-@group(0) @binding(1)
-var s_diffuse: sampler;
-
 @fragment
 fn fs_main(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> @location(0) vec4<f32> {
+    engine = engine_values();
     let object_color: vec4<f32> = textureSample(t_diffuse, s_diffuse, in.tex_coords);
 
     // For double-sided meshes (backface culling off) the back face is
@@ -108,12 +159,6 @@ fn fs_main(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> @loca
     let diffuse_strength = max(dot(normal, light_dir), 0.0);
     let diffuse_color = light.color * diffuse_strength;
 
-    let view_dir = normalize(camera.view_pos.xyz - in.world_position);
-    let reflect_dir = reflect(-light_dir, normal);
-
-    let specular_strength = pow(max(dot(view_dir, reflect_dir), 0.0), 32.0);
-    let specular_color = specular_strength * light.color;
-
     let result = (ambient_color + diffuse_color) * object_color.xyz;
 
     // Long-distance atmospheric haze - same start/end as water.wgsl's fog,
@@ -123,6 +168,7 @@ fn fs_main(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> @loca
     let fog_end = 1400000.0;
     let fog_factor = smoothstep(fog_start, fog_end, in.view_depth);
     let fogged_color = mix(result, vec3<f32>(0.448, 0.604, 0.711), fog_factor);
+    let lit = vec4<f32>(fogged_color, object_color.a);
 
-    return vec4<f32>(fogged_color, object_color.a);
+    return fragment(FragmentIn(in.world_position, in.world_position + engine.camera_position, normal, in.tex_coords, object_color, lit, front_facing));
 }

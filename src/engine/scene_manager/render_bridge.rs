@@ -3,7 +3,8 @@ use crate::engine::game_nodes::game_object::{GameObject, MetaData, Transform as 
 use crate::engine::rendering::instance_management::{InstanceData, ModelDataInstance};
 use crate::resources;
 
-use super::properties::{Model, Transform3D};
+use super::properties::{Material, Model, Transform3D};
+use crate::engine::rendering::shader_library::STANDARD;
 use super::scene::Scene;
 
 /// Bridges a spawned `Node`'s `Transform3D`+`Model` properties into the
@@ -51,6 +52,7 @@ pub fn register_static_model(scene: &mut Scene, app: &mut App, id: &str) -> Resu
     let node = scene.content.nodes.get(id).ok_or_else(|| format!("no node named '{id}' to register"))?;
     let transform = *node.get_property::<Transform3D>().ok_or_else(|| format!("node '{id}' has no Transform3D property"))?;
     let model = node.get_property::<Model>().ok_or_else(|| format!("node '{id}' has no Model property"))?;
+    let material = node.get_property::<Material>().map_or_else(|| STANDARD.to_owned(), |material| material.shader.clone());
     // Node scale x the model's own - see Model::render_scale.
     let render_scale = model.render_scale(transform.scale);
     // Where the model comes from: its own file (Model::from_file), a name
@@ -90,6 +92,7 @@ pub fn register_static_model(scene: &mut Scene, app: &mut App, id: &str) -> Resu
         renderizable_transform: game_object.transform,
         instance: game_object,
         model_ref: model_ref.clone(),
+        material,
     });
 
     // Rebuild the shared instance buffer from every renderizable instance
@@ -106,6 +109,7 @@ pub fn register_static_model(scene: &mut Scene, app: &mut App, id: &str) -> Resu
         model: loaded_model,
         instance_buffer,
         instance_count,
+        material_ranges: Vec::new(),
     });
 
     Ok(())

@@ -176,6 +176,11 @@ impl ThickLines {
         Self { pipeline, uniform_buffer, uniform_bind_group, static_buffer: None, dynamic: Vec::new(), dynamic_buffer: None, mask: None, screen_space: false }
     }
 
+    /// Nothing to draw - no static set and no `dynamic` lines.
+    pub fn is_empty(&self) -> bool {
+        self.static_buffer.is_none() && self.dynamic.is_empty()
+    }
+
     /// Replaces the static set - drawn every time, under `dynamic`. Empty
     /// clears it.
     pub fn set_static(&mut self, device: &wgpu::Device, lines: &[LineInstance]) {

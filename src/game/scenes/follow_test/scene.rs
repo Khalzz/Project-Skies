@@ -99,7 +99,8 @@ impl GameLogic {
                         rotation: UnitQuaternion::identity(),
                         scale: Vector3::new(1.0, 1.0, 1.0),
                     })
-                    .add_property(Model::new(crate::OCEAN_SURFACE_MODEL)),
+                    .add_property(Model::new(crate::OCEAN_SURFACE_MODEL))
+                .add_property(crate::engine::scene_manager::properties::Material::shader(crate::engine::rendering::shader_library::WATER)),
             )
             .expect("follow_test should only spawn 'world' once");
         // The MQ-9 drone - the node the follow camera will track. Static for

@@ -1,0 +1,9 @@
+// examples/glow.wgsl's settings - see engine::rendering::shader_library's
+// ShaderSettings. Anything left out takes its default.
+(
+    kind: Surface,          // Surface (3D hooks) | Ui (2D hooks) | Raw (a whole shader)
+    pass: "transparent",    // a scene pass in the frame plan, by name
+    blend: Additive,        // Alpha | Additive | None
+    cull: None,             // Back | Front | None - None: both sides show
+    depth_write: false,     // see-through: doesn't hide what's behind it
+)

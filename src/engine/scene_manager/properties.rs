@@ -2,6 +2,21 @@ use nalgebra::{UnitQuaternion, Vector3};
 
 use crate::resources::{DoubleSidedMeshes, ModelSource};
 
+/// A `Node` property choosing the shader its model is drawn with, by name
+/// (see engine::rendering::shader_library) - "engine/standard", or one of
+/// the game's like "hologram" (`assets/shaders/hologram.wgsl`). A node
+/// without one is drawn with "engine/standard".
+#[derive(Debug, Clone, PartialEq)]
+pub struct Material {
+    pub shader: String,
+}
+
+impl Material {
+    pub fn shader(name: impl Into<String>) -> Self {
+        Self { shader: name.into() }
+    }
+}
+
 /// A `Node` property giving it a 3D position/rotation/scale.
 ///
 /// Deliberately independent of `crate::transform::Transform` and
