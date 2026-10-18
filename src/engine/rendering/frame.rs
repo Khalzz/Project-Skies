@@ -15,7 +15,9 @@
 //!   over the world;
 //! - `Lines`/`Text` - a named set of thick lines or SDF text;
 //! - `Ui` - one layer of the UI;
-//! - `Fullscreen` - a shader run over the whole of the current target;
+//! - `Fullscreen` - a Fullscreen shader run over the whole of the current
+//!   target, by material name (see engine::rendering::shader_library) - how
+//!   the world gets onto the screen (engine/blit, or a game's own);
 //! - `Custom` - anything else, as code given the encoder and the target.
 //!
 //! Each scene can set its own (`App::frame_plan`, in its start); on a scene
@@ -61,9 +63,8 @@ impl FramePlan {
     }
 
     /// What a scene draws when nothing says otherwise: the world (models,
-    /// water, see-through models, particles), composited onto the screen,
-    /// and the UI over it. The "hud" target is cleared and left empty, so
-    /// the composite has nothing extra to lay over the world.
+    /// a "water" pass for a sea, see-through models, particles), copied onto
+    /// the screen (engine/blit), and the UI over it.
     pub fn engine_default() -> Self {
         Self::new()
             .scene("opaque")
@@ -71,11 +72,8 @@ impl FramePlan {
             .scene("water")
             .scene("transparent")
             .particles()
-            .target("hud", true)
-                .ui(UiLayer::Main)
-            .end_target()
-            .fullscreen("engine/scene_blit")
-            .ui(UiLayer::OnTop)
+            .fullscreen(crate::engine::rendering::shader_library::BLIT)
+            .ui(UiLayer::All)
     }
 
     fn step(mut self, step: FrameStep) -> Self {

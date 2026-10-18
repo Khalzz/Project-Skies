@@ -1,7 +1,8 @@
 //! The ocean's wave field - one set of waves, generated from a real wind-sea
-//! spectrum, drawn by the water shader (water.wgsl, via `OceanUniform`). The
-//! waves are visual only: gameplay treats the water as a flat plane at the
-//! sea's rest level (`OceanWaves::sea_level`).
+//! spectrum, drawn by the ocean shader (assets/shaders/ocean.wgsl, through
+//! its material's params - see `OceanWaves::params`). The waves are visual
+//! only: gameplay treats the water as a flat plane at the sea's rest level
+//! (`OceanWaves::sea_level`).
 //!
 //! Two groups of waves:
 //! - geometry waves (`OceanSettings::geometry_waves`) - Gerstner waves that
@@ -19,10 +20,11 @@
 //! speed sets a believable sea state.
 //!
 //! Precision: phases are computed on the CPU in f64, relative to the camera,
-//! every frame (`OceanWaves::uniform`) - the GPU only ever multiplies small
+//! every frame (`OceanWaves::params`) - the GPU only ever multiplies small
 //! camera-relative distances, so waves stay crisp arbitrarily far from the
 //! world origin, and the clock never wraps.
 
+use std::collections::BTreeMap;
 use std::f64::consts::TAU;
 
 use rand::rngs::StdRng;
@@ -32,10 +34,10 @@ const GRAVITY: f64 = 9.81;
 /// Phillips constant of the Pierson-Moskowitz spectrum.
 const PM_ALPHA: f64 = 0.0081;
 
-/// Must match `MAX_WAVES` in water.wgsl.
+/// Must match `MAX_WAVES` in ocean.wgsl.
 pub const MAX_WAVES: usize = 80;
 /// How many trail points the plane's wake can send the shader - must match
-/// `MAX_WAKE_POINTS` in water.wgsl. See WaterRenderData's wake.
+/// `MAX_WAKE_POINTS` in ocean.wgsl. See game::ocean's wake.
 pub const MAX_WAKE_POINTS: usize = 32;
 
 #[derive(Clone, Debug)]
@@ -117,33 +119,6 @@ impl Wave {
     fn phase_at(&self, x: f64, z: f64, t: f64) -> f64 {
         self.k * (self.direction[0] * x + self.direction[1] * z) - self.omega * t + self.phase
     }
-}
-
-/// GPU copy of the wave field - layout must match `Ocean` in water.wgsl.
-/// Each wave is two vec4s: (dir.x, dir.z, k, amplitude) and
-/// (steepness, phase at the camera, wavelength, unused).
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct OceanUniform {
-    /// geometry wave count, detail wave count, base height, color height scale
-    params: [f32; 4],
-    /// choppiness, whitecap strength, detail strength, wind direction (radians)
-    shading: [f32; 4],
-    waves: [[f32; 4]; MAX_WAVES * 2],
-    // The low-flying plane's wake (see WaterRenderData::update_wake) - all
-    // zero when there's none. Filled in by the renderer, not here.
-    /// Plane: camera-relative x, z, height above the water, intensity 0..1.
-    pub wake_head: [f32; 4],
-    /// Circle around the whole wake (camera-relative x, z, radius) - the
-    /// shader skips pixels outside it - and the trail's max age (seconds).
-    pub wake_bounds: [f32; 4],
-    /// Trail point count, flight direction (horizontal unit x, z), unused.
-    pub wake_info: [f32; 4],
-    /// Trail, newest first: camera-relative x, z, age (s), intensity 0..1.
-    pub wake_points: [[f32; 4]; MAX_WAKE_POINTS],
-    /// Camera world x, z wrapped to WAKE_NOISE_PERIOD (so it stays precise
-    /// anywhere), unused x2 - pins the foam's noise to the water.
-    pub wake_anchor: [f32; 4],
 }
 
 /// The wake foam's noise repeats every this many meters (too far apart to
@@ -275,25 +250,24 @@ impl OceanWaves {
         self.base_height as f32
     }
 
-    /// This frame's GPU copy, with every wave's phase already evaluated at
-    /// `camera` (true world XZ) in f64 - see this module's doc comment.
-    pub fn uniform(&self, camera_x: f32, camera_z: f32) -> OceanUniform {
-        let mut waves = [[0.0f32; 4]; MAX_WAVES * 2];
+    /// This frame's waves for the ocean shader's `Ocean` params - `params`,
+    /// `shading`, `waves` (see ocean.wgsl) - with every wave's phase already
+    /// evaluated at `camera` (true world XZ) in f64 - see this module's doc
+    /// comment. Each wave is two vec4s: (dir.x, dir.z, k, amplitude) and
+    /// (steepness, phase at the camera, wavelength, unused).
+    pub fn params(&self, camera_x: f32, camera_z: f32) -> BTreeMap<String, Vec<f32>> {
+        let mut waves = vec![0.0f32; MAX_WAVES * 2 * 4];
         for (slot, wave) in self.geometry.iter().chain(self.detail.iter()).enumerate() {
             let phase = wave.phase_at(camera_x as f64, camera_z as f64, self.time).rem_euclid(TAU);
-            waves[slot * 2] = [wave.direction[0] as f32, wave.direction[1] as f32, wave.k as f32, wave.amplitude as f32];
-            waves[slot * 2 + 1] = [wave.steepness as f32, phase as f32, wave.wavelength() as f32, 0.0];
+            waves[slot * 8..slot * 8 + 8].copy_from_slice(&[
+                wave.direction[0] as f32, wave.direction[1] as f32, wave.k as f32, wave.amplitude as f32,
+                wave.steepness as f32, phase as f32, wave.wavelength() as f32, 0.0,
+            ]);
         }
-
-        OceanUniform {
-            params: [self.geometry.len() as f32, self.detail.len() as f32, self.base_height as f32, self.color_height_scale as f32],
-            shading: [self.settings.choppiness, self.settings.whitecap_strength, self.settings.detail_strength, self.settings.wind_direction],
-            waves,
-            wake_head: [0.0; 4],
-            wake_bounds: [0.0; 4],
-            wake_info: [0.0; 4],
-            wake_points: [[0.0; 4]; MAX_WAKE_POINTS],
-            wake_anchor: [0.0; 4],
-        }
+        BTreeMap::from([
+            ("params".to_owned(), vec![self.geometry.len() as f32, self.detail.len() as f32, self.base_height as f32, self.color_height_scale as f32]),
+            ("shading".to_owned(), vec![self.settings.choppiness, self.settings.whitecap_strength, self.settings.detail_strength, self.settings.wind_direction]),
+            ("waves".to_owned(), waves),
+        ])
     }
 }

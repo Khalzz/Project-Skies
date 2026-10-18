@@ -1132,7 +1132,7 @@ impl FlightEditor {
                 (position, rotation, Some(speed), 0.8)
             }
         };
-        AircraftPlacement { name, plane, player: false, position, rotation, speed, throttle, path: Vec::new(), follow: None, loadout: Default::default(), flares: None, chaff: None, fuel_kg: None, bingo_kg: None, radar_warn_m: None, difficulty: Default::default(), start }
+        AircraftPlacement { name, plane, player: false, position, rotation, speed, throttle, path: Vec::new(), follow: None, loadout: Default::default(), flares: None, chaff: None, fuel_kg: None, bingo_kg: None, radar_warn_m: None, difficulty: Default::default(), start, material: None }
     }
 }
 

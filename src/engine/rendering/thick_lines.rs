@@ -1,7 +1,8 @@
 //! Thick lines - segments drawn a fixed number of pixels wide whatever their
 //! distance, for views made of lines (the play scene's F10 tactical map).
-//! Each segment is one GPU instance that the shader (thick_lines.wgsl)
-//! widens into a quad on screen, so a big, unchanging set (a terrain's
+//! Each segment is one GPU instance that the shader widens into a quad on
+//! screen (thick_lines_template.wgsl - drawn with the set's `material`, a
+//! Lines shader: engine/thick_lines unless it says otherwise), so a big, unchanging set (a terrain's
 //! contours) is uploaded once (`set_static`) and only what moves is sent
 //! every frame (`dynamic`).
 //!
@@ -11,7 +12,7 @@
 
 use wgpu::util::DeviceExt;
 
-use crate::engine::rendering::camera::handler::CameraResources;
+use crate::engine::scene_manager::properties::Material;
 
 /// One segment, in world space - `width` in pixels, `color` RGBA (alpha
 /// blends).
@@ -27,19 +28,34 @@ pub struct LineInstance {
 impl LineInstance {
     const ATTRIBUTES: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32];
 
-    fn layout() -> wgpu::VertexBufferLayout<'static> {
-        wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<LineInstance>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Instance,
-            attributes: &Self::ATTRIBUTES,
-        }
+}
+
+/// The segments' vertex layout - one LineInstance per instance.
+pub(crate) fn line_layout() -> wgpu::VertexBufferLayout<'static> {
+    wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<LineInstance>() as wgpu::BufferAddress,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &LineInstance::ATTRIBUTES,
     }
+}
+
+/// A line set's own bind group (group 2 of a Lines shader): its uniform.
+pub(crate) fn bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Thick lines uniform layout"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+            count: None,
+        }],
+    })
 }
 
 /// The most edges a mask's outline can have - see `convex_mask`.
 pub const MAX_MASK_EDGES: usize = 32;
 
-/// The shader's own uniform - see thick_lines.wgsl's LineUniform.
+/// The set's own uniform - see thick_lines_template.wgsl's LineUniform.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct LineUniform {
@@ -54,7 +70,9 @@ struct LineUniform {
 }
 
 pub struct ThickLines {
-    pipeline: wgpu::RenderPipeline,
+    /// What it's drawn with - a Lines shader (see engine::rendering::
+    /// shader_library), engine/thick_lines unless set otherwise.
+    pub material: Material,
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
     /// Uploaded once by `set_static` - drawn first.
@@ -112,68 +130,28 @@ pub fn convex_mask(points: &[[f32; 2]], inset: f32) -> Option<Vec<[f32; 3]>> {
 }
 
 impl ThickLines {
-    pub fn new(device: &wgpu::Device, color_format: wgpu::TextureFormat, camera: &CameraResources) -> Self {
+    /// `layout`: ShaderLibrary::overlay_layout(Overlay::Lines).
+    pub fn new(device: &wgpu::Device, layout: &wgpu::BindGroupLayout) -> Self {
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Thick lines uniform"),
             contents: bytemuck::cast_slice(&[LineUniform { camera_position: [0.0; 4], screen: [1.0; 4], mask_info: [0.0; 4], mask: [[0.0; 4]; MAX_MASK_EDGES] }]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
-        let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Thick lines uniform layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
-                count: None,
-            }],
-        });
         let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Thick lines uniform bind group"),
-            layout: &uniform_layout,
+            layout,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniform_buffer.as_entire_binding() }],
         });
-
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Thick lines pipeline layout"),
-            bind_group_layouts: &[&uniform_layout, &camera.bind_group_layout],
-            push_constant_ranges: &[],
-        });
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Thick lines shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/thick_lines.wgsl").into()),
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Thick lines pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[LineInstance::layout()],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: color_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                // Quads can come out either winding once projected.
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState { count: 1, mask: !0, alpha_to_coverage_enabled: false },
-            multiview: None,
-            cache: None,
-        });
-
-        Self { pipeline, uniform_buffer, uniform_bind_group, static_buffer: None, dynamic: Vec::new(), dynamic_buffer: None, mask: None, screen_space: false }
+        Self {
+            material: Material::shader(crate::engine::rendering::shader_library::THICK_LINES),
+            uniform_buffer,
+            uniform_bind_group,
+            static_buffer: None,
+            dynamic: Vec::new(),
+            dynamic_buffer: None,
+            mask: None,
+            screen_space: false,
+        }
     }
 
     /// Nothing to draw - no static set and no `dynamic` lines.
@@ -194,10 +172,13 @@ impl ThickLines {
         });
     }
 
-    /// Draws the static set, then `dynamic`, into `render_pass` - seen from
-    /// the camera at world `camera_position` whose view_proj is bound in
-    /// `camera_bind_group`, on a screen `screen` pixels big.
-    pub fn draw<'pass>(&'pass mut self, device: &wgpu::Device, queue: &wgpu::Queue, render_pass: &mut wgpu::RenderPass<'pass>, camera_bind_group: &'pass wgpu::BindGroup, camera_position: [f32; 3], screen: [f32; 2]) {
+    /// Draws the static set, then `dynamic`, into `render_pass` with its
+    /// material (`material`: its pipeline and bind group 0 - see
+    /// ShaderLibrary::overlay) - seen from the camera at world
+    /// `camera_position` whose view_proj is bound in `camera_bind_group`, on
+    /// a screen `screen` pixels big, with the light's bind group `light`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, render_pass: &mut wgpu::RenderPass<'_>, material: (&wgpu::RenderPipeline, &wgpu::BindGroup), camera_bind_group: &wgpu::BindGroup, light: &wgpu::BindGroup, camera_position: [f32; 3], screen: [f32; 2]) {
         let mut mask = [[0.0; 4]; MAX_MASK_EDGES];
         let edges = self.mask.as_deref().unwrap_or_default();
         for (slot, edge) in mask.iter_mut().zip(edges) {
@@ -229,9 +210,11 @@ impl ThickLines {
             }
         }
 
-        render_pass.set_pipeline(&self.pipeline);
-        render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+        render_pass.set_pipeline(material.0);
+        render_pass.set_bind_group(0, material.1, &[]);
         render_pass.set_bind_group(1, camera_bind_group, &[]);
+        render_pass.set_bind_group(2, &self.uniform_bind_group, &[]);
+        render_pass.set_bind_group(3, light, &[]);
         if let Some((buffer, count)) = &self.static_buffer {
             render_pass.set_vertex_buffer(0, buffer.slice(..));
             render_pass.draw(0..6, 0..*count);
@@ -263,14 +246,5 @@ mod tests {
         assert!(inside(&padded, 60.0, 60.0));
         assert!(!inside(&padded, 15.0, 60.0));
         assert_eq!(convex_mask(&[[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]], 0.0), None, "all in a line");
-    }
-
-    #[test]
-    fn the_shader_is_valid_wgsl() {
-        let source = include_str!("../shaders/thick_lines.wgsl");
-        let module = wgpu::naga::front::wgsl::parse_str(source).unwrap_or_else(|error| panic!("{}", error.emit_to_string(source)));
-        wgpu::naga::valid::Validator::new(wgpu::naga::valid::ValidationFlags::all(), wgpu::naga::valid::Capabilities::all())
-            .validate(&module)
-            .unwrap_or_else(|error| panic!("{error:?}"));
     }
 }

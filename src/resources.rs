@@ -830,6 +830,7 @@ fn prepare_level_assets(device: &Device, queue: &Queue, camera_position: Vector3
                                     instance_count,
                                     instance_buffer,
                                     material_ranges: Vec::new(),
+                                    mesh_materials: Default::default(),
                                 }
                             );
                         },
@@ -1081,7 +1082,7 @@ pub enum PrimitiveShape {
     /// its origin, in real world units (leave its node at scale 1) - see
     /// `build_water_rings_mesh`. One mesh per `WaterTier` (named by
     /// `water_tier_mesh_name`); the water pass draws only the tier that
-    /// matches the camera's altitude (see `WaterRenderData::update`). Meant
+    /// matches the camera's altitude (see `TiledMeshes::update_tier`). Meant
     /// to be recentered under the camera every frame and drawn with
     /// water.wgsl.
     WaterRings { tiers: &'static [WaterTier] },
@@ -1184,7 +1185,7 @@ const WATER_TILE_MARGIN: f32 = 50.0;
 
 /// A block of one WaterRings mesh that's drawn or skipped as a whole, by
 /// whether its box is in the camera's view (see
-/// WaterRenderData::visible_ranges): its triangles are indices
+/// TiledMeshes::visible_ranges): its triangles are indices
 /// `first_index..first_index + index_count`, and `min`/`max` bound every
 /// vertex in it, relative to the mesh's own origin, however the shader ends
 /// up moving them.
@@ -1435,9 +1436,9 @@ pub fn register_primitive_model(app: &mut App, name: &str, shape: PrimitiveShape
 
     app.loaded_models.insert(name.to_owned(), model::Model { mesh_lists, materials });
     // Ocean meshes draw tile by tile, only the tiles in view - see
-    // WaterRenderData::visible_ranges.
+    // TiledMeshes::visible_ranges.
     for (mesh_name, tiles) in mesh_tiles {
-        app.water.set_mesh_tiles(mesh_name, tiles);
+        app.tiled_meshes.set_mesh_tiles(mesh_name, tiles);
     }
     Ok(())
 }

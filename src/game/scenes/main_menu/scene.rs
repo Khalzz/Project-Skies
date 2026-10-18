@@ -7,7 +7,7 @@ use crate::engine::scene_manager::node::Node;
 use crate::engine::scene_manager::properties::{Model, Transform3D};
 use crate::engine::rendering::camera::camera::yaw_pitch_rotation;
 use crate::engine::input::input;
-use crate::engine::rendering::render_pipeline::water_renderer::WakeSource;
+use crate::game::ocean::{Ocean, WakeSource};
 use crate::engine::scene_manager::scene::{FrameContext, Scene, SceneBehaviour};
 #[allow(unused_imports)]
 use crate::game::camera::camera::{Camera, CameraConfig, Fov, Speed};
@@ -68,6 +68,8 @@ pub struct GameLogic {
     elapsed: f32,
     /// How far the sea has streamed, metres.
     flown: f32,
+    /// The sea - streaming past, with the jet's wake on it.
+    ocean: Ocean,
 }
 
 impl GameLogic {
@@ -89,7 +91,7 @@ impl GameLogic {
 
         app.menu_shot = MenuShot::default();
 
-        Self { elapsed: 0.0, flown: 0.0 }
+        Self { elapsed: 0.0, flown: 0.0, ocean: Ocean::default() }
     }
 
     fn spawn_world(scene: &mut Scene, app: &mut App) {
@@ -136,7 +138,7 @@ impl GameLogic {
                     scale: Vector3::new(1.0, 1.0, 1.0),
                 })
                 .add_property(Model::new(crate::OCEAN_SURFACE_MODEL))
-                .add_property(crate::engine::scene_manager::properties::Material::shader(crate::engine::rendering::shader_library::WATER))
+                .add_property(crate::game::ocean::Ocean::material())
         ).expect("main_menu should only spawn 'world' once");
     }
 
@@ -149,15 +151,15 @@ impl GameLogic {
         let heading = horizontal_from_yaw(app.menu_shot.water_yaw_deg);
         // The wave field shifts opposite the heading, so the sea travels
         // along the heading itself.
-        app.water.set_flow(-heading.x * self.flown, -heading.z * self.flown);
+        self.ocean.set_flow(-heading.x * self.flown, -heading.z * self.flown);
         // The same foam wake the player's jet leaves when it's fast and low.
         // The jet stays put, so the trail is carried along with the sea.
         let speed = app.menu_shot.speed;
-        app.water.set_wake_source(Some(WakeSource {
+        self.ocean.set_wake_source(Some(WakeSource {
             position: app.menu_shot.plane,
             velocity: -heading * speed,
         }));
-        app.water.scroll_wake(heading.x * speed * delta_time, heading.z * speed * delta_time);
+        self.ocean.scroll_wake(heading.x * speed * delta_time, heading.z * speed * delta_time);
 
         if let Some(plane) = scene.content.nodes.get_mut("plane").and_then(|node| node.get_property_mut::<Transform3D>()) {
             plane.position = app.menu_shot.plane;
@@ -304,5 +306,10 @@ impl SceneBehaviour for GameLogic {
     fn update(&mut self, scene: &mut Scene, app: &mut App, ctx: &mut FrameContext) {
         let _ = ctx;
         self.update(scene, app, app.time.delta_time);
+    }
+
+    fn after_cameras(&mut self, scene: &mut Scene, app: &mut App) {
+        // The sea's waves and wake, around where the camera is drawn from.
+        self.ocean.update(scene, "world", app.time.delta_time);
     }
 }

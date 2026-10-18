@@ -1,0 +1,10 @@
+// ocean.wgsl's settings - the sea (see game::ocean, which fills its params
+// every frame).
+(
+    kind: Raw,              // a whole shader - its own vertex and fragment work
+    pass: "water",          // the frame plan's "water" pass, after its CopyDepth
+    blend: Alpha,
+    cull: Back,
+    depth_write: true,
+    reads: [Depth],         // the depth so far, at group 0 bindings 16/17 - for shore foam
+)

@@ -437,6 +437,11 @@ pub struct AircraftPlacement {
     /// Optional - ground when left out.
     #[serde(default, skip_serializing_if = "Start::is_ground")]
     pub start: Start,
+    /// What it's drawn with - a shader and its values, and mesh materials of
+    /// its own on top of its plane's (see `Material`). Optional - its
+    /// plane's look when left out.
+    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "plain_some")]
+    pub material: Option<crate::engine::scene_manager::properties::Material>,
 }
 
 /// Radar altitude (m) that starts the low-altitude warning when a placement

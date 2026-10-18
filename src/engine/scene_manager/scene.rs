@@ -317,9 +317,17 @@ impl Scene {
             instance.instance.transform.position = transform.position;
             instance.instance.transform.rotation = transform.rotation;
             instance.instance.transform.scale = render_scale;
-            let material = node.get_property::<Material>().map_or(crate::engine::rendering::shader_library::STANDARD, |material| material.shader.as_str());
-            if instance.material != material {
-                instance.material = material.to_owned();
+            match node.get_property::<Material>() {
+                Some(material) => {
+                    let key = material.key(&node.id);
+                    if instance.material != key {
+                        instance.material = key;
+                    }
+                }
+                None if instance.material != crate::engine::rendering::shader_library::STANDARD => {
+                    instance.material = crate::engine::rendering::shader_library::STANDARD.to_owned();
+                }
+                None => {}
             }
         }
     }

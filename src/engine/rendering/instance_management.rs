@@ -43,6 +43,10 @@ pub struct ModelDataInstance {
     /// material draws - they're written sorted by material, so each is one
     /// run (see App::run). Empty until the first frame's written.
     pub material_ranges: Vec<(String, std::ops::Range<u32>)>,
+    /// Some of its meshes drawn with another material (by mesh name, the
+    /// material instance - see Material::meshes), set every frame from the
+    /// node that has them.
+    pub mesh_materials: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]

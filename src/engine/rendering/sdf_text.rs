@@ -12,6 +12,9 @@
 //! filling the screen, and turn and shrink with whatever they're placed on
 //! (the HUD's glass, a plate in the jet's frame).
 //!
+//! Drawn with the set's `material` - a Text shader (sdf_text_template.wgsl;
+//! engine/sdf_text unless it says otherwise).
+//!
 //! Like `ThickLines`: one renderer is either in screen pixels or in the world
 //! (`screen_space`), refilled every frame through `push`, drawn over what's
 //! there with no depth test, optionally only inside a convex outline on
@@ -23,8 +26,8 @@ use glyphon::cosmic_text::{fontdb, Buffer, CacheKey, CacheKeyFlags, FontSystem, 
 use nalgebra::Vector3;
 use wgpu::util::DeviceExt;
 
-use crate::engine::rendering::camera::handler::CameraResources;
 use crate::engine::rendering::thick_lines::MAX_MASK_EDGES;
+use crate::engine::scene_manager::properties::Material;
 use crate::engine::ui::components::label::Font;
 
 /// The size glyphs are rasterized at (px) - their distance fields hold the
@@ -66,7 +69,7 @@ impl TextFrame {
     }
 }
 
-/// One glyph quad - see sdf_text.wgsl's GlyphInstance. `rect` is the quad in
+/// One glyph quad - see sdf_text_template.wgsl's GlyphInstance. `rect` is the quad in
 /// ems from the frame's `origin` (x right, y down), `uv` its corners in the
 /// atlas.
 #[repr(C)]
@@ -83,16 +86,46 @@ struct GlyphInstance {
 impl GlyphInstance {
     const ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 3 => Float32x4, 4 => Float32x4, 5 => Float32x4];
 
-    fn layout() -> wgpu::VertexBufferLayout<'static> {
-        wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<GlyphInstance>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Instance,
-            attributes: &Self::ATTRIBUTES,
-        }
+}
+
+/// The glyphs' vertex layout - one GlyphInstance per instance.
+pub(crate) fn glyph_layout() -> wgpu::VertexBufferLayout<'static> {
+    wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<GlyphInstance>() as wgpu::BufferAddress,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &GlyphInstance::ATTRIBUTES,
     }
 }
 
-/// The shader's own uniform - see sdf_text.wgsl's TextUniform.
+/// A text set's own bind group (group 2 of a Text shader): its uniform, its
+/// atlas and the atlas's sampler.
+pub(crate) fn bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("SDF text layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    })
+}
+
+/// The set's own uniform - see sdf_text_template.wgsl's TextUniform.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct TextUniform {
@@ -161,7 +194,9 @@ impl Packer {
 }
 
 pub struct SdfText {
-    pipeline: wgpu::RenderPipeline,
+    /// What it's drawn with - a Text shader (see engine::rendering::
+    /// shader_library), engine/sdf_text unless set otherwise.
+    pub material: Material,
     uniform_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     atlas: wgpu::Texture,
@@ -186,7 +221,9 @@ pub struct SdfText {
 }
 
 impl SdfText {
-    pub fn new(device: &wgpu::Device, color_format: wgpu::TextureFormat, camera: &CameraResources) -> Self {
+    /// For a target of `color_format`; `layout`: ShaderLibrary::
+    /// overlay_layout(Overlay::Text).
+    pub fn new(device: &wgpu::Device, color_format: wgpu::TextureFormat, layout: &wgpu::BindGroupLayout) -> Self {
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("SDF text uniform"),
             contents: bytemuck::cast_slice(&[TextUniform { camera_position: [0.0; 4], screen: [1.0; 4], mask_info: [0.0; 4], mask: [[0.0; 4]; MAX_MASK_EDGES] }]),
@@ -211,30 +248,9 @@ impl SdfText {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        let layout_entries = [
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            },
-        ];
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("SDF text layout"), entries: &layout_entries });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("SDF text bind group"),
-            layout: &bind_group_layout,
+            layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: uniform_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&atlas_view) },
@@ -242,48 +258,8 @@ impl SdfText {
             ],
         });
 
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("SDF text pipeline layout"),
-            bind_group_layouts: &[&bind_group_layout, &camera.bind_group_layout],
-            push_constant_ranges: &[],
-        });
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("SDF text shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/sdf_text.wgsl").into()),
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("SDF text pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[GlyphInstance::layout()],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: color_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                // Seen from behind a plane, a glyph's quad winds the other way.
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState { count: 1, mask: !0, alpha_to_coverage_enabled: false },
-            multiview: None,
-            cache: None,
-        });
-
         Self {
-            pipeline,
+            material: Material::shader(crate::engine::rendering::shader_library::SDF_TEXT),
             uniform_buffer,
             bind_group,
             atlas,
@@ -412,10 +388,13 @@ impl SdfText {
         })
     }
 
-    /// Draws what was pushed into `render_pass` - seen from the camera at
-    /// world `camera_position` whose view_proj is bound in
-    /// `camera_bind_group`, on a screen `screen` pixels big.
-    pub fn draw<'pass>(&'pass mut self, device: &wgpu::Device, queue: &wgpu::Queue, render_pass: &mut wgpu::RenderPass<'pass>, camera_bind_group: &'pass wgpu::BindGroup, camera_position: [f32; 3], screen: [f32; 2]) {
+    /// Draws what was pushed into `render_pass` with its material
+    /// (`material`: its pipeline and bind group 0 - see ShaderLibrary::
+    /// overlay) - seen from the camera at world `camera_position` whose
+    /// view_proj is bound in `camera_bind_group`, on a screen `screen` pixels
+    /// big, with the light's bind group `light`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, render_pass: &mut wgpu::RenderPass<'_>, material: (&wgpu::RenderPipeline, &wgpu::BindGroup), camera_bind_group: &wgpu::BindGroup, light: &wgpu::BindGroup, camera_position: [f32; 3], screen: [f32; 2]) {
         for (x, y, width, height, texels) in self.uploads.drain(..) {
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo { texture: &self.atlas, mip_level: 0, origin: wgpu::Origin3d { x, y, z: 0 }, aspect: wgpu::TextureAspect::All },
@@ -455,9 +434,11 @@ impl SdfText {
         let Some((buffer, _)) = &self.instance_buffer else { return };
         queue.write_buffer(buffer, 0, bytemuck::cast_slice(&self.instances));
 
-        render_pass.set_pipeline(&self.pipeline);
-        render_pass.set_bind_group(0, &self.bind_group, &[]);
+        render_pass.set_pipeline(material.0);
+        render_pass.set_bind_group(0, material.1, &[]);
         render_pass.set_bind_group(1, camera_bind_group, &[]);
+        render_pass.set_bind_group(2, &self.bind_group, &[]);
+        render_pass.set_bind_group(3, light, &[]);
         render_pass.set_vertex_buffer(0, buffer.slice(..));
         render_pass.draw(0..6, 0..needed as u32);
     }
@@ -617,14 +598,5 @@ mod tests {
         assert!(at(0, 0) < 128, "the corner of the margin is outside");
         assert!(at(4, 6) < at(5, 6), "falls toward the edge");
         assert!(at(3, 6) < 128 && at(4, 6) > 128, "the edge is between the last texel in and the first out");
-    }
-
-    #[test]
-    fn the_shader_is_valid_wgsl() {
-        let source = include_str!("../shaders/sdf_text.wgsl");
-        let module = wgpu::naga::front::wgsl::parse_str(source).unwrap_or_else(|error| panic!("{}", error.emit_to_string(source)));
-        wgpu::naga::valid::Validator::new(wgpu::naga::valid::ValidationFlags::all(), wgpu::naga::valid::Capabilities::all())
-            .validate(&module)
-            .unwrap_or_else(|error| panic!("{error:?}"));
     }
 }

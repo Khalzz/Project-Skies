@@ -252,7 +252,7 @@ fn head_tracking_value(app: &mut App, selected: HeadTrackingSource) -> UiNode {
 /// A gray triangle in a rounded square, the same 22px and corner as Retry.
 /// The square stays clear until hover, then fills white while the triangle
 /// turns black. A negative corner radius is what asks the UI shader to draw
-/// the triangle (see `text_shader.wgsl`); `points_left` picks the direction.
+/// the triangle (see `ui_template.wgsl`); `points_left` picks the direction.
 fn step_triangle(points_left: bool, on_click: impl Fn(&mut App) + 'static) -> UiNode {
     UiNode::container()
         .set_size(SizeValue::Pixels(22.0), SizeValue::Pixels(22.0))

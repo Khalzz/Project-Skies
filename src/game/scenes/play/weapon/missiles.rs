@@ -205,7 +205,7 @@ impl Missiles {
     /// Call once a frame while the game runs; `update_plumes` every frame.
     pub fn update(&mut self, scene: &mut Scene, app: &mut App, aircraft: &[TargetTrack], ground: &WorldCollision, sun: Option<Vector3<f32>>, delta_time: f32) -> MissileEvents {
         let mut events = MissileEvents::default();
-        let sea_level = app.water.ocean.sea_level();
+        let sea_level = app.sea_level;
 
         let mut ended = Vec::new();
         for (index, missile) in self.flying.iter_mut().enumerate() {

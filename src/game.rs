@@ -6,3 +6,5 @@ pub mod ui;
 pub mod camera;
 pub mod debug_overlay;
 pub mod frame_plans;
+pub mod ocean;
+pub mod screen_effects;

@@ -19,7 +19,10 @@ use crate::transform::Transform;
 ///
 /// Everything here is static - no physics thread (see the `SceneBehaviour`
 /// impl's default `fixed_update`).
-pub struct GameLogic;
+pub struct GameLogic {
+    /// The sea.
+    ocean: crate::game::ocean::Ocean,
+}
 
 impl GameLogic {
     pub fn new(scene: &mut Scene, app: &mut App, environment: Environment) -> Self {
@@ -30,7 +33,7 @@ impl GameLogic {
 
         Self::spawn_world(scene, app);
 
-        Self
+        Self { ocean: crate::game::ocean::Ocean::default() }
     }
 
     fn spawn_world(scene: &mut Scene, app: &mut App) {
@@ -100,7 +103,7 @@ impl GameLogic {
                         scale: Vector3::new(1.0, 1.0, 1.0),
                     })
                     .add_property(Model::new(crate::OCEAN_SURFACE_MODEL))
-                .add_property(crate::engine::scene_manager::properties::Material::shader(crate::engine::rendering::shader_library::WATER)),
+                .add_property(crate::game::ocean::Ocean::material()),
             )
             .expect("follow_test should only spawn 'world' once");
         // The MQ-9 drone - the node the follow camera will track. Static for
@@ -177,5 +180,10 @@ impl GameLogic {
 impl SceneBehaviour for GameLogic {
     fn update(&mut self, scene: &mut Scene, _app: &mut App, _ctx: &mut FrameContext) {
         self.update(scene);
+    }
+
+    fn after_cameras(&mut self, scene: &mut Scene, app: &mut App) {
+        // The sea's waves, around where the camera is drawn from.
+        self.ocean.update(scene, "world", app.time.delta_time);
     }
 }

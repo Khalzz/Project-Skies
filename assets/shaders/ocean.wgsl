@@ -1,15 +1,14 @@
-// Water shader - shares the same camera/mesh-transform/light bind groups
-// (1/2/3) every other model-drawing pipeline uses, but group 0 is its own
-// thing: not a material's diffuse texture (water never samples one, always
-// outputs a computed color instead - see WATER_COLOR/DEEP_COLOR/
-// SKY_REFLECTION_COLOR below), it's a snapshot of the depth buffer taken
-// right after opaque geometry finishes drawing (see DepthRender::
-// foam_depth_copy and render_pass.rs's own render_water_pass) - used for
-// shore-intersection foam, see fs_main's own comment on that. This is also
-// why water draws through its own manual render_water_pass instead of the
-// generic draw_model_instanced_from_list every other model goes through -
-// that helper always binds each mesh's own material at group 0, which would
-// stomp this.
+// The ocean - the game's Raw shader for the sea (settings in ocean.ron; see
+// engine::rendering::shader_library for what a Raw shader gets). Groups
+// 1/2/3 are the camera, the mesh's transform and the light, as for every
+// model. Group 0 is the material's: its params - the wave field and the
+// wake, `Ocean` below, filled every frame by game::ocean - at binding 2, and
+// (it `reads: [Depth]`) a snapshot of the depth buffer taken right after the
+// solid world finished drawing (the frame plan's CopyDepth) at 16/17 - used
+// for shore-intersection foam, see fs_main's own comment on that. Bindings
+// 0/1 are the mesh's own texture, which water never samples - it always
+// outputs a computed color instead (see WATER_COLOR/DEEP_COLOR/
+// SKY_REFLECTION_COLOR below).
 
 // Matches every SceneCameras::create_camera call site's znear/zfar today
 // (see Projection::new's own callers) - CameraUniform *does* carry near/far
@@ -111,7 +110,7 @@ const NEXT_RING_FADE_START: f32 = 0.9;
 
 
 // The waves themselves come from `ocean` (group 0, binding 2) - generated on
-// the CPU from a wind-sea spectrum by engine::rendering::enviroment::ocean
+// the CPU from a wind-sea spectrum by game::ocean
 // (see that module's doc comment), which is also what gameplay asks for the
 // surface height, so both always agree. Two groups, in that order in
 // `ocean.waves`:
@@ -128,13 +127,13 @@ const NEXT_RING_FADE_START: f32 = 0.9;
 // the camera-relative positions it already works in. That keeps every
 // number small, so waves stay crisp arbitrarily far from the world origin.
 
-// Must match engine::rendering::enviroment::ocean::MAX_WAVES.
+// Must match game::ocean::MAX_WAVES.
 const MAX_WAVES: u32 = 80u;
-// Must match engine::rendering::enviroment::ocean::MAX_WAKE_POINTS.
+// Must match game::ocean::MAX_WAKE_POINTS.
 const MAX_WAKE_POINTS: u32 = 32u;
 
 // A plane flying fast and low stirs up the water (see water_wake, and
-// WaterRenderData's wake for when/how strongly) - shaped by which way it's
+// game::ocean's wake for when/how strongly) - shaped by which way it's
 // flying, like a boat's wake, not a round drop:
 // - under it, a small patch flattened and whitened by the blast,
 //   WAKE_PATCH_RADIUS across its width (+ WAKE_PATCH_GROWTH per unit of
@@ -162,7 +161,7 @@ const WAKE_TRAIL_FOAM: f32 = 0.8;
 // The trail's foam is broken up by noise pinned to the water: dense when
 // fresh, thinning to patches as it ages - WAKE_FOAM_COVERAGE_FRESH/_OLD are
 // how much of it survives (0..1) at those two ends. The noise repeats every
-// WAKE_NOISE_PERIOD meters (ocean.rs's WAKE_NOISE_PERIOD, keep in sync).
+// WAKE_NOISE_PERIOD meters (game::ocean's WAKE_NOISE_PERIOD, keep in sync).
 const WAKE_FOAM_COVERAGE_FRESH: f32 = 0.85;
 const WAKE_FOAM_COVERAGE_OLD: f32 = 0.35;
 const WAKE_NOISE_PERIOD: f32 = 4096.0;
@@ -221,12 +220,12 @@ struct Light {
 // pattern for sampling this exact Depth32Float format. No sampler filtering
 // happens (NonFiltering, textureSample with a nearest-only sampler) - depth
 // values shouldn't be blended between texels anyway.
-@group(0) @binding(0)
+@group(0) @binding(16)
 var t_scene_depth: texture_2d<f32>;
-@group(0) @binding(1)
+@group(0) @binding(17)
 var s_scene_depth: sampler;
 
-// See engine::rendering::enviroment::ocean::OceanUniform - each wave is two
+// See game::ocean (OceanWaves::params, Ocean::write_wake) - each wave is two
 // vec4s: (dir.x, dir.z, k, amplitude), (steepness, phase at camera,
 // wavelength, unused).
 struct Ocean {
@@ -236,8 +235,7 @@ struct Ocean {
     // choppiness, whitecap strength, detail strength, wind direction (radians)
     shading: vec4<f32>,
     waves: array<vec4<f32>, 160>,
-    // The low-flying plane's wake - see engine::rendering::enviroment::
-    // ocean::OceanUniform. All zero when there's none.
+    // The low-flying plane's wake - see game::ocean. All zero when there's none.
     // plane: camera-relative x, z, height above the water, intensity 0..1
     wake_head: vec4<f32>,
     // circle around the whole wake (camera-relative x, z, radius), trail max age

@@ -12,3 +12,4 @@ pub mod sdf_text;
 pub mod frame;
 pub mod render_sets;
 pub mod shader_library;
+pub mod tiled_meshes;

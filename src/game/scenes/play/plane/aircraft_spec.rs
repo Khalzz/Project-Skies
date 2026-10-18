@@ -71,6 +71,10 @@ pub struct AircraftSpec {
     /// `cockpit_sill: [(azimuth, elevation), ...]` (optional: nowhere). See
     /// `sill_elevation`.
     pub cockpit_sill: Vec<(f32, f32)>,
+    /// Some of its model's meshes drawn with other materials, by mesh name -
+    /// `data.ron`'s `materials: { "Canopy": (shader: "gold_canopy", params:
+    /// { ... }) }` (optional). See Material.
+    pub materials: std::collections::BTreeMap<String, crate::engine::scene_manager::properties::Material>,
     /// Its flares and chaff, and the dispensers they come out of -
     /// `data.ron`'s `countermeasures: ( ... )` (optional: none).
     pub countermeasures: Option<CountermeasureSpec>,
@@ -97,6 +101,8 @@ struct PlaneData {
     head_limits: Option<HeadLimits>,
     #[serde(default)]
     cockpit_sill: Vec<(f32, f32)>,
+    #[serde(default)]
+    materials: std::collections::BTreeMap<String, crate::engine::scene_manager::properties::Material>,
     #[serde(default)]
     countermeasures: Option<CountermeasureSpec>,
 }
@@ -222,6 +228,7 @@ impl AircraftSpec {
             cameras: data.cameras,
             head_limits: data.head_limits,
             cockpit_sill: data.cockpit_sill,
+            materials: data.materials,
             countermeasures: data.countermeasures,
         })
     }

@@ -1,6 +1,9 @@
-// SDF text - one instance per glyph, a quad on its string's plane, filled
-// from the glyph's distance field (see engine::rendering::sdf_text). Each
-// instance draws 6 vertices.
+// The template every Text shader is built from (see engine::rendering::
+// shader_library): SDF text - one instance per glyph, a quad on its string's
+// plane, filled from the glyph's distance field (see engine::rendering::
+// sdf_text). Each instance draws 6 vertices. The `fragment` hook, pasted
+// where the HOOKS line is, gets each pixel's color. Group 0 is the
+// material's own, 1 the camera, 2 the text's (below), 3 the light.
 
 struct CameraUniform {
     view_proj: mat4x4<f32>,
@@ -21,11 +24,11 @@ struct TextUniform {
     mask: array<vec4<f32>, 32>,
 };
 
-@group(0) @binding(0)
+@group(2) @binding(0)
 var<uniform> text: TextUniform;
-@group(0) @binding(1)
+@group(2) @binding(1)
 var t_atlas: texture_2d<f32>;
-@group(0) @binding(2)
+@group(2) @binding(2)
 var s_atlas: sampler;
 
 @group(1) @binding(0)
@@ -78,8 +81,52 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, glyph: GlyphInstance) -> Ve
     return output;
 }
 
+// The light (group 3) carries the time - what `engine` is filled from.
+struct Light {
+    position: vec3<f32>,
+    color: vec3<f32>,
+    time: f32,
+    camera_position: vec3<f32>,
+}
+
+@group(3) @binding(0)
+var<uniform> light: Light;
+
+// What the hook can read, as `engine` - see standard_template.wgsl's.
+struct Engine {
+    time: f32,
+    camera_position: vec3<f32>,
+    sun_direction: vec3<f32>,
+    sun_color: vec3<f32>,
+}
+var<private> engine: Engine;
+
+fn engine_values() -> Engine {
+    return Engine(light.time, light.camera_position, normalize(light.position), light.color);
+}
+
+// The `fragment` hook's pixel (see shader_library's module doc):
+// - pixel: where it is on the target, in pixels from the top left;
+// - uv: where in the atlas (the glyph's distance field);
+// - color: what the engine draws there - the text's color, the glyph's soft
+//   edge in its alpha. Returned unchanged, it changes nothing;
+// - distance: the field there - 0.5 on the glyph's edge, more inside, less
+//   outside (0 at SPREAD texels out - see sdf_text.rs);
+// - softness: how much `distance` changes over one pixel on screen - so an
+//   outline or a glow can be a set number of pixels wide.
+struct TextIn {
+    pixel: vec2<f32>,
+    uv: vec2<f32>,
+    color: vec4<f32>,
+    distance: f32,
+    softness: f32,
+}
+
+//@HOOKS
+
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    engine = engine_values();
     // The field is 0.5 on the edge, more inside. Its change over one screen
     // pixel is how soft the edge is drawn - so it stays one pixel wide at
     // any size or slant. Sampled before the mask, so the derivatives are
@@ -95,8 +142,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             discard;
         }
     }
-    if (coverage <= 0.0) {
-        discard;
-    }
-    return vec4<f32>(input.color.rgb, input.color.a * coverage);
+    // Not discarded where the glyph isn't - a hook can draw there (a glow, an
+    // outline); blended, a clear pixel leaves the target as it was.
+    return fragment(TextIn(input.position.xy, input.uv, vec4<f32>(input.color.rgb, input.color.a * coverage), distance, pixel));
 }

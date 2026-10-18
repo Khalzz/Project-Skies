@@ -30,7 +30,7 @@ use super::weapon::missile::TargetTrack;
 use super::weapon::missiles::{BlastEvent, Missiles};
 use super::crash_effects::{Crash, CrashEffects};
 use super::world_collision::WorldCollision;
-use crate::engine::rendering::render_pipeline::blur_renderer::ScreenEffects;
+use crate::game::screen_effects::{ScreenEffects, G_VISION};
 use crate::engine::ui::components::label::text_width;
 use crate::game::ui::HUD_FONT;
 use crate::engine::rendering::sdf_text::TextFrame;
@@ -40,7 +40,7 @@ use super::{camera::camera::{Camera, CameraState, COCKPIT_CAMERA}, event_handlin
 use std::sync::mpsc::Sender;
 use crate::game::game_settings::GAME_SETTINGS;
 use crate::game::selected_level::SELECTED_LEVEL;
-use crate::engine::rendering::render_pipeline::water_renderer::WakeSource;
+use crate::game::ocean::{Ocean, WakeSource};
 use crate::engine::particles::ParticleEmitters;
 use crate::game::ui::label;
 use crate::game::scenes::play::ui as play_ui;
@@ -147,6 +147,8 @@ pub struct GameLogic {
     // Which of the scene's frame plans is up - the M map's or flying's (see
     // game::frame_plans) - so it's swapped only when the map opens or closes.
     showing_map_plan: bool,
+    // The sea - its waves, and the player's wake on it (see game::ocean).
+    ocean: Ocean,
     // The helmet display is switched on ("toggle_hmd") - see draw_hmd.
     hmd_enabled: bool,
     // The vertical lock is on: the first enemy through the strip over the
@@ -177,6 +179,12 @@ pub struct GameLogic {
     // Seconds into the HUD power-on after a cinematic returns to the
     // cockpit. None once it's on for good - see tick_hud_boot.
     hud_boot: Option<f32>,
+    // This frame's G-effects (see update_g_vision) - handed to the g_vision
+    // shader in after_cameras and cleared, so they only last the frame.
+    screen_effects: ScreenEffects,
+    // The flight HUD's brightness in g_vision (see tick_hud_boot) - it
+    // stays until changed.
+    hud_opacity: f32,
     // F10's editor camera keeping up with what F1-F4 picked: its node id
     // and where it was last frame - see update_editor_follow.
     editor_follow: Option<(String, Vector3<f32>)>,
@@ -867,6 +875,7 @@ impl GameLogic {
             player_body_velocity: None,
             hmd_cue: std::cell::Cell::new(None),
             showing_map_plan: false,
+            ocean: Ocean::default(),
             hmd_enabled: true,
             vertical_scan: false,
             lock_held: 0.0,
@@ -878,6 +887,8 @@ impl GameLogic {
             animations,
             animation_hides_hud: false,
             hud_boot: None,
+            screen_effects: ScreenEffects::default(),
+            hud_opacity: 1.0,
             editor_follow: None,
             telemetry_last: None,
             view_camera: PLAYER_CAMERA.to_owned(),
@@ -909,7 +920,7 @@ impl GameLogic {
         let ground_scale = Vector3::new(30_000.0, 30_000.0, 30_000.0);
         let runway_position = Vector3::new(0.0, 100.0, 0.0);
         let runway_scale = Vector3::new(60.0, 60.0, 60.0);
-        let sea_level = app.water.ocean.sea_level();
+        let sea_level = app.sea_level;
         // F10's tactical map: the same land as height contours, uploaded once.
         let contours = [
             contour_lines(&ground_trimesh.0, &ground_trimesh.1, ground_position, ground_scale, sea_level),
@@ -1036,7 +1047,7 @@ impl GameLogic {
                     scale: Vector3::new(1.0, 1.0, 1.0),
                 })
                 .add_property(Model::new(crate::OCEAN_SURFACE_MODEL))
-                .add_property(crate::engine::scene_manager::properties::Material::shader(crate::engine::rendering::shader_library::WATER))
+                .add_property(crate::game::ocean::Ocean::material())
         ).expect("play should only spawn 'world' once");
     }
 
@@ -1055,12 +1066,12 @@ impl GameLogic {
         }
     }
 
-    // Tells the water where the player's plane is and how fast it's going,
+    // Tells the sea where the player's plane is and how fast it's going,
     // so it can stir up a wake when flying fast and low (see
-    // WaterRenderData::set_wake_source - how strongly is decided there) -
+    // Ocean::set_wake_source - how strongly is decided there) -
     // and moves the "water_spray" node onto the sea right under it, turned
     // to its heading, spraying as hard as the wake is strong.
-    fn update_water_wake(scene: &mut Scene, app: &mut App, player_id: &str) {
+    fn update_water_wake(ocean: &mut Ocean, scene: &mut Scene, app: &mut App, player_id: &str) {
         let source = scene.content.renderizable_instances.get(player_id).map(|player| WakeSource {
             position: player.instance.transform.position,
             velocity: scene.content.nodes.get(player_id)
@@ -1068,11 +1079,11 @@ impl GameLogic {
                 .map(|state| state.flight_data.velocity)
                 .unwrap_or_else(Vector3::zeros),
         });
-        app.water.set_wake_source(source);
+        ocean.set_wake_source(source);
 
         let Some(source) = source else { return };
-        let strength = app.water.wake_strength(&source);
-        let sea_level = app.water.ocean.sea_level();
+        let strength = ocean.wake_strength(&source);
+        let sea_level = app.sea_level;
         let Some(spray) = scene.content.nodes.get_mut("water_spray") else { return };
         if let Some(transform) = spray.get_property_mut::<Transform3D>() {
             transform.position = Vector3::new(source.position.x, sea_level, source.position.z);
@@ -1116,7 +1127,7 @@ impl GameLogic {
             return;
         }
         self.is_dead = true;
-        let sea_level = app.water.ocean.sea_level();
+        let sea_level = app.sea_level;
         if let Some(camera) = scene.content.nodes.get_mut("camera").and_then(|node| node.get_behavior_mut::<Camera>()) {
             camera.enter_wreck_view(sea_level);
         }
@@ -1124,7 +1135,7 @@ impl GameLogic {
 
     /// Drains the colors, closes in the tunnel or reds out the view as the
     /// pilot does (see plane::pilot::Pilot::screen_effects) - every frame,
-    /// since screen effects only last one (see BlurRender::write_effects).
+    /// since screen effects only last one (see after_cameras).
     /// The flight HUD is drawn under that same pass, so it greys, dims and
     /// tunnels with the world. It's still switched off once crashed, and
     /// while the map, the editor or an animation asks for it gone.
@@ -1152,7 +1163,7 @@ impl GameLogic {
             effects.desaturation = 1.0;
             effects.darkening = 0.75;
         }
-        app.renderer.blur.effects = effects;
+        self.screen_effects = effects;
 
         let hide = plane.wrecked || plane.pilot.is_dead() || (app.tactical_map_active || app.editor_active) || self.animation_hides_hud;
         if !hide && self.hud_hidden_by_g {
@@ -1186,13 +1197,13 @@ impl GameLogic {
         if app.editor_active || app.tactical_map_active || self.animation_hides_hud {
             if self.hud_boot.is_some() {
                 self.hud_boot = None;
-                app.renderer.blur.hud_opacity = 1.0;
+                self.hud_opacity = 1.0;
             }
             return;
         }
         if was_hiding_hud && self.in_player_cockpit(scene) {
             self.hud_boot = Some(0.0);
-            app.renderer.blur.hud_opacity = 0.0;
+            self.hud_opacity = 0.0;
         }
     }
 
@@ -1202,20 +1213,20 @@ impl GameLogic {
     fn tick_hud_boot(&mut self, app: &mut App, advance: bool) {
         if self.hud_hidden_by_g {
             self.hud_boot = None;
-            app.renderer.blur.hud_opacity = 1.0;
+            self.hud_opacity = 1.0;
             return;
         }
         let Some(t) = self.hud_boot else {
-            app.renderer.blur.hud_opacity = 1.0;
+            self.hud_opacity = 1.0;
             return;
         };
         let t = if advance { t + app.time.delta_time } else { t };
         if t >= hud_boot_length() {
             self.hud_boot = None;
-            app.renderer.blur.hud_opacity = 1.0;
+            self.hud_opacity = 1.0;
         } else {
             self.hud_boot = Some(t);
-            app.renderer.blur.hud_opacity = hud_boot_alpha(t);
+            self.hud_opacity = hud_boot_alpha(t);
         }
     }
 
@@ -1305,7 +1316,7 @@ impl GameLogic {
             // following it down as it sinks.
             let in_water = scene.content.nodes.get(&focus).and_then(|node| node.get_behavior::<Plane>()).is_some_and(Plane::in_water);
             let (position, rotation) = if in_water {
-                let sea_level = app.water.ocean.sea_level();
+                let sea_level = app.sea_level;
                 *self.went_in_at.entry(focus.clone()).or_insert_with(|| {
                     let forward = rotation * Vector3::z();
                     let heading = Vector3::new(forward.x, 0.0, forward.z).try_normalize(1e-4).unwrap_or_else(Vector3::z);
@@ -1485,7 +1496,7 @@ impl GameLogic {
         }
 
         Self::update_water_plane(scene);
-        Self::update_water_wake(scene, app, player_id);
+        Self::update_water_wake(&mut self.ocean, scene, app, player_id);
         self.check_crash(scene, app);
         let has_control = input_lock_end.is_none() && !app.flight_editor.typing && !app.hud_layout.typing && !self.sequence_locks_input();
         self.update_weapons(scene, app, has_control);
@@ -1731,7 +1742,7 @@ impl GameLogic {
             screen_height: map_height * to_pixels,
             focus,
         };
-        let sea_level = app.water.ocean.sea_level();
+        let sea_level = app.sea_level;
         let selected = app.tactical_ui.selected.clone();
         let hovered = app.tactical_ui.hovered.clone();
         // A map path picked in the editor is shown instead of the aircraft's
@@ -2345,7 +2356,7 @@ impl GameLogic {
             highlighted.push(preview);
         }
         let mut lines = if app.editor_active {
-            super::editor_gizmos::lines(scene, self.flight_manager.map(), scene.cameras.active_name(), selected, &highlighted, &view, app.water.ocean.sea_level(), aspect)
+            super::editor_gizmos::lines(scene, self.flight_manager.map(), scene.cameras.active_name(), selected, &highlighted, &view, app.sea_level, aspect)
         } else {
             Vec::new()
         };
@@ -2353,7 +2364,7 @@ impl GameLogic {
         // its autopilot's flying - with a line to the point it's making for;
         // a missile's trail and a line to its target.
         if spectating && !self.camera_focus.is_empty() {
-            let sea_level = app.water.ocean.sea_level();
+            let sea_level = app.sea_level;
             if let Some(missile) = self.missiles.telemetry(&self.camera_focus) {
                 for pair in missile.trail.windows(2).chain(std::iter::once([*missile.trail.last().unwrap_or(&missile.position), missile.position].as_slice())) {
                     lines.push(LineInstance { start: pair[0].into(), end: pair[1].into(), color: [1.0, 0.6, 0.2, 0.9], width: 2.0 });
@@ -2600,7 +2611,7 @@ impl GameLogic {
             let Some(crash) = scene.content.nodes.get_mut(&name).and_then(|node| node.get_behavior_mut::<Plane>()).and_then(|plane| plane.crash.take()) else { continue };
             let Some(mut at) = scene.content.renderizable_instances.get(&name).map(|instance| instance.instance.transform.position) else { continue };
             if crash == Crash::Water {
-                at.y = app.water.ocean.sea_level();
+                at.y = app.sea_level;
             }
             self.crash_effects.spawn(scene, app, crash, at);
         }
@@ -3160,7 +3171,7 @@ impl GameLogic {
             .map(|plane| { let (kg, capacity) = plane.fuel(); (kg, capacity, plane.bingo_kg, plane.radar_warn_m) })
             .unwrap_or((0.0, 0.0, None, super::map::DEFAULT_RADAR_WARN_M));
         let radar_altitude = scene.content.renderizable_instances.get(player_id)
-            .map(|instance| self.world_collision.height_below(instance.instance.transform.position, app.water.ocean.sea_level()))
+            .map(|instance| self.world_collision.height_below(instance.instance.transform.position, app.sea_level))
             .unwrap_or(0.0);
         let low_altitude = shown && radar_altitude < radar_warn_m;
         let bingo_text = self.bingo_warn_until.is_some_and(|until| self.game_time < until);
@@ -4181,9 +4192,9 @@ impl GameLogic {
                     label.set_text(&mut app.ui.text.font_system, &text, true);
                 }
             }
-            // Ocean culling results (see WaterRenderData::visible_ranges) -
+            // Ocean culling results (see TiledMeshes::visible_ranges) -
             // F8 freezes culling to see it in the world.
-            let ocean = app.water.draw_stats();
+            let ocean = app.tiled_meshes.draw_stats();
             if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "debug_panel/stats_box/ocean").and_then(|n| n.as_label_mut()) {
                 label.set_text(&mut app.ui.text.font_system, &format!(
                     "Ocean: {}/{} tiles, {:.1}M/{:.1}M triangles",
@@ -4426,6 +4437,11 @@ impl SceneBehaviour for GameLogic {
     }
 
     fn after_cameras(&mut self, scene: &mut Scene, app: &mut App) {
+        // The sea's waves and wake, around where the camera is drawn from.
+        self.ocean.update(scene, "world", app.time.delta_time);
+        // The G-effects and the HUD's brightness, into the flight plan's
+        // Fullscreen step - this frame's effects used up (see update_g_vision).
+        app.shaders.set_instance(G_VISION, G_VISION, &std::mem::take(&mut self.screen_effects).params(self.hud_opacity));
         // The M map draws instead of the world - its own frame plan, swapped
         // in for this frame's drawing whenever it's opened or closed.
         if app.tactical_map_active != self.showing_map_plan {

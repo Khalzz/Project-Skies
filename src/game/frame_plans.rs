@@ -4,6 +4,8 @@
 use crate::app::App;
 use crate::engine::rendering::frame::FramePlan;
 use crate::engine::rendering::render_pipeline::render_pass::{color_attachment, UiLayer};
+use crate::engine::rendering::render_sets::RenderSets;
+use crate::engine::rendering::shader_library::Overlay;
 
 /// Every scene without a plan of its own (the menu, the loading screen...):
 /// the engine's default - the world, the UI over it - and the game's debug
@@ -31,7 +33,7 @@ pub fn flight() -> FramePlan {
             .text("hmd_text")
             .ui(UiLayer::Main)
         .end_target()
-        .fullscreen("engine/scene_blit")
+        .fullscreen(crate::game::screen_effects::G_VISION)
         // Heat blobs sit on the graded picture, so desaturation doesn't
         // turn them grey.
         .lines("heat_screen_lines")
@@ -90,14 +92,18 @@ impl App {
             render_pass.set_viewport(x, y, width, height, 0.0, 1.0);
         }
         let Some(lines) = self.render_sets.get_lines_mut("tactical_lines") else { return };
+        // With its material (see ShaderLibrary::prepare_overlay).
+        let key = RenderSets::lines_key("tactical_lines", lines);
+        let Some(material) = self.overlay_materials.get(&key).and_then(|key| self.shaders.overlay(key, Overlay::Lines)) else { return };
         lines.draw(
             &self.renderer.device,
             &self.renderer.queue,
             &mut render_pass,
+            material,
             &self.camera_resources.bind_group,
+            &self.light.rendering_data.bind_group,
             [camera_position.x, camera_position.y, camera_position.z],
             screen,
         );
     }
-
 }

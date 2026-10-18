@@ -14,7 +14,7 @@ use crate::engine::rendering::enviroment::skybox_renderer::SkyboxRender;
 use crate::engine::rendering::enviroment::environment;
 use crate::engine::rendering::instance_management::{InstanceData, InstanceRaw, ModelDataInstance};
 use crate::engine::rendering::render_pipeline::depth_renderer::DepthRender;
-use crate::engine::rendering::render_pipeline::water_renderer::WaterRenderData;
+use crate::engine::rendering::tiled_meshes::TiledMeshes;
 use crate::engine::particles::ParticleEmitters;
 use crate::engine::particles::renderer::{EmitterSource, ParticleFrameInfo, ParticleRenderer};
 use crate::engine::scene_manager::properties::Transform3D;
@@ -65,26 +65,26 @@ pub struct App {
     // (worked out at the start of the frame plan).
     pub shaders: crate::engine::rendering::shader_library::ShaderLibrary,
     pub material_placements: HashMap<String, crate::engine::rendering::shader_library::Placement>,
-    // The ocean's renderer (water.wgsl) - draws the models whose material
-    // is "engine/water", in the frame plan's "water" pass (see
-    // WaterRenderData's own doc comment).
-    pub water: WaterRenderData,
+    /// What each 2D material in use (the UI's, the line and text sets') is
+    /// drawn with this frame - itself, or its flashing magenta stand-in (see
+    /// ShaderLibrary::prepare_overlay).
+    pub overlay_materials: HashMap<String, String>,
+    // Big meshes drawn a part at a time - altitude tiers and the tiles in
+    // view (see engine::rendering::tiled_meshes) - and which parts of each
+    // draw this frame (worked out with the materials, by model and mesh).
+    pub tiled_meshes: TiledMeshes,
+    pub mesh_ranges: HashMap<(String, String), Vec<std::ops::Range<u32>>>,
+    // The world's sea level (world Y) and wind (toward where it blows, m/s)
+    // - set by the game (its sea); particles splash on the one and drift
+    // with the other.
+    pub sea_level: f32,
+    pub wind: nalgebra::Vector3<f32>,
     // What a scene's background load is on right now (see LoadReporter) -
     // shown by the loading screen, None when nothing's loading.
     pub loading_step: Option<String>,
     // GPU particles and trails, fed each frame from every node's
     // ParticleEmitters property (see App::update_particles).
     pub particles: ParticleRenderer,
-    // Debug view (no key any more) - when true, render_water_pass
-    // skips drawing any model_ref listed in water_debug_hidden_models below.
-    // Everything else (terrain, player, the rest of water_shaded_models)
-    // keeps drawing normally - this hides specific water surfaces you want
-    // out of the way while tuning, not an isolate-to-water-only view.
-    pub water_debug_view: bool,
-    // model_refs to skip in render_water_pass while water_debug_view is on -
-    // empty today (it used to hide the old far water plane, which the single
-    // ocean ring mesh replaced); fill it to hide a water surface while tuning.
-    pub water_debug_hidden_models: HashSet<String>,
     // No key any more - toggles a live in-window debug overlay
     // (see egui_overlay field below, and render_pass.rs's own
     // render_aero_debug_overlay_pass) showing rolling_rate's theoretical
@@ -282,27 +282,41 @@ impl App {
         let renderer = Renderer::new(&window_manager).await?;
 
         // rendering elements
-        let ui = Ui::new(&renderer.device, &renderer.queue, &renderer.config, &renderer.glyphon.cache, &renderer.blur.scene_color, &renderer.blur.blurred);
         let camera_resources = CameraResources::new(&renderer.device, &renderer.config);
         let light = Light::new(&renderer.device, &renderer.config, &camera_resources);
 
-        let render_pipeline_layout = renderer.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Render Pipeline Layout"),
-            bind_group_layouts: &[
-                &Texture::create_bind_group_layout(&renderer.device),
-                &camera_resources.bind_group_layout,
-                &Mesh::create_bind_group_layout(&renderer.device),
-                &light.rendering_data.bind_group_layout
-            ],
-            push_constant_ranges: &[],
-        });
-        
         // Every model is drawn with a shader from here, by its material's
         // name (see engine::rendering::shader_library) - built when first
-        // used, with these bind groups.
-        let shaders = crate::engine::rendering::shader_library::ShaderLibrary::new(renderer.device.clone(), renderer.config.format, render_pipeline_layout);
+        // used, with these bind groups: the mesh's texture, the camera, the
+        // mesh's transform, the light.
+        let shaders = crate::engine::rendering::shader_library::ShaderLibrary::new(
+            renderer.device.clone(),
+            renderer.queue.clone(),
+            renderer.config.format,
+            [
+                Texture::create_bind_group_layout(&renderer.device),
+                camera_resources.bind_group_layout.clone(),
+                Mesh::create_bind_group_layout(&renderer.device),
+                light.rendering_data.bind_group_layout.clone(),
+            ],
+        );
 
-        let water = WaterRenderData::new(&renderer.device, &renderer.config, &camera_resources, &light, &renderer.depth_render.foam_depth_copy.view, &renderer.depth_render.foam_depth_copy.sampler);
+        // What shaders that `reads: [Depth]` get - see ShaderLibrary::set_depth_copy.
+        let mut shaders = shaders;
+        shaders.set_depth_copy(renderer.depth_render.foam_depth_copy.view.clone(), renderer.depth_render.foam_depth_copy.sampler.clone());
+        shaders.set_screen_inputs(Self::screen_inputs(&renderer.blur));
+
+        // Its boxes and images are drawn with Ui shaders from the library.
+        let ui = Ui::new(
+            &renderer.device,
+            &renderer.queue,
+            &renderer.config,
+            &renderer.glyphon.cache,
+            &renderer.blur.scene_color,
+            &renderer.blur.blurred,
+            shaders.overlay_layout(crate::engine::rendering::shader_library::Overlay::UiBox),
+            shaders.overlay_layout(crate::engine::rendering::shader_library::Overlay::UiImage),
+        );
 
         let particles = ParticleRenderer::new(&renderer.device, &renderer.queue, renderer.config.format, &camera_resources.bind_group_layout, &renderer.depth_render.foam_depth_copy.view);
 
@@ -327,11 +341,13 @@ impl App {
             scene_manager: SceneManager::new(),
             shaders,
             material_placements: HashMap::new(),
-            water,
+            overlay_materials: HashMap::new(),
+            tiled_meshes: TiledMeshes::default(),
+            mesh_ranges: HashMap::new(),
+            sea_level: 0.0,
+            wind: nalgebra::Vector3::zeros(),
             loading_step: None,
             particles,
-            water_debug_view: false,
-            water_debug_hidden_models: HashSet::new(),
             show_aero_debug_overlay: false,
             debug_mouse_free: false,
             flight_editor: FlightEditor::default(),
@@ -408,10 +424,11 @@ impl App {
         }
         self.ui.resize_blur_binding(&self.renderer.device, &self.renderer.queue, &self.renderer.blur.scene_color, &self.renderer.blur.blurred, width, height);
         // self.renderer.resize above already rebuilt depth_render.foam_depth_copy
-        // at the new size (DepthRender::resize) - the water shader's own bind
-        // group has to be rebuilt to match, a bind group is tied to the specific
-        // texture view it was created against.
-        self.water.rebuild_depth_bind_group(&self.renderer.device, &self.renderer.depth_render.foam_depth_copy.view, &self.renderer.depth_render.foam_depth_copy.sampler);
+        // at the new size (DepthRender::resize) - the shaders that read it get
+        // the new one (a bind group is tied to the specific texture view it
+        // was created against).
+        self.shaders.set_depth_copy(self.renderer.depth_render.foam_depth_copy.view.clone(), self.renderer.depth_render.foam_depth_copy.sampler.clone());
+        self.shaders.set_screen_inputs(Self::screen_inputs(&self.renderer.blur));
         self.particles.rebuild_depth_bind_group(&self.renderer.device, &self.renderer.depth_render.foam_depth_copy.view);
     }
 
@@ -425,15 +442,14 @@ impl App {
         }
         let active = cameras.active();
         let camera_position = active.camera.position().coords;
-        let settings = self.water.ocean.settings();
-        let wind = Vector3::new(settings.wind_direction.cos(), 0.0, settings.wind_direction.sin()) * settings.wind_speed;
+        let wind = self.wind;
         let light = &self.light.uniform;
         let frame = ParticleFrameInfo {
             camera_position,
             camera_view: active.camera.calc_matrix(),
             near: active.projection.znear,
             delta_time: if self.is_paused { 0.0 } else { self.time.delta_time },
-            sea_level: self.water.ocean.sea_level(),
+            sea_level: self.sea_level,
             wind,
             sun_direction: Vector3::from(light.position),
             sun_color: Vector3::from(light.color),
@@ -454,11 +470,22 @@ impl App {
         self.particles.update(&self.renderer.device, &self.renderer.queue, &frame, sources);
     }
 
+    /// The images Fullscreen shaders read, by name (see shader_library's
+    /// SCREEN_INPUTS) - the world drawn this frame, the "hud" target, the
+    /// world blurred.
+    fn screen_inputs(blur: &crate::engine::rendering::render_pipeline::blur_renderer::BlurRender) -> Vec<(&'static str, wgpu::TextureView, wgpu::Sampler)> {
+        vec![
+            ("scene", blur.scene_color.view.clone(), blur.scene_color.sampler.clone()),
+            ("hud", blur.hud_color.view.clone(), blur.hud_color.sampler.clone()),
+            ("blurred", blur.blurred.view.clone(), blur.blurred.sampler.clone()),
+        ]
+    }
+
     /// Registers a line set for the frame plan's `Lines` steps - see
     /// engine::rendering::render_sets. `screen_space`: in screen pixels, not
     /// the world.
     pub fn add_line_set(&mut self, name: &str, screen_space: bool) {
-        let mut lines = crate::engine::rendering::thick_lines::ThickLines::new(&self.renderer.device, self.renderer.config.format, &self.camera_resources);
+        let mut lines = crate::engine::rendering::thick_lines::ThickLines::new(&self.renderer.device, self.shaders.overlay_layout(crate::engine::rendering::shader_library::Overlay::Lines));
         lines.screen_space = screen_space;
         self.render_sets.insert_lines(name, lines);
     }
@@ -466,7 +493,7 @@ impl App {
     /// Registers an SDF text set for the frame plan's `Text` steps (see
     /// `add_line_set`).
     pub fn add_text_set(&mut self, name: &str, screen_space: bool) {
-        let mut text = crate::engine::rendering::sdf_text::SdfText::new(&self.renderer.device, self.renderer.config.format, &self.camera_resources);
+        let mut text = crate::engine::rendering::sdf_text::SdfText::new(&self.renderer.device, self.renderer.config.format, self.shaders.overlay_layout(crate::engine::rendering::shader_library::Overlay::Text));
         text.screen_space = screen_space;
         self.render_sets.insert_text(name, text);
     }
@@ -562,13 +589,7 @@ impl App {
         let mut text_areas: Vec<TextArea> = Vec::new();
         let mut text_areas_on_top: Vec<TextArea> = Vec::new();
 
-        self.ui.ui_rendering.vertices.clear();
-        self.ui.ui_rendering.num_vertices = 0;
-
-        self.ui.ui_rendering.indices.clear();
-        self.ui.ui_rendering.num_indices = 0;
-
-        self.ui.ui_rendering.image_quads.clear();
+        self.ui.ui_rendering.clear();
 
         // Taken out up front (rather than looked up in render order via repeated
         // get_mut calls) because this function's TextAreas borrow from inside
@@ -1262,7 +1283,7 @@ impl App {
                 self.water_elapsed = (self.water_elapsed + self.time.delta_time) % 10_000.0;
                 self.light.uniform.time = self.water_elapsed;
                 self.light.uniform.camera_position = camera_position.into();
-                self.water.update(&self.renderer.queue, self.time.delta_time, camera_position);
+                self.tiled_meshes.update_tier(camera_position.y);
 
                 self.renderer.queue.write_buffer(&self.light.rendering_data.buffer, 0, bytemuck::cast_slice(&[self.light.uniform]));
                 // lighting update

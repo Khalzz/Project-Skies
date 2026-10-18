@@ -1,3 +1,10 @@
+// The template every Ui shader is built from for UI boxes - panels, buttons,
+// labels' backgrounds (see engine::rendering::shader_library). The engine works
+// out the box - rounded corners, border, frosted blur, scroll clip - then
+// hands the color to the `fragment` hook, pasted where the HOOKS line is.
+// Group 0 is the material's own (params, textures), 1 the camera (unused
+// here), 2 the UI's (below), 3 the light.
+
 
 // the elements brought here by the render buffer
 struct VertexInput {
@@ -39,7 +46,7 @@ struct VertexOutput {
 }
 
 @vertex
-fn vertex(model: VertexInput) -> VertexOutput {
+fn vs_main(model: VertexInput) -> VertexOutput {
     var out: VertexOutput;
 
     out.color = model.color;
@@ -60,16 +67,16 @@ fn vertex(model: VertexInput) -> VertexOutput {
 // is a shared precomputed texture rather than a per-fragment sample scatter -
 // the latter showed visible ghosting/repeats at large radii instead of smooth
 // blur). background_blur below crossfades between the two.
-@group(0) @binding(0)
+@group(2) @binding(0)
 var t_scene: texture_2d<f32>;
-@group(0) @binding(1)
+@group(2) @binding(1)
 var s_scene: sampler;
-@group(0) @binding(2)
+@group(2) @binding(2)
 var t_blurred: texture_2d<f32>;
-@group(0) @binding(3)
+@group(2) @binding(3)
 var s_blurred: sampler;
 // xy: screen size in pixels. zw: unused padding, kept for uniform buffer alignment.
-@group(0) @binding(4)
+@group(2) @binding(4)
 var<uniform> u_screen_size: vec4<f32>;
 
 // Matches BlurRender::MAX_BLUR_RADIUS - the background_blur value (in pixels)
@@ -101,8 +108,47 @@ fn adjust_saturation(color: vec3<f32>, amount: f32) -> vec3<f32> {
     return mix(vec3<f32>(luminance, luminance, luminance), color, amount);
 }
 
+// The light (group 3) carries the time - what `engine` is filled from.
+struct Light {
+    position: vec3<f32>,
+    color: vec3<f32>,
+    time: f32,
+    camera_position: vec3<f32>,
+}
+
+@group(3) @binding(0)
+var<uniform> light: Light;
+
+// What the hook can read, as `engine` - see standard_template.wgsl's.
+struct Engine {
+    time: f32,
+    camera_position: vec3<f32>,
+    sun_direction: vec3<f32>,
+    sun_color: vec3<f32>,
+}
+var<private> engine: Engine;
+
+fn engine_values() -> Engine {
+    return Engine(light.time, light.camera_position, normalize(light.position), light.color);
+}
+
+// The `fragment` hook's pixel (see shader_library's module doc):
+// - pixel: where it is on the target, in pixels from the top left;
+// - uv: 0..1 across the element's box from its top left (an image's: across
+//   the image);
+// - color: what the engine draws there - fill, border, frosted blur, the
+//   soft edge in its alpha. A hook returning it unchanged changes nothing.
+struct UiIn {
+    pixel: vec2<f32>,
+    uv: vec2<f32>,
+    color: vec4<f32>,
+}
+
+//@HOOKS
+
 @fragment
-fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    engine = engine_values();
     // Scroll clipping (see UiNode::set_scrollable/node_content_preparation's
     // clip_rect, Rust side) - discard anything outside the tightest scrollable
     // ancestor's own content rect, same [top, left, bottom, right] packing as
@@ -280,5 +326,6 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let coverage = 1.0 - smoothstep(-aa, aa, dist);
     out_color.a = out_color.a * coverage;
 
-    return out_color;
+    let box_uv = (in.clip_position.xy - vec2<f32>(left, top)) / max(vec2<f32>(right - left, bottom - top), vec2<f32>(0.0001));
+    return fragment(UiIn(in.clip_position.xy, box_uv, out_color));
 }

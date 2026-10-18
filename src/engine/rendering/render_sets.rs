@@ -47,6 +47,27 @@ impl RenderSets {
         self.text.get_mut(name)
     }
 
+    /// Every line set, by name.
+    pub fn all_lines(&self) -> impl Iterator<Item = (&String, &ThickLines)> {
+        self.lines.iter()
+    }
+
+    /// Every text set, by name.
+    pub fn all_text(&self) -> impl Iterator<Item = (&String, &SdfText)> {
+        self.text.iter()
+    }
+
+    /// The material key of the line set `name` with `lines`' material (see
+    /// Material::key).
+    pub fn lines_key(name: &str, lines: &ThickLines) -> String {
+        lines.material.key(&format!("lines:{name}"))
+    }
+
+    /// The material key of the text set `name` with `text`'s material.
+    pub fn text_key(name: &str, text: &SdfText) -> String {
+        text.material.key(&format!("text:{name}"))
+    }
+
     /// Drops every set - the scene's ending.
     pub fn clear(&mut self) {
         self.lines.clear();

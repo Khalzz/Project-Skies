@@ -1,6 +1,10 @@
-// Thick lines - one instance per segment, widened to a fixed width in pixels
-// on screen (see engine::rendering::thick_lines). Each instance draws 6
-// vertices: a quad from `start` to `end`, `width` pixels across.
+// The template every Lines shader is built from (see engine::rendering::
+// shader_library): thick lines - one instance per segment, widened to a fixed
+// width in pixels on screen (see engine::rendering::thick_lines). Each
+// instance draws 6 vertices: a quad from `start` to `end`, `width` pixels
+// across. The `fragment` hook, pasted where the HOOKS line is, gets each
+// pixel's color. Group 0 is the material's own, 1 the camera, 2 the lines'
+// (below), 3 the light.
 
 struct CameraUniform {
     view_proj: mat4x4<f32>,
@@ -21,7 +25,7 @@ struct LineUniform {
     mask: array<vec4<f32>, 32>,
 };
 
-@group(0) @binding(0)
+@group(2) @binding(0)
 var<uniform> lines: LineUniform;
 
 @group(1) @binding(0)
@@ -105,8 +109,49 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, line: LineInstance) -> Vert
     return output;
 }
 
+// The light (group 3) carries the time - what `engine` is filled from.
+struct Light {
+    position: vec3<f32>,
+    color: vec3<f32>,
+    time: f32,
+    camera_position: vec3<f32>,
+}
+
+@group(3) @binding(0)
+var<uniform> light: Light;
+
+// What the hook can read, as `engine` - see standard_template.wgsl's.
+struct Engine {
+    time: f32,
+    camera_position: vec3<f32>,
+    sun_direction: vec3<f32>,
+    sun_color: vec3<f32>,
+}
+var<private> engine: Engine;
+
+fn engine_values() -> Engine {
+    return Engine(light.time, light.camera_position, normalize(light.position), light.color);
+}
+
+// The `fragment` hook's pixel (see shader_library's module doc):
+// - pixel: where it is on the target, in pixels from the top left;
+// - color: what the engine draws there - the line's color, its soft edge in
+//   its alpha. Returned unchanged, it changes nothing;
+// - across: how far from the line's middle, in pixels (- one side, + the
+//   other);
+// - half_width: half the line's width, in pixels.
+struct LineIn {
+    pixel: vec2<f32>,
+    color: vec4<f32>,
+    across: f32,
+    half_width: f32,
+}
+
+//@HOOKS
+
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    engine = engine_values();
     let edges = u32(lines.mask_info.x);
     for (var i = 0u; i < edges; i = i + 1u) {
         let edge = lines.mask[i];
@@ -116,5 +161,5 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     }
     // How much of this pixel the line covers, across it.
     let coverage = clamp(input.half_width + 0.5 - abs(input.across_pixels), 0.0, 1.0);
-    return vec4<f32>(input.color.rgb, input.color.a * coverage);
+    return fragment(LineIn(input.position.xy, vec4<f32>(input.color.rgb, input.color.a * coverage), input.across_pixels, input.half_width));
 }

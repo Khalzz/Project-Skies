@@ -52,7 +52,7 @@ pub fn register_static_model(scene: &mut Scene, app: &mut App, id: &str) -> Resu
     let node = scene.content.nodes.get(id).ok_or_else(|| format!("no node named '{id}' to register"))?;
     let transform = *node.get_property::<Transform3D>().ok_or_else(|| format!("node '{id}' has no Transform3D property"))?;
     let model = node.get_property::<Model>().ok_or_else(|| format!("node '{id}' has no Model property"))?;
-    let material = node.get_property::<Material>().map_or_else(|| STANDARD.to_owned(), |material| material.shader.clone());
+    let material = node.get_property::<Material>().map_or_else(|| STANDARD.to_owned(), |material| material.key(id));
     // Node scale x the model's own - see Model::render_scale.
     let render_scale = model.render_scale(transform.scale);
     // Where the model comes from: its own file (Model::from_file), a name
@@ -110,6 +110,7 @@ pub fn register_static_model(scene: &mut Scene, app: &mut App, id: &str) -> Resu
         instance_buffer,
         instance_count,
         material_ranges: Vec::new(),
+        mesh_materials: Default::default(),
     });
 
     Ok(())

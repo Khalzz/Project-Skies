@@ -122,7 +122,12 @@ async fn main() -> Result<(), String> {
             if let Err(e) = resources::register_primitive_model(&mut app, MARKER_MODEL, resources::PrimitiveShape::Cube) {
                 eprintln!("{e}");
             }
-            app.water.set_tier_altitudes(OCEAN_TIERS.iter().map(|tier| tier.min_altitude).collect());
+            app.tiled_meshes.set_tier_altitudes(OCEAN_TIERS.iter().map(|tier| tier.min_altitude).collect());
+            // The sea every scene has - its level and wind are the world's
+            // (particles splash on it and drift with it - see game::ocean).
+            let ocean = game::ocean::Ocean::default();
+            app.sea_level = ocean.sea_level();
+            app.wind = ocean.wind();
             app.scene_manager.create_loaded_scene(
                 "playing",
                 // Play uses the procedural clear-day sea sky (see sky.wgsl)

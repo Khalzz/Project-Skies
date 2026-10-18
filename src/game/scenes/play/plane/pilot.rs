@@ -6,7 +6,7 @@
 //! enough (see IMPACT_FATAL_G) kills the pilot: the view fades to black and
 //! stays there.
 
-use crate::engine::rendering::render_pipeline::blur_renderer::ScreenEffects;
+use crate::game::screen_effects::ScreenEffects;
 
 /// Positive G the pilot takes indefinitely - a fighter pilot in an anti-G
 /// suit, doing the anti-G straining manoeuvre: roughly 4.5-5 G relaxed

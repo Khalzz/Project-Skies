@@ -249,7 +249,7 @@ impl Label {
     // node_content_preparation's clip_rect) rather than just this label's own
     // rect - glyphon already clips every glyph to TextBounds on its own, so a
     // scrolled-out label's text needs no shader-side work, unlike the
-    // background/border quads (see text_shader.wgsl's clip discard).
+    // background/border quads (see ui_template.wgsl's clip discard).
     fn bounds(&self, rect: &Rect, clip_rect: Option<&Rect>, dpi_scale: f32) -> TextBounds {
         let left = rect.left.max(clip_rect.map_or(f32::MIN, |c| c.left));
         let top = rect.top.max(clip_rect.map_or(f32::MIN, |c| c.top));

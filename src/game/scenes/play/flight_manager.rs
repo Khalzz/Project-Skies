@@ -52,6 +52,18 @@ fn plane_cameras(spec: &AircraftSpec) -> Cameras {
     cameras
 }
 
+/// What an aircraft is drawn with: its map placement's material (else
+/// engine/standard), with its plane's mesh materials under the placement's
+/// own - None when that's just engine/standard.
+fn plane_material(spec: &AircraftSpec, placement: Option<&AircraftPlacement>) -> Option<crate::engine::scene_manager::properties::Material> {
+    use crate::engine::scene_manager::properties::Material;
+    let mut material = placement.and_then(|placement| placement.material.clone()).unwrap_or_else(|| Material::shader(crate::engine::rendering::shader_library::STANDARD));
+    for (mesh, mesh_material) in &spec.materials {
+        material.meshes.entry(mesh.clone()).or_insert_with(|| mesh_material.clone());
+    }
+    (!material.is_standard()).then_some(material)
+}
+
 /// The flares and chaff `placement` is loaded with - as many as the map
 /// says, or as its plane's data.ron does - none without dispensers.
 fn loaded_countermeasures(spec: &AircraftSpec, placement: &AircraftPlacement) -> Option<CountermeasureSet> {
@@ -86,6 +98,7 @@ fn load_map(scene_folder: &str) -> MapSpec {
                     radar_warn_m: None,
                     difficulty: Default::default(),
                     start: Default::default(),
+                    material: None,
                 }],
             }],
             ..Default::default()
@@ -334,6 +347,11 @@ impl flight_manager {
             if let Some(emitters) = node.get_property_mut::<ParticleEmitters>() {
                 *emitters = effects::plane_emitters(&spec.effects, &spec.gear, &spec.aero.wings);
             }
+            // What it's drawn with - its mesh materials as the file now has them.
+            match plane_material(&spec, self.applied.find(&plane.node_id).map(|(_, placement)| placement)) {
+                Some(material) => node.set_property(material),
+                None => { node.remove_property::<crate::engine::scene_manager::properties::Material>(); }
+            }
             if let Some(plane) = node.get_behavior_mut::<Plane>() {
                 plane.set_effects(&spec.effects);
                 plane.set_surface_max(&spec.aero.wings);
@@ -541,8 +559,14 @@ impl flight_manager {
         plane.set_path(&flight_plan.0, Speed::Hold(cruise_speed(placement)), placement.difficulty, flight_plan.1);
         let plane = if placement.player { plane } else { plane.bot() };
 
+        let material = plane_material(&aircraft_spec, Some(placement));
+        let node = Node::new(&placement.name);
+        let node = match material {
+            Some(material) => node.add_property(material),
+            None => node,
+        };
         scene.spawn_node_live(app,
-            Node::new(&placement.name)
+            node
                 .add_behavior(plane)
                 .add_property(Transform3D {
                     position: placement.position(),
@@ -559,7 +583,7 @@ impl flight_manager {
                 .add_property(effects::plane_emitters(&aircraft_spec.effects, &aircraft_spec.gear, &aircraft_spec.aero.wings))
                 .add_property(physics)
                 .add_physics_behavior(AircraftPhysics::new(&aircraft_spec.aero, &aircraft_spec.engine, &aircraft_spec.gear, &aircraft_spec.effects, center_of_mass, colliders, mass, placement.start.gear_down()))
-                .add_physics_behavior(WaterContact::new(app.water.ocean.sea_level()).sinks(WRECK_FLOAT_SECONDS, WRECK_SINK_SECONDS)),
+                .add_physics_behavior(WaterContact::new(app.sea_level).sinks(WRECK_FLOAT_SECONDS, WRECK_SINK_SECONDS)),
             physics_command_tx,
         ).map_err(|error| format!("map aircraft '{}': {error}", placement.name))?;
         if let Some(instance) = scene.content.renderizable_instances.get_mut(&placement.name) {
@@ -862,6 +886,7 @@ mod tests {
             radar_warn_m: None,
             difficulty: Default::default(),
             start: Default::default(),
+            material: None,
         }
     }
 

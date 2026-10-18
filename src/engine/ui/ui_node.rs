@@ -3,6 +3,7 @@ use nalgebra::vector;
 use crate::app::{App, Size};
 use crate::engine::input::input;
 use crate::engine::rendering::ui::ui::UiRendering;
+use crate::engine::scene_manager::properties::Material;
 use crate::engine::rendering::vertex::{ImageVertex, VertexUi};
 use crate::engine::utils::lerps::lerp;
 use super::color::{lerp_rgba, Fill, UiColor};
@@ -171,7 +172,7 @@ impl Style {
         let background_color = self.background_color.clone().unwrap_or(Fill::Solid(UiColor::TRANSPARENT));
         ResolvedStyle {
             // Falls back to the background color, not a hardcoded transparent - the
-            // shader (see text_shader.wgsl) always paints a border-width band along
+            // shader (see ui_template.wgsl) always paints a border-width band along
             // the edge in border_color, so a hardcoded transparent default carves a
             // literal hairline of see-through out of every box that has a
             // background but never explicitly set its own border color - subtle on
@@ -332,6 +333,10 @@ pub struct UiNode {
     // already set directly untouched.
     pending_size: Option<(SizeValue, SizeValue)>,
     pending_position: Option<(PositionValue, PositionValue)>,
+    // What its own box (or image) is drawn with - a Ui shader (see
+    // engine::rendering::shader_library). None: engine/ui. Not passed down -
+    // each child draws with its own. See `set_material`.
+    material: Option<Material>,
 }
 
 fn point_in_rect(x: f32, y: f32, rect: &Rect) -> bool {
@@ -368,6 +373,7 @@ impl UiNode {
             is_clicked: false,
             pending_size: None,
             pending_position: None,
+            material: None,
         }
     }
 
@@ -616,6 +622,7 @@ impl UiNode {
                 label.apply_style(font_system, current.font_size, effective_style.align.unwrap_or(Align::Left));
 
                 let text_color = ancestor_hover_text.map(GlyphonColor::from).unwrap_or_else(|| current.text_color());
+                ui.use_material(self.material.as_ref());
                 ui.vertices.extend_from_slice(&vertices_slice);
                 ui.indices.extend_from_slice(&indice_slice);
                 ui.num_vertices += vertices_slice.len() as u16;
@@ -694,6 +701,7 @@ impl UiNode {
                 // this node itself received (not the clip it's about to establish
                 // for its own children below - this is its own box, not theirs).
                 let (vertices_slice, indice_slice) = Self::compute_quad(&self.transform, &effective_visibility, size, dpi_scale, ui.num_vertices, Self::clip_rect_array(clip_rect));
+                ui.use_material(self.material.as_ref());
                 let (cv, ci) = container.ui_node_data_creation(size, &mut ui.vertices, &vertices_slice, &mut ui.indices, &indice_slice);
                 ui.num_vertices += cv;
                 ui.num_indices += ci;
@@ -950,6 +958,7 @@ impl UiNode {
                 // already captured as plain locals before that loop ran, not from
                 // `container` directly, for the same reason.
                 if scrollable && max_scroll > 0.0 {
+                    ui.use_material(None);
                     const BAR_WIDTH: f32 = 5.0;
                     let bar_left = content_right - BAR_WIDTH;
 
@@ -1005,7 +1014,8 @@ impl UiNode {
                 // background quad behind an Image node today to show through the gap.
                 let inner_rect = Self::inner_rect(&self.transform, &self.padding);
                 let vertices = Self::compute_image_vertices(&inner_rect, size, current.alpha, image.quarter_turns);
-                ui.image_quads.entry(image.path.clone()).or_default().extend_from_slice(&vertices);
+                let material = ui.material_key(self.material.as_ref());
+                ui.image_quads.entry((material, image.path.clone())).or_default().extend_from_slice(&vertices);
             },
         }
 
@@ -1014,7 +1024,7 @@ impl UiNode {
 
     /// Debug-only: draws an outline (transparent fill, opaque border - reuses the
     /// same border rendering every node's own border color already gets, see
-    /// text_shader.wgsl) at this node's resolved `rect`, recursing into children.
+    /// ui_template.wgsl) at this node's resolved `rect`, recursing into children.
     /// Call after `node_content_preparation` has already run this frame (needs
     /// `self.transform.rect` to be current) - see `App::prepare_ui_content`, gated
     /// behind `Ui::debug_bounds` (no key any more).
@@ -1029,6 +1039,7 @@ impl UiNode {
         // debugging than a clipped one would be.
         let (vertices_slice, indice_slice) = Self::compute_quad(&self.transform, &outline, size, dpi_scale, ui.num_vertices, Self::NO_CLIP);
 
+        ui.use_material(None);
         ui.num_vertices += vertices_slice.len() as u16;
         ui.num_indices += indice_slice.len() as u32;
         ui.vertices.extend_from_slice(&vertices_slice);
@@ -1118,7 +1129,7 @@ impl UiNode {
     /// this call will add, i.e. `ui.num_vertices` at the call site.
     // "No clip" sentinel for VertexUi::clip_rect ([top, left, bottom, right] -
     // same packing as VertexUi::rect) - large enough that no on-screen fragment
-    // ever falls outside it, so text_shader.wgsl's clip discard never triggers
+    // ever falls outside it, so ui_template.wgsl's clip discard never triggers
     // for the overwhelming majority of nodes that were never inside a
     // scrollable container (see UiNode::set_scrollable). Same "off by default"
     // shape as background_blur's own 0.0 default.
@@ -1137,7 +1148,7 @@ impl UiNode {
 
         // Unlike ndc_x/y above (self-contained NDC, resolution-independent), the
         // `rect` VertexUi carries gets compared fragment-by-fragment in
-        // text_shader.wgsl against `@builtin(position)`, which WGPU always gives
+        // ui_template.wgsl against `@builtin(position)`, which WGPU always gives
         // in real backing pixels, never points - so `rect` (and `clip`, same
         // packing) has to already be in that space too, same reasoning as
         // Label::text_area's own dpi_scale doc comment. Left unscaled, every
@@ -1154,7 +1165,7 @@ impl UiNode {
         let clip = clip.map(|v| v * dpi_scale);
 
         let border_edges = visibility.border_edges.to_bits();
-        // Same reasoning as `rect`/`clip` above - text_shader.wgsl's SDF (dist)
+        // Same reasoning as `rect`/`clip` above - ui_template.wgsl's SDF (dist)
         // and per-edge border bands compare directly against `@builtin(position)`
         // (real pixels), so corner_radius/border_width (authored in points, same
         // as everything else) have to be converted to that space too, or a
@@ -1522,6 +1533,20 @@ impl UiNode {
         self
     }
 
+    /// Draws this node's own box (or image) with `material` - a Ui shader
+    /// (see engine::rendering::shader_library), engine/ui otherwise. Its
+    /// children keep their own; its text is drawn as before.
+    pub fn set_material(mut self, material: Material) -> Self {
+        self.material = Some(material);
+        self
+    }
+
+    /// `set_material`, on a node that's already built - None back to
+    /// engine/ui. The UI is drawn again with it.
+    pub fn replace_material(&mut self, material: Option<Material>) {
+        self.material = material;
+    }
+
     /// Registers a callback that runs once, on the frame this node gets clicked
     /// (mouse button pressed while over it - see the `is_clicked` hit-test in
     /// `node_content_preparation`, and `App::fire_ui_click_handlers` for how it
@@ -1760,7 +1785,7 @@ impl UiNode {
     /// own alpha: the blur radius comes from here, while the *background color's
     /// alpha* controls how much of that blur shows through versus how strongly
     /// the flat color tints it (an opaque background_color fully hides the blur;
-    /// a translucent one lets it show through, tinted) - see text_shader.wgsl's
+    /// a translucent one lets it show through, tinted) - see ui_template.wgsl's
     /// fill_color. Every node crossfades between the same shared, precomputed
     /// full-resolution blur based on its own radius (see BlurRender), rather than
     /// each sampling the live scene independently at an arbitrary radius - the

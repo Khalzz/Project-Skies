@@ -118,7 +118,7 @@ impl From<[f32; 4]> for Padding {
 /// every border before this existed - only an explicit `.set_border_edges(...)`
 /// call ever narrows it, e.g. `BorderEdges::LEFT` for a sidebar-style accent bar
 /// on just one side. All 4 edges together render through the same rounded-corner
-/// SDF border every node already used (see `text_shader.wgsl`'s `border_mix`);
+/// SDF border every node already used (see `ui_template.wgsl`'s `border_mix`);
 /// fewer than 4 switches to independent straight bands per enabled edge instead,
 /// since there's no single "distance to nearest enabled edge" that still respects
 /// corner rounding correctly for an arbitrary subset - a partial border is drawn
