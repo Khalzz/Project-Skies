@@ -1,0 +1,117 @@
+use crate::app::App;
+use crate::game_nodes::game_object::{GameObject, MetaData, Transform as GameObjectTransform};
+use crate::rendering::instance_management::{InstanceData, ModelDataInstance};
+use crate::resources;
+
+use super::properties::{Material, Model, Transform3D};
+use crate::rendering::shader_library::STANDARD;
+use super::scene::Scene;
+
+/// Bridges a spawned `Node`'s `Transform3D`+`Model` properties into the
+/// existing renderer, which only walks `App::renderizable_instances`/
+/// `App::game_models` today - see `properties.rs`'s own doc comment on
+/// `Model`, this is exactly the "follow-up work" flagged there.
+///
+/// Expects `model_ref` to already be loaded - either via
+/// `resources::register_model` (into `app.loaded_models`) or already resident
+/// in `app.game_models` (the `data.ron` pipeline, or a previous call to this
+/// fn for another instance of the same model) - and errors instead of
+/// loading one itself; see that function's own doc comment for why loading is
+/// meant to happen up front, not lazily here.
+///
+/// What this always rebuilds is that model's shared instance buffer: it's a
+/// single fixed-size GPU buffer covering every instance of that model at once
+/// (see `create_instance_buffer`), so adding one more instance needs a fresh,
+/// larger buffer, not just an in-place write - this recomputes it from every
+/// `renderizable_instances` entry currently sharing `model_ref` (this node
+/// included) each time. That makes this call O(current instance count of
+/// that model), fine for "a new object appears" - it's not what keeps
+/// existing instances' positions updated frame to frame, `App::run`'s own
+/// per-frame `write_buffer` loop already does that cheaply, without
+/// reallocating, and keeps working unchanged once this has sized the buffer
+/// correctly.
+///
+/// One real gap, not handled here: removing a node doesn't shrink/rebuild the
+/// buffer back down - only growth (a node newly referencing a model) is
+/// covered, matching how far this system's been built out so far.
+/// Takes the node `id`'s instance off the renderer - the reverse of
+/// `register_static_model`. Its model stays loaded; the shared instance
+/// buffer keeps its size (the per-frame write just fills fewer slots), only
+/// the instance count drops.
+pub fn unregister_model(scene: &mut Scene, app: &mut App, id: &str) {
+    let Some(removed) = scene.content.renderizable_instances.remove(id) else { return };
+    let remaining = scene.content.renderizable_instances.values()
+        .filter(|instance| instance.model_ref == removed.model_ref)
+        .count() as u32;
+    if let Some(model) = app.game_models.get_mut(&removed.model_ref) {
+        model.instance_count = remaining;
+    }
+}
+
+pub fn register_static_model(scene: &mut Scene, app: &mut App, id: &str) -> Result<(), String> {
+    let node = scene.content.nodes.get(id).ok_or_else(|| format!("no node named '{id}' to register"))?;
+    let transform = *node.get_property::<Transform3D>().ok_or_else(|| format!("node '{id}' has no Transform3D property"))?;
+    let model = node.get_property::<Model>().ok_or_else(|| format!("node '{id}' has no Model property"))?;
+    let material = node.get_property::<Material>().map_or_else(|| STANDARD.to_owned(), |material| material.key(id));
+    // Node scale x the model's own - see Model::render_scale.
+    let render_scale = model.render_scale(transform.scale);
+    // Where the model comes from: its own file (Model::from_file), a name
+    // declared with resources::declare_model, or - neither - a model already
+    // resident under that name (a procedural one). Kept under the file's key,
+    // so a name and a file pointing at the same thing share one load.
+    let source = model.source.clone().or_else(|| app.model_sources.get(&model.model_ref).cloned());
+    let model_ref = source.as_ref().map(|source| source.key()).unwrap_or_else(|| model.model_ref.clone());
+
+    let game_object = GameObject {
+        id: id.to_owned(),
+        model: model_ref.clone(),
+        transform: GameObjectTransform {
+            position: transform.position,
+            rotation: transform.rotation,
+            scale: render_scale,
+        },
+        children: vec![],
+        metadata: MetaData { physics: None, cameras: None, lighting: None },
+    };
+
+    // Reuse the mesh already loaded - either previously instanced
+    // (app.game_models) or preloaded but not yet instanced
+    // (app.loaded_models, see resources::register_model) - never loads one
+    // itself; a model_ref with neither is a "you forgot to preload this" bug.
+    let loaded_model = match app.game_models.remove(&model_ref) {
+        Some(existing) => existing.model,
+        None => match &source {
+            // First node in this level using it - load it now.
+            Some(source) => resources::load_scene_model(app, source)?,
+            None => app.loaded_models.remove(&model_ref)
+                .ok_or_else(|| format!("model '{model_ref}' isn't loaded or declared - see resources::declare_model"))?,
+        },
+    };
+
+    scene.content.renderizable_instances.insert(id.to_owned(), InstanceData {
+        renderizable_transform: game_object.transform,
+        instance: game_object,
+        model_ref: model_ref.clone(),
+        material,
+    });
+
+    // Rebuild the shared instance buffer from every renderizable instance
+    // that now references this model - includes the node just inserted above.
+    let instances: Vec<&GameObject> = scene.content.renderizable_instances.values()
+        .filter(|instance| instance.model_ref == model_ref)
+        .map(|instance| &instance.instance)
+        .collect();
+    let instance_count = instances.len() as u32;
+    let camera_position = scene.cameras.active().camera.position().coords;
+    let instance_buffer = resources::create_instance_buffer(&instances, &app.renderer.device, camera_position);
+
+    app.game_models.insert(model_ref, ModelDataInstance {
+        model: loaded_model,
+        instance_buffer,
+        instance_count,
+        material_ranges: Vec::new(),
+        mesh_materials: Default::default(),
+    });
+
+    Ok(())
+}

@@ -5,8 +5,8 @@ use rapier3d::prelude::{ColliderBuilder, RigidBodyBuilder};
 use ron::from_str;
 use wgpu::{util::DeviceExt, BindGroupLayout, Buffer, Device, Queue, SurfaceConfiguration};
 
-use crate::{app::App, engine::game_nodes::{game_object::GameObject, scene::Scene}, engine::rendering::{enviroment::environment::Environment, enviroment::skybox_renderer::SkyboxRender, instance_management::{InstanceData, InstanceRaw, ModelDataInstance}, models::model::{self, Mesh, Model, ModelVertex}, models::textures::Texture}, transform::Transform};
-use crate::engine::scene_manager::scene::Scene as ManagedScene;
+use crate::{app::App, game_nodes::{game_object::GameObject, scene::Scene}, rendering::{enviroment::environment::Environment, enviroment::skybox_renderer::SkyboxRender, instance_management::{InstanceData, InstanceRaw, ModelDataInstance}, models::model::{self, Mesh, Model, ModelVertex}, models::textures::Texture}, transform::Transform};
+use crate::scene_manager::scene::Scene as ManagedScene;
 
 /// Flip to `true` to dump every model's materials/textures/primitives to
 /// stdout as it loads (see `model_log!` uses in `load_model_gltf` /
@@ -839,7 +839,7 @@ fn prepare_level_assets(device: &Device, queue: &Queue, camera_position: Vector3
                 }
 
                 for (i, instance_data) in model_instances.iter().enumerate() {
-                    renderizable_instances.insert(ids[i].clone(), InstanceData { renderizable_transform: instance_data.transform.clone(), instance: (**instance_data).clone(), model_ref: model_name.clone(), material: crate::engine::rendering::shader_library::STANDARD.to_owned() });
+                    renderizable_instances.insert(ids[i].clone(), InstanceData { renderizable_transform: instance_data.transform.clone(), instance: (**instance_data).clone(), model_ref: model_name.clone(), material: crate::rendering::shader_library::STANDARD.to_owned() });
                 }
             }
         },
@@ -863,7 +863,7 @@ pub fn prepare_environment(device: &Device, queue: &Queue, camera_bind_group_lay
         Environment::Color(color) => PreparedEnvironment { skybox: None, clear_color: color },
         Environment::ProceduralSky => PreparedEnvironment {
             skybox: Some(SkyboxRender::new_procedural(device, config, camera_bind_group_layout)),
-            clear_color: crate::engine::rendering::enviroment::environment::DEFAULT_CLEAR_COLOR,
+            clear_color: crate::rendering::enviroment::environment::DEFAULT_CLEAR_COLOR,
         },
         Environment::Skybox(faces) => {
             let texture = load_texture_cube(
@@ -875,11 +875,11 @@ pub fn prepare_environment(device: &Device, queue: &Queue, camera_bind_group_lay
             match texture {
                 Ok(texture) => PreparedEnvironment {
                     skybox: Some(SkyboxRender::new(device, config, camera_bind_group_layout, texture)),
-                    clear_color: crate::engine::rendering::enviroment::environment::DEFAULT_CLEAR_COLOR,
+                    clear_color: crate::rendering::enviroment::environment::DEFAULT_CLEAR_COLOR,
                 },
                 Err(err) => {
                     eprintln!("Skybox faces couldn't be loaded, falling back to clear color: {err}");
-                    PreparedEnvironment { skybox: None, clear_color: crate::engine::rendering::enviroment::environment::DEFAULT_CLEAR_COLOR }
+                    PreparedEnvironment { skybox: None, clear_color: crate::rendering::enviroment::environment::DEFAULT_CLEAR_COLOR }
                 }
             }
         }

@@ -6,38 +6,36 @@ use wgpu::{BindGroupLayout, BindGroupLayoutDescriptor, Device, DeviceDescriptor,
 use sdl2::{JoystickSubsystem, GameControllerSubsystem, HapticSubsystem};
 use glyphon::{Cache, Resolution, TextArea, Viewport};
 
-use crate::game::debug_overlay::{AeroSample, DebugWindows};
-use crate::engine::audio::audio::Audio;
-use crate::engine::physics::physics::{DebugPhysicsMessageType, PhysicsDataTransmission};
-use crate::engine::physics::physics_handler::{RenderMessage, PhysicsCommand};
-use crate::engine::rendering::enviroment::skybox_renderer::SkyboxRender;
-use crate::engine::rendering::enviroment::environment;
-use crate::engine::rendering::instance_management::{InstanceData, InstanceRaw, ModelDataInstance};
-use crate::engine::rendering::render_pipeline::depth_renderer::DepthRender;
-use crate::engine::rendering::tiled_meshes::TiledMeshes;
-use crate::engine::particles::ParticleEmitters;
-use crate::engine::particles::renderer::{EmitterSource, ParticleFrameInfo, ParticleRenderer};
-use crate::engine::scene_manager::properties::Transform3D;
+use crate::audio::audio::Audio;
+use crate::physics::physics::{DebugPhysicsMessageType, PhysicsDataTransmission};
+use crate::physics::physics_handler::{RenderMessage, PhysicsCommand};
+use crate::rendering::enviroment::skybox_renderer::SkyboxRender;
+use crate::rendering::enviroment::environment;
+use crate::rendering::instance_management::{InstanceData, InstanceRaw, ModelDataInstance};
+use crate::rendering::render_pipeline::depth_renderer::DepthRender;
+use crate::rendering::tiled_meshes::TiledMeshes;
+use crate::particles::ParticleEmitters;
+use crate::particles::renderer::{EmitterSource, ParticleFrameInfo, ParticleRenderer};
+use crate::scene_manager::properties::Transform3D;
 use nalgebra::Vector3;
-use crate::engine::rendering::camera::handler::CameraResources;
-use crate::engine::rendering::models::textures::Texture;
-use crate::engine::game_nodes::timing::Timing;
-use crate::engine::rendering::enviroment::light::Light;
-use crate::engine::rendering::models::model::{self, Mesh, Model, Vertex};
-use crate::engine::rendering::renderer::Renderer;
-use crate::engine::scene_manager::scene::{FrameContext, LoadReporter, LoadedAssets, PendingSceneLoad, Scene, SceneManager};
-use crate::engine::splash_screen::SplashScreenConfig;
-use crate::engine::input::input;
-use crate::engine::rendering::ui::physics_rendering::RenderPhysics;
-use crate::engine::rendering::ui::rendering_utils;
-use crate::engine::rendering::ui::ui::Ui;
-use crate::engine::ui::color::UiColor;
-use crate::engine::ui::ui_node::UiNode;
-use crate::engine::ui::ui_transform::PositionValue;
-use crate::game::scenes::loading::scene::{LoadingScreenScene, FADE_OUT_SECS, PANEL_KEY, STEP_KEY};
-use crate::game::scenes::play::flight_editor::FlightEditor;
+use crate::rendering::camera::handler::CameraResources;
+use crate::rendering::models::textures::Texture;
+use crate::game_nodes::timing::Timing;
+use crate::rendering::enviroment::light::Light;
+use crate::rendering::models::model::{self, Mesh, Model, Vertex};
+use crate::rendering::renderer::Renderer;
+use crate::scene_manager::scene::{FrameContext, LoadReporter, LoadedAssets, PendingSceneLoad, Scene, SceneManager};
+use crate::splash_screen::SplashScreenConfig;
+use crate::input::input;
+use crate::rendering::ui::physics_rendering::RenderPhysics;
+use crate::rendering::ui::rendering_utils;
+use crate::rendering::ui::ui::Ui;
+use crate::ui::color::UiColor;
+use crate::ui::ui_node::UiNode;
+use crate::ui::ui_transform::PositionValue;
+use crate::scene_manager::loading_screen::{LoadingScreenScene, FADE_OUT_SECS, PANEL_KEY, STEP_KEY};
 use crate::resources;
-use crate::engine::window::window::{WindowManager, WindowSettings};
+use crate::window::window::{WindowManager, WindowSettings};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -54,6 +52,49 @@ pub struct Throttling {
     pub ui_update_interval: Duration,
 }
 
+/*
+    # App
+    The main application struct, this struct its mainly thought to be used as a "configuration"
+    of the engine, in that way we could set something like:
+
+    "Create a window with this particularities, the physics engine set it up with this configurations
+    the audio subsystem should have this values and so on"
+
+    TODO: refactor this component, right now there are too many things in this struct that
+    are related to the past "game based implementation"
+
+    so for now what we need its to set here:
+
+    1. Window
+    2. Physics
+    3. Rendering: Check if this component its a better idea to separate it in 2D rendering and 3D rendering before everything else
+        1. Models
+        2. Textures
+        3. Physics debug lines for colliders
+        4. UI rendering
+        5. Lighting
+    4. Audio
+    5. Input
+        1. Controller
+        2. Joystick
+        3. Rumble
+        4. ETC....
+    6. Time: It will contain elements like DeltaTime, TimeScale  and other functionalities
+    7. SceneManager: It will contain each scene and his configuration, and based on it it will apply them
+    Review the way its setted up, because now there might be 2 different posibilities
+        1. We set the list, select one and set the scene manager with the settings of the openned scene
+        2. We set the list, select one and read the settings from the selected scene THIS IS THE OPTIMAL    
+    8. EGUI: Right now we have egui as a component directed by very different elements in the screen
+    the main focus its that now the egui system should be our "Debug screens" for now, that way we could
+    test things through it instead of trough anything else
+
+    Exception relative that needs more work
+    - Particles: Check where its this system being instantiated, i know its a node component
+    but his existence and system configuration should MAYBE allow me to configurate something from here
+    but i repeat, check first
+    - UI: The ui should mostly work as a "node system" in some sort of way
+    since the ui its not an "app relative element" its more a "scene relative element"
+*/
 pub struct App {
     pub window_manager: WindowManager,
     pub renderer: Renderer,
@@ -63,8 +104,8 @@ pub struct App {
     // The shaders models are drawn with, by name (see engine::rendering::
     // shader_library) - and where each material in use is drawn this frame
     // (worked out at the start of the frame plan).
-    pub shaders: crate::engine::rendering::shader_library::ShaderLibrary,
-    pub material_placements: HashMap<String, crate::engine::rendering::shader_library::Placement>,
+    pub shaders: crate::rendering::shader_library::ShaderLibrary,
+    pub material_placements: HashMap<String, crate::rendering::shader_library::Placement>,
     /// What each 2D material in use (the UI's, the line and text sets') is
     /// drawn with this frame - itself, or its flashing magenta stand-in (see
     /// ShaderLibrary::prepare_overlay).
@@ -97,40 +138,22 @@ pub struct App {
     // scroll so the overlay's buttons can be clicked mid-flight. Also shows
     // the overlay - see `debug_overlay_visible`.
     pub debug_mouse_free: bool,
-    // The live map editor, docked round the world in F10's editor (see
-    // play::scene::GameLogic::update_flight_editor) - drawn by the same egui
-    // overlay pass.
-    pub flight_editor: FlightEditor,
     // M's map (see play::tactical_map) is up - the play scene draws it
     // instead of the world (see game::frame_plans::tactical_map).
     pub tactical_map_active: bool,
     // What a frame draws, in order (see engine::rendering::frame) - the
     // active scene's, set in its start; back to `default_frame_plan` on a
     // scene change, which the game sets once.
-    pub frame_plan: crate::engine::rendering::frame::FramePlan,
-    pub default_frame_plan: crate::engine::rendering::frame::FramePlan,
+    pub frame_plan: crate::rendering::frame::FramePlan,
+    pub default_frame_plan: crate::rendering::frame::FramePlan,
     // The line and text sets the frame plan's steps draw - the active
     // scene's, registered in its start, dropped on a scene change (see
     // engine::rendering::render_sets).
-    pub render_sets: crate::engine::rendering::render_sets::RenderSets,
+    pub render_sets: crate::rendering::render_sets::RenderSets,
     // F10's editor - the world drawn as usual, seen through a free editor
     // camera, with the editor's panels round it and the "editor_lines" set
     // (cameras' views, paths, links) over it.
     pub editor_active: bool,
-    // F10 on the title (see main_menu::scene). The shot's camera, jet, and
-    // which way the sea travels. Drawn by the egui overlay while `open`.
-    pub menu_shot: crate::game::scenes::main_menu::scene::MenuShot,
-    // F11 while flying (see play::scene::HudLayout). The cockpit HUD's size,
-    // center, and where the jet plate sits. Drawn by the egui overlay while
-    // `open`.
-    pub hud_layout: crate::game::scenes::play::scene::HudLayout,
-    // The debug view (F5/F9) while spectating - what the camera's on, as
-    // the play scene sees it (see play::scene's telemetry), drawn over the
-    // game by the egui overlay pass. None otherwise.
-    pub spectate_telemetry: Option<crate::game::scenes::play::flight_editor::Telemetry>,
-    // The tactical map's buttons, selection and flight plan window (see
-    // play::tactical_ui) - drawn by the egui overlay pass while it's up.
-    pub tactical_ui: crate::game::scenes::play::tactical_ui::TacticalUi,
     // Where F10's map is drawn (logical px: x, y, width, height) - the
     // middle of the editor view's layout, between its panels (see
     // FlightEditor::draw_docked), set by the egui pass each frame. None: the
@@ -148,7 +171,7 @@ pub struct App {
     // endpoints, see ManualVertex) - drawn with the F5 physics lines' pipeline
     // but whether F5 is on or not, over everything. Whoever fills it clears
     // it (see play::scene::GameLogic::update_flight_editor's paths).
-    pub world_lines: Vec<[crate::engine::primitive::manual_vertex::ManualVertex; 2]>,
+    pub world_lines: Vec<[crate::primitive::manual_vertex::ManualVertex; 2]>,
     // Every physics body's latest pose from the physics thread - kept, so a
     // frame where no new one has arrived still draws each body where it is
     // by now (see `physics_pose_now`) instead of freezing it for a frame.
@@ -156,15 +179,6 @@ pub struct App {
     // The node id of the aircraft the player flies (see play::map's
     // `player`) - kept up to date by the play scene, for the F7 windows.
     pub player_node: String,
-    // Which of the overlay's windows are open - toggled from its "Debug
-    // Windows" panel or each window's own close button.
-    pub debug_windows: DebugWindows,
-    // Rolling window of recent flight samples (speed, AoA, altitude, the
-    // roll/pitch/yaw/climb rates and the stick) for the F7 "Flight Rates"
-    // window - see AeroSample. Bounded (see AERO_DEBUG_TRAIL_CAPACITY),
-    // pushed by Plane only while the overlay is up, so this stays empty and
-    // untouched otherwise.
-    pub aero_debug_trail: std::collections::VecDeque<AeroSample>,
     // Rolling window of recent (sample_index, main_wing_lift_y_newtons,
     // elevator_wing_lift_y_newtons) samples - same show_aero_debug_overlay
     // gate/cap as aero_debug_trail above, pushed alongside it from
@@ -186,7 +200,7 @@ pub struct App {
     // anything wanting a live debug overlay drawn into the game's own
     // window, not just the aero one specifically, though that's the only
     // consumer so far.
-    pub egui_overlay: crate::engine::rendering::egui_overlay::EguiOverlay,
+    pub egui_overlay: crate::rendering::egui_overlay::EguiOverlay,
     // Set true to request a graceful shutdown from code that only has
     // `&mut App` (e.g. a UI button's click handler - see main_menu::ui's own
     // "Quit" button), not the `run()` loop's own local `app_state`. run()'s
@@ -196,6 +210,10 @@ pub struct App {
     // resources dropped, `App::run` actually RETURNS to its caller) instead
     // of a raw std::process::exit(0), which used to skip all of that.
     pub should_quit: bool,
+    // set_fullscreen/set_resolution changed the window - App::run resizes at
+    // the top of the next frame, with the active scene back in place so its
+    // cameras resize too (it's taken out while its own update runs).
+    resize_pending: bool,
     // Wrapped (not a raw running total) so precision doesn't degrade over a
     // long play session - the wave functions in water.wgsl are periodic, so
     // wrapping is invisible to them. Advanced once per frame alongside the
@@ -262,18 +280,13 @@ pub struct App {
 }
 
 impl App {
-    pub async fn new(title: &str, ext_width: Option<u32>, ext_height: Option<u32>) -> Result<App, String> {
+    pub async fn new(window_settings: WindowSettings) -> Result<App, String> {
         // Window initialization
-        
-        let window_manager = WindowManager::new(WindowSettings {
-            tittle: title.to_string(),
-            size: None,
-            screen_index: None,
-            fullscreen: true,
-        });
+
+        let window_manager = WindowManager::new(window_settings);
 
         env::set_var("SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS", "0");
-        window_manager.context.mouse().set_relative_mouse_mode(true);
+        // window_manager.context.mouse().set_relative_mouse_mode(true);
 
         let joystick_subsystem = window_manager.context.joystick().unwrap();
         let haptic_subsystem = window_manager.context.haptic().unwrap();
@@ -289,7 +302,7 @@ impl App {
         // name (see engine::rendering::shader_library) - built when first
         // used, with these bind groups: the mesh's texture, the camera, the
         // mesh's transform, the light.
-        let shaders = crate::engine::rendering::shader_library::ShaderLibrary::new(
+        let shaders = crate::rendering::shader_library::ShaderLibrary::new(
             renderer.device.clone(),
             renderer.queue.clone(),
             renderer.config.format,
@@ -314,8 +327,8 @@ impl App {
             &renderer.glyphon.cache,
             &renderer.blur.scene_color,
             &renderer.blur.blurred,
-            shaders.overlay_layout(crate::engine::rendering::shader_library::Overlay::UiBox),
-            shaders.overlay_layout(crate::engine::rendering::shader_library::Overlay::UiImage),
+            shaders.overlay_layout(crate::rendering::shader_library::Overlay::UiBox),
+            shaders.overlay_layout(crate::rendering::shader_library::Overlay::UiImage),
         );
 
         let particles = ParticleRenderer::new(&renderer.device, &renderer.queue, renderer.config.format, &camera_resources.bind_group_layout, &renderer.depth_render.foam_depth_copy.view);
@@ -330,7 +343,7 @@ impl App {
         // physics rendering
         let render_physics = RenderPhysics::new(&renderer.device, &renderer.config, &camera_resources);
 
-        let egui_overlay = crate::engine::rendering::egui_overlay::EguiOverlay::new(&renderer.device, renderer.config.format);
+        let egui_overlay = crate::rendering::egui_overlay::EguiOverlay::new(&renderer.device, renderer.config.format);
 
         // Physics data
         let time = Timing::new();
@@ -350,28 +363,22 @@ impl App {
             particles,
             show_aero_debug_overlay: false,
             debug_mouse_free: false,
-            flight_editor: FlightEditor::default(),
             tactical_map_active: false,
-            frame_plan: crate::engine::rendering::frame::FramePlan::engine_default(),
-            default_frame_plan: crate::engine::rendering::frame::FramePlan::engine_default(),
+            frame_plan: crate::rendering::frame::FramePlan::engine_default(),
+            default_frame_plan: crate::rendering::frame::FramePlan::engine_default(),
             render_sets: Default::default(),
-            tactical_ui: Default::default(),
             tactical_viewport: None,
             editor_active: false,
-            menu_shot: crate::game::scenes::main_menu::scene::MenuShot::default(),
-            hud_layout: crate::game::scenes::play::scene::HudLayout::default(),
-            spectate_telemetry: None,
             egui_cursor: None,
             infinite_drag: None,
             world_lines: Vec::new(),
             physics_poses: HashMap::new(),
             player_node: "player".to_owned(),
-            debug_windows: DebugWindows::default(),
-            aero_debug_trail: std::collections::VecDeque::new(),
             wing_lift_trail: std::collections::VecDeque::new(),
             pitch_rate_trail: std::collections::VecDeque::new(),
             egui_overlay,
             should_quit: false,
+            resize_pending: false,
             water_elapsed: 0.0,
             ui,
             camera_resources,
@@ -416,6 +423,11 @@ impl App {
         // that field's own doc comment.
         let width = self.window_manager.pixel_size.width;
         let height = self.window_manager.pixel_size.height;
+        // Minimized - a 0-sized surface can't be configured. Restoring it
+        // reports a size change again, which lands back here.
+        if width == 0 || height == 0 {
+            return;
+        }
 
         self.renderer.resize(width, height);
         self.camera_resources.resize(width, height);
@@ -430,6 +442,32 @@ impl App {
         self.shaders.set_depth_copy(self.renderer.depth_render.foam_depth_copy.view.clone(), self.renderer.depth_render.foam_depth_copy.sampler.clone());
         self.shaders.set_screen_inputs(Self::screen_inputs(&self.renderer.blur));
         self.particles.rebuild_depth_bind_group(&self.renderer.device, &self.renderer.depth_render.foam_depth_copy.view);
+
+        // Lay the UI out again against the new size - every node's Percent
+        // sizes and Center/End positions were worked out against the old one
+        // (see UiNode::resolve). In points, like the UI's layout everywhere.
+        let ui_width = self.window_manager.size.width as f32;
+        let ui_height = self.window_manager.size.height as f32;
+        for node in self.ui.renderizable_elements.values_mut() {
+            node.resolve(ui_width, ui_height);
+        }
+        self.ui.has_changed = true;
+    }
+
+    /// Borderless fullscreen at the desktop's resolution, or back to a window
+    /// - the renderer and UI follow at the start of the next frame.
+    pub fn set_fullscreen(&mut self, fullscreen: bool) -> Result<(), String> {
+        self.window_manager.set_fullscreen(fullscreen)?;
+        self.resize_pending = true;
+        Ok(())
+    }
+
+    /// The window's size in windowed mode (see WindowManager::set_resolution)
+    /// - the renderer and UI follow at the start of the next frame.
+    pub fn set_resolution(&mut self, width: u32, height: u32) -> Result<(), String> {
+        self.window_manager.set_resolution(width, height)?;
+        self.resize_pending = true;
+        Ok(())
     }
 
     /// Feeds every node's `ParticleEmitters` (at wherever the node is being
@@ -473,7 +511,7 @@ impl App {
     /// The images Fullscreen shaders read, by name (see shader_library's
     /// SCREEN_INPUTS) - the world drawn this frame, the "hud" target, the
     /// world blurred.
-    fn screen_inputs(blur: &crate::engine::rendering::render_pipeline::blur_renderer::BlurRender) -> Vec<(&'static str, wgpu::TextureView, wgpu::Sampler)> {
+    fn screen_inputs(blur: &crate::rendering::render_pipeline::blur_renderer::BlurRender) -> Vec<(&'static str, wgpu::TextureView, wgpu::Sampler)> {
         vec![
             ("scene", blur.scene_color.view.clone(), blur.scene_color.sampler.clone()),
             ("hud", blur.hud_color.view.clone(), blur.hud_color.sampler.clone()),
@@ -485,7 +523,7 @@ impl App {
     /// engine::rendering::render_sets. `screen_space`: in screen pixels, not
     /// the world.
     pub fn add_line_set(&mut self, name: &str, screen_space: bool) {
-        let mut lines = crate::engine::rendering::thick_lines::ThickLines::new(&self.renderer.device, self.shaders.overlay_layout(crate::engine::rendering::shader_library::Overlay::Lines));
+        let mut lines = crate::rendering::thick_lines::ThickLines::new(&self.renderer.device, self.shaders.overlay_layout(crate::rendering::shader_library::Overlay::Lines));
         lines.screen_space = screen_space;
         self.render_sets.insert_lines(name, lines);
     }
@@ -493,7 +531,7 @@ impl App {
     /// Registers an SDF text set for the frame plan's `Text` steps (see
     /// `add_line_set`).
     pub fn add_text_set(&mut self, name: &str, screen_space: bool) {
-        let mut text = crate::engine::rendering::sdf_text::SdfText::new(&self.renderer.device, self.renderer.config.format, self.shaders.overlay_layout(crate::engine::rendering::shader_library::Overlay::Text));
+        let mut text = crate::rendering::sdf_text::SdfText::new(&self.renderer.device, self.renderer.config.format, self.shaders.overlay_layout(crate::rendering::shader_library::Overlay::Text));
         text.screen_space = screen_space;
         self.render_sets.insert_text(name, text);
     }
@@ -562,11 +600,10 @@ impl App {
         self.ui.has_changed = true;
     }
 
-    /// Whether the mouse is a pointer for clicking debug windows (F7, F10's
-    /// flight editor, the F10 tactical map, or F11's HUD layout) instead of
-    /// looking around.
+    /// Whether the mouse is a pointer for clicking debug windows (F7, the
+    /// editor, the tactical map) instead of looking around.
     pub fn mouse_free(&self) -> bool {
-        self.debug_mouse_free || self.tactical_map_active || self.editor_active || self.hud_layout.open
+        self.debug_mouse_free || self.tactical_map_active || self.editor_active
     }
 
     /// Whether the F7 debug overlay is up.
@@ -726,10 +763,9 @@ impl App {
     // and mutate ANY UI node via Ui::get_ui_node while it runs, including its own
     // node or an ancestor (e.g. a button hiding the panel it's inside of).
     fn fire_ui_click_handlers(&mut self) {
-        // The title shot panel (F10) and the HUD layout panel (F11) sit on
-        // top of the game's own UI. A click on either must not also hit the
-        // button underneath.
-        if (self.menu_shot.open || self.hud_layout.open) && self.egui_overlay.ctx.is_pointer_over_area() {
+        // An egui window sits on top of the game's own UI. A click on it must
+        // not also hit the button underneath.
+        if self.egui_overlay.ctx.is_pointer_over_area() {
             return;
         }
         let mut pending: Vec<(String, Box<dyn FnMut(&mut App)>)> = Vec::new();
@@ -789,6 +825,17 @@ impl App {
             let quit_requested = input::update(&mut event_pump, self.time.delta_time, false);
             if quit_requested {
                 app_state.is_running = false;
+            }
+            // The window changed size - set_fullscreen/set_resolution, or the
+            // user (dragged, maximized, Alt+Enter...). Only when it really
+            // differs from what the renderer has: SDL reports our own changes
+            // too, often a frame later.
+            let window_resized = input::take_window_resized();
+            if std::mem::take(&mut self.resize_pending) || window_resized {
+                let (width, height) = self.window_manager.canvas.window().drawable_size();
+                if width != self.renderer.config.width || height != self.renderer.config.height {
+                    self.resize();
+                }
             }
 
             if !app_state.is_running || self.should_quit {
@@ -1303,8 +1350,8 @@ impl App {
                 // (drain_messages() was write-only - nothing ever called it) - dump to
                 // stdout for now so debug_text! is actually visible somewhere. Remove
                 // once there's a real on-screen console, or replace with one.
-                let messages = crate::engine::tooling::debug_console::drain_messages();
-                if crate::engine::tooling::debug_console::is_console_visible() {
+                let messages = crate::tooling::debug_console::drain_messages();
+                if crate::tooling::debug_console::is_console_visible() {
                     for message in messages {
                         println!("{message}");
                     }
