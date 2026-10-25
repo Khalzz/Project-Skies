@@ -15,7 +15,25 @@
 
 use crate::app::Size;
 use crate::rendering::vertex::VertexUi;
+use crate::ui::color::UiColor;
 use crate::ui::ui_node::UiNode;
+
+/// How a scrollable container's scrollbar looks - see `UiNode::set_scrollbar`.
+#[derive(Clone, Copy, Debug)]
+pub struct Scrollbar {
+    /// The bar's whole length - where the thumb can travel.
+    pub track: UiColor,
+    /// The part showing which slice of the content is in view.
+    pub thumb: UiColor,
+    /// In pixels.
+    pub width: f32,
+}
+
+impl Default for Scrollbar {
+    fn default() -> Self {
+        Self { track: UiColor::Rgba(255, 255, 255, 10), thumb: UiColor::Rgba(255, 255, 255, 255), width: 5.0 }
+    }
+}
 
 pub struct Container {
     pub gap: f32,
@@ -29,6 +47,9 @@ pub struct Container {
     // every child like a plain container. See UiNode::node_content_preparation's
     // Container branch for the actual scroll/clip logic.
     pub scrollable: bool,
+    // Set via UiNode::set_clip_children - clips its children to its own content
+    // rect like `scrollable`, without the scrolling or the scrollbar.
+    pub clip_children: bool,
     // Current, lerped-each-frame scroll position in pixels (see
     // node_content_preparation's SCROLL_SMOOTH_MS) - what children are actually
     // laid out against. Always 0.0 unless scrollable.
@@ -37,11 +58,13 @@ pub struct Container {
     // hovered, clamped to [0.0, max_scroll] every frame (see
     // node_content_preparation) so it can't run away past the real content.
     pub scroll_target: f32,
+    // How the scrollbar a scrollable container draws looks.
+    pub scrollbar: Scrollbar,
 }
 
 impl Container {
     pub fn new(gap: f32, children: Vec<(String, UiNode)>) -> Self {
-        Self { gap, children, scrollable: false, scroll_offset: 0.0, scroll_target: 0.0 }
+        Self { gap, children, scrollable: false, clip_children: false, scroll_offset: 0.0, scroll_target: 0.0, scrollbar: Scrollbar::default() }
     }
 
     pub fn ui_node_data_creation(&self, _size: &Size, vertices: &mut Vec<VertexUi>, vertices_slice: &[VertexUi], indices: &mut Vec<u16>, indices_slice: &[u16]) -> (u16, u32) {

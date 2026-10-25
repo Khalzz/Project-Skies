@@ -3,12 +3,17 @@ use nalgebra::vector;
 use crate::app::{App, Size};
 use crate::input::input;
 use crate::rendering::ui::ui::UiRendering;
-use crate::scene_manager::properties::Material;
+use crate::scene_manager::node::properties::Material;
 use crate::rendering::vertex::{ImageVertex, VertexUi};
 use crate::utils::lerps::lerp;
+use crate::window::window::CursorIcon;
+use crate::ui::widgets::text_input::TextInputState;
+use crate::ui::widgets::toggle::ToggleState;
+use crate::ui::widgets::dropdown::DropdownState;
 use super::color::{lerp_rgba, Fill, UiColor};
 use super::components::label::{Font, Label, DEFAULT_FONT_SIZE, min_height_for_font_size};
-use super::components::container::Container;
+use super::text_style::TextStyle;
+use super::components::container::{Container, Scrollbar};
 use super::components::image::ImageNode;
 use super::ui_transform::{Anchor, BorderEdges, ChildAnchor, Orientation, Fit, Padding, PositionValue, Rect, SizeValue, UiTransform};
 use super::ui_structure;
@@ -274,6 +279,14 @@ pub struct UiNode {
     // than replacing it, so a press can override just e.g. border_color while
     // hover's background/text_color stay in effect underneath.
     pub press: Option<Style>,
+    // Whether it takes input - see `set_enabled`. True by default.
+    enabled: bool,
+    // Style overrides applied while it's disabled (or an ancestor is) - set
+    // by `.on_disabled(...)`, layered over everything else like press is.
+    pub disabled_style: Option<Style>,
+    // Set by `.set_enter(...)` - the style the first frame eases from (with a
+    // transition) instead of snapping straight to the real one.
+    enter: Option<Style>,
     // Set by `.set_transition(...)` - how long, in ms, style changes (hover in/out,
     // or a runtime change like set_alpha) take to visually settle instead of
     // applying instantly. `None` (the default) means instant, same as before this
@@ -325,6 +338,18 @@ pub struct UiNode {
     // click happened (see node_content_preparation), so take_click_handlers firing
     // every frame regardless still only calls on_click once per actual click.
     is_clicked: bool,
+    // The mouse cursor shown while the mouse is over this node - set by
+    // `.set_cursor(...)`. None: whatever's under it decides (the arrow if
+    // nothing does). Not passed down - a child over it with its own wins.
+    pub cursor: Option<CursorIcon>,
+    // Set on a `widgets::text_input` box - what's typed in it, its caret and
+    // focus. Updated every frame in node_content_preparation.
+    text_input: Option<Box<TextInputState>>,
+    // Set on a `widgets::toggle` - whether it's on. Its look follows it every
+    // frame in node_content_preparation.
+    toggle: Option<ToggleState>,
+    // Set on a `widgets::dropdown` - its options and which is selected.
+    dropdown: Option<DropdownState>,
     // Set by `.set_size(...)`/`.set_position(...)`, consumed by `resolve(...)` -
     // deferred rather than resolved immediately so a node can be built as a plain
     // value (no closure) before its parent's size is known; `resolve` walks the
@@ -364,13 +389,20 @@ impl UiNode {
             padding: Padding::default(),
             hover: None,
             press: None,
+            enabled: true,
+            disabled_style: None,
             transition_ms: None,
+            enter: None,
             current_style: None,
             border_edges_hold: None,
             is_hovered: false,
             is_pressed: false,
             on_click: None,
             is_clicked: false,
+            cursor: None,
+            text_input: None,
+            toggle: None,
+            dropdown: None,
             pending_size: None,
             pending_position: None,
             material: None,
@@ -399,8 +431,8 @@ impl UiNode {
     }
 
     /// Fades this node's own content (text alpha or image tint alpha) - has no
-    /// effect on containers, which don't have a single color of their own. Used to
-    /// animate splash screen elements in/out (see App::run_splash_screen). Text
+    /// effect on containers, which don't have a single color of their own - for
+    /// fading elements in/out (the loading screen's text, say). Text
     /// bakes the alpha straight into `style.text_color`'s alpha channel (keeping its
     /// RGB) since text has no separate alpha channel of its own to blend with;
     /// images use `style.alpha` directly, resolved at render time same as hover.
@@ -417,7 +449,7 @@ impl UiNode {
 
     /// Moves this node to an absolute screen position, recomputing its rect. Only
     /// meaningful for top-level nodes (children get repositioned by their parent
-    /// container every frame anyway) - used to slide splash screen elements in.
+    /// container every frame anyway) - for sliding elements in.
     /// Named distinctly from `.set_position(...)` (the richer, deferred
     /// `PositionValue` builder) on purpose - this is an immediate, raw-pixel runtime
     /// mutator meant for a node you already have a `&mut` to (e.g. via
@@ -456,6 +488,45 @@ impl UiNode {
         self
     }
 
+    /// Lets this node take input, or not. Disabled, it - and everything
+    /// under it - is still drawn and laid out, but isn't hovered, pressed or
+    /// clicked (no `on_click`, so a toggle doesn't flip and a dropdown doesn't
+    /// open), shows no hover cursor, and a text input in it stops being typed
+    /// into. It's drawn with its `.on_disabled(...)` look, if it has one -
+    /// every widget sets a faded one.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        if !enabled {
+            self.is_hovered = false;
+            self.is_pressed = false;
+            self.is_clicked = false;
+        }
+    }
+
+    /// Chainable wrapper over `set_enabled`, e.g. `button(...).enabled(false)`.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.set_enabled(enabled);
+        self
+    }
+
+    /// Whether this node itself takes input (see `set_enabled`) - a disabled
+    /// ancestor disables it too, whatever this says.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// The style overrides it's drawn with while disabled (see `set_enabled`)
+    /// - itself or an ancestor - layered over its look like `.on_press(...)`.
+    /// Same closure shape and merging as `.on_hover(...)`.
+    pub fn on_disabled(mut self, build: impl FnOnce(Style) -> Style) -> Self {
+        let disabled = build(Style::default());
+        self.disabled_style = Some(match self.disabled_style {
+            Some(existing) => disabled.or(&existing),
+            None => disabled,
+        });
+        self
+    }
+
     pub fn get_children_mut(&mut self) -> Option<&mut Vec<(String, UiNode)>> {
         match &mut self.content {
             UiNodeContent::Container(container) => Some(&mut container.children),
@@ -480,6 +551,42 @@ impl UiNode {
         }
     }
 
+    /// Sizes every Fit container in this tree from its children, deepest
+    /// first. The layout pass (`node_content_preparation`) sizes a container
+    /// before laying out its children, so on its own it reads their sizes
+    /// from the frame before - a freshly built tree (a modal just opened)
+    /// would then grow into its size one nesting level per frame, sliding
+    /// as it does when centered. Run on every top-level node right before
+    /// it (see App::prepare_ui_content).
+    pub(crate) fn measure_fit(&mut self) {
+        if !self.is_active {
+            return;
+        }
+        let UiNodeContent::Container(container) = &mut self.content else { return };
+        for (_, child) in &mut container.children {
+            child.measure_fit();
+        }
+        let flow: Vec<(f32, f32)> = container.children.iter()
+            .filter(|(_, c)| in_flow(c))
+            .map(|(_, c)| (c.transform.width, c.transform.height))
+            .collect();
+        let gaps = container.gap * (flow.len().saturating_sub(1) as f32);
+        let sum_width = flow.iter().map(|(w, _)| w).sum::<f32>() + gaps;
+        let sum_height = flow.iter().map(|(_, h)| h).sum::<f32>() + gaps;
+        let max_width = flow.iter().map(|(w, _)| *w).fold(0.0f32, f32::max);
+        let max_height = flow.iter().map(|(_, h)| *h).fold(0.0f32, f32::max);
+        let (natural_width, natural_height) = match self.transform.direction {
+            Orientation::Horizontal => (sum_width, max_height),
+            Orientation::Vertical => (max_width, sum_height),
+        };
+        if self.transform.fit.horizontal {
+            self.transform.width = natural_width + self.padding.left + self.padding.right;
+        }
+        if self.transform.fit.vertical {
+            self.transform.height = natural_height + self.padding.top + self.padding.bottom;
+        }
+    }
+
     // ── Rendering ──
 
     /// `hit_testable` is false for everything behind a modal (see
@@ -499,7 +606,9 @@ impl UiNode {
     /// `ancestor_hover_text` is a color an ancestor asked every descendant to
     /// draw while that ancestor is hovered (its own `.on_hover` text color).
     /// `None` leaves each label on its own color.
-    pub fn node_content_preparation(&mut self, size: &Size, dpi_scale: f32, ui: &mut UiRendering, font_system: &mut FontSystem, text_cache: &mut SwashCache, delta_time: f32, hit_testable: bool, clip_rect: Option<&Rect>, ancestor_hover_text: Option<UiColor>) -> (Vec<TextArea>, u16, u32) {
+    /// `ancestor_disabled`: an ancestor is disabled (see `set_enabled`) - so
+    /// this node is too, whatever its own setting.
+    pub fn node_content_preparation(&mut self, size: &Size, dpi_scale: f32, ui: &mut UiRendering, font_system: &mut FontSystem, text_cache: &mut SwashCache, delta_time: f32, hit_testable: bool, clip_rect: Option<&Rect>, ancestor_hover_text: Option<UiColor>, ancestor_disabled: bool) -> (Vec<TextArea>, u16, u32) {
         // Inactive nodes render nothing and can't be hovered/clicked - their
         // *parent's* layout loop is what skips giving them any space (this alone
         // wouldn't stop them occupying a stacking slot), see the Container branch
@@ -512,6 +621,18 @@ impl UiNode {
         }
 
         let mut text_areas: Vec<TextArea> = Vec::new();
+
+        // Disabled (its own setting or an ancestor's - see set_enabled): no
+        // hover, press, click or cursor, for it and everything under it - the
+        // same as being under a modal - and drawn with its disabled look.
+        let disabled = ancestor_disabled || !self.enabled;
+        let hit_testable = hit_testable && !disabled;
+
+        // A toggle (see widgets::toggle): its knob's side and its colors for
+        // its value, before its style is read below.
+        if let Some(toggle) = &self.toggle {
+            toggle.sync(&mut self.transform.child_anchor.horizontal, &mut self.style.background_color, &mut self.content);
+        }
 
         // Hover hit-test, redone fresh every frame from the live mouse position and
         // this node's already-resolved rect - naturally stays correct as the node
@@ -526,12 +647,15 @@ impl UiNode {
         // numerically overlapping the cursor, could phantom-hover/click even
         // though it isn't actually being drawn there (see clip_rect's own doc
         // comment on this fn).
-        let (mouse_x, mouse_y) = (input::mouse_x() as f32, input::mouse_y() as f32);
+        // In UI units, like every rect here (see Ui::scale_factor).
+        let (mouse_x, mouse_y) = ui.mouse();
         let mouse_over = hit_testable
             && point_in_rect(mouse_x, mouse_y, &self.transform.rect)
             && clip_rect.map_or(true, |clip| point_in_rect(mouse_x, mouse_y, clip));
         self.is_hovered = self.hover.is_some() && mouse_over;
-        self.is_pressed = self.press.is_some() && mouse_over && input::is_action_pressed("ui_click");
+        // The left mouse button itself, not a game action - the UI works
+        // whatever bindings the game loads.
+        self.is_pressed = self.press.is_some() && mouse_over && input::mouse_left_button_down();
 
         // Hover's Some(...) fields win over the resting style, its None fields fall
         // back to it - built fresh every frame (not written back into self.style),
@@ -550,12 +674,52 @@ impl UiNode {
         } else {
             hover_applied
         };
-        self.is_clicked = mouse_over && input::is_action_just_pressed("ui_click");
+        let effective_style = match &self.disabled_style {
+            Some(disabled_style) if disabled => disabled_style.or(&effective_style),
+            _ => effective_style,
+        };
+        self.is_clicked = mouse_over && input::mouse_left_button_just_pressed();
+        // Parents run before their children and always_on_top nodes last, so
+        // the last node to write here is the one drawn on top.
+        if mouse_over && self.cursor.is_some() {
+            ui.hover_cursor = self.cursor;
+        }
+
+        // A dropdown (see widgets::dropdown): its selected option shown, and
+        // where it is, for its list to open at.
+        if let Some(dropdown) = &self.dropdown {
+            dropdown.sync(&mut self.content, font_system, &self.transform.rect);
+        }
+
+        // A text input (see widgets::text_input): focus and typing, then its
+        // text and caret into its children, and its focus look over its style.
+        let effective_style = match self.text_input.as_deref_mut() {
+            Some(input) => {
+                // Disabled while being typed into - it stops there.
+                if disabled {
+                    input.focused = false;
+                }
+                let text_left = self.transform.rect.left + self.padding.left;
+                let text_room = self.transform.width - self.padding.left - self.padding.right;
+                input.update(&mut self.content, font_system, self.is_clicked, delta_time, mouse_x - text_left, text_room);
+                if input.focused {
+                    ui.text_input_focused = true;
+                    input.focus.or(&effective_style)
+                } else {
+                    effective_style
+                }
+            }
+            None => effective_style,
+        };
 
         // The target this frame's animatable fields are heading toward (or already
         // at, with no .set_transition(...) set) - see ResolvedStyle/UiNode.current_style.
         let target = effective_style.resolve_concrete();
-        let current = match (self.current_style.take(), self.transition_ms) {
+        // The first frame (nothing drawn yet) starts from the enter style, if
+        // there is one - see `set_enter`.
+        let previous = self.current_style.take()
+            .or_else(|| self.enter.as_ref().map(|enter| enter.or(&effective_style).resolve_concrete()));
+        let current = match (previous, self.transition_ms) {
             (Some(current), Some(ms)) if ms > 0.0 => {
                 let t = (delta_time / (ms / 1000.0)).min(1.0);
                 current.lerp(&target, t)
@@ -601,6 +765,9 @@ impl UiNode {
         // read further down, in each UiNodeContent branch below, and a method call
         // like .text_color() needs the whole struct intact, not just its own field.
         let mut effective_visibility = Visibility::new(current.background_color.clone(), current.border_color.clone(), current.corner_radius, current.border_width, border_edges, current.background_blur);
+        if current.background_blur > 0.0 {
+            ui.uses_blur = true;
+        }
         // A triangle (negative corner radius) takes its hover color from the
         // square around it, which passes that color down as text color.
         if current.corner_radius < 0.0 {
@@ -719,7 +886,6 @@ impl UiNode {
                 let content_bottom = parent_rect.bottom - padding.bottom;
                 let content_w = content_right - content_left;
                 let content_h = content_bottom - content_top;
-                let content_rect = Rect { top: content_top, left: content_left, bottom: content_bottom, right: content_right };
 
                 // Grow children (see SizeValue::Grow) split whatever main-axis space
                 // is left after every other active child's own size and the gaps
@@ -757,6 +923,21 @@ impl UiNode {
                     }
                 }
 
+                // A scrollable that overflows draws its scrollbar at the right of
+                // its content area (see below) - its children get the area left of
+                // the bar, so nothing sits behind it. Heights are final by now
+                // (main-axis Grow above), so whether it overflows is known before
+                // any child is stretched or placed across.
+                const SCROLLBAR_GAP: f32 = 4.0;
+                let overflows = container.scrollable
+                    && matches!(direction, Orientation::Vertical)
+                    && container.children.iter().filter(|(_, c)| in_flow(c)).map(|(_, c)| c.transform.height).sum::<f32>()
+                        + gap * (flow_count.saturating_sub(1) as f32) > content_h;
+                let bar_room = if overflows { container.scrollbar.width + SCROLLBAR_GAP } else { 0.0 };
+                let child_right = (content_right - bar_room).max(content_left);
+                let child_w = child_right - content_left;
+                let child_rect = Rect { top: content_top, left: content_left, bottom: content_bottom, right: child_right };
+
                 // Cross-axis Grow ("stretch to fill the container's other axis" -
                 // CSS flexbox's align-items: stretch equivalent) - unlike main-axis
                 // Grow above, this used to only be resolved once, at build time
@@ -775,7 +956,7 @@ impl UiNode {
                     }
                     match direction {
                         Orientation::Vertical if child.transform.grow.horizontal => {
-                            child.transform.width = content_w;
+                            child.transform.width = child_w;
                             child.transform.apply_transformation();
                         }
                         Orientation::Horizontal if child.transform.grow.vertical => {
@@ -832,6 +1013,7 @@ impl UiNode {
                 // needing `&self`) afterward, even a read-only one. Plain field
                 // reads captured into locals before that point aren't affected.
                 let scroll_offset = container.scroll_offset;
+                let scrollbar = container.scrollbar;
                 // Scrollable containers clip their children to their own content
                 // rect (replacing whatever clip this node itself received, not
                 // intersecting it - see this fn's own doc comment on clip_rect for
@@ -839,7 +1021,7 @@ impl UiNode {
                 // incoming clip straight through, so clipping still reaches deeply
                 // nested descendants (e.g. a scrollable list's rows' own nested
                 // chip buttons) transparently through non-scrollable wrappers.
-                let child_clip_rect: Option<&Rect> = if scrollable { Some(&content_rect) } else { clip_rect };
+                let child_clip_rect: Option<&Rect> = if scrollable || container.clip_children { Some(&child_rect) } else { clip_rect };
 
                 // Cross-axis natural height for a Horizontal container's auto-height
                 // Start case below - computed here (before the mutable child loop
@@ -903,7 +1085,7 @@ impl UiNode {
                         // slot, no gap, and not counted in the parent's Fit size,
                         // so it can hang over later siblings. Put it after those
                         // siblings in the child list so it paints on top of them.
-                        child.transform.resolve_position_in_rect(x, y, &content_rect);
+                        child.transform.resolve_position_in_rect(x, y, &child_rect);
                     } else {
                         // Position on main axis
                         match direction {
@@ -919,8 +1101,8 @@ impl UiNode {
                                 // Cross-axis alignment
                                 child.transform.x = match child_anchor.horizontal {
                                     Anchor::Start => content_left,
-                                    Anchor::Center => content_left + (content_w - child.transform.width) / 2.0,
-                                    Anchor::End => content_right - child.transform.width,
+                                    Anchor::Center => content_left + (child_w - child.transform.width) / 2.0,
+                                    Anchor::End => child_right - child.transform.width,
                                 };
                             }
                             Orientation::Horizontal => {
@@ -940,7 +1122,7 @@ impl UiNode {
                         child.transform.apply_transformation();
                     }
 
-                    let (child_text_areas, _cv, _ci) = child.node_content_preparation(size, dpi_scale, ui, font_system, text_cache, delta_time, hit_testable, child_clip_rect, child_hover_text);
+                    let (child_text_areas, _cv, _ci) = child.node_content_preparation(size, dpi_scale, ui, font_system, text_cache, delta_time, hit_testable, child_clip_rect, child_hover_text, disabled);
                     text_areas.extend(child_text_areas);
                 }
 
@@ -959,11 +1141,11 @@ impl UiNode {
                 // `container` directly, for the same reason.
                 if scrollable && max_scroll > 0.0 {
                     ui.use_material(None);
-                    const BAR_WIDTH: f32 = 5.0;
-                    let bar_left = content_right - BAR_WIDTH;
+                    let bar_width = scrollbar.width;
+                    let bar_left = content_right - bar_width;
 
-                    let track_transform = UiTransform::new(bar_left, content_top, content_h, BAR_WIDTH, 0.0, false);
-                    let track_visibility = Visibility::new(Fill::Solid(UiColor::Rgba(255, 255, 255, 15)), Fill::Solid(UiColor::TRANSPARENT), BAR_WIDTH / 2.0, 0.0, BorderEdges::ALL, 0.0);
+                    let track_transform = UiTransform::new(bar_left, content_top, content_h, bar_width, 0.0, false);
+                    let track_visibility = Visibility::new(Fill::Solid(scrollbar.track), Fill::Solid(UiColor::TRANSPARENT), bar_width / 2.0, 0.0, BorderEdges::ALL, 0.0);
                     let (track_v, track_i) = Self::compute_quad(&track_transform, &track_visibility, size, dpi_scale, ui.num_vertices, Self::NO_CLIP);
                     ui.num_vertices += track_v.len() as u16;
                     ui.num_indices += track_i.len() as u32;
@@ -975,8 +1157,8 @@ impl UiNode {
                     // much taller than the viewport.
                     let thumb_height = (content_h * content_h / total_children_main).max(24.0).min(content_h);
                     let thumb_top = content_top + (content_h - thumb_height) * (scroll_offset / max_scroll);
-                    let thumb_transform = UiTransform::new(bar_left, thumb_top, thumb_height, BAR_WIDTH, 0.0, false);
-                    let thumb_visibility = Visibility::new(Fill::Solid(UiColor::Rgba(255, 255, 255, 90)), Fill::Solid(UiColor::TRANSPARENT), BAR_WIDTH / 2.0, 0.0, BorderEdges::ALL, 0.0);
+                    let thumb_transform = UiTransform::new(bar_left, thumb_top, thumb_height, bar_width, 0.0, false);
+                    let thumb_visibility = Visibility::new(Fill::Solid(scrollbar.thumb), Fill::Solid(UiColor::TRANSPARENT), bar_width / 2.0, 0.0, BorderEdges::ALL, 0.0);
                     let (thumb_v, thumb_i) = Self::compute_quad(&thumb_transform, &thumb_visibility, size, dpi_scale, ui.num_vertices, Self::NO_CLIP);
                     ui.num_vertices += thumb_v.len() as u16;
                     ui.num_indices += thumb_i.len() as u32;
@@ -1146,6 +1328,20 @@ impl UiNode {
         let ndc_x = |x: f32| (x / (screen_size.width as f32 / 2.0)) - 1.0;
         let ndc_y = |y: f32| 1.0 - (y / (screen_size.height as f32 / 2.0));
 
+        // The box snapped to whole screen pixels - layout leaves edges wherever
+        // text measurements put them (17.6px down...), and a 1px border on an
+        // edge between two pixel rows gets split across both at partial
+        // strength, so one side looks thinner than the others. Snapped, every
+        // side's border covers whole pixels and they all look the same. Only
+        // how it's drawn - layout and hit-testing keep the exact rect.
+        let snap = |value: f32| (value * dpi_scale).round() / dpi_scale;
+        let box_rect = Rect {
+            top: snap(transform.rect.top),
+            left: snap(transform.rect.left),
+            bottom: snap(transform.rect.bottom),
+            right: snap(transform.rect.right),
+        };
+
         // Unlike ndc_x/y above (self-contained NDC, resolution-independent), the
         // `rect` VertexUi carries gets compared fragment-by-fragment in
         // ui_template.wgsl against `@builtin(position)`, which WGPU always gives
@@ -1157,10 +1353,10 @@ impl UiNode {
         // actual on-screen quad, discarding almost everything outside its
         // top-left corner - the exact "cut into quarters, stuck top-left" bug.
         let rect = [
-            transform.rect.top * dpi_scale,
-            transform.rect.left * dpi_scale,
-            transform.rect.bottom * dpi_scale,
-            transform.rect.right * dpi_scale,
+            box_rect.top * dpi_scale,
+            box_rect.left * dpi_scale,
+            box_rect.bottom * dpi_scale,
+            box_rect.right * dpi_scale,
         ];
         let clip = clip.map(|v| v * dpi_scale);
 
@@ -1171,13 +1367,21 @@ impl UiNode {
         // as everything else) have to be converted to that space too, or a
         // "2px border" renders at half its intended on-screen thickness.
         let corner_radius = visibility.corner_radius * dpi_scale;
-        let border_width = visibility.border_width * dpi_scale;
+        // Whole pixels too, for the same reason - a 1.25px border (1px at 125%
+        // display scaling) would blur across pixels. Never rounded down to
+        // nothing: a border that was asked for stays at least 1px.
+        let border_width = match visibility.border_width * dpi_scale {
+            width if width > 0.0 => width.round().max(1.0),
+            _ => 0.0,
+        };
+        // Real pixels too - so a blur looks the same size at any display scale.
+        let background_blur = visibility.background_blur * dpi_scale;
         let quad = |left: f32, top: f32, right: f32, bottom: f32, bg: [[f32; 4]; 4], bd: [[f32; 4]; 4], base: u16| -> (Vec<VertexUi>, Vec<u16>) {
             let vertices = vec![
-                VertexUi { position: vector![ndc_x(left), ndc_y(top), 0.0].into(), color: bg[0], rect, border_color: bd[0], corner_radius, border_width, background_blur: visibility.background_blur, border_edges, clip_rect: clip },
-                VertexUi { position: vector![ndc_x(left), ndc_y(bottom), 0.0].into(), color: bg[1], rect, border_color: bd[1], corner_radius, border_width, background_blur: visibility.background_blur, border_edges, clip_rect: clip },
-                VertexUi { position: vector![ndc_x(right), ndc_y(bottom), 0.0].into(), color: bg[2], rect, border_color: bd[2], corner_radius, border_width, background_blur: visibility.background_blur, border_edges, clip_rect: clip },
-                VertexUi { position: vector![ndc_x(right), ndc_y(top), 0.0].into(), color: bg[3], rect, border_color: bd[3], corner_radius, border_width, background_blur: visibility.background_blur, border_edges, clip_rect: clip },
+                VertexUi { position: vector![ndc_x(left), ndc_y(top), 0.0].into(), color: bg[0], rect, border_color: bd[0], corner_radius, border_width, background_blur, border_edges, clip_rect: clip },
+                VertexUi { position: vector![ndc_x(left), ndc_y(bottom), 0.0].into(), color: bg[1], rect, border_color: bd[1], corner_radius, border_width, background_blur, border_edges, clip_rect: clip },
+                VertexUi { position: vector![ndc_x(right), ndc_y(bottom), 0.0].into(), color: bg[2], rect, border_color: bd[2], corner_radius, border_width, background_blur, border_edges, clip_rect: clip },
+                VertexUi { position: vector![ndc_x(right), ndc_y(top), 0.0].into(), color: bg[3], rect, border_color: bd[3], corner_radius, border_width, background_blur, border_edges, clip_rect: clip },
             ];
             let indices = vec![base, 1 + base, 2 + base, base, 2 + base, 3 + base];
             (vertices, indices)
@@ -1199,7 +1403,7 @@ impl UiNode {
             // just puts the same value in all 4.
             let bg = visibility.background_color.corner_colors();
             let bd = visibility.border_color.corner_colors();
-            return quad(transform.rect.left, transform.rect.top, transform.rect.right, transform.rect.bottom, bg, bd, base);
+            return quad(box_rect.left, box_rect.top, box_rect.right, box_rect.bottom, bg, bd, base);
         };
 
         // Where stop `t` actually falls in world/screen space along this box's
@@ -1209,9 +1413,9 @@ impl UiNode {
         let world_edge = |t: f32| -> f32 {
             let a = if direction.is_reversed() { 1.0 - t } else { t };
             if direction.is_horizontal() {
-                transform.rect.left + (transform.rect.right - transform.rect.left) * a
+                box_rect.left + (box_rect.right - box_rect.left) * a
             } else {
-                transform.rect.top + (transform.rect.bottom - transform.rect.top) * a
+                box_rect.top + (box_rect.bottom - box_rect.top) * a
             }
         };
 
@@ -1239,9 +1443,9 @@ impl UiNode {
             };
 
             let (band_vertices, band_indices) = if direction.is_horizontal() {
-                quad(lo_edge, transform.rect.top, hi_edge, transform.rect.bottom, bg, bd, next_base)
+                quad(lo_edge, box_rect.top, hi_edge, box_rect.bottom, bg, bd, next_base)
             } else {
-                quad(transform.rect.left, lo_edge, transform.rect.right, hi_edge, bg, bd, next_base)
+                quad(box_rect.left, lo_edge, box_rect.right, hi_edge, bg, bd, next_base)
             };
             next_base += band_vertices.len() as u16;
             vertices.extend(band_vertices);
@@ -1343,21 +1547,25 @@ impl UiNode {
     /// are given explicitly - kept as constructor params (not deferred like
     /// `.set_size(...)`) since the label's `Buffer` needs a real size immediately to
     /// measure/shape its text, and this constructor is also used by call sites that
-    /// never go through `Layer`/`resolve` (e.g. the splash screen, free camera HUD).
+    /// never go through `Layer`/`resolve` (e.g. the loading screen, free camera HUD).
     /// Everything else - position, color, font size, alignment, background, border,
     /// hover, click - is set through the builder chain, e.g.
     /// `UiNode::label(font_system, "Play", None, None).at(40.0, 40.0).set_text_color(...)`.
     pub fn label(font_system: &mut FontSystem, text: &str, width: Option<f32>, height: Option<f32>) -> Self {
+        let auto_width = width.is_none();
         let (width, height) = Label::measure_or(font_system, text, width, height);
         let transform = UiTransform::new(0.0, 0.0, height, width, 0.0, false);
-        let content = UiNodeContent::Text(Label::new(font_system, text, width, height));
+        let mut label = Label::new(font_system, text, width, height);
+        label.auto_width = auto_width;
+        let content = UiNodeContent::Text(label);
         Self::base(transform, Style::default(), content)
     }
 
     /// Create an image node from code - `width`/`height` are required (unlike
     /// `label`, there's no natural size to auto-measure without a loaded texture).
-    /// The image itself must already be loaded (see Ui::load_image) before this node
-    /// can draw anything. Chain `.at(x, y)` for position.
+    /// `path` is inside the assets folder - loaded with the scene when the scene's
+    /// UI uses it, otherwise the first frame it's drawn (see Assets). Chain
+    /// `.at(x, y)` for position.
     pub fn image(path: String, width: f32, height: f32) -> Self {
         let transform = UiTransform::new(0.0, 0.0, height, width, 0.0, false);
         let content = UiNodeContent::Image(ImageNode::new(path));
@@ -1533,6 +1741,17 @@ impl UiNode {
         self
     }
 
+    /// Where this node's look starts from on the first frame it's drawn - CSS's
+    /// `@starting-style`. With `.set_transition(...)` it then eases from there
+    /// to its real style, so it fades in instead of popping up:
+    /// `.set_transition(200.0).set_enter(|s| s.set_background_color(UiColor::TRANSPARENT))`.
+    /// Fields it leaves unset start at the real style. Without a transition it
+    /// does nothing.
+    pub fn set_enter(mut self, build: impl FnOnce(Style) -> Style) -> Self {
+        self.enter = Some(build(Style::default()));
+        self
+    }
+
     /// Draws this node's own box (or image) with `material` - a Ui shader
     /// (see engine::rendering::shader_library), engine/ui otherwise. Its
     /// children keep their own; its text is drawn as before.
@@ -1557,6 +1776,97 @@ impl UiNode {
     pub fn on_click(mut self, f: impl FnMut(&mut App) + 'static) -> Self {
         self.on_click = Some(Box::new(f));
         self
+    }
+
+    /// The mouse cursor shown while the mouse is over this node, e.g.
+    /// `.set_cursor(CursorIcon::Text)` - `button(...)` sets `Pointer` (see
+    /// `ButtonStyle::cursor`). Change it later through the `cursor` field.
+    pub fn set_cursor(mut self, cursor: CursorIcon) -> Self {
+        self.cursor = Some(cursor);
+        self
+    }
+
+    /// Makes this node a text input - see `widgets::text_input`, which builds
+    /// the box and children this expects ("text" and "caret").
+    pub(crate) fn with_text_input(mut self, state: TextInputState) -> Self {
+        self.text_input = Some(Box::new(state));
+        self
+    }
+
+    /// What's typed in this text input (see `widgets::text_input`) - None if
+    /// it isn't one.
+    pub fn input_value(&self) -> Option<&str> {
+        self.text_input.as_ref().map(|input| input.value.as_str())
+    }
+
+    /// Replaces what's typed in this text input - no-op if it isn't one.
+    pub fn set_input_value(&mut self, value: &str) {
+        if let Some(input) = &mut self.text_input {
+            input.set_value(value);
+        }
+    }
+
+    /// Makes this node a toggle - see `widgets::toggle`, which builds the
+    /// track and knob this expects.
+    pub(crate) fn with_toggle(mut self, state: ToggleState) -> Self {
+        self.toggle = Some(state);
+        self
+    }
+
+    /// The value its click handler flips - see `UiNode::on_toggle`.
+    pub(crate) fn toggle_cell(&self) -> Option<std::rc::Rc<std::cell::Cell<bool>>> {
+        self.toggle.as_ref().map(|toggle| std::rc::Rc::clone(&toggle.on))
+    }
+
+    /// Whether this toggle (see `widgets::toggle`) is on - None if it isn't one.
+    pub fn toggle_value(&self) -> Option<bool> {
+        self.toggle.as_ref().map(|toggle| toggle.on.get())
+    }
+
+    /// Turns this toggle on or off without running its `on_toggle` - no-op if
+    /// it isn't one.
+    pub fn set_toggle_value(&mut self, on: bool) {
+        if let Some(toggle) = &self.toggle {
+            toggle.on.set(on);
+        }
+    }
+
+    /// Makes this node a dropdown - see `widgets::dropdown`, which builds the
+    /// box and children this expects.
+    pub(crate) fn with_dropdown(mut self, state: DropdownState) -> Self {
+        self.dropdown = Some(state);
+        self
+    }
+
+    pub(crate) fn dropdown_state(&self) -> Option<&DropdownState> {
+        self.dropdown.as_ref()
+    }
+
+    /// The index of this dropdown's selected option (see `widgets::dropdown`)
+    /// - None if it isn't one.
+    pub fn dropdown_selected(&self) -> Option<usize> {
+        self.dropdown.as_ref().map(|dropdown| dropdown.selected.get())
+    }
+
+    /// Selects option `index` of this dropdown without running its
+    /// `on_select` - no-op if it isn't one, or there's no such option.
+    pub fn set_dropdown_selected(&mut self, index: usize) {
+        if let Some(dropdown) = &self.dropdown {
+            if index < dropdown.option_count() {
+                dropdown.selected.set(index);
+            }
+        }
+    }
+
+    /// Whether this text input has focus (is being typed into).
+    pub fn is_input_focused(&self) -> bool {
+        self.text_input.as_ref().is_some_and(|input| input.focused)
+    }
+
+    /// `.set_position(...)` on a node that's already built - a child placed
+    /// on its own (out of the stacking flow), moved within its parent.
+    pub(crate) fn set_pending_position(&mut self, x: PositionValue, y: PositionValue) {
+        self.pending_position = Some((x, y));
     }
 
     /// Inserts `child` under `id`, in the order this is called - no-op if this node
@@ -1617,12 +1927,28 @@ impl UiNode {
             if min_height > self.transform.height {
                 self.transform.height = min_height;
             }
-            if min_width > self.transform.width {
+            if label.auto_width {
+                // Measured from its text - the text's real width at this size
+                // (plus any padding already set), smaller or bigger.
+                self.transform.width = min_width + self.padding.left + self.padding.right;
+            } else if min_width > self.transform.width {
                 self.transform.width = min_width;
             }
             self.transform.apply_transformation();
         }
         self
+    }
+
+    /// Everything about how this label's text looks at once - font, size,
+    /// color, alignment (see `TextStyle`). Inert on content types other than
+    /// Text. Like `.set_font_size(...)`, grows the box to fit the text at the
+    /// new font and size - call `.set_padding(...)` after it.
+    pub fn set_text_style(self, font_system: &mut FontSystem, style: &TextStyle) -> Self {
+        // Font before size - set_font_size sizes the box for this font's glyphs.
+        self.set_font(font_system, style.font)
+            .set_font_size(font_system, style.size)
+            .set_text_color(style.color)
+            .set_align(style.align)
     }
 
     /// Works on any node type - inert on content types other than Text.
@@ -1701,6 +2027,27 @@ impl UiNode {
     pub fn set_scrollable(mut self, scrollable: bool) -> Self {
         if let UiNodeContent::Container(container) = &mut self.content {
             container.scrollable = scrollable;
+        }
+        self
+    }
+
+    /// How this scrollable container's scrollbar looks (see `Scrollbar`).
+    /// No-op if this node isn't a container.
+    pub fn set_scrollbar(mut self, scrollbar: Scrollbar) -> Self {
+        if let UiNodeContent::Container(container) = &mut self.content {
+            container.scrollbar = scrollbar;
+        }
+        self
+    }
+
+    /// Clips this container's children to its own box (inside its padding) -
+    /// anything past its edges isn't drawn or hovered. Like CSS
+    /// `overflow: hidden`: no scrolling and no scrollbar (see `set_scrollable`
+    /// for those). For a box that's smaller than its contents on purpose - a
+    /// reveal animation, a fixed-size panel.
+    pub fn set_clip_children(mut self, clip: bool) -> Self {
+        if let UiNodeContent::Container(container) = &mut self.content {
+            container.clip_children = clip;
         }
         self
     }

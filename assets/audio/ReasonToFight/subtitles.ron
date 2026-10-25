@@ -1,6 +1,0 @@
-SubtitleData(
-    subtitles: {
-        3000: (text: "Pixy: So, have you found a reason to fight yet?", duration: 4000),
-        7000: (text: "Buddy.", duration: 3000),
-    },
-)

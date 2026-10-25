@@ -46,8 +46,8 @@ pub enum UiContent {
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct ImageData {
-    // Relative to res/ (same convention as resources::load_binary) - loaded once and
-    // cached by this exact path, see Ui::load_image.
+    // Relative to the assets folder (see resources::load_asset_binary) - loaded once and
+    // cached by this exact path, see Assets::image.
     pub path: String,
 }
 

@@ -11,6 +11,8 @@
 struct CameraUniform {
     view_proj: mat4x4<f32>,
     view_pos: vec4<f32>,
+    near: f32,
+    far: f32,
 };
 
 struct Transform {
@@ -48,11 +50,22 @@ struct Engine {
     // Which way the sun is, and its light's color.
     sun_direction: vec3<f32>,
     sun_color: vec3<f32>,
+    // The camera's near and far planes - what `linear_depth` uses.
+    near: f32,
+    far: f32,
 }
 var<private> engine: Engine;
 
 fn engine_values() -> Engine {
-    return Engine(light.time, light.camera_position, normalize(light.position), light.color);
+    return Engine(light.time, light.camera_position, normalize(light.position), light.color, camera.near, camera.far);
+}
+
+// How far from the camera (world units) a raw depth is - one read from the
+// depth so far (`reads: [Depth]`), or a point's own (its clip-space z / w).
+// Depths here are reversed: 1 at the near plane, 0 at the far one.
+fn linear_depth(raw: f32) -> f32 {
+    let z = 1.0 - 2.0 * raw;
+    return 2.0 * camera.near * camera.far / (camera.far + camera.near - z * (camera.far - camera.near));
 }
 
 // The `vertex` hook's vertex: where it is (relative to the camera), its

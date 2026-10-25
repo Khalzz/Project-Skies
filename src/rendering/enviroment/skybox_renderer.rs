@@ -133,7 +133,8 @@ impl SkyboxRender {
     /// uniform (sun direction + palette, set once here) instead of a texture;
     /// everything else (the camera-centred cube, the no-depth pipeline, the
     /// `render` path) is identical to a real skybox. Tune the look below.
-    pub fn new_procedural(device: &Device, config: &SurfaceConfiguration, camera_bind_group_layout: &BindGroupLayout) -> Self {
+    /// `sun`: whether its sun disc and glow are drawn - without, just the sky.
+    pub fn new_procedural(device: &Device, config: &SurfaceConfiguration, camera_bind_group_layout: &BindGroupLayout, sun: bool) -> Self {
         let normalize3 = |v: [f32; 3]| {
             let inv = 1.0 / (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
             [v[0] * inv, v[1] * inv, v[2] * inv, 0.0]
@@ -152,7 +153,8 @@ impl SkyboxRender {
             // too green for open ocean, so the sea tone is bluer than it.)
             zenith_color: [0.014, 0.147, 0.430, 1.0],
             horizon_color: [0.342, 0.587, 0.711, 1.0],
-            sun_color: [1.0, 0.95, 0.85, 1.0],
+            // Added on top of the sky (see sky.wgsl) - black draws no sun.
+            sun_color: if sun { [1.0, 0.95, 0.85, 1.0] } else { [0.0, 0.0, 0.0, 1.0] },
             haze_color: [0.448, 0.604, 0.711, 1.0],
             // Keep in sync with water.wgsl's SEA_HORIZON_COLOR.
             sea_horizon_color: [0.147, 0.296, 0.477, 1.0],
@@ -175,7 +177,8 @@ impl SkyboxRender {
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("procedural_sky_uniform"),
             contents: bytemuck::cast_slice(&[sky_uniform]),
-            usage: wgpu::BufferUsages::UNIFORM,
+            // COPY_DST: set_sun_direction rewrites it when the lighting turns.
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {

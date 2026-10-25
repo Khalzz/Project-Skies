@@ -5,8 +5,9 @@ use crate::{primitive::manual_vertex::ManualVertex, rendering::{camera::handler:
 pub struct RenderPhysics {
     pub renderizable_lines: Vec<[ManualVertex; 2]>,
     pub visible: bool,
+    /// This frame's lines - grown when they don't fit (see
+    /// App::render_physics_debug_lines).
     pub vertex_buffer: Buffer,
-    pub index_buffer: Buffer,
     pub bind_group_layout: BindGroupLayout,
     pub bind_group: BindGroup,
     pub render_pipeline: RenderPipeline,
@@ -15,18 +16,11 @@ pub struct RenderPhysics {
 impl RenderPhysics {
     pub fn new(device: &Device, config: &SurfaceConfiguration, camera: &CameraResources) -> Self{
         let vertex = [ManualVertex::default(); 2];
-        let indices = [0, 1];
 
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("ManualVertex Buffer"),
             contents: bytemuck::cast_slice(&vertex),
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::UNIFORM,
-        });
-
-        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Index Buffer"),
-            contents: bytemuck::cast_slice(&indices),
-            usage: wgpu::BufferUsages::INDEX,
         });
 
         // Define the bind group layout
@@ -76,7 +70,6 @@ impl RenderPhysics {
 
         Self {
             vertex_buffer,
-            index_buffer,
             renderizable_lines: vec![],
             visible: false,
             bind_group_layout,

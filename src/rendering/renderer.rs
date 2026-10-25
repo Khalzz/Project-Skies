@@ -1,10 +1,23 @@
-use wgpu::{Device, DeviceDescriptor, Features, InstanceDescriptor, Limits, Queue, Surface, SurfaceConfiguration, TextureUsages};
+use std::collections::HashMap;
+
+use wgpu::{Device, DeviceDescriptor, InstanceDescriptor, Limits, Queue, Surface, SurfaceConfiguration, TextureUsages};
 use glyphon::{Cache, Resolution, Viewport};
 
+use crate::particles::renderer::ParticleRenderer;
+use crate::primitive::manual_vertex::ManualVertex;
+use crate::rendering::camera::handler::CameraResources;
+use crate::rendering::enviroment::environment::{Environment, PreparedEnvironment};
+use crate::rendering::enviroment::light::Light;
+use crate::rendering::frame::FramePlan;
+use crate::rendering::graphics_backend::GraphicsBackend;
+use crate::rendering::models::model::Mesh;
 use crate::rendering::models::textures::Texture;
-use crate::rendering::render_pipeline::blur_renderer::BlurRender;
+use crate::rendering::render_pipeline::blur_renderer::{offscreen_texture, BlurRender};
 use crate::rendering::render_pipeline::depth_renderer::DepthRender;
-use crate::window::window::WindowManager;
+use crate::rendering::render_sets::RenderSets;
+use crate::rendering::shader_library::{Placement, ShaderLibrary, BUILTIN_SCREEN_INPUTS};
+use crate::rendering::ui::physics_rendering::RenderPhysics;
+use crate::window::window::Window;
 
 pub struct Glyphon {
   pub(crate) cache: Cache,
@@ -12,14 +25,17 @@ pub struct Glyphon {
 }
 
 /**
- * # Graphics manager
+ * # Renderer
  *
- * Graphics manager its the main iteration of WGPU for initial configuration, rendering and more related to it.
+ * Everything that draws: the WGPU device and surface, plus every system that
+ * lives as long as the app does and puts something on screen - shaders,
+ * camera and light buffers, particles, debug lines. What a scene draws
+ * (its nodes, cameras, environment override) lives on the scene itself.
  */
-
 pub struct Renderer {
-  // 'static: create_surface_unsafe doesn't actually borrow window_manager (it copies
-  // the raw window/display handles out), so there's no real lifetime to track here.
+  // 'static: create_surface_unsafe doesn't actually borrow the window (it
+  // copies the raw window/display handles out), so there's no real lifetime
+  // to track here.
   pub surface: Surface<'static>,
   pub device: Device,
   pub queue: Queue,
@@ -28,89 +44,135 @@ pub struct Renderer {
   pub depth_render: DepthRender,
   pub blur: BlurRender,
   pub glyphon: Glyphon,
+
+  /// The active camera's GPU buffer and bind group - filled from whichever
+  /// camera the active scene has selected, every frame.
+  pub camera_resources: CameraResources,
+  /// The sun's GPU buffer (direction, color, shader time, camera position) -
+  /// filled every frame from the project's or the scene's `Lighting`.
+  pub light: Light,
+  /// The shaders models are drawn with, by name (see
+  /// rendering::shader_library) - and where each material in use is drawn
+  /// this frame (worked out at the start of the frame plan).
+  pub shaders: ShaderLibrary,
+  pub material_placements: HashMap<String, Placement>,
+  /// What each 2D material in use (the UI's, the line and text sets') is
+  /// drawn with this frame - itself, or its flashing magenta stand-in (see
+  /// ShaderLibrary::prepare_overlay).
+  pub overlay_materials: HashMap<String, String>,
+  /// The fingerprint of what the last material setup read, and the
+  /// Fullscreen steps it got ready - see App::place_materials.
+  pub(crate) placed: Option<(u64, std::collections::HashSet<String>)>,
+  /// GPU particles and trails, fed each frame from every node's
+  /// ParticleEmitters property (see App::update_particles).
+  pub particles: ParticleRenderer,
+  /// 2D nodes' shapes, refilled each frame (see App::prepare_nodes_2d).
+  pub shapes_2d: crate::rendering::shapes_2d::Shapes2D,
+  /// What a frame draws, in order (see rendering::frame) - the active
+  /// scene's, set in its start; back to `default_frame_plan` on a scene
+  /// change.
+  pub frame_plan: FramePlan,
+  pub default_frame_plan: FramePlan,
+  /// The line and text sets the frame plan's steps draw - the active
+  /// scene's, registered in its start, dropped on a scene change (see
+  /// rendering::render_sets).
+  pub render_sets: RenderSets,
+  /// The physics colliders' debug lines - shown while `visible`.
+  pub render_physics: RenderPhysics,
+  /// Lines a scene wants drawn in the world this frame (world-space
+  /// endpoints) - drawn with the physics lines' pipeline whether those are
+  /// shown or not, over everything. Whoever fills it clears it.
+  pub world_lines: Vec<[ManualVertex; 2]>,
+  /// Draws the depth buffer instead of the scene - a renderer debug view.
+  pub show_depth_map: bool,
+  /// The project's environment (`ProjectSettings::environment`) as it's
+  /// drawn - what every scene without its own override shows - and the
+  /// `Environment` it was made from, so App::run can tell when the settings
+  /// change and build it again.
+  pub project_environment: PreparedEnvironment,
+  pub(crate) project_environment_source: Environment,
+  /// The graphics API it's drawing with - see `backend`.
+  backend: GraphicsBackend,
+  /// The game's own images to draw into - see `add_target`.
+  pub(crate) targets: HashMap<String, Texture>,
 }
 
 impl Renderer {
-  pub async fn new(window_manager: &WindowManager) -> Result<Renderer, String> {
-    let instance = wgpu::Instance::new(&InstanceDescriptor::default());
+  /// The graphics API it's drawing with - the one asked for, or what `Auto`
+  /// picked (never `Auto` itself).
+  pub fn backend(&self) -> GraphicsBackend {
+    self.backend
+  }
+
+  /// The renderer on `backend` (see GraphicsBackend) - an error, not a
+  /// crash, when this machine can't draw with it.
+  pub async fn new(window: &Window, backend: GraphicsBackend) -> Result<Renderer, String> {
+    // wgpu validates every call in debug builds (release builds never do);
+    // the WGPU_VALIDATION / WGPU_DEBUG environment variables ("0" or "1")
+    // override that either way. Measure speed in release: debug builds of
+    // wgpu itself are slower, DX12's much more than Vulkan's.
+    let flags = wgpu::InstanceFlags::default().with_env();
+    let instance = wgpu::Instance::new(&InstanceDescriptor { backends: backend.wgpu_backends(), flags, ..Default::default() });
     let surface = unsafe {
-        match instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::from_window(window_manager.canvas.window()).unwrap()) {
-            Ok(s) => s,
-            Err(e) => return Err(e.to_string()),
-        }
+        let target = wgpu::SurfaceTargetUnsafe::from_window(window.sdl_window()).map_err(|error| error.to_string())?;
+        instance.create_surface_unsafe(target).map_err(|error| format!("couldn't draw to the window with {backend}: {error}"))?
     };
 
-     let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions {
+    let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
-        ..Default::default() // remember that this set every other parameter as their default values
-    }).await.unwrap();
+        compatible_surface: Some(&surface),
+        ..Default::default()
+    }).await.map_err(|error| format!("no GPU can draw with {backend} here: {error}"))?;
+    let backend = GraphicsBackend::from_wgpu(adapter.get_info().backend);
 
     let (device, queue) = adapter.request_device(
         &DeviceDescriptor {
             label: None,
-            required_features: Features::empty(),
+            required_features: wgpu::Features::empty(),
             required_limits: Limits::default(),
             memory_hints: wgpu::MemoryHints::Performance,
             trace: wgpu::Trace::Off,
         },
-    ).await.unwrap();
+    ).await.map_err(|error| format!("the GPU couldn't start on {backend}: {error}"))?;
 
     // Surface settings
     let surface_caps = surface.get_capabilities(&adapter);
     let surface_format = surface_caps.formats;
 
     let config = wgpu::SurfaceConfiguration {
-        usage: TextureUsages::RENDER_ATTACHMENT,
+        // COPY_SRC where the screen allows it: the always-on-top UI (a modal)
+        // blurs a copy of the frame drawn so far, HUD included - see
+        // BlurRender::blur_backdrop. Without it, it blurs only the world.
+        usage: TextureUsages::RENDER_ATTACHMENT | (surface_caps.usages & TextureUsages::COPY_SRC),
         format: surface_format[0],
-        // Real backing pixels, not window_manager.size's points - on a HiDPI/
-        // Retina display those differ (see WindowManager::pixel_size's own doc
-        // comment), and the GPU surface needs the real pixel count to actually
-        // render at native display resolution instead of being upscaled.
-        width: window_manager.pixel_size.width,
-        height: window_manager.pixel_size.height,
-        // TEMPORARY, for cross-machine perf testing - normally Fifo (vsync'd to
-        // the display's refresh rate, avoids the GPU spinning at max speed idling
-        // on a menu with nothing worth rendering thousands of FPS for). Uncapped
-        // here instead so the in-game FPS counter reflects genuine throughput
-        // instead of being clipped at the display's refresh rate - Fifo was
-        // exactly why a 60Hz-capped Mac and an apparently-unthrottled PC weren't
-        // comparable. Immediate tears; Mailbox doesn't (still uncapped, just
-        // drops instead of showing a torn frame) - prefer that if available.
-        // Revert to Fifo once this round of testing is done.
-        present_mode: if surface_caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
-            wgpu::PresentMode::Mailbox
-        } else {
-            wgpu::PresentMode::Immediate
-        },
+        // Real backing pixels, not the window's points - on a HiDPI/Retina
+        // display those differ (see Window::pixel_size's own doc comment), and
+        // the GPU surface needs the real pixel count to actually render at
+        // native display resolution instead of being upscaled.
+        width: window.pixel_size.width,
+        height: window.pixel_size.height,
+        // Vsync on by default - see set_vsync.
+        present_mode: Self::present_mode(true),
         // Explicitly Opaque rather than surface_caps.alpha_modes[0] (whatever the
-        // driver happens to report first) - this window is a fullscreen game, it
-        // should never be alpha-composited against the desktop behind it. Every
-        // frame's alpha channel already ends up 1.0 by the time it reaches the
-        // swapchain (DEFAULT_CLEAR_COLOR.a is 1.0 and the UI pass's own blend
-        // formula preserves full opacity once the destination already has it),
-        // but leaving the *declared* mode to chance still lets Windows' compositor
+        // driver happens to report first) - the window should never be
+        // alpha-composited against the desktop behind it. Every frame's alpha
+        // channel already ends up 1.0 by the time it reaches the swapchain, but
+        // leaving the *declared* mode to chance still lets Windows' compositor
         // treat this surface as alpha-aware for its own purposes - the likely
-        // cause of the Alt-Tab/taskbar live thumbnail blinking (DWM's main
-        // composited view apparently overrides this for a topmost, screen-
-        // covering window, but its separate thumbnail-generation path doesn't get
-        // the same override). Opaque is virtually always supported for a desktop
-        // swapchain, but fall back to whatever's first if it somehow isn't.
+        // cause of the Alt-Tab/taskbar live thumbnail blinking. Opaque is
+        // virtually always supported for a desktop swapchain, but fall back to
+        // whatever's first if it somehow isn't.
         alpha_mode: if surface_caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::Opaque) {
             wgpu::CompositeAlphaMode::Opaque
         } else {
             surface_caps.alpha_modes[0]
         },
         view_formats: vec![],
-        // 1 (the previous value) meant the CPU couldn't start a new frame
-        // until the GPU had actually finished presenting the last one -
-        // get_current_texture() (see App::render's "render.gpu_acquire"
-        // profiler span) was blocking on that every frame, and measured
-        // ~2.5ms/frame of it. 3 (Metal's own typical drawable pool size) lets
-        // the CPU queue further ahead instead of stalling there - confirmed via
-        // the profiler: gpu_acquire roughly halved and overall fps rose ~43%
-        // with no other change. The cost is a few extra ms of input latency
-        // (more frames queued ahead of the GPU) - imperceptible for this game,
-        // a standard tradeoff most games make for the throughput.
+        // 1 meant the CPU couldn't start a new frame until the GPU had
+        // actually finished presenting the last one - get_current_texture()
+        // was blocking on that every frame (~2.5ms/frame). 3 lets the CPU
+        // queue further ahead instead of stalling there, for a few extra ms of
+        // input latency - a standard tradeoff.
         desired_maximum_frame_latency: 3,
     };
 
@@ -133,6 +195,40 @@ impl Renderer {
     let depth_render = DepthRender::new(&device, &config);
     let blur = BlurRender::new(&device, &config);
 
+    let camera_resources = CameraResources::new(&device, &config);
+    let light = Light::new(&device, &config, &camera_resources);
+
+    // Every model is drawn with a shader from here, by its material's name
+    // (see rendering::shader_library) - built when first used, with these
+    // bind groups: the mesh's texture, the camera, the mesh's transform, the
+    // light.
+    let mut shaders = ShaderLibrary::new(
+        device.clone(),
+        queue.clone(),
+        config.format,
+        [
+            Texture::create_bind_group_layout(&device),
+            camera_resources.bind_group_layout.clone(),
+            Mesh::create_bind_group_layout(&device),
+            light.rendering_data.bind_group_layout.clone(),
+        ],
+    );
+    // What shaders that `reads: [Depth]` get - see ShaderLibrary::set_depth_copy.
+    shaders.set_depth_copy(depth_render.foam_depth_copy.view.clone(), depth_render.foam_depth_copy.sampler.clone());
+    shaders.set_screen_inputs(Self::screen_inputs(&blur, &HashMap::new()));
+    // The toasts' icons (see widgets::toast).
+    crate::ui::widgets::toast::add_icon_shaders(&mut shaders);
+    // The dropdowns' chevron (see widgets::dropdown).
+    crate::ui::widgets::dropdown::add_icon_shaders(&mut shaders);
+
+    let particles = ParticleRenderer::new(&device, &queue, config.format, &camera_resources.bind_group_layout, &depth_render.foam_depth_copy.view);
+    let render_physics = RenderPhysics::new(&device, &config, &camera_resources);
+    let shapes_2d = crate::rendering::shapes_2d::Shapes2D::new(&device, config.format);
+
+
+    let project_environment_source = Environment::default();
+    let project_environment = crate::resources::prepare_environment(&device, &queue, &camera_resources.bind_group_layout, &config, project_environment_source.clone());
+
     Ok(Renderer {
       surface,
       device,
@@ -145,7 +241,48 @@ impl Renderer {
         cache,
         viewport,
       },
+      camera_resources,
+      light,
+      shaders,
+      material_placements: HashMap::new(),
+      overlay_materials: HashMap::new(),
+      placed: None,
+      particles,
+      shapes_2d,
+      frame_plan: FramePlan::engine_default(),
+      default_frame_plan: FramePlan::engine_default(),
+      render_sets: Default::default(),
+      render_physics,
+      world_lines: Vec::new(),
+      show_depth_map: false,
+      project_environment,
+      project_environment_source,
+      backend,
+      targets: HashMap::new(),
     })
+  }
+
+  /// Vsync on: frames wait for the screen's refresh (no tearing, no GPU
+  /// running flat out on a menu). Off: as many frames as the GPU can make -
+  /// for measuring real throughput, or a player who wants it. On by default;
+  /// can change while the game runs.
+  pub fn set_vsync(&mut self, vsync: bool) {
+    let present_mode = Self::present_mode(vsync);
+    if self.config.present_mode != present_mode {
+      self.config.present_mode = present_mode;
+      self.surface.configure(&self.device, &self.config);
+    }
+  }
+
+  pub fn vsync(&self) -> bool {
+    self.config.present_mode == Self::present_mode(true)
+  }
+
+  /// The surface's present mode for vsync on or off - wgpu's Auto modes
+  /// pick the best one this GPU supports (Fifo/FifoRelaxed on; Mailbox, which
+  /// doesn't tear, or Immediate off), so either works on every GPU.
+  fn present_mode(vsync: bool) -> wgpu::PresentMode {
+    if vsync { wgpu::PresentMode::AutoVsync } else { wgpu::PresentMode::AutoNoVsync }
   }
 
   // Everything here is sized off the surface, so it all gets touched together -
@@ -158,6 +295,9 @@ impl Renderer {
     self.depth_render.resize(&self.device, &self.config);
     self.depth_texture = Texture::create_depth_texture(&self.device, &self.config, "depth_texture");
     self.blur.resize(&self.device, &self.config);
+    for (name, target) in self.targets.iter_mut() {
+      *target = offscreen_texture(&self.device, width.max(1), height.max(1), self.config.format, name);
+    }
 
     self.glyphon.viewport.update(
       &self.queue,
@@ -166,5 +306,55 @@ impl Renderer {
           height: self.config.height,
       },
     );
+
+    self.camera_resources.resize(width, height);
+    // The depth copy and blur targets were just rebuilt at the new size - the
+    // shaders and particles that read them need the new ones (a bind group
+    // is tied to the specific texture view it was created against).
+    self.shaders.set_depth_copy(self.depth_render.foam_depth_copy.view.clone(), self.depth_render.foam_depth_copy.sampler.clone());
+    self.shaders.set_screen_inputs(Self::screen_inputs(&self.blur, &self.targets));
+    self.particles.rebuild_depth_bind_group(&self.device, &self.depth_render.foam_depth_copy.view);
+  }
+
+  /// The images Fullscreen shaders read, by name - the world drawn this
+  /// frame ("scene"), the world blurred ("blurred"), and every one of the
+  /// game's own targets (see `add_target`).
+  fn screen_inputs<'a>(blur: &BlurRender, targets: &'a HashMap<String, Texture>) -> Vec<(&'a str, wgpu::TextureView, wgpu::Sampler)> {
+    let mut inputs = vec![
+        ("scene", blur.scene_color.view.clone(), blur.scene_color.sampler.clone()),
+        ("blurred", blur.blurred_view.clone(), blur.sampler.clone()),
+    ];
+    inputs.extend(targets.iter().map(|(name, target)| (name.as_str(), target.view.clone(), target.sampler.clone())));
+    inputs
+  }
+
+  /// An image of the game's own, `name`d, the size of the screen - drawn
+  /// into by the frame plan's steps between `.target(name, clear)` and
+  /// `.end_target()`, and read by a Fullscreen shader that has `name` in its
+  /// `inputs` (a HUD drawn apart, then blended over the world). Kept for the
+  /// app's life, through every scene. "scene" and "blurred" are the
+  /// engine's own images, and can't be taken.
+  pub fn add_target(&mut self, name: &str) {
+    if BUILTIN_SCREEN_INPUTS.contains(&name) {
+      eprintln!("add_target: \"{name}\" is one of the engine's own images ({}) - pick another name", BUILTIN_SCREEN_INPUTS.join(", "));
+      return;
+    }
+    if self.targets.contains_key(name) {
+      return;
+    }
+    let target = offscreen_texture(&self.device, self.config.width.max(1), self.config.height.max(1), self.config.format, name);
+    self.targets.insert(name.to_owned(), target);
+    self.shaders.set_screen_inputs(Self::screen_inputs(&self.blur, &self.targets));
+  }
+
+  /// Whether the game added a target `name` (see `add_target`).
+  pub fn has_target(&self, name: &str) -> bool {
+    self.targets.contains_key(name)
+  }
+
+  /// Builds `environment` (a skybox's textures, the procedural sky...) - on
+  /// the main thread, for a change made while a scene runs.
+  pub fn prepare_environment(&self, environment: Environment) -> PreparedEnvironment {
+    crate::resources::prepare_environment(&self.device, &self.queue, &self.camera_resources.bind_group_layout, &self.config, environment)
   }
 }

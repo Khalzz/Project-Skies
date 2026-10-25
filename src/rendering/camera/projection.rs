@@ -34,6 +34,11 @@ impl Projection {
         self.aspect = width as f32 / height as f32;
     }
 
+    /// Its far plane - how far away things are still drawn.
+    pub fn zfar(&self) -> f32 {
+        self.zfar
+    }
+
     pub fn calc_matrix(&self) -> Matrix4<f32> {
         OPENGL_TO_WGPU_MATRIX * Perspective3::new(self.aspect, self.fovy.to_radians(), self.znear, self.zfar).to_homogeneous()
     }

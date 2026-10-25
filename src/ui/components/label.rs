@@ -117,6 +117,10 @@ pub struct Label {
     pub buffer: Buffer,
     text: String,
     font: Font,
+    /// Its width was measured from its text (no width given) - so a later
+    /// font or size change measures it again, smaller as well as bigger (see
+    /// UiNode::set_font_size). A width given stays, only ever growing.
+    pub(crate) auto_width: bool,
 }
 
 impl Label {
@@ -145,7 +149,7 @@ impl Label {
         buffer.set_wrap(font_system, glyphon::Wrap::None);
         buffer.shape_until_scroll(font_system, true);
 
-        Self { buffer, text: text.to_owned(), font: Font::default() }
+        Self { buffer, text: text.to_owned(), font: Font::default(), auto_width: false }
     }
 
     /// The text shown.
@@ -203,7 +207,7 @@ impl Label {
         (self.text_area(parent_rect, dpi_scale, color, clip_rect), vertices_slice.len() as u16, indices_slice.len() as u32)
     }
 
-    // `dpi_scale` (pixel_size / points size, see WindowManager) - everything
+    // `dpi_scale` (pixel_size / points size, see Window) - everything
     // else in this codebase (UiTransform/Rect, mouse position, this label's own
     // parent_rect) is in points, but glyphon's Resolution/TextArea coordinate
     // space is real backing pixels (see glyphon::Resolution's own doc comment:

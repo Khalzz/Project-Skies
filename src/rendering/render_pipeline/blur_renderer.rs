@@ -1,4 +1,4 @@
-use wgpu::{util::DeviceExt, BindGroup, BindGroupLayout, BindGroupLayoutDescriptor, Buffer, Device, RenderPipeline, SurfaceConfiguration};
+use wgpu::{util::DeviceExt, BindGroup, BindGroupLayoutDescriptor, Buffer, Device, RenderPipeline, SurfaceConfiguration, TextureView};
 
 use crate::primitive::manual_vertex::ManualVertexTexturized;
 use crate::rendering::models::textures::Texture;
@@ -11,42 +11,46 @@ const QUAD_VERTICES: &[ManualVertexTexturized] = &[
 ];
 const QUAD_INDICES: &[u16] = &[0, 1, 2, 0, 2, 3];
 
-// Per-iteration step multiplier for the compounding blur passes (see
-// BlurRender::render) - doubling each time is what lets 3 cheap 9-tap passes
-// reach a large, smooth effective radius instead of needing a single pass with
-// a huge (and therefore sparse/ghosty) tap spread.
-const BLUR_STEPS: [f32; 3] = [1.0, 2.0, 4.0];
+/// How many blur strengths there are - level `k` (1-based) blurs about
+/// `2^(k+1)` pixels: 4, 8, 16, 32, 64. ui_template.wgsl's BLUR_LEVELS must
+/// match.
+pub const BLUR_LEVELS: u32 = 5;
 
-/// The pixel radius UiNode::set_background_blur maps to "fully blurred" - values
-/// at or above this sample `blurred` outright, values in between linearly
-/// crossfade between `scene_color` (sharp) and `blurred` (see ui_template.wgsl).
-/// Matches Tailwind's backdrop-blur-3xl (~64px).
+/// The pixel radius UiNode::set_background_blur reaches the strongest level
+/// at - Tailwind's backdrop-blur-3xl (~64px). See ui_template.wgsl.
 pub const MAX_BLUR_RADIUS: f32 = 64.0;
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct DirectionUniform {
-    direction: [f32; 2],
+struct HalfTexelUniform {
+    half_texel: [f32; 2],
     _padding: [f32; 2],
 }
 
-// Deliberately not Texture::create_texture - that helper's sampler always sets
-// `compare: Some(...)` (meant for depth textures), which a Filtering-typed sampler
-// binding (see bind_group_layout below) rejects at bind-group-creation time. These
-// are plain color render targets, so a plain non-comparison linear sampler.
-fn offscreen_texture(device: &Device, width: u32, height: u32, format: wgpu::TextureFormat, label: &str) -> Texture {
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
+/// `size` halved `level` times, never below 1.
+fn level_size(size: (u32, u32), level: u32) -> (u32, u32) {
+    ((size.0 >> level).max(1), (size.1 >> level).max(1))
+}
+
+fn color_texture(device: &Device, (width, height): (u32, u32), layers: u32, format: wgpu::TextureFormat, label: &str) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
-        size: wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
+        size: wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: layers },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
-    });
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+    })
+}
+
+// Deliberately not Texture::create_texture's - that one's sampler always sets
+// `compare: Some(...)` (meant for depth textures), which a Filtering-typed
+// sampler binding rejects at bind-group-creation time. These are plain color
+// targets, so a plain non-comparison linear sampler.
+fn linear_sampler(device: &Device) -> wgpu::Sampler {
+    device.create_sampler(&wgpu::SamplerDescriptor {
         address_mode_u: wgpu::AddressMode::ClampToEdge,
         address_mode_v: wgpu::AddressMode::ClampToEdge,
         address_mode_w: wgpu::AddressMode::ClampToEdge,
@@ -54,33 +58,18 @@ fn offscreen_texture(device: &Device, width: u32, height: u32, format: wgpu::Tex
         min_filter: wgpu::FilterMode::Linear,
         mipmap_filter: wgpu::FilterMode::Nearest,
         ..Default::default()
-    });
-    Texture { texture, view, sampler }
-}
-
-fn direction_buffer(device: &Device, direction: [f32; 2], label: &str) -> Buffer {
-    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some(label),
-        contents: bytemuck::cast_slice(&[DirectionUniform { direction, _padding: [0.0, 0.0] }]),
-        usage: wgpu::BufferUsages::UNIFORM,
     })
 }
 
-fn make_bind_group(device: &Device, layout: &BindGroupLayout, source: &Texture, direction: &Buffer, label: &str) -> BindGroup {
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some(label),
-        layout,
-        entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&source.view) },
-            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&source.sampler) },
-            wgpu::BindGroupEntry { binding: 2, resource: direction.as_entire_binding() },
-        ],
-    })
+pub(crate) fn offscreen_texture(device: &Device, width: u32, height: u32, format: wgpu::TextureFormat, label: &str) -> Texture {
+    let texture = color_texture(device, (width, height), 1, format, label);
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    Texture { texture, view, sampler: linear_sampler(device) }
 }
 
-fn fullscreen_pipeline(device: &Device, layout: &wgpu::PipelineLayout, shader: &wgpu::ShaderModule, format: wgpu::TextureFormat) -> RenderPipeline {
+fn fullscreen_pipeline(device: &Device, layout: &wgpu::PipelineLayout, shader: &wgpu::ShaderModule, entry_point: &str, format: wgpu::TextureFormat) -> RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("fullscreen_pipeline"),
+        label: Some(entry_point),
         layout: Some(layout),
         vertex: wgpu::VertexState {
             module: shader,
@@ -90,7 +79,7 @@ fn fullscreen_pipeline(device: &Device, layout: &wgpu::PipelineLayout, shader: &
         },
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: Some("fs_main"),
+            entry_point: Some(entry_point),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
                 blend: Some(wgpu::BlendState::REPLACE),
@@ -114,50 +103,82 @@ fn fullscreen_pipeline(device: &Device, layout: &wgpu::PipelineLayout, shader: &
     })
 }
 
+/// One step of the blur chain: `source` (bound in `bind_group`) halved
+/// (`up: false`) or doubled into `target`.
+struct BlurPass {
+    up: bool,
+    bind_group: BindGroup,
+    target: TextureView,
+}
+
 /// Real screen-space background blur ("backdrop-filter: blur()") for UI panels -
 /// see `UiNode::set_background_blur`. The 3D scene renders into `scene_color`
 /// every frame (an offscreen copy - see `App::render_opaque_pass`/
 /// `render_transparent_pass`) instead of straight into the swapchain, since the UI
 /// pass needs something already-rendered to sample from before it draws.
 ///
-/// The frame plan's Fullscreen step copies that sharp copy onto the screen (see
-/// shader_library's engine/blit), and `blur_scene` builds `blurred`: a
-/// full-resolution, densely-sampled blur reached by chaining three
-/// 9-tap separable Gaussian passes (H+V each) at growing step sizes (see
-/// BLUR_STEPS) rather than one pass with a huge, sparse tap spread - the latter
-/// is what produced a "same element repeated" ghosting artifact an earlier
-/// version of this had at large radii. Every UI node with `background_blur` set
-/// then crossfades between `scene_color` and this single shared `blurred`
-/// texture based on its own radius (see `MAX_BLUR_RADIUS`/`Ui::blur_bind_group`)
-/// - not a physically exact reproduction of "blur(Npx)" at every radius, but
-/// smooth and artifact-free at every strength, which matters more for a UI
-/// effect.
+/// The blur is a Dual Kawase chain (see blur.wgsl): the image is halved five
+/// times (½ down to 1/32), and each of those is doubled back up to ½
+/// resolution - `BLUR_LEVELS` blurs of growing strength, one layer each of
+/// `levels`. A blurred node picks between them by its radius (see
+/// ui_template.wgsl), so a small radius really is a small blur. Everything
+/// runs at ½ resolution or lower, the taps sit between texels so the bilinear
+/// filter does part of the averaging, and the cost hardly depends on the
+/// radius.
+///
+/// It only runs on frames that need it - a node with `background_blur`, or a
+/// Fullscreen shader reading "blurred" (see App::run_frame_plan).
 pub struct BlurRender {
     /// The world drawn this frame - what the frame plan's Fullscreen step
     /// copies onto the screen (its "scene" input, see shader_library).
     pub scene_color: Texture,
-    /// The frame plan's "hud" target - transparent where nothing's drawn
-    /// (a Fullscreen shader's "hud" input).
-    pub hud_color: Texture,
-    blur_a: Texture,
-    pub blurred: Texture,
-    // One bind group per compounding pass, in order - even indices are H passes
-    // (write into blur_a), odd are V passes (write into blurred), see `render`.
-    blur_passes: Vec<BindGroup>,
-    blur_pipeline: RenderPipeline,
+    /// The frame as it is right before the always-on-top UI (a modal) -
+    /// world and HUD both - so that layer's blur shows the HUD behind it
+    /// instead of only the world. See `blur_backdrop`.
+    pub backdrop: Texture,
+    /// The `BLUR_LEVELS` blurs, weakest first, at ½ resolution - one array
+    /// layer each, kept alive for `levels_view`/`blurred_view`.
+    _levels: wgpu::Texture,
+    /// All the levels, for the UI (a `texture_2d_array`).
+    pub levels_view: TextureView,
+    /// The strongest level alone - a Fullscreen shader's "blurred" input.
+    pub blurred_view: TextureView,
+    pub sampler: wgpu::Sampler,
+    /// The chain's smaller images (¼ and below) - kept alive for `passes`.
+    _scratch: Vec<wgpu::Texture>,
+    /// The first step - halving `scene_color`, or `backdrop` - then the rest.
+    first_from_scene: BlurPass,
+    first_from_backdrop: BlurPass,
+    passes: Vec<BlurPass>,
+    down_pipeline: RenderPipeline,
+    up_pipeline: RenderPipeline,
     vertex_buffer: Buffer,
     index_buffer: Buffer,
 }
 
 impl BlurRender {
     pub fn new(device: &Device, config: &SurfaceConfiguration) -> Self {
-        let scene_color = offscreen_texture(device, config.width, config.height, config.format, "scene_color");
-        let hud_color = offscreen_texture(device, config.width, config.height, config.format, "hud_color");
-        let blur_a = offscreen_texture(device, config.width, config.height, config.format, "blur_a");
-        let blurred = offscreen_texture(device, config.width, config.height, config.format, "blurred_scene");
+        let format = config.format;
+        let full = (config.width.max(1), config.height.max(1));
+        let scene_color = offscreen_texture(device, full.0, full.1, format, "scene_color");
+        let backdrop = offscreen_texture(device, full.0, full.1, format, "ui_backdrop");
+        let sampler = linear_sampler(device);
 
-        // Texture + sampler + one uniform (each blur pass's direction).
-        let blur_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        let levels = color_texture(device, level_size(full, 1), BLUR_LEVELS, format, "blur_levels");
+        let layer_view = |layer: u32| levels.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2),
+            base_array_layer: layer,
+            array_layer_count: Some(1),
+            ..Default::default()
+        });
+        let levels_view = levels.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let blurred_view = layer_view(BLUR_LEVELS - 1);
+
+        // Texture + sampler + one uniform (half a texel of the source).
+        let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("blur_bind_group_layout"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
@@ -188,36 +209,69 @@ impl BlurRender {
                 },
             ],
         });
+        let pass = |up: bool, source: &TextureView, source_size: (u32, u32), target: TextureView| {
+            let uniform = HalfTexelUniform { half_texel: [0.5 / source_size.0 as f32, 0.5 / source_size.1 as f32], _padding: [0.0; 2] };
+            let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("blur_half_texel"),
+                contents: bytemuck::cast_slice(&[uniform]),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("blur_pass_bind_group"),
+                layout: &layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(source) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
+                    wgpu::BindGroupEntry { binding: 2, resource: buffer.as_entire_binding() },
+                ],
+            });
+            BlurPass { up, bind_group, target }
+        };
 
-        // ── Blur pipeline (compounding separable Gaussian, see BLUR_STEPS) ──
-        // Six passes total (H then V per step): scene_color -> blur_a -> blurred
-        // -> blur_a -> blurred -> blur_a -> blurred - `blurred` always ends up
-        // holding the final result regardless of BLUR_STEPS' length. Only the
-        // very first H pass reads scene_color; every H pass after that re-blurs
-        // the previous iteration's result (`blurred`), which is what compounds
-        // the effect - V always reads blur_a, that iteration's fresh H output.
-        let inv_w = 1.0 / config.width.max(1) as f32;
-        let inv_h = 1.0 / config.height.max(1) as f32;
-        let mut blur_passes = Vec::with_capacity(BLUR_STEPS.len() * 2);
-        for (i, step) in BLUR_STEPS.iter().enumerate() {
-            let h_source = if i == 0 { &scene_color } else { &blurred };
-            let h_dir = direction_buffer(device, [step * inv_w, 0.0], "blur_direction_h");
-            blur_passes.push(make_bind_group(device, &blur_layout, h_source, &h_dir, "blur_h_bind_group"));
+        // Level 1 is the full image halved once, straight into its layer.
+        let first_from_scene = pass(false, &scene_color.view, full, layer_view(0));
+        let first_from_backdrop = pass(false, &backdrop.view, full, layer_view(0));
 
-            let v_dir = direction_buffer(device, [0.0, step * inv_h], "blur_direction_v");
-            blur_passes.push(make_bind_group(device, &blur_layout, &blur_a, &v_dir, "blur_v_bind_group"));
+        // down[j]: the image halved j times (j >= 2) - and a same-sized
+        // scratch image for the way back up.
+        let mut scratch = Vec::new();
+        let mut down_views = vec![layer_view(0), layer_view(0)];
+        let mut up_views = vec![layer_view(0), layer_view(0)];
+        for j in 2..=BLUR_LEVELS {
+            let down = color_texture(device, level_size(full, j), 1, format, "blur_down");
+            down_views.push(down.create_view(&wgpu::TextureViewDescriptor::default()));
+            scratch.push(down);
+            let up = color_texture(device, level_size(full, j), 1, format, "blur_up");
+            up_views.push(up.create_view(&wgpu::TextureViewDescriptor::default()));
+            scratch.push(up);
         }
 
-        let blur_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        let mut passes = Vec::new();
+        for j in 2..=BLUR_LEVELS {
+            passes.push(pass(false, &down_views[j as usize - 1], level_size(full, j - 1), down_views[j as usize].clone()));
+        }
+        // Level k: the image halved k times, doubled back to ½ resolution -
+        // through the scratch images, into its layer.
+        for k in 2..=BLUR_LEVELS {
+            let mut source = down_views[k as usize].clone();
+            for j in (1..k).rev() {
+                let target = if j == 1 { layer_view(k - 1) } else { up_views[j as usize].clone() };
+                passes.push(pass(true, &source, level_size(full, j + 1), target.clone()));
+                source = target;
+            }
+        }
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("blur_pipeline_layout"),
-            bind_group_layouts: &[&blur_layout],
+            bind_group_layouts: &[&layout],
             push_constant_ranges: &[],
         });
-        let blur_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Blur Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/blur.wgsl").into()),
         });
-        let blur_pipeline = fullscreen_pipeline(device, &blur_pipeline_layout, &blur_shader, config.format);
+        let down_pipeline = fullscreen_pipeline(device, &pipeline_layout, &shader, "fs_down", format);
+        let up_pipeline = fullscreen_pipeline(device, &pipeline_layout, &shader, "fs_up", format);
 
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Blur Pass VB"),
@@ -232,11 +286,17 @@ impl BlurRender {
 
         Self {
             scene_color,
-            hud_color,
-            blur_a,
-            blurred,
-            blur_passes,
-            blur_pipeline,
+            backdrop,
+            _levels: levels,
+            levels_view,
+            blurred_view,
+            sampler,
+            _scratch: scratch,
+            first_from_scene,
+            first_from_backdrop,
+            passes,
+            down_pipeline,
+            up_pipeline,
             vertex_buffer,
             index_buffer,
         }
@@ -250,32 +310,51 @@ impl BlurRender {
         *self = Self::new(device, config);
     }
 
-    fn draw_pass(&self, encoder: &mut wgpu::CommandEncoder, pipeline: &RenderPipeline, target: &wgpu::TextureView, bind_group: &BindGroup, label: &str) {
+    fn draw_pass(&self, encoder: &mut wgpu::CommandEncoder, pass: &BlurPass) {
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some(label),
+            label: Some(if pass.up { "Blur Up" } else { "Blur Down" }),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target,
+                view: &pass.target,
                 resolve_target: None,
+                // Every pixel is drawn over - nothing to load or clear.
                 ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
             })],
             depth_stencil_attachment: None,
             occlusion_query_set: None,
             timestamp_writes: None,
         });
-        render_pass.set_pipeline(pipeline);
-        render_pass.set_bind_group(0, bind_group, &[]);
+        render_pass.set_pipeline(if pass.up { &self.up_pipeline } else { &self.down_pipeline });
+        render_pass.set_bind_group(0, &pass.bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
         render_pass.draw_indexed(0..QUAD_INDICES.len() as u32, 0, 0..1);
     }
 
-    /// Rebuilds `blurred` from `scene_color` via the compounding blur chain,
-    /// ready for the UI to crossfade toward per node - once a frame, once the
-    /// world's drawn, before the UI (see App::run_frame_plan).
-    pub fn blur_scene(&self, encoder: &mut wgpu::CommandEncoder) {
-        for (i, bind_group) in self.blur_passes.iter().enumerate() {
-            let target = if i % 2 == 0 { &self.blur_a.view } else { &self.blurred.view };
-            self.draw_pass(encoder, &self.blur_pipeline, target, bind_group, "Blur Pass");
+    fn run_chain(&self, encoder: &mut wgpu::CommandEncoder, first: &BlurPass) {
+        self.draw_pass(encoder, first);
+        for pass in &self.passes {
+            self.draw_pass(encoder, pass);
         }
+    }
+
+    /// Rebuilds the blur levels from `scene_color`, ready for the UI to pick
+    /// from per node - once the world's drawn, before the UI (see
+    /// App::run_frame_plan).
+    pub fn blur_scene(&self, encoder: &mut wgpu::CommandEncoder) {
+        self.run_chain(encoder, &self.first_from_scene);
+    }
+
+    /// Copies `frame` (what's been drawn so far - the screen) into `backdrop`
+    /// and rebuilds the blur levels from it, for the always-on-top UI to
+    /// blur. False (nothing done) when `frame` can't be copied from or isn't
+    /// the same size and format.
+    pub fn blur_backdrop(&self, encoder: &mut wgpu::CommandEncoder, frame: &wgpu::Texture) -> bool {
+        let backdrop = &self.backdrop.texture;
+        if !frame.usage().contains(wgpu::TextureUsages::COPY_SRC) || frame.size() != backdrop.size() || frame.format() != backdrop.format() {
+            return false;
+        }
+        encoder.copy_texture_to_texture(frame.as_image_copy(), backdrop.as_image_copy(), backdrop.size());
+        self.run_chain(encoder, &self.first_from_backdrop);
+        true
     }
 }

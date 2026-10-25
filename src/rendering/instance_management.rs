@@ -47,6 +47,19 @@ pub struct ModelDataInstance {
     /// material instance - see Material::meshes), set every frame from the
     /// node that has them.
     pub mesh_materials: std::collections::HashMap<String, String>,
+    /// Which entry this is - a new one for every one made (see `new_stamp`),
+    /// so one put in place of another under the same name (a node spawned
+    /// with a model already drawn) reads as a change (see
+    /// App::place_materials).
+    pub stamp: u64,
+}
+
+impl ModelDataInstance {
+    /// A stamp no entry has had before - see `stamp`.
+    pub fn new_stamp() -> u64 {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 #[derive(Debug, Deserialize)]

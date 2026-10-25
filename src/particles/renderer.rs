@@ -623,6 +623,15 @@ impl ParticleRenderer {
         let previous_camera = self.previous_camera.unwrap_or(camera);
         self.previous_camera = Some(camera);
 
+        // No emitter now, and nothing left from one before - nothing to
+        // spawn, age or draw.
+        let mut sources = sources.into_iter().peekable();
+        if sources.peek().is_none() && self.runtimes.is_empty() {
+            self.particle_draws.clear();
+            self.trail_draws.clear();
+            return;
+        }
+
         for runtime in self.runtimes.values_mut() {
             runtime.seen = false;
         }

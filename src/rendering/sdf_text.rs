@@ -27,7 +27,7 @@ use nalgebra::Vector3;
 use wgpu::util::DeviceExt;
 
 use crate::rendering::thick_lines::MAX_MASK_EDGES;
-use crate::scene_manager::properties::Material;
+use crate::scene_manager::node::properties::Material;
 use crate::ui::components::label::Font;
 
 /// The size glyphs are rasterized at (px) - their distance fields hold the
@@ -444,7 +444,7 @@ impl SdfText {
     }
 }
 
-fn srgb_to_linear(channel: f32) -> f32 {
+pub(crate) fn srgb_to_linear(channel: f32) -> f32 {
     if channel <= 0.04045 { channel / 12.92 } else { ((channel + 0.055) / 1.055).powf(2.4) }
 }
 

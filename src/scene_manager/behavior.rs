@@ -2,9 +2,8 @@ use std::any::Any;
 
 use crate::app::App;
 use crate::physics::physics_handler::RenderMessage;
-use crate::rendering::camera::handler::SceneCameras;
-
 use super::node::Node;
+use super::scene_access::SceneAccess;
 
 /// Splits off `as_any`/`as_any_mut` into their own supertrait purely so they
 /// can be given a blanket impl - a trait's own default method body doesn't
@@ -30,58 +29,47 @@ impl<T: Any> AsAny for T {
 ///
 /// Distinct from a property: a property is plain, generic data any system
 /// might read (`Transform3D`, `Model`) - a behavior is one element's own
-/// logic, with exclusive ownership of its own fields, driven by these three
-/// hooks instead of external systems reaching in. A behavior can still reach
-/// into its node's properties (`node.get_property_mut::<Transform3D>()`) from
-/// any of these when it needs to.
+/// logic, with exclusive ownership of its own fields, driven by these hooks
+/// instead of external systems reaching in.
 ///
-/// Every hook also gets `&mut SceneCameras` and `&mut App` - `cameras` for
-/// anything that drives the owning scene's own cameras (e.g. a free-fly
-/// `Camera` behavior), `app` for anything else outside the node itself
-/// (`app.audio`, ...). `cameras` is threaded in separately from a `&mut
-/// Scene` rather than handing the whole scene over - a node's behaviors run
-/// from inside `scene.content.nodes`, already borrowed off `scene`, so only
-/// sibling fields of `content` (like `cameras`) can be reached at the same
-/// time, not `scene` itself. The real cost of all this: `Node`/`SceneNodes`
-/// can no longer be unit-tested without a live `App`, which needs a real
-/// window/GPU context to construct - so there's no cheap, isolated test path
-/// for behavior dispatch anymore (see `scene_nodes.rs`'s own comment on what
-/// this replaced).
+/// Every hook gets its own `node` (its properties: `node.transform_2d_mut()`,
+/// `node.get_property_mut::<T>()`...), the rest of the scene through `scene`
+/// (other nodes, the cameras, spawning and despawning - see `SceneAccess`),
+/// and `app` for anything outside the scene (`app.time.delta_time`,
+/// `app.audio`, ...).
 ///
-/// All three are no-ops by default - implement only the ones a given
-/// behavior actually needs.
+/// The real cost of `app`: `Node`/`SceneNodes` can't be unit-tested without a
+/// live `App`, which needs a real window/GPU context to construct - so
+/// there's no cheap, isolated test path for behavior dispatch (see
+/// `scene_nodes.rs`'s own comment on what this replaced).
+///
+/// All are no-ops by default - implement only the ones a given behavior
+/// actually needs.
 pub trait Behavior: Any + AsAny {
     /// Runs once, right after this node is actually spawned into a
     /// `SceneNodes` - not the behavior's own constructor, since properties it
     /// depends on may only be visible once the node is fully built (mirrors
     /// Godot's `_ready` vs `_init` split).
-    fn on_spawn(&mut self, node: &mut Node, cameras: &mut SceneCameras, app: &mut App) {
-        let _ = (node, cameras, app);
+    fn on_spawn(&mut self, node: &mut Node, scene: &mut SceneAccess, app: &mut App) {
+        let _ = (node, scene, app);
     }
 
-    /// Runs every rendered frame - variable `dt`.
-    fn update(&mut self, node: &mut Node, cameras: &mut SceneCameras, app: &mut App, dt: f32) {
-        let _ = (node, cameras, app, dt);
+    /// Runs every rendered frame - how long it was is `app.time.delta_time`.
+    fn update(&mut self, node: &mut Node, scene: &mut SceneAccess, app: &mut App) {
+        let _ = (node, scene, app);
     }
 
-    /// Reacts to physics results once per frame - an approximation of a true
-    /// fixed 120Hz tick, not the real physics-thread rate. `Node`'s `Box<dyn
-    /// Any>` properties aren't `Send`, so running this on the actual physics
-    /// thread (see `engine::physics::physics_handler::Physics::physics_thread`)
-    /// would require making the whole property system `Send`-safe - not worth
-    /// it for logic that reacts to results rather than computing forces or
-    /// collisions itself (that belongs in a `PhysicsBehavior` attached via
-    /// `Node::add_physics_behavior` instead, which runs at the real fixed
-    /// rate on the physics thread and never touches `Node`).
-    ///
-    /// `physics_message` is this node's own entry from that frame's physics
-    /// results (`None` until the physics thread has actually reported back
-    /// for this node, e.g. a node whose id never registered a `Physics`
-    /// property in the first place) - see `SceneNodes::fixed_update`'s own
-    /// doc comment. This is the generic version of what used to be a scene
-    /// hand-picking one node by name to feed its physics results to (see
-    /// `Plane::fixed_update`'s own doc comment for the case this replaced).
-    fn fixed_update(&mut self, node: &mut Node, cameras: &mut SceneCameras, app: &mut App, dt: f32, physics_message: Option<&RenderMessage>) {
-        let _ = (node, cameras, app, dt, physics_message);
+    /// Runs every rendered frame while the scene's physics runs (a scene
+    /// with no physics body has none - then it isn't called at all), after
+    /// every node's `update`, with this node's latest physics results -
+    /// `physics` is None until the physics thread has reported on it (or
+    /// always, for a node without a `Physics` property). Once a frame, not
+    /// at the physics rate: for reacting to
+    /// where the physics put the node. Logic that has to run at the fixed
+    /// physics rate (forces, collisions) goes in a `PhysicsBehavior`
+    /// (`Node::add_physics_behavior`), which runs on the physics thread -
+    /// this can't, since `Node`'s properties can't cross to that thread.
+    fn after_physics(&mut self, node: &mut Node, scene: &mut SceneAccess, app: &mut App, physics: Option<&RenderMessage>) {
+        let _ = (node, scene, app, physics);
     }
 }

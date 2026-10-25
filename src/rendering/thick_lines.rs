@@ -12,7 +12,7 @@
 
 use wgpu::util::DeviceExt;
 
-use crate::scene_manager::properties::Material;
+use crate::scene_manager::node::properties::Material;
 
 /// One segment, in world space - `width` in pixels, `color` RGBA (alpha
 /// blends).

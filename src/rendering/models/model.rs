@@ -1,4 +1,4 @@
-use std::{collections::HashMap, default, mem, ops::Range};
+use std::{collections::HashMap, default, mem};
 
 
 use gltf::material::AlphaMode;
@@ -60,9 +60,14 @@ pub struct Material {
 
 pub struct Mesh {
     pub name: String,
-    pub vertex_buffer: wgpu::Buffer,
-    pub index_buffer: wgpu::Buffer,
+    /// Where its indices start in its model's index buffer (see
+    /// `Model::index_buffer`), and how many there are.
+    pub first_index: u32,
     pub num_elements: u32,
+    /// Where its vertices start in its model's vertex buffer - its indices
+    /// count from its own first vertex, so this is added to them when it's
+    /// drawn.
+    pub base_vertex: i32,
     pub material: usize,
     pub transform_buffer: wgpu::Buffer,
     pub transform_bind_group: wgpu::BindGroup,
@@ -86,7 +91,14 @@ pub struct Mesh {
 /// A 3D model is defined by meshes, the "mesh_list" is for definition of different mesh types, for example separation of opaque and transparent ones.
 pub struct Model {
     pub mesh_lists: HashMap<String, HashMap<String, Mesh>>,
-    pub materials: Vec<Material>
+    pub materials: Vec<Material>,
+    /// Every mesh's vertices, one after another - one buffer for the whole
+    /// model, so it's bound once to draw all of its meshes instead of once
+    /// per mesh (see `Mesh::base_vertex`). Each mesh is still drawn on its
+    /// own, with its own transform - only where its geometry lives is shared.
+    pub vertex_buffer: wgpu::Buffer,
+    /// Every mesh's indices, the same way (see `Mesh::first_index`).
+    pub index_buffer: wgpu::Buffer,
 }
 
 impl Model {
@@ -115,7 +127,7 @@ impl Model {
         let mesh_lists = self.mesh_lists.iter()
             .map(|(list, meshes)| (list.clone(), meshes.iter().map(|(key, mesh)| (key.clone(), mesh.share(device, queue, &layout))).collect()))
             .collect();
-        Model { mesh_lists, materials: self.materials.clone() }
+        Model { mesh_lists, materials: self.materials.clone(), vertex_buffer: self.vertex_buffer.clone(), index_buffer: self.index_buffer.clone() }
     }
 }
 
@@ -136,9 +148,9 @@ impl Mesh {
         });
         let mesh = Mesh {
             name: self.name.clone(),
-            vertex_buffer: self.vertex_buffer.clone(),
-            index_buffer: self.index_buffer.clone(),
+            first_index: self.first_index,
             num_elements: self.num_elements,
+            base_vertex: self.base_vertex,
             material: self.material,
             transform_buffer,
             transform_bind_group,
@@ -234,183 +246,5 @@ impl Mesh {
                 },
             ],
         })
-    }
-}
-
-pub trait DrawModel<'a> {
-    // Draw multiple instances of a single mesh
-    fn draw_mesh_instanced(
-        &mut self,
-        mesh: &'a Mesh,
-        material: &'a Material,
-        instances: Range<u32>,
-        camera_bind_group: &'a wgpu::BindGroup,
-        light_bind_group: &'a wgpu::BindGroup
-    );
-
-    // Draw multiple instances of the entire model. Sets the pipeline itself,
-    // per mesh - the caller must NOT set one.
-    //
-    //  - `cull_back`  : single-sided meshes (and the near-side pass of a
-    //                   double-sided one).
-    //  - `no_cull`    : `Some` for the opaque pass - a double-sided mesh is
-    //                   drawn once with no culling. `None` for the transparent
-    //                   pass.
-    //  - `cull_front` : `Some` for the transparent pass - a double-sided mesh
-    //                   is drawn twice, back faces (far side) with this then
-    //                   front faces (near side) with `cull_back`, so the near
-    //                   wall blends over the far wall for a convex shell.
-    //
-    // Which meshes are double-sided comes from `Mesh::double_sided` (set at
-    // load from `resources::DoubleSided`).
-    fn draw_model_instanced_from_list(
-        &mut self,
-        model: &'a Model,
-        instances: Range<u32>,
-        camera_bind_group: &'a wgpu::BindGroup,
-        light_bind_group: &'a wgpu::BindGroup,
-        list_name: &String,
-        cull_back: &'a wgpu::RenderPipeline,
-        no_cull: Option<&'a wgpu::RenderPipeline>,
-        cull_front: Option<&'a wgpu::RenderPipeline>,
-    );
-}
-
-impl<'a, 'b> DrawModel<'b> for wgpu::RenderPass<'a>
-where
-    'b: 'a,
-{
-    fn draw_mesh_instanced(&mut self, mesh: &'b Mesh, material: &'b Material, instances: Range<u32>, camera_bind_group: &'b wgpu::BindGroup, light_bind_group: &'a wgpu::BindGroup) {
-        self.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-        self.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-        self.set_bind_group(0, &material.bind_group, &[]);
-        self.set_bind_group(1, camera_bind_group, &[]);
-        self.set_bind_group(2, &mesh.transform_bind_group, &[]);
-        self.set_bind_group(3, light_bind_group, &[]);
-        self.draw_indexed(0..mesh.num_elements, 0, instances);
-    }
-
-    // The `active` tracker is a loop-carried "which pipeline is bound" that
-    // skips redundant set_pipeline calls; its store on the final iteration is
-    // unavoidably dead.
-    #[allow(unused_assignments)]
-    fn draw_model_instanced_from_list(
-        &mut self,
-        model: &'b Model,
-        instances: Range<u32>,
-        camera_bind_group: &'b wgpu::BindGroup,
-        light_bind_group: &'a wgpu::BindGroup,
-        list_name: &String,
-        cull_back: &'b wgpu::RenderPipeline,
-        no_cull: Option<&'b wgpu::RenderPipeline>,
-        cull_front: Option<&'b wgpu::RenderPipeline>,
-    ) {
-        let Some(meshes) = model.mesh_lists.get(list_name) else { return };
-        // 0 = cull_back, 1 = no_cull, 2 = cull_front. `None` = nothing set yet
-        // (the caller doesn't set a pipeline), so the first draw always sets one.
-        let mut active: Option<u8> = None;
-        for (_key, mesh) in meshes {
-            let material = &model.materials[mesh.material];
-            if mesh.double_sided {
-                if let Some(front) = cull_front {
-                    // Two-pass: far side (back faces) then near side (front faces).
-                    self.set_pipeline(front);
-                    self.draw_mesh_instanced(mesh, material, instances.clone(), camera_bind_group, light_bind_group);
-                    self.set_pipeline(cull_back);
-                    active = Some(0);
-                    self.draw_mesh_instanced(mesh, material, instances.clone(), camera_bind_group, light_bind_group);
-                    continue;
-                }
-                if let Some(nc) = no_cull {
-                    if active != Some(1) { self.set_pipeline(nc); active = Some(1); }
-                    self.draw_mesh_instanced(mesh, material, instances.clone(), camera_bind_group, light_bind_group);
-                    continue;
-                }
-            }
-            if active != Some(0) { self.set_pipeline(cull_back); active = Some(0); }
-            self.draw_mesh_instanced(mesh, material, instances.clone(), camera_bind_group, light_bind_group);
-        }
-    }
-}
-
-// This trait will entirely be dedicated to draw the lighting of the scene
-pub trait DrawLight<'a> {
-    fn draw_light_mesh(
-        &mut self,
-        mesh: &'a Mesh,
-        camera_bind_group: &'a wgpu::BindGroup,
-        light_bind_group: &'a wgpu::BindGroup,
-    );
-    fn draw_light_mesh_instanced(
-        &mut self,
-        mesh: &'a Mesh,
-        instances: Range<u32>,
-        camera_bind_group: &'a wgpu::BindGroup,
-        light_bind_group: &'a wgpu::BindGroup,
-    );
-
-    fn draw_light_model(
-        &mut self,
-        model: &'a Model,
-        camera_bind_group: &'a wgpu::BindGroup,
-        light_bind_group: &'a wgpu::BindGroup,
-    );
-    fn draw_light_model_instanced(
-        &mut self,
-        model: &'a Model,
-        instances: Range<u32>,
-        camera_bind_group: &'a wgpu::BindGroup,
-        light_bind_group: &'a wgpu::BindGroup,
-    );
-}
-
-impl<'a, 'b> DrawLight<'b> for wgpu::RenderPass<'a>
-where
-    'b: 'a,
-{
-    fn draw_light_mesh(
-        &mut self,
-        mesh: &'b Mesh,
-        camera_bind_group: &'b wgpu::BindGroup,
-        light_bind_group: &'b wgpu::BindGroup,
-    ) {
-        self.draw_light_mesh_instanced(mesh, 0..1, camera_bind_group, light_bind_group);
-    }
-
-    fn draw_light_mesh_instanced(
-        &mut self,
-        mesh: &'b Mesh,
-        instances: Range<u32>,
-        camera_bind_group: &'b wgpu::BindGroup,
-        light_bind_group: &'b wgpu::BindGroup,
-    ) {
-        self.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-        self.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-        self.set_bind_group(0, camera_bind_group, &[]);
-        self.set_bind_group(1, light_bind_group, &[]);
-        self.draw_indexed(0..mesh.num_elements, 0, instances);
-    }
-
-    fn draw_light_model(
-        &mut self,
-        model: &'b Model,
-        camera_bind_group: &'b wgpu::BindGroup,
-        light_bind_group: &'b wgpu::BindGroup,
-    ) {
-        self.draw_light_model_instanced(model, 0..1, camera_bind_group, light_bind_group);
-    }
-    
-    fn draw_light_model_instanced(
-        &mut self,
-        model: &'b Model,
-        instances: Range<u32>,
-        camera_bind_group: &'b wgpu::BindGroup,
-        light_bind_group: &'b wgpu::BindGroup,
-    ) {
-        for (_id, mesh_lists) in &model.mesh_lists {
-            for mesh in mesh_lists {
-                self.draw_light_mesh_instanced(mesh.1, instances.clone(), camera_bind_group, light_bind_group);
-            }
-        }
     }
 }

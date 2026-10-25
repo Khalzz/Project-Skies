@@ -228,13 +228,13 @@ impl DepthRender {
         });
     }
 
-    // Copies `texture`'s current contents into `foam_depth_copy` - has to run
-    // between render passes (copy_texture_to_texture isn't valid mid-pass),
-    // specifically after the opaque pass has finished (so it captures solid
-    // geometry's depth) and before the water pass begins (so the water
-    // shader is reading a snapshot from *before* water itself contributed
-    // any depth, not a stale one from last frame).
-    pub fn snapshot_for_water(&self, encoder: &mut wgpu::CommandEncoder) {
+    // Copies `texture`'s current contents into `foam_depth_copy` - the depth
+    // so far, for the shaders that read it (`reads: [Depth]`) and the
+    // particles' soft fading. Has to run between render passes
+    // (copy_texture_to_texture isn't valid mid-pass): after the passes whose
+    // depth it should hold, before the ones reading it - a frame plan's
+    // CopyDepth.
+    pub fn snapshot_depth(&self, encoder: &mut wgpu::CommandEncoder) {
         encoder.copy_texture_to_texture(
             self.texture.texture.as_image_copy(),
             self.foam_depth_copy.texture.as_image_copy(),

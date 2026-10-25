@@ -1,4 +1,4 @@
-//! Named shaders - what a node's `Material` (see scene_manager::properties)
+//! Named shaders - what a node's `Material` (see scene_manager::node::properties)
 //! draws its model with.
 //!
 //! - Built in, under `engine/`: "engine/standard" (what every model is drawn
@@ -27,12 +27,16 @@
 //! textures from 3 on, two bindings each (texture, sampler), by name in
 //! alphabetical order - what a Raw shader declares itself. One that `reads:
 //! [Depth]` gets the depth so far (the frame plan's CopyDepth) at 16 - a
-//! `texture_2d<f32>` to `textureLoad` - and a non-filtering sampler at 17.
+//! `texture_2d<f32>` to `textureLoad` - and a non-filtering sampler at 17;
+//! a Surface shader declares them itself, and turns a depth into a distance
+//! with the template's `linear_depth` (the camera's planes are `engine.near`
+//! and `engine.far`).
 //!
 //! A `Fullscreen` shader is a frame plan's `Fullscreen` step - a `fragment()`
 //! hook run for every pixel of the target (fullscreen_template.wgsl). It reads
 //! the images its `.ron` names in `inputs` ("scene" - the world drawn so far,
-//! "hud" - the "hud" target, "blurred" - the scene blurred, last frame's),
+//! "blurred" - the scene blurred, last frame's - or one of the game's own
+//! targets, by its name: see Renderer::add_target),
 //! each declared for it like a texture, after its textures; its params are
 //! the material `key`'s the step names (see `set_instance`). One that can't
 //! be used falls back to engine/blit (the scene, plain) - said once.
@@ -83,8 +87,9 @@ pub const UI: &str = "engine/ui";
 pub const SDF_TEXT: &str = "engine/sdf_text";
 /// What thick line sets are drawn with unless they say otherwise.
 pub const THICK_LINES: &str = "engine/thick_lines";
-/// The images a Fullscreen shader can read (its `.ron`'s `inputs`).
-pub const SCREEN_INPUTS: [&str; 3] = ["scene", "hud", "blurred"];
+/// The engine's own images a Fullscreen shader can read (its `.ron`'s
+/// `inputs`) - besides the game's targets (see Renderer::add_target).
+pub const BUILTIN_SCREEN_INPUTS: [&str; 2] = ["scene", "blurred"];
 const FULLSCREEN_TEMPLATE: &str = include_str!("../shaders/fullscreen_template.wgsl");
 const BLIT_HOOKS: &str = "fn fragment(f: ScreenIn) -> vec4<f32> {\n    return textureSample(scene, scene_sampler, f.uv);\n}\n";
 /// Where a shader that `reads: [Depth]` gets the depth so far - texture,
@@ -260,7 +265,7 @@ pub struct ShaderSettings {
     /// Textures it reads, by name - an image file each.
     pub textures: BTreeMap<String, String>,
     pub reads: Vec<Read>,
-    /// A Fullscreen shader's images, by name - see SCREEN_INPUTS.
+    /// A Fullscreen shader's images, by name - see BUILTIN_SCREEN_INPUTS.
     pub inputs: Vec<String>,
 }
 
@@ -463,8 +468,10 @@ struct Instance {
     /// Its params block, as last written, for the shader build it's for.
     buffer: Option<(wgpu::Buffer, Vec<u8>)>,
     /// Its bind group 0 for each mesh texture it's drawn with - by the
-    /// model it's in and the texture's index there.
-    bind_groups: HashMap<(String, usize), wgpu::BindGroup>,
+    /// model it's in, then the texture's index there (a 2D or Fullscreen
+    /// material's one: model "", index 0). Nested so looking one up needs no
+    /// new String - it's done for every mesh, every frame.
+    bind_groups: HashMap<String, HashMap<usize, wgpu::BindGroup>>,
     generation: u64,
 }
 
@@ -488,11 +495,15 @@ pub struct ShaderLibrary {
     /// Bind group 2 of each 2D thing - see `overlay_layout`.
     overlay_layouts: HashMap<Overlay, wgpu::BindGroupLayout>,
     instances: HashMap<String, Instance>,
+    /// Goes up whenever what's built changes - a shader built or forgotten,
+    /// the images bind groups are made with made anew - see `changes`.
+    changes: u64,
     generation: u64,
     /// The depth snapshot (DepthRender::foam_depth_copy) - what a shader that
     /// `reads: [Depth]` gets. Set at startup and again on every resize.
     depth_copy: Option<(wgpu::TextureView, wgpu::Sampler)>,
-    /// The images Fullscreen shaders read, by name (see SCREEN_INPUTS) - set
+    /// The images Fullscreen shaders read, by name (see BUILTIN_SCREEN_INPUTS
+    /// and Renderer::add_target) - set
     /// at startup and again on every resize.
     screen_inputs: HashMap<String, (wgpu::TextureView, wgpu::Sampler)>,
     folders: Vec<PathBuf>,
@@ -524,6 +535,7 @@ impl ShaderLibrary {
             layout,
             overlay_layouts,
             instances: HashMap::new(),
+            changes: 0,
             generation: 0,
             depth_copy: None,
             screen_inputs: HashMap::new(),
@@ -540,16 +552,18 @@ impl ShaderLibrary {
     /// and again whenever it's made anew (a resize): every bind group made
     /// with the old one goes.
     pub fn set_depth_copy(&mut self, view: wgpu::TextureView, sampler: wgpu::Sampler) {
+        self.changes += 1;
         self.depth_copy = Some((view, sampler));
         for instance in self.instances.values_mut() {
             instance.bind_groups.clear();
         }
     }
 
-    /// The images Fullscreen shaders read (see SCREEN_INPUTS) - set at
-    /// startup and again whenever they're made anew (a resize): every bind
-    /// group made with the old ones goes.
+    /// The images Fullscreen shaders read (see `screen_inputs`) - set at
+    /// startup and again whenever they're made anew (a resize, a target
+    /// added): every bind group made with the old ones goes.
     pub fn set_screen_inputs(&mut self, inputs: Vec<(&str, wgpu::TextureView, wgpu::Sampler)>) {
+        self.changes += 1;
         self.screen_inputs = inputs.into_iter().map(|(name, view, sampler)| (name.to_owned(), (view, sampler))).collect();
         for instance in self.instances.values_mut() {
             instance.bind_groups.clear();
@@ -562,10 +576,12 @@ impl ShaderLibrary {
     /// once) when it can't be used - the step draws engine/blit instead.
     pub fn prepare_fullscreen(&mut self, key: &str) -> bool {
         let name = self.shader_of(key);
+        let mut images: Vec<String> = self.screen_inputs.keys().cloned().collect();
+        images.sort();
         let problem = match self.ensure_built(&name) {
             Err(problem) => Some(problem),
             Ok(settings) if settings.kind != Kind::Fullscreen => Some(format!("it's a {:?} shader, used as a Fullscreen step", settings.kind)),
-            Ok(settings) => settings.inputs.iter().find(|input| !SCREEN_INPUTS.contains(&input.as_str())).map(|input| format!("its input \"{input}\" isn't an image there is ({})", SCREEN_INPUTS.join(", "))),
+            Ok(settings) => settings.inputs.iter().find(|input| !images.contains(input)).map(|input| format!("its input \"{input}\" isn't an image there is ({})", images.join(", "))),
         };
         if let Some(problem) = problem {
             self.report_fullscreen(&name, &problem);
@@ -590,7 +606,7 @@ impl ShaderLibrary {
         let Some(Ok(shader)) = self.built.get(&name) else { return false };
         let Some(group0) = &shader.group0 else { return false };
         let Some(instance) = self.instances.get_mut(key) else { return false };
-        if !instance.bind_groups.contains_key(&(String::new(), 0)) {
+        if !instance.bind_groups.get("").is_some_and(|groups| groups.contains_key(&0)) {
             let mut entries = Vec::new();
             if group0.params.is_some() {
                 let Some((buffer, _)) = &instance.buffer else { return false };
@@ -608,17 +624,24 @@ impl ShaderLibrary {
                 entries.push(wgpu::BindGroupEntry { binding: binding + 1, resource: wgpu::BindingResource::Sampler(sampler) });
             }
             let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some(key), layout: &group0.layout, entries: &entries });
-            instance.bind_groups.insert((String::new(), 0), bind_group);
+            instance.bind_groups.entry(String::new()).or_default().insert(0, bind_group);
         }
         true
+    }
+
+    /// A count that goes up whenever what's built changes (a shader built
+    /// or forgotten, the depth copy or the screen images made anew) - the
+    /// same two frames in a row, nothing here changed in between.
+    pub fn changes(&self) -> u64 {
+        self.changes
     }
 
     /// The material `key`'s Fullscreen pipeline and bind group 0, once
     /// `prepare_fullscreen` has made them.
     pub fn fullscreen(&self, key: &str) -> Option<(&wgpu::RenderPipeline, &wgpu::BindGroup)> {
-        let shader = self.built.get(&self.shader_of(key))?.as_ref().ok()?;
+        let shader = self.built.get(self.shader_name(key))?.as_ref().ok()?;
         let pipeline = shader.pipelines.get(&Self::fullscreen_key(&shader.settings))?;
-        let bind_group = self.instances.get(key)?.bind_groups.get(&(String::new(), 0))?;
+        let bind_group = self.instances.get(key)?.bind_groups.get("")?.get(&0)?;
         Some((pipeline, bind_group))
     }
 
@@ -645,9 +668,9 @@ impl ShaderLibrary {
     /// The material `key`'s pipeline for `overlay` and its bind group 0, once
     /// `prepare_overlay` has made them.
     pub fn overlay(&self, key: &str, overlay: Overlay) -> Option<(&wgpu::RenderPipeline, &wgpu::BindGroup)> {
-        let shader = self.built.get(&self.shader_of(key))?.as_ref().ok()?;
+        let shader = self.built.get(self.shader_name(key))?.as_ref().ok()?;
         let pipeline = shader.overlays.get(&overlay)?;
-        let bind_group = self.instances.get(key)?.bind_groups.get(&(String::new(), 0))?;
+        let bind_group = self.instances.get(key)?.bind_groups.get("")?.get(&0)?;
         Some((pipeline, bind_group))
     }
 
@@ -727,6 +750,7 @@ impl ShaderLibrary {
     }
 
     fn forget(&mut self, name: &str) {
+        self.changes += 1;
         self.built.remove(name);
         self.reported.retain(|line| !line.starts_with(&format!("\"{name}\"")));
     }
@@ -756,8 +780,14 @@ impl ShaderLibrary {
     /// The shader the material `key` is drawn with (a key with no instance
     /// is a shader's name), after the game's overrides.
     fn shader_of(&self, key: &str) -> String {
+        self.shader_name(key).to_owned()
+    }
+
+    /// `shader_of`, borrowed - for the lookups done for every mesh, every
+    /// frame, which only read.
+    fn shader_name<'a>(&'a self, key: &'a str) -> &'a str {
         let shader = self.instances.get(key).map_or(key, |instance| instance.shader.as_str());
-        self.overrides.get(shader).cloned().unwrap_or_else(|| shader.to_owned())
+        self.overrides.get(shader).map_or(shader, String::as_str)
     }
 
     /// Where the material `key` (see `set_instance` - or just a shader's
@@ -806,33 +836,41 @@ impl ShaderLibrary {
     /// The material `key`'s pipeline `pipeline`, once `placement` has built
     /// it - engine/error's for a material placed as an error.
     pub fn pipeline(&self, key: &str, placement: &Placement, pipeline: PipelineKey) -> Option<&wgpu::RenderPipeline> {
-        let name = if *placement == Placement::Error { ERROR.to_owned() } else { self.shader_of(key) };
-        self.built.get(&name)?.as_ref().ok()?.pipelines.get(&pipeline)
+        let name = if *placement == Placement::Error { ERROR } else { self.shader_name(key) };
+        self.built.get(name)?.as_ref().ok()?.pipelines.get(&pipeline)
     }
 
     /// The settings of the material `key`'s shader, once `placement` has
     /// built it.
     pub fn settings(&self, key: &str) -> Option<&ShaderSettings> {
-        self.built.get(&self.shader_of(key))?.as_ref().ok().map(|shader| &shader.settings)
+        self.built.get(self.shader_name(key))?.as_ref().ok().map(|shader| &shader.settings)
+    }
+
+    /// Whether the material `key`'s shader reads the depth so far (`reads:
+    /// [Depth]`) - what a frame plan's CopyDepth is for.
+    pub fn reads_depth(&self, key: &str) -> bool {
+        self.settings(key).is_some_and(|settings| settings.reads.contains(&Read::Depth))
     }
 
     /// Whether the material `key`'s shader has a bind group 0 of its own
     /// (params or textures) - drawn with `group0`, not the mesh's.
     pub fn has_group0(&self, key: &str) -> bool {
-        matches!(self.built.get(&self.shader_of(key)), Some(Ok(shader)) if shader.group0.is_some())
+        matches!(self.built.get(self.shader_name(key)), Some(Ok(shader)) if shader.group0.is_some())
     }
 
     /// Makes the material `key`'s bind group 0 for the mesh texture `diffuse`
     /// (index `index` in the model `model`) if it isn't made yet - once
     /// `placement` has built it and written its params.
     pub fn prepare_group0(&mut self, key: &str, model: &str, index: usize, diffuse: &Texture) {
+        // Made already, nearly every time - checked first, without building
+        // anything to look it up with.
+        if self.group0(key, model, index).is_some() {
+            return;
+        }
         let name = self.shader_of(key);
         let Some(Ok(shader)) = self.built.get(&name) else { return };
         let Some(group0) = &shader.group0 else { return };
         let Some(instance) = self.instances.get_mut(key) else { return };
-        if instance.bind_groups.contains_key(&(model.to_owned(), index)) {
-            return;
-        }
         let mut entries = vec![
             wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&diffuse.view) },
             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&diffuse.sampler) },
@@ -852,13 +890,13 @@ impl ShaderLibrary {
             entries.push(wgpu::BindGroupEntry { binding: DEPTH_BINDING + 1, resource: wgpu::BindingResource::Sampler(sampler) });
         }
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some(key), layout: &group0.layout, entries: &entries });
-        instance.bind_groups.insert((model.to_owned(), index), bind_group);
+        instance.bind_groups.entry(model.to_owned()).or_default().insert(index, bind_group);
     }
 
     /// The material `key`'s bind group 0 for the mesh texture `index` of
     /// the model `model` (see `prepare_group0`).
     pub fn group0(&self, key: &str, model: &str, index: usize) -> Option<&wgpu::BindGroup> {
-        self.instances.get(key)?.bind_groups.get(&(model.to_owned(), index))
+        self.instances.get(key)?.bind_groups.get(model)?.get(&index)
     }
 
     /// Writes the material `key`'s params block - the shader's `.ron`
@@ -1025,6 +1063,7 @@ impl ShaderLibrary {
             None => ShaderSettings::default(),
         };
         self.generation += 1;
+        self.changes += 1;
         let generation = self.generation;
 
         // Its textures - read now, watched with its files.
@@ -1588,6 +1627,17 @@ mod tests {
     }
 
     #[test]
+    fn the_toast_icons_are_valid() {
+        let settings = read_settings("(kind: Ui)").unwrap();
+        for hooks in [include_str!("../shaders/ui_icon_alert.wgsl"), include_str!("../shaders/ui_icon_error.wgsl"), include_str!("../shaders/ui_icon_chevron.wgsl")] {
+            for &overlay in Kind::Ui.overlays() {
+                let (program, first_line) = assemble_overlay(overlay, hooks, &surface_declarations(hooks, &settings));
+                check(&program, first_line, hooks.lines().count(), "icon").unwrap();
+            }
+        }
+    }
+
+    #[test]
     fn the_error_material_is_valid() {
         validate(ERROR_SOURCE).unwrap();
     }
@@ -1645,16 +1695,6 @@ mod tests {
     }
 
     #[test]
-    fn the_ocean_reads_the_params_the_game_writes() {
-        // game::ocean's tests check it writes exactly these.
-        let code = std::fs::read_to_string("assets/shaders/ocean.wgsl").unwrap();
-        let module = check(&code, 1, code.lines().count(), "ocean").unwrap();
-        let layout = params_layout(&module).unwrap().expect("the ocean has params");
-        let names: Vec<&str> = layout.fields.iter().map(|field| field.name.as_str()).collect();
-        assert_eq!(names, ["params", "shading", "waves", "wake_head", "wake_bounds", "wake_info", "wake_points", "wake_anchor"]);
-    }
-
-    #[test]
     fn every_game_shader_builds() {
         fn walk(folder: &Path, found: &mut Vec<PathBuf>) {
             let Ok(entries) = std::fs::read_dir(folder) else { return };
@@ -1668,7 +1708,8 @@ mod tests {
             }
         }
         let mut shaders = Vec::new();
-        walk(Path::new("assets/shaders"), &mut shaders);
+        // The examples' shaders - the game code there.
+        walk(Path::new("examples"), &mut shaders);
         for wgsl in shaders {
             let code = std::fs::read_to_string(&wgsl).unwrap();
             let ron_path = wgsl.with_extension("ron");

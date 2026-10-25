@@ -24,12 +24,11 @@ pub struct Layer {
 }
 
 impl Layer {
+    /// Captures the UI's room (`Ui::size` - the window in UI units, see
+    /// `UiScaling`).
     pub fn new(app: &App) -> Self {
-        Self {
-            width: app.window_manager.size.width as f32,
-            height: app.window_manager.size.height as f32,
-            children: Vec::new(),
-        }
+        let (width, height) = app.ui.size();
+        Self { width, height, children: Vec::new() }
     }
 
     pub fn set_child(mut self, id: impl Into<String>, child: UiNode) -> Self {

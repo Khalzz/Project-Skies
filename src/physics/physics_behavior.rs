@@ -16,7 +16,7 @@ pub type PhysicsPayload = Box<dyn Any + Send>;
 /// The physics-thread half of a node - attached with
 /// `Node::add_physics_behavior`, moved onto the physics thread once when the
 /// scene's physics starts, and from then on run at the real fixed rate
-/// (`FIXED_TIMESTEP`), right before every `rapier` step.
+/// (`PhysicsSettings::fixed_timestep`), right before every `rapier` step.
 ///
 /// It never sees its `Node` (not `Send`, stays on the main thread). The two
 /// halves only talk through typed messages:
@@ -25,7 +25,7 @@ pub type PhysicsPayload = Box<dyn Any + Send>;
 /// - physics → main: whatever `publish` returns, read on the main thread via
 ///   `Node::physics_state::<T>()`.
 pub trait PhysicsBehavior: Send {
-    /// One fixed physics step - `dt` is always `FIXED_TIMESTEP`.
+    /// One fixed physics step - `dt` is always `PhysicsSettings::fixed_timestep`.
     fn fixed_update(&mut self, ctx: &mut PhysicsCtx, dt: f32);
 
     /// Snapshot to send back to the main thread, called once per rendered

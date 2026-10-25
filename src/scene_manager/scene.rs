@@ -1,27 +1,27 @@
-use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::Arc;
+use std::time::Duration;
 
 use sdl2::EventPump;
 
 use crate::app::{App, AppState};
 use crate::game_nodes::game_object::Physics;
-use crate::rendering::camera::handler::{CameraInstance, LookAtTarget, SceneCameras};
-use crate::rendering::enviroment::environment::SceneEnvironment;
+use crate::rendering::camera::handler::{LookAtTarget, SceneCameras, DEFAULT_CAMERA};
+use crate::rendering::enviroment::environment::{Environment, PreparedEnvironment};
 use crate::rendering::instance_management::InstanceData;
 use crate::physics::physics::{physics_handling, DebugPhysicsMessageType, PhysicsDataTransmission};
 use crate::physics::physics_handler::{PhysicsCommand, RenderMessage};
 use crate::physics::physics_resources::PhysicsObjectDef;
 use crate::scene_manager::node::Node;
-use crate::scene_manager::physics_bridge;
-use crate::scene_manager::properties::{CameraLens, Material, Model as NodeModelProperty, Parent, Space, SpawnedLive, Transform3D};
+use crate::scene_manager::physics_bridge::{self, TrimeshCache};
+use crate::scene_manager::node::properties::{CameraLens, Material, Model as NodeModelProperty, Parent, Space, SpawnedLive, Transform3D};
 use crate::scene_manager::render_bridge;
+use crate::scene_manager::scene_access::SceneChanges;
 use crate::scene_manager::scene_nodes::SceneNodes;
 use crate::rendering::models::model::Model as LoadedModel;
 use crate::resources::ModelSource;
-use crate::transform::Transform;
+use crate::settings::SceneSettings;
 
 
 /// Everything a scene might need out of a single frame, bundled so `SceneBehaviour::update`
@@ -93,26 +93,60 @@ pub trait SceneBehaviour {
     /// goes, so it has the last word on what it moves.
     fn late_update(&mut self, scene: &mut Scene, app: &mut App, ctx: &mut FrameContext) { let _ = (scene, app, ctx); }
     /// After this frame's cameras and renderable transforms are the ones
-    /// that will be drawn. The collimated HUD is placed here so it shares
-    /// that pose with the combiner glass.
+    /// that will be drawn - for anything placed relative to the camera.
     fn after_cameras(&mut self, scene: &mut Scene, app: &mut App) { let _ = (scene, app); }
+    /// The game's debug windows for this scene - egui, drawn over everything
+    /// while the debug UI is up (see `DebugUi`). Runs every frame it's up,
+    /// after the scene's update.
+    fn debug_ui(&mut self, ctx: &egui::Context, scene: &mut Scene, app: &mut App) { let _ = (ctx, scene, app); }
 }
 
-/// A "screen" the game can be in (main menu, plane selection, playing, ...) -
-/// the generic container every scene shares: whatever nodes/renderable
-/// instances it's spawned (`content`), whatever cameras it's registered
-/// (`cameras`), whatever skybox/clear color it's applied (`environment`),
-/// plus the `SceneBehaviour` actually driving it. `SceneManager::active_scene`
-/// holds whichever one is currently active; `App::run`'s loop drives it
-/// instead of hand-matching on state.
+/// A "screen" the game can be in (main menu, a level, ...) - the generic
+/// container every scene shares: whatever nodes/renderable instances it's
+/// spawned (`content`), whatever cameras it's registered (`cameras`), what it
+/// sets differently from the project (`settings`), plus the `SceneBehaviour`
+/// actually driving it. `SceneManager::active_scene` holds whichever one is
+/// currently active; `App::run`'s loop drives it.
+///
+/// A scene is built first - its constructor (see `SceneManager::create_scene`)
+/// spawns its nodes, which only note which models and bodies they need -
+/// then those models load under the loading screen, and only then does it
+/// start (its `on_spawn`, then its updates).
 pub struct Scene {
     pub content: SceneContent,
     pub cameras: SceneCameras,
-    pub environment: SceneEnvironment,
+    /// What this scene sets differently from the project - see
+    /// `crate::settings`. Can change while it runs.
+    pub settings: SceneSettings,
+    /// `settings.environment` built and ready to draw, and the
+    /// `Environment` it was built from (App::run builds it again when the
+    /// settings change). None: the project's is drawn.
+    pub(crate) environment: Option<(Environment, PreparedEnvironment)>,
     behaviour: Option<Box<dyn SceneBehaviour>>,
     // Set once the scene's been built (its behaviour's on_spawn has run) -
-    // nodes spawned from then on are marked SpawnedLive.
+    // nodes spawned from then on are marked SpawnedLive, and put on the
+    // renderer and physics right away instead of waiting in the lists below.
     started: bool,
+    /// Nodes spawned while the scene was being built, with a model or a
+    /// physics body still to set up - once the scene's assets have loaded
+    /// (see `finish_loading`).
+    pending_models: Vec<String>,
+    pending_bodies: Vec<String>,
+    /// Models named with `will_use` - loaded with the scene's own.
+    extra_models: Vec<String>,
+}
+
+/// What a built scene needs loaded before it starts - see
+/// `Scene::assets_to_load`.
+pub(crate) struct SceneAssets {
+    /// Model files not loaded yet - only the shared copy of each (a variant
+    /// is made from it when its node is set up, see `ModelSource::variant`).
+    pub models: Vec<ModelSource>,
+    /// Every model key the scene uses - loaded already or not - so the
+    /// previous scene's copies of them are kept.
+    pub keys: HashSet<String>,
+    /// Model files mesh colliders read.
+    pub trimeshes: Vec<String>,
 }
 
 impl Scene {
@@ -122,10 +156,14 @@ impl Scene {
     pub fn new(app: &App) -> Self {
         Self {
             content: SceneContent::default(),
-            cameras: SceneCameras::new(app.camera_resources.width(), app.camera_resources.height()),
-            environment: SceneEnvironment::default(),
+            cameras: SceneCameras::new(app.renderer.camera_resources.width(), app.renderer.camera_resources.height()),
+            settings: SceneSettings::default(),
+            environment: None,
             behaviour: None,
             started: false,
+            pending_models: Vec::new(),
+            pending_bodies: Vec::new(),
+            extra_models: Vec::new(),
         }
     }
 
@@ -134,14 +172,17 @@ impl Scene {
         self
     }
 
-    /// Spawns `node` into this scene's own content and, if it carries a
-    /// `Model` property, immediately registers it with the renderer too (see
-    /// `engine::scene_manager::render_bridge::register_static_model`); same
-    /// deal if it carries a `Physics` property (see
-    /// `engine::scene_manager::physics_bridge::register_physics_body`), or a
+    /// Spawns `node` into this scene's own content. If it carries a `Model`
+    /// property it's put on the renderer too (see
+    /// `render_bridge::register_static_model`); same deal for a `Physics`
+    /// property (see `physics_bridge::register_physics_body`), or a
     /// `CameraLens` (a camera under its id, see `sync_cameras`) - in every
     /// case the property itself is what triggers instantiation, not a
     /// second call the spawner has to remember to make separately.
+    /// While the scene is being built, its model and body are set up once
+    /// the scene's assets have loaded, before it starts; after that, right
+    /// away (a model nothing loaded yet is loaded on the spot - see
+    /// `will_use`).
     /// Children given with `Node::with_child` are spawned right after it,
     /// each with its `Parent`.
     /// `Node`/`SceneNodes` stay unaware of rendering/physics either way -
@@ -163,10 +204,10 @@ impl Scene {
     fn spawn_tree(&mut self, app: &mut App, mut node: Node, physics_command_tx: Option<&Sender<PhysicsCommand>>) -> Result<(), String> {
         let children = node.take_children();
         let id = node.id.clone();
-        self.spawn_one(app, node, physics_command_tx)?;
+        let changes = self.spawn_one(app, node, physics_command_tx)?;
         for mut child in children {
             let (space, inherit_rotation) = child.placement();
-            let given = child.get_property::<Transform3D>().copied().unwrap_or_default();
+            let given = child.transform_3d().copied().unwrap_or_default();
             let local = match space {
                 Space::Local => given,
                 Space::Global => Transform3D::default(),
@@ -174,10 +215,31 @@ impl Scene {
             child.set_property(Parent { id: id.clone(), space, local, inherit_rotation });
             self.spawn_tree(app, child, physics_command_tx)?;
         }
+        // What its behaviors' on_spawn asked for, now it's in.
+        self.apply_changes(app, changes, physics_command_tx);
         Ok(())
     }
 
-    fn spawn_one(&mut self, app: &mut App, mut node: Node, physics_command_tx: Option<&Sender<PhysicsCommand>>) -> Result<(), String> {
+    /// Does what node behaviors asked for while they ran (see
+    /// `SceneAccess::spawn`/`despawn`) - despawns first, so a node can be
+    /// replaced by one with the same id. One that can't be spawned is
+    /// reported.
+    pub(crate) fn apply_changes(&mut self, app: &mut App, changes: SceneChanges, physics_command_tx: Option<&Sender<PhysicsCommand>>) {
+        for id in changes.despawns {
+            self.despawn_node(app, &id, physics_command_tx);
+        }
+        for node in changes.spawns {
+            let id = node.id.clone();
+            if let Err(error) = self.spawn_tree(app, node, physics_command_tx) {
+                eprintln!("couldn't spawn node '{id}': {error}");
+            }
+        }
+    }
+
+    /// Spawns one node (not its children) - and hands back what its
+    /// behaviors' on_spawn asked to spawn or despawn, for `spawn_tree` to do
+    /// once the node and its children are in.
+    fn spawn_one(&mut self, app: &mut App, mut node: Node, physics_command_tx: Option<&Sender<PhysicsCommand>>) -> Result<SceneChanges, String> {
         let id = node.id.clone();
         // A local child starts where its parent is now - its renderer
         // instance, body and camera are all made from this.
@@ -192,23 +254,32 @@ impl Scene {
         let has_model = node.get_property::<NodeModelProperty>().is_some();
         let has_physics = node.get_property::<Physics>().is_some();
         let lens = node.get_property::<CameraLens>().copied();
-        let transform = node.get_property::<Transform3D>().copied().unwrap_or_default();
+        let transform = node.transform_3d().copied().unwrap_or_default();
 
-        self.content.nodes.spawn(node, &mut self.cameras, app)?;
+        let mut changes = SceneChanges::default();
+        self.content.nodes.spawn(node, &mut self.cameras, app, &mut changes)?;
 
         if has_model {
-            render_bridge::register_static_model(self, app, &id)?;
+            if self.started {
+                render_bridge::register_static_model(self, app, &id)?;
+            } else {
+                self.pending_models.push(id.clone());
+            }
         }
 
         if has_physics {
-            physics_bridge::register_physics_body(self, &id)?;
+            if self.started {
+                physics_bridge::register_physics_body(self, &id, &TrimeshCache::new())?;
+            } else {
+                self.pending_bodies.push(id.clone());
+            }
         }
 
         if let Some(lens) = lens {
             self.cameras.place(&id, transform.position, transform.rotation, lens.fovy, lens.znear, lens.viewport);
         }
 
-        let Some(tx) = physics_command_tx else { return Ok(()) };
+        let Some(tx) = physics_command_tx else { return Ok(changes) };
         let def = self.content.physics_bodies.iter().rposition(|def| def.id == id)
             .map(|index| self.content.physics_bodies.remove(index));
         let behaviors = self.content.nodes.get_mut(&id).map(|node| node.take_physics_behaviors()).unwrap_or_default();
@@ -216,7 +287,7 @@ impl Scene {
             tx.send(PhysicsCommand::AddBody { def, behaviors })
                 .map_err(|error| format!("node '{id}': couldn't reach the physics thread: {error}"))?;
         }
-        Ok(())
+        Ok(changes)
     }
 
     /// Removes the node `id` and its children (and theirs) - their
@@ -236,6 +307,8 @@ impl Scene {
                 continue;
             }
             render_bridge::unregister_model(self, app, &id);
+            self.pending_models.retain(|pending| *pending != id);
+            self.pending_bodies.retain(|pending| *pending != id);
             self.cameras.remove_camera(&id);
             self.content.kinematic.remove(&id);
             self.content.physics_bodies.retain(|def| def.id != id);
@@ -243,6 +316,79 @@ impl Scene {
                 let _ = tx.send(PhysicsCommand::RemoveBody { name: id.clone() });
             }
         }
+    }
+
+    /// Has `model` (a path inside the assets folder) loaded with this scene,
+    /// before it starts - for a model none of its nodes use yet, but one
+    /// spawned while it runs will (a missile fired later). Without this,
+    /// that model loads the moment its node spawns - a stutter, for a big
+    /// one. Only while the scene's being built (its constructor).
+    pub fn will_use(&mut self, model: impl Into<String>) {
+        self.extra_models.push(model.into());
+    }
+
+    /// What this built scene needs loaded before it can start - every model
+    /// its nodes (and `will_use`) name, minus what's loaded already, and the
+    /// mesh colliders' files.
+    pub(crate) fn assets_to_load(&self, app: &App) -> SceneAssets {
+        let mut assets = SceneAssets { models: Vec::new(), keys: HashSet::new(), trimeshes: Vec::new() };
+        let mut add = |source: ModelSource| {
+            let base = ModelSource { variant: None, ..source.clone() };
+            assets.keys.insert(source.key());
+            if assets.keys.insert(base.key()) && !app.assets.is_model_loaded(&base.key()) {
+                assets.models.push(base);
+            }
+        };
+        for id in &self.pending_models {
+            let Some(model) = self.content.nodes.get(id).and_then(|node| node.get_property::<NodeModelProperty>()) else { continue };
+            // None: a model made in code (see resources::register_primitive_model).
+            if let Some(source) = model.resolve_source(&app.assets) {
+                add(source);
+            }
+        }
+        for name in &self.extra_models {
+            match app.assets.model_source(name) {
+                Some(source) => add(source),
+                None => eprintln!("will_use: there's no model '{name}' in the assets folder ({})", app.assets.root().display()),
+            }
+        }
+        for id in &self.pending_bodies {
+            let Some(physics) = self.content.nodes.get(id).and_then(|node| node.get_property::<Physics>()) else { continue };
+            for path in physics_bridge::trimesh_paths(physics) {
+                if !assets.trimeshes.iter().any(|known| known == path) {
+                    assets.trimeshes.push(path.to_owned());
+                }
+            }
+        }
+        assets
+    }
+
+    /// Puts every node spawned while the scene was built on the renderer and
+    /// physics - its models are loaded by now, its mesh colliders read
+    /// (`trimeshes`). A node that can't be is reported and left out.
+    pub(crate) fn finish_loading(&mut self, app: &mut App, trimeshes: &TrimeshCache) {
+        for id in std::mem::take(&mut self.pending_models) {
+            if let Err(error) = render_bridge::register_static_model(self, app, &id) {
+                eprintln!("node '{id}': {error}");
+            }
+        }
+        for id in std::mem::take(&mut self.pending_bodies) {
+            if let Err(error) = physics_bridge::register_physics_body(self, &id, trimeshes) {
+                eprintln!("node '{id}': {error}");
+            }
+        }
+        self.extra_models.clear();
+    }
+
+    /// The node `id`, if the scene has one.
+    pub fn get_node(&self, id: &str) -> Option<&Node> {
+        self.content.nodes.get(id)
+    }
+
+    /// The node `id`, to change - `scene.get_node_mut("player")`, then its
+    /// properties (`transform_2d_mut()`, `get_property_mut::<T>()`...).
+    pub fn get_node_mut(&mut self, id: &str) -> Option<&mut Node> {
+        self.content.nodes.get_mut(id)
     }
 
     /// Where the node `id` is in the world (see `SceneNodes::world_transform`).
@@ -311,7 +457,7 @@ impl Scene {
     pub fn sync_render_instances(&mut self) {
         let SceneContent { nodes, renderizable_instances, .. } = &mut self.content;
         for node in nodes.iter() {
-            let Some(transform) = node.get_property::<Transform3D>() else { continue };
+            let Some(transform) = node.transform_3d() else { continue };
             let Some(instance) = renderizable_instances.get_mut(&node.id) else { continue };
             let render_scale = node.get_property::<NodeModelProperty>().map(|model| model.render_scale(transform.scale)).unwrap_or(transform.scale);
             instance.instance.transform.position = transform.position;
@@ -338,22 +484,27 @@ impl Scene {
     pub fn sync_cameras(&mut self) {
         for node in self.content.nodes.iter() {
             let Some(lens) = node.get_property::<CameraLens>() else { continue };
-            let transform = node.get_property::<Transform3D>().copied().unwrap_or_default();
+            let transform = node.transform_3d().copied().unwrap_or_default();
             self.cameras.place(&node.id, transform.position, transform.rotation, lens.fovy, lens.znear, lens.viewport);
         }
     }
 
-    /// Creates (or replaces) a named camera directly on this scene, with no
-    /// node/behaviour needed - the plain path for a camera that just sits at
-    /// a fixed pose (see `SceneCameras::create_camera`). If a camera needs
-    /// its own per-frame logic (e.g. a free-fly controller), spawn a node
-    /// with a `Behavior` instead - `Behavior`'s hooks get a `&mut
-    /// SceneCameras` of their own to drive this same list from, so both
-    /// paths write into exactly one place.
-    pub fn create_camera(&mut self, name: impl Into<String>, transform: Transform, fovy: f32) -> &mut CameraInstance {
-        self.cameras.create_camera(name, transform, fovy)
+    /// Gives a scene that starts without a camera one, so it can always be
+    /// seen: a `DEFAULT_CAMERA` node at the origin, looking along +Z. A
+    /// camera node spawned later takes over from it. Called when a scene
+    /// starts (see App::start_scene).
+    pub(crate) fn ensure_camera(&mut self, app: &mut App) {
+        if self.cameras.has_active_camera() {
+            return;
+        }
+        let camera = Node::new(DEFAULT_CAMERA).add_property(Transform3D::default()).add_property(CameraLens::default());
+        if let Err(error) = self.spawn_node(app, camera) {
+            eprintln!("couldn't give the scene its default camera: {error}");
+        }
     }
 
+    /// Makes the camera node `id`'s camera the one drawn from. False if
+    /// there's no such camera.
     pub fn select_camera(&mut self, name: &str) -> bool {
         self.cameras.select_camera(name)
     }
@@ -375,6 +526,11 @@ impl Scene {
             behaviour.on_spawn(self, app);
             self.behaviour = Some(behaviour);
         }
+        // What on_spawn spawned goes on the renderer and physics now - the
+        // loading step already ran, so a model nothing loaded yet loads
+        // here, on the spot (spawn it in the scene's constructor to have it
+        // load under the loading screen instead).
+        self.finish_loading(app, &TrimeshCache::new());
         self.started = true;
     }
 
@@ -399,40 +555,35 @@ impl Scene {
         }
     }
 
+    pub(crate) fn run_debug_ui(&mut self, app: &mut App, ctx: &egui::Context) {
+        if let Some(mut behaviour) = self.behaviour.take() {
+            behaviour.debug_ui(ctx, self, app);
+            self.behaviour = Some(behaviour);
+        }
+    }
+
     /// Starts this scene's physics thread, if it has anything to simulate -
     /// any node spawned with a `Physics` property (see `physics_bridge`) or a
     /// `PhysicsBehavior` (see `Node::add_physics_behavior`). Called once,
-    /// right after the scene becomes active: rigidbodies and node physics
-    /// halves are both moved onto the new thread here, so a node spawned
-    /// later gets neither.
+    /// right after the scene becomes active, with its gravity (its own or the
+    /// project's) and the project's fixed timestep: rigidbodies and node
+    /// physics halves are both moved onto the new thread here (a node spawned
+    /// later goes through `spawn_node_live`).
     pub(crate) fn start_physics(&mut self, app: &App) -> Option<PhysicsDataTransmission> {
         let node_behaviors = self.content.nodes.take_physics_behaviors();
         if self.content.physics_bodies.is_empty() && node_behaviors.is_empty() {
             return None;
         }
 
-        Some(physics_handling(&app.renderer.device, &app.renderer.config, &app.camera_resources, self.content.physics_bodies.clone(), node_behaviors))
+        let gravity = self.settings.gravity(&app.settings);
+        let fixed_timestep = app.settings.physics.fixed_timestep;
+        Some(physics_handling(&app.renderer.device, &app.renderer.config, &app.renderer.camera_resources, self.content.physics_bodies.clone(), node_behaviors, gravity, fixed_timestep))
     }
 }
 
-/// What a heavy scene needs to go through the background-load path instead of the
-/// plain synchronous one - see `SceneManager::create_loaded_scene`. `prepare` has
-/// to be `Arc`, not `Rc` like every other stored closure here: it's the one that
-/// actually gets moved into the background `std::thread::spawn` (see `App::run`'s
-/// reset handling), so it has to be `Send` itself, not just its output.
-pub(crate) struct LoadedSceneSpec {
-    pub(crate) prepare: Arc<dyn Fn(&wgpu::Device, &wgpu::Queue, &wgpu::BindGroupLayout, &wgpu::SurfaceConfiguration, &LoadReporter) -> Box<dyn Any + Send> + Send + Sync>,
-    pub(crate) finish: Rc<dyn Fn(&mut App, Box<dyn Any + Send>) -> Scene>,
-}
-
-/// A background asset load currently in flight - set when `App::run`'s reset
-/// handling kicks off a heavy scene's load, cleared once its `receiver` yields,
-/// `LoadingScreenScene` has faded back out, and `finish` has been run. See
-/// `App::run`.
-/// Handed to a heavy scene's background load (its `prepare`, then its
-/// models): each `step` names what's being loaded now - shown on the
-/// loading screen - and times the one before it. `finish` logs every step's
-/// time, slowest first, to find what makes loading slow.
+/// Used by a scene's loading thread: each `step` names what's being loaded
+/// now - shown on the loading screen - and times the one before it. `finish`
+/// logs every step's time, slowest first, to find what makes loading slow.
 pub struct LoadReporter {
     scene: String,
     progress: std::sync::mpsc::Sender<String>,
@@ -480,72 +631,153 @@ impl LoadReporter {
     }
 }
 
-/// What a heavy scene's background load hands back: its own `prepare`
-/// output, and the models it said it uses (see `SceneManager::
-/// preload_models`), each loaded or the reason it couldn't be, by key.
+/// What a scene's loading thread hands back: the models and images it was
+/// missing (each loaded, or why it couldn't be), its mesh colliders'
+/// geometry, and its environment override built - see
+/// `App::start_scene_load`.
 pub struct LoadedAssets {
-    pub prepared: Box<dyn Any + Send>,
     pub models: Vec<(String, Result<LoadedModel, String>)>,
+    pub trimeshes: TrimeshCache,
+    pub images: Vec<(String, Result<crate::assets::Image, String>)>,
+    pub environment: Option<(Environment, PreparedEnvironment)>,
 }
 
+/// A scene whose assets are loading - set when `App::run` opens a scene that
+/// needs anything loaded, cleared once `receiver` yields, the loading screen
+/// has faded back out, and the scene has started. See `App::run`.
 pub struct PendingSceneLoad {
-    pub receiver: Receiver<LoadedAssets>,
-    /// What the background load is on now (see `LoadReporter::step`).
-    pub progress: Receiver<String>,
-    pub finish: Rc<dyn Fn(&mut App, Box<dyn Any + Send>) -> Scene>,
-    /// Set once `receiver` has actually yielded a result - holds it (plus how many
-    /// seconds we've spent fading LoadingScreenScene's UI back out) until the fade
-    /// finishes, at which point App::run does the real clear+finish+swap. None
-    /// means still waiting on the background thread.
-    pub ready: Option<(LoadedAssets, f32)>,
+    /// The scene, built, waiting for its assets.
+    pub(crate) scene: Scene,
+    pub(crate) receiver: Receiver<LoadedAssets>,
+    /// What the loading thread is on now (see `LoadReporter::step`).
+    pub(crate) progress: Receiver<String>,
+    /// Set once `receiver` has yielded - holds the assets (plus how many
+    /// seconds we've spent fading the loading screen's UI back out) until the
+    /// fade finishes, at which point App::run starts the scene. None means
+    /// still loading.
+    pub(crate) ready: Option<(LoadedAssets, f32)>,
 }
 
-/// Owns every registered scene's constructor plus whichever one is currently active -
-/// lives on `App` as `app.scene_manager`. Register cheap scenes with `create_scene`,
-/// heavy ones (that load models/textures) with `create_loaded_scene`, then activate
-/// one with `open_scene` (see main.rs) from anywhere holding `&mut App`.
+/// The name the splash scene is opened under - see `SceneManager::set_splash_scene`.
+pub(crate) const SPLASH_SCENE: &str = "__splash";
+
+/// The scene shown first, for `duration`, before the one the game opens -
+/// see `SceneManager::set_splash_scene`.
+struct Splash {
+    duration: Duration,
+    factory: Rc<dyn Fn(&mut App) -> Scene>,
+}
+
+/// The splash scene while it's up: the scene to open once it's done, and how
+/// long (seconds) it has run.
+struct SplashRunning {
+    next: String,
+    elapsed: f32,
+}
+
+/// Owns every registered scene's constructor plus whichever one is currently
+/// active - lives on `App` as `app.scene_manager`. Register scenes with
+/// `create_scene`, then activate one with `open_scene` from anywhere holding
+/// `&mut App`.
 pub struct SceneManager {
     // Rc, not Box: App::run needs to call a factory with &mut App, which means
     // cloning it out of this map first (same reason `active` below is read via
     // .clone()) - a Box can't be cheaply cloned, an Rc can.
     factories: HashMap<String, Rc<dyn Fn(&mut App) -> Scene>>,
-    // Heavy scenes registered via create_loaded_scene - disjoint from `factories`,
-    // a given name is only ever in one of the two maps.
-    loaders: HashMap<String, Rc<LoadedSceneSpec>>,
-    // The models each heavy scene uses - see preload_models.
-    preloads: HashMap<String, Rc<dyn Fn(&App) -> Vec<ModelSource>>>,
     // Only one scene is ever meaningfully alive at a time (inactive scenes never
     // tick), so this is a single slot rather than a map of every registered scene's
     // instance - those don't exist until create_scene's factory actually runs for
-    // whichever one becomes active (see App::run's reset handling).
+    // whichever one becomes active (see App::run).
     pub active_scene: Option<Scene>,
     pub active: String,
     pub reset: bool,
-    // Some while a create_loaded_scene scene's background prepare is in flight -
-    // App::run polls this every non-reset frame and swaps it into active_scene once
-    // ready (see App::run). A LoadingScreenScene occupies active_scene in the
-    // meantime so rendering keeps happening.
+    // Some while the scene being opened has its assets loading - App::run polls
+    // this every frame and starts it once they're ready. The loading screen
+    // occupies active_scene in the meantime so rendering keeps happening.
     pub loading: Option<PendingSceneLoad>,
+    splash: Splash,
+    /// Some while the splash scene is up - see `advance_splash`.
+    splash_running: Option<SplashRunning>,
 }
 
 impl SceneManager {
     pub fn new() -> Self {
-        Self { factories: HashMap::new(), loaders: HashMap::new(), preloads: HashMap::new(), active_scene: None, active: String::new(), reset: false, loading: None }
+        // An empty scene for no time at all - no splash, until
+        // set_splash_scene says otherwise.
+        let splash = Splash { duration: Duration::ZERO, factory: Rc::new(|app: &mut App| Scene::new(app)) };
+        Self { factories: HashMap::new(), active_scene: None, active: String::new(), reset: false, loading: None, splash, splash_running: None }
+    }
+
+    /// The scene shown when the game starts, for `duration`, before the one
+    /// it opens - built by `factory` like any scene (see `create_scene`), so
+    /// it holds whatever it's given: UI, nodes, a camera, its own settings.
+    /// It loads like any scene too; `duration` counts from when it starts.
+    /// Opening another scene from it ends it early.
+    ///
+    /// By default it's an empty scene shown for no time - no splash at all.
+    pub fn set_splash_scene<B: SceneBehaviour + 'static>(&mut self, duration: Duration, factory: impl Fn(&mut Scene, &mut App) -> B + 'static) {
+        self.splash = Splash {
+            duration,
+            factory: Rc::new(move |app: &mut App| {
+                let mut scene = Scene::new(app);
+                let behaviour = factory(&mut scene, app);
+                scene.set_scene_behaviour(behaviour)
+            }),
+        };
+    }
+
+    /// Opens the splash scene in place of the scene the game opened - which
+    /// is opened once the splash is done (see `advance_splash`). Nothing
+    /// when the splash lasts no time. Called once, as `App::run` starts.
+    pub(crate) fn begin_splash(&mut self) {
+        if self.splash.duration.is_zero() {
+            return;
+        }
+        self.factories.insert(SPLASH_SCENE.to_owned(), self.splash.factory.clone());
+        let next = std::mem::replace(&mut self.active, SPLASH_SCENE.to_owned());
+        self.reset = true;
+        self.splash_running = Some(SplashRunning { next, elapsed: 0.0 });
+    }
+
+    /// Counts the splash scene's time while it runs (not while it loads),
+    /// and opens the scene the game opened once it's up. `dt`: real seconds
+    /// since the last frame - a paused game doesn't hold the splash up.
+    pub(crate) fn advance_splash(&mut self, dt: f32) {
+        let Some(running) = self.splash_running.as_mut() else { return };
+        // The splash opened another scene itself - it's over.
+        if self.active != SPLASH_SCENE {
+            self.splash_running = None;
+            self.factories.remove(SPLASH_SCENE);
+            return;
+        }
+        if self.reset || self.loading.is_some() {
+            return;
+        }
+        running.elapsed += dt;
+        if running.elapsed < self.splash.duration.as_secs_f32() {
+            return;
+        }
+        let next = std::mem::take(&mut running.next);
+        self.splash_running = None;
+        if next.is_empty() {
+            eprintln!("SceneManager: the splash scene is done, but no scene was opened to follow it");
+        } else {
+            self.open_scene(&next);
+            self.factories.remove(SPLASH_SCENE);
+        }
     }
 
     /// Registers a scene's constructor under `name` - nothing runs yet, `factory`
     /// only gets called once this scene actually becomes active (see `open_scene`).
-    /// `factory` gets a fresh, empty `Scene` to spawn into (`scene.spawn_node`,
-    /// `scene.content` directly) alongside `&mut App`, and returns just the
-    /// `SceneBehaviour` driving it - wrapping that behaviour into the `Scene` it
-    /// was just handed (`Scene::set_scene_behaviour`) happens here, not in the
-    /// scene's own constructor, so a scene's `new` never has to repeat that
-    /// boilerplate. Since a scene's own `new(scene: &mut Scene, app: &mut App) ->
-    /// Self` already has exactly this shape, it can be passed directly:
-    /// `create_scene("main_menu", main_menu::GameLogic::new)`.
-    /// Overwrites whatever was previously registered under the same name. Use this
-    /// only for scenes cheap enough to construct synchronously with no visible
-    /// hitch (no model/texture loading) - see `create_loaded_scene` otherwise.
+    /// `factory` gets a fresh, empty `Scene` to build (spawn its nodes, set its
+    /// `settings`) alongside `&mut App`, and returns the `SceneBehaviour` driving
+    /// it - so a scene's own `new(scene: &mut Scene, app: &mut App) -> Self` can
+    /// be passed directly: `create_scene("main_menu", MainMenu::new)`.
+    ///
+    /// Every model the built scene's nodes use (and its environment, if it sets
+    /// its own) is loaded before it starts - in the background, under the
+    /// loading screen, when there's anything to load (see App::start_scene_load).
+    /// Overwrites whatever was previously registered under the same name.
     pub fn create_scene<B: SceneBehaviour + 'static>(&mut self, name: impl Into<String>, factory: impl Fn(&mut Scene, &mut App) -> B + 'static) {
         self.factories.insert(name.into(), Rc::new(move |app: &mut App| {
             let mut scene = Scene::new(app);
@@ -554,61 +786,13 @@ impl SceneManager {
         }));
     }
 
-    /// Registers a scene whose construction needs real disk/GPU work first (skybox
-    /// textures, glTF geometry, ...) - unlike `create_scene`, construction is split
-    /// in two: `prepare` runs on a background thread (see `App::run`'s reset
-    /// handling; `device`/`queue`/`camera_bind_group_layout`/`config` are all cheap,
-    /// `Arc`-backed clones, so building real GPU resources there is safe), and only
-    /// once that finishes does `finish` run on the main thread with whatever
-    /// `prepare` produced - same `(&mut Scene, &mut App) -> B: SceneBehaviour` shape
-    /// as `create_scene`'s `factory`, plus the prepared value.
-    ///
-    /// `P` crosses the thread boundary as a type-erased `Box<dyn Any + Send>`
-    /// internally - `SceneManager` can't be generic over every registered scene's
-    /// own prepared-asset type at once, since they're all stored in the same
-    /// `loaders` map. Downcast back happens automatically inside `finish` below;
-    /// callers of `create_loaded_scene`/the scene's own `prepare`/`finish` never see
-    /// the erasure themselves.
-    pub fn create_loaded_scene<P: Send + 'static, B: SceneBehaviour + 'static>(
-        &mut self,
-        name: impl Into<String>,
-        prepare: impl Fn(&wgpu::Device, &wgpu::Queue, &wgpu::BindGroupLayout, &wgpu::SurfaceConfiguration, &LoadReporter) -> P + Send + Sync + 'static,
-        finish: impl Fn(&mut Scene, &mut App, P) -> B + 'static,
-    ) {
-        self.loaders.insert(name.into(), Rc::new(LoadedSceneSpec {
-            prepare: Arc::new(move |device, queue, layout, config, reporter| Box::new(prepare(device, queue, layout, config, reporter)) as Box<dyn Any + Send>),
-            finish: Rc::new(move |app: &mut App, prepared: Box<dyn Any + Send>| {
-                let prepared = *prepared.downcast::<P>().expect("SceneManager: prepared asset type mismatch for a create_loaded_scene scene");
-                let mut scene = Scene::new(app);
-                let behaviour = finish(&mut scene, app, prepared);
-                scene.set_scene_behaviour(behaviour)
-            }),
-        }));
-    }
-
-    /// The models a `create_loaded_scene` scene spawns, so they load on the
-    /// background thread during its loading screen (with its `prepare`)
-    /// instead of one by one on the main thread as its `finish` spawns the
-    /// nodes - which froze the window after the loading screen was gone.
-    /// `models` runs on the main thread when the scene opens (it can read
-    /// `app.model_sources` to turn declared names into files). Anything it
-    /// leaves out still loads the old way, when first spawned.
-    pub fn preload_models(&mut self, name: impl Into<String>, models: impl Fn(&App) -> Vec<ModelSource> + 'static) {
-        self.preloads.insert(name.into(), Rc::new(models));
-    }
-
-    /// See `preload_models` - cloned out for the same reason as `factory_for`.
-    pub(crate) fn preload_for(&self, name: &str) -> Option<Rc<dyn Fn(&App) -> Vec<ModelSource>>> {
-        self.preloads.get(name).cloned()
-    }
-
     /// Switches the active scene and requests its `reset` for the next frame - use
     /// this instead of setting `active`/`reset` separately, since forgetting
     /// `reset = true` leaves the new scene running with the old one's leftover data.
     /// Logs an error and leaves the current scene active if `name` isn't registered,
     /// rather than switching to a scene that doesn't exist.
     pub fn open_scene(&mut self, name: &str) {
-        if self.factories.contains_key(name) || self.loaders.contains_key(name) {
+        if self.factories.contains_key(name) {
             self.active = name.to_owned();
             self.reset = true;
         } else {
@@ -621,12 +805,6 @@ impl SceneManager {
     /// this map) is itself reachable through that same `&mut App`.
     pub(crate) fn factory_for(&self, name: &str) -> Option<Rc<dyn Fn(&mut App) -> Scene>> {
         self.factories.get(name).cloned()
-    }
-
-    /// Level path/environment/finish fn for a `create_loaded_scene`-registered
-    /// scene, if any - see `factory_for`, same cloning rationale.
-    pub(crate) fn loader_for(&self, name: &str) -> Option<Rc<LoadedSceneSpec>> {
-        self.loaders.get(name).cloned()
     }
 
     /// This scene manager's currently active scene's content, if any - `None`
@@ -651,19 +829,5 @@ impl SceneManager {
 
     pub fn cameras_mut(&mut self) -> Option<&mut SceneCameras> {
         self.active_scene.as_mut().map(|scene| &mut scene.cameras)
-    }
-
-    /// Same reasoning as `content`/`cameras` - the applied skybox/clear color
-    /// live on whichever `Scene` is active now, not on `SceneManager` itself.
-    /// Render-time code falls back to `App`'s own `skybox`/`clear_color`
-    /// fields when this is `None` - that fallback only ever applies before
-    /// the first scene has reset (the splash screen phase, which sets those
-    /// App-level fields directly since no `Scene` exists yet to hold them).
-    pub fn environment(&self) -> Option<&SceneEnvironment> {
-        self.active_scene.as_ref().map(|scene| &scene.environment)
-    }
-
-    pub fn environment_mut(&mut self) -> Option<&mut SceneEnvironment> {
-        self.active_scene.as_mut().map(|scene| &mut scene.environment)
     }
 }

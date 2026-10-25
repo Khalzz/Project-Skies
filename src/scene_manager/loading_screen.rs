@@ -36,8 +36,8 @@ pub struct LoadingScreenScene {
 
 impl LoadingScreenScene {
     pub fn new(app: &mut App) -> Self {
-        let screen_width = app.window_manager.size.width as f32;
-        let screen_height = app.window_manager.size.height as f32;
+        // In UI units (see Ui::size).
+        let (screen_width, screen_height) = app.ui.size();
 
         let mut backdrop = UiNode::container()
             .set_size(SizeValue::Percent(100.0), SizeValue::Percent(100.0))
@@ -84,7 +84,7 @@ impl LoadingScreenScene {
 
 impl SceneBehaviour for LoadingScreenScene {
     fn update(&mut self, _scene: &mut Scene, app: &mut App, _ctx: &mut FrameContext) {
-        self.elapsed += app.time.delta_time;
+        self.elapsed += app.time.unscaled_delta_time;
 
         // Indeterminate progress - a slow pulse is enough to read as "still
         // working" rather than frozen. App::run's fade-out runs later in the

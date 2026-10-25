@@ -18,8 +18,12 @@ pub struct CameraUniform {
     // sibling module now that this struct has its own file.
     pub view_proj: [[f32; 4]; 4],
     view_position: [f32; 4],
+    // The active camera's near and far planes - what a shader turns a depth
+    // into a distance with (see standard_template.wgsl's linear_depth).
     near: f32,
-    far: f32
+    far: f32,
+    // WGSL rounds the struct up to a multiple of 16 bytes.
+    _padding: [f32; 2],
 }
 
 impl CameraUniform {
@@ -28,7 +32,8 @@ impl CameraUniform {
             view_proj: Matrix4::identity().into(),
             view_position: [0.0; 4],
             near: near_far.near,
-            far: near_far.far
+            far: near_far.far,
+            _padding: [0.0; 2],
         }
     }
 
@@ -36,5 +41,7 @@ impl CameraUniform {
         // The camera is always at the origin in the space these matrices operate in.
         self.view_position = [0.0, 0.0, 0.0, 1.0];
         self.view_proj = (projection.calc_matrix() * camera.calc_matrix()).into();
+        self.near = projection.znear;
+        self.far = projection.zfar();
     }
 }

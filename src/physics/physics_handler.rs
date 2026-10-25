@@ -2,7 +2,7 @@ use rapier3d::prelude::{CCDSolver, ColliderSet, CollisionPipeline, DefaultBroadP
 use nalgebra:: {Quaternion, Vector3};
 use std::collections::HashMap;
 use rapier3d::prelude::{ColliderHandle, RigidBodyHandle};
-use std::sync::mpsc::{Sender, Receiver};
+use std::sync::mpsc::{Sender, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
@@ -53,6 +53,11 @@ pub enum PhysicsCommand {
     /// move it: send a `SetTransform` first to start it where the animation
     /// left it.
     SetKinematic { name: String, kinematic: bool },
+    /// The world's gravity from now on - the scene's or the project's
+    /// changed (see `settings`).
+    SetGravity(Vector3<f32>),
+    /// How fast physics time runs - `Timing::time_scale` changed. 0 stops it.
+    SetTimeScale(f32),
 }
 
 // By hand - a physics half (`Box<dyn PhysicsBehavior>`) isn't Debug.
@@ -66,6 +71,8 @@ impl std::fmt::Debug for PhysicsCommand {
             PhysicsCommand::AddBody { def, behaviors } => write!(f, "AddBody {{ id: {:?}, behaviors: {} }}", def.id, behaviors.len()),
             PhysicsCommand::RemoveBody { name } => write!(f, "RemoveBody {{ name: {name:?} }}"),
             PhysicsCommand::SetKinematic { name, kinematic } => write!(f, "SetKinematic {{ name: {name:?}, kinematic: {kinematic} }}"),
+            PhysicsCommand::SetGravity(gravity) => write!(f, "SetGravity({gravity:?})"),
+            PhysicsCommand::SetTimeScale(scale) => write!(f, "SetTimeScale({scale})"),
         }
     }
 }
@@ -93,13 +100,13 @@ pub struct Physics {
 }
 
 impl Physics {
-    pub fn new() -> Self {
+    pub fn new(gravity: Vector3<f32>) -> Self {
         // Physics data
         let physics = Physics {
             physics_pipeline: PhysicsPipeline::new(),
             colission_pipeline: CollisionPipeline::new(),
             query_pipeline: QueryPipeline::new(),
-            gravity: Vector3::new(0.0, -9.81, 0.0),
+            gravity,
             rigidbody_set: RigidBodySet::new(),
             collider_set: ColliderSet::new(),
             physics_elements: HashMap::new(),
@@ -110,17 +117,28 @@ impl Physics {
         physics
     }
 
+    /// The most catch-up steps owed at once - after a stall (a debugger
+    /// break, the PC freezing a moment, steps briefly slower than real time),
+    /// time beyond this is dropped instead of making it up: catching it all
+    /// up would take longer still, and fall further behind every loop.
+    const MAX_STEPS_BEHIND: f32 = 5.0;
+    /// The longest the thread sleeps with nothing to do (paused, or time
+    /// stopped) before looking again - a command wakes it right away anyway.
+    const MAX_IDLE: Duration = Duration::from_millis(50);
+
     // `node_behaviors` are every node's physics half, keyed by node id (see
     // `SceneNodes::take_physics_behaviors`), talking to their main-thread
     // halves through `node_input_rx`/`node_state_tx`.
-    pub fn physics_thread(&mut self, tx: Sender<HashMap<String, RenderMessage>>, rx: Receiver<PhysicsCommand>, debug_physics_tx: Sender<Vec<DebugPhysicsMessageType>>, node_behaviors: Vec<(String, Vec<Box<dyn PhysicsBehavior>>)>, node_input_rx: Receiver<HashMap<String, PhysicsInput>>, node_state_tx: Sender<HashMap<String, Vec<PhysicsPayload>>>) {
-        const FIXED_TIMESTEP: f32 = 1.0 / 120.0; // Fixed timestep for 120 FPS for more responsive physics
+    // `fixed_timestep` is how long one step is (see PhysicsSettings).
+    pub fn physics_thread(&mut self, fixed_timestep: f32, tx: Sender<HashMap<String, RenderMessage>>, rx: Receiver<PhysicsCommand>, debug_physics_tx: Sender<Vec<DebugPhysicsMessageType>>, node_behaviors: Vec<(String, Vec<Box<dyn PhysicsBehavior>>)>, node_input_rx: Receiver<HashMap<String, PhysicsInput>>, node_state_tx: Sender<HashMap<String, Vec<PhysicsPayload>>>) {
+        let fixed_timestep = fixed_timestep.max(1.0 / 1000.0);
+        let mut time_scale: f32 = 1.0;
         let mut accumulator = 0.0;
         let mut last_update = Instant::now();
         let mut should_send_data = false;
         let mut send_debug_lines = false;
 
-        let integration_parameters = IntegrationParameters { dt: FIXED_TIMESTEP, ..Default::default() };
+        let integration_parameters = IntegrationParameters { dt: fixed_timestep, ..Default::default() };
         let mut island_manager = IslandManager::new();
         let mut broad_phase = DefaultBroadPhase::new();
         let mut narrow_phase = NarrowPhase::new();
@@ -145,6 +163,9 @@ impl Physics {
 
         let mut paused = false;
         let mut shutdown = false;
+        // A command that woke the thread from its wait - handled first, with
+        // the ones queued behind it.
+        let mut woken_by: Option<PhysicsCommand> = None;
 
         loop {
             // Merge every input batch the main thread sent since last loop -
@@ -159,23 +180,20 @@ impl Physics {
 
             let now = Instant::now();
             let elapsed = now.duration_since(last_update).as_secs_f32();
-            accumulator += elapsed;
+            accumulator = (accumulator + elapsed * time_scale).min(fixed_timestep * Self::MAX_STEPS_BEHIND);
             last_update = now;
 
             // Step the physics pipeline with fixed timestep (only if not paused)
-            while accumulator >= FIXED_TIMESTEP && !paused {
+            while accumulator >= fixed_timestep && !paused {
                 // Calculate delta time for this physics step
                 let current_time = Instant::now();
                 self.delta_time = current_time.duration_since(self.last_physics_time).as_secs_f32();
                 self.last_physics_time = current_time;
-                
-                // Clamp delta time to prevent spiral of death
-                let clamped_delta_time = self.delta_time.min(FIXED_TIMESTEP * 2.0);
 
                 // Every node's physics half, at the real fixed rate, right
                 // before the world advances by exactly that step.
                 for physics_node in physics_nodes.iter_mut() {
-                    physics_node.fixed_update(&mut self.rigidbody_set, &mut self.collider_set, &narrow_phase, &self.query_pipeline, FIXED_TIMESTEP);
+                    physics_node.fixed_update(&mut self.rigidbody_set, &mut self.collider_set, &narrow_phase, &self.query_pipeline, fixed_timestep);
                 }
                 
                 self.physics_pipeline.step(
@@ -194,11 +212,15 @@ impl Physics {
                     &event_handler,
                 );
 
-                accumulator -= FIXED_TIMESTEP;
+                accumulator -= fixed_timestep;
             }
 
             loop {
-                match rx.try_recv() {
+                let command = match woken_by.take() {
+                    Some(command) => Ok(command),
+                    None => rx.try_recv(),
+                };
+                match command {
                     Ok(PhysicsCommand::RequestData { debug_lines }) => {
                         should_send_data = true;
                         send_debug_lines = debug_lines;
@@ -243,6 +265,12 @@ impl Physics {
                                 }
                             }
                         }
+                    },
+                    Ok(PhysicsCommand::SetGravity(gravity)) => {
+                        self.gravity = gravity;
+                    },
+                    Ok(PhysicsCommand::SetTimeScale(scale)) => {
+                        time_scale = scale.max(0.0);
                     },
                     Ok(PhysicsCommand::RemoveBody { name }) => {
                         self.remove_body(&name, &mut island_manager, &mut impulse_joint_set, &mut multibody_joint_set);
@@ -336,6 +364,20 @@ impl Physics {
                 }
                 
                 should_send_data = false; // Reset flag after sending
+            }
+
+            // Sleeps until the next step is due - or until a command comes
+            // in (the main thread asks for data every frame), whichever is
+            // first - instead of spinning on the clock in between.
+            let until_next_step = if paused || time_scale <= 0.0 {
+                Self::MAX_IDLE
+            } else {
+                Duration::from_secs_f32(((fixed_timestep - accumulator) / time_scale).max(0.0)).min(Self::MAX_IDLE)
+            };
+            match rx.recv_timeout(until_next_step) {
+                Ok(command) => woken_by = Some(command),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
             }
         }
     }

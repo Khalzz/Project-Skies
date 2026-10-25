@@ -1,0 +1,18 @@
+// water.wgsl's settings - see engine::rendering::shader_library.
+(
+    // Drawn in the game's own "water" pass (see the frame plan in water.rs),
+    // after the solid world and its depth copy.
+    pass: "water",
+    blend: Alpha,
+    // See-through: what's under the water still has to be drawn, not hidden
+    // behind the surface in the depth buffer.
+    depth_write: false,
+    // The depth drawn so far, at group 0 bindings 16/17 - how deep the water
+    // is in front of whatever is under it.
+    reads: [Depth],
+    params: {
+        // Over the seabed close to the surface, and far down.
+        "shallow": (0.10, 0.55, 0.60, 0.35),
+        "deep": (0.02, 0.12, 0.25, 0.90),
+    },
+)

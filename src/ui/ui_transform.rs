@@ -1,7 +1,7 @@
 use serde::Deserialize;
 
 /// Horizontal or vertical alignment axis
-#[derive(Clone, Debug, Deserialize, PartialEq, Default)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Default)]
 pub enum Anchor {
     #[default]
     Start,
@@ -30,7 +30,7 @@ pub struct ChildAnchor {
 
 /// Orientation children are stacked in a container - like a flex container's
 /// `flex-direction`.
-#[derive(Clone, Debug, Deserialize, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Default, PartialEq)]
 pub enum Orientation {
     #[default]
     Vertical,

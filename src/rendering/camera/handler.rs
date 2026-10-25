@@ -19,6 +19,11 @@ use super::uniform::{CameraUniform, NearFarUniform};
 // `active()`'s `.expect()` never has anything to panic on - only
 // `has_active_camera()` (and the render loop, via that) treats this specially.
 const NO_CAMERA_SENTINEL: &str = "__no_camera";
+/// The camera node a scene gets when it starts without one of its own - at
+/// the origin, unrotated (see `Scene::ensure_camera`). A node like any
+/// other: found, moved and selected by this name. A camera node the scene
+/// spawns later takes over from it.
+pub const DEFAULT_CAMERA: &str = "default_camera";
 // A dedicated hidden camera swapped in via select_camera - keeps a
 // transition's blended values out of both the source and destination
 // camera's own stored settings, so nothing reading those directly ever sees
@@ -84,11 +89,9 @@ impl CameraResources {
     pub fn new(device: &Device, config: &wgpu::SurfaceConfiguration) -> Self {
         let near_far_uniform = NearFarUniform {
             near: 0.1,
-            // Pushed way out so the ocean surface's outer rings (~2,100 km,
-            // see main.rs's OCEAN_SURFACE_MODEL) aren't clipped - reversed-Z keeps
-            // near/mid depth precision fine regardless of how far this goes.
-            // Kept in sync with the Projection::new call below and water.wgsl's
-            // own `const FAR`.
+            // Pushed way out - reversed-Z keeps near/mid depth precision fine
+            // regardless of how far this goes. Only until the first frame:
+            // from then on the active camera's own (see update_view_proj).
             far: 4_000_000.0,
         };
 
@@ -214,14 +217,14 @@ impl CameraResources {
 /// active scene has registered, which one's active, and any in-progress
 /// blend between two of them. Lives on `Scene` as `scene.cameras`, so it's
 /// dropped and rebuilt fresh on every scene switch the same way
-/// `SceneContent` is - a camera a previous scene registered
-/// (`game::camera::camera::Camera` behaviors, a scene's own direct
-/// `Scene::create_camera` calls, ...) never lingers into the next one.
+/// `SceneContent` is - a camera a previous scene registered never lingers
+/// into the next one.
 ///
-/// This is the "base" of the camera system - `Camera` (see `camera.rs`) only
-/// defines a camera's own settings and functions; this is what actually
-/// creates one, translating a `Transform` into that representation (see
-/// `create_camera`), tracks every registered camera by name, and drives what
+/// Cameras are made by camera nodes - a node with a `CameraLens` - not here:
+/// each one's camera is registered under the node's id when it spawns, kept
+/// where the node is every frame (see `Scene::sync_cameras`), and removed
+/// with the node. This is what the renderer reads: every camera by name,
+/// which one's active (`select_camera`, `transition_to`), and what
 /// `CameraResources::update_buffer` reads each frame.
 pub struct SceneCameras {
     cameras: HashMap<String, CameraInstance>,
@@ -266,19 +269,19 @@ impl SceneCameras {
     /// comes from this scene's own tracked screen size, kept current by
     /// `resize`.
     ///
-    /// If nothing else is currently active (see `NO_CAMERA_SENTINEL`), this
-    /// camera becomes active automatically - a scene with exactly one camera
-    /// never needs its own `select_camera` call. A second `create_camera`
-    /// doesn't repeat that - `active` is real by then, so choosing between
-    /// multiple cameras still needs an explicit `select_camera`.
-    pub fn create_camera(&mut self, name: impl Into<String>, transform: Transform, fovy: f32) -> &mut CameraInstance {
+    /// If nothing else is currently active (see `NO_CAMERA_SENTINEL`), or
+    /// only the automatic `DEFAULT_CAMERA` is, this camera becomes active -
+    /// a scene with exactly one camera of its own never needs its own
+    /// `select_camera` call. A second `create_camera` doesn't repeat that -
+    /// choosing between a scene's own cameras still needs `select_camera`.
+    pub(crate) fn create_camera(&mut self, name: impl Into<String>, transform: Transform, fovy: f32) -> &mut CameraInstance {
         let camera = Camera::new(transform);
         // Far plane kept in sync with CameraResources::new's near_far_uniform
         // and water.wgsl's `const FAR` - see the comment there.
         let projection = Projection::new(self.width, self.height, fovy, 0.1, 4_000_000.0);
 
         let name = name.into();
-        if self.active == NO_CAMERA_SENTINEL {
+        if self.active == NO_CAMERA_SENTINEL || self.active == DEFAULT_CAMERA {
             self.active = name.clone();
         }
         self.cameras.insert(name.clone(), CameraInstance { camera, projection, look_at: None });
@@ -384,7 +387,7 @@ impl SceneCameras {
 
     /// Takes the camera `name` away - if it was the active one, back to no
     /// camera until another is selected.
-    pub fn remove_camera(&mut self, name: &str) {
+    pub(crate) fn remove_camera(&mut self, name: &str) {
         if name == NO_CAMERA_SENTINEL || self.cameras.remove(name).is_none() {
             return;
         }
@@ -400,7 +403,7 @@ impl SceneCameras {
     /// node is: at `position`, looking along `rotation`'s +Z with its +Y up,
     /// with the lens given - drawn `viewport` big, or the whole screen. See
     /// `Scene::sync_cameras`.
-    pub fn place(&mut self, name: &str, position: Vector3<f32>, rotation: UnitQuaternion<f32>, fovy: f32, znear: f32, viewport: Option<(u32, u32)>) {
+    pub(crate) fn place(&mut self, name: &str, position: Vector3<f32>, rotation: UnitQuaternion<f32>, fovy: f32, znear: f32, viewport: Option<(u32, u32)>) {
         if !self.cameras.contains_key(name) {
             self.create_camera(name, Transform::new(position, Quaternion::identity(), Vector3::new(1.0, 1.0, 1.0)), fovy);
         }

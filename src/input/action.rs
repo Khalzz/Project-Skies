@@ -167,7 +167,7 @@ impl Binding {
 
     /// How strongly this one binding is currently activated (0.0..=1.0), given the raw
     /// device state aggregated across every connected device.
-    fn strength(&self, raw: &RawInputState) -> f32 {
+    pub(crate) fn strength(&self, raw: &RawInputState) -> f32 {
         match self {
             Binding::Key(key) => {
                 if raw.keys_down.contains(&key.to_uppercase()) { 1.0 } else { 0.0 }
@@ -211,7 +211,7 @@ impl Binding {
 /// updated incrementally as SDL events arrive in InputSubsystem::update, then used
 /// once per frame to recompute every action's strength. Joystick state is keyed by
 /// (device name, index).
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct RawInputState {
     pub keys_down: HashSet<String>,
     pub mouse_buttons_down: HashSet<MouseButton>,

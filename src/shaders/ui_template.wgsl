@@ -62,26 +62,43 @@ fn vs_main(model: VertexInput) -> VertexOutput {
     return out;
 }
 
-// The sharp offscreen scene copy, and BlurRender's precomputed, densely-sampled
-// "fully blurred" version of it (see BlurRender's own doc comment for why this
-// is a shared precomputed texture rather than a per-fragment sample scatter -
-// the latter showed visible ghosting/repeats at large radii instead of smooth
-// blur). background_blur below crossfades between the two.
+// What's behind, sharp (the scene, or for the always-on-top layer the frame
+// with the HUD drawn), and BlurRender's blur levels of it - one array layer
+// each, weakest first, at half resolution. background_blur below picks
+// between them (see blur_level).
 @group(2) @binding(0)
 var t_scene: texture_2d<f32>;
 @group(2) @binding(1)
 var s_scene: sampler;
 @group(2) @binding(2)
-var t_blurred: texture_2d<f32>;
+var t_blurred: texture_2d_array<f32>;
 @group(2) @binding(3)
 var s_blurred: sampler;
 // xy: screen size in pixels. zw: unused padding, kept for uniform buffer alignment.
 @group(2) @binding(4)
 var<uniform> u_screen_size: vec4<f32>;
 
-// Matches BlurRender::MAX_BLUR_RADIUS - the background_blur value (in pixels)
-// that samples t_blurred outright; values below crossfade toward t_scene.
+// Matches BlurRender::BLUR_LEVELS / MAX_BLUR_RADIUS - level k blurs about
+// 2^(k+1) pixels (4, 8, 16, 32, 64), so 64px is the strongest.
+const BLUR_LEVELS: i32 = 5;
 const MAX_BLUR_RADIUS: f32 = 64.0;
+
+// Which level a radius (real pixels) is, as a fraction: 0 sharp, k level k.
+// Up to 4px fades from sharp into level 1; past it, one level per doubling.
+fn blur_level(radius: f32) -> f32 {
+    if (radius < 4.0) {
+        return radius / 4.0;
+    }
+    return min(log2(radius) - 1.0, f32(BLUR_LEVELS));
+}
+
+// Level `level` of what's behind, at `uv` - 0 is the sharp image.
+fn backdrop_level(level: i32, uv: vec2<f32>) -> vec3<f32> {
+    if (level <= 0) {
+        return textureSampleLevel(t_scene, s_scene, uv, 0.0).rgb;
+    }
+    return textureSampleLevel(t_blurred, s_blurred, uv, level - 1, 0.0).rgb;
+}
 
 // Signed distance from `p` (relative to the box's own center) to a box of
 // `half_size`, corners rounded by `radius` - negative inside, 0 on the edge,
@@ -191,16 +208,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         dist = sd_rounded_box(in.clip_position.xy - center, half_size, radius);
     }
 
-    // fwidth(dist) is roughly how much `dist` changes between this fragment and
-    // its neighbors - halving it as the smoothstep *half*-width keeps the
-    // anti-aliased edge about 1 screen pixel wide *total* regardless of
-    // resolution/DPI (smoothstep(-aa, aa, ...) spans 2*aa). Using the full
-    // fwidth() as the half-width instead (a common off-by-2x mistake) doubles
-    // that to ~2px, which barely shows on a thick border but visibly bloats a
-    // thin one - especially on a curve, since a curved/diagonal edge already
-    // crosses more partially-covered pixels than a perfectly axis-aligned
-    // straight one, so the same over-wide band reads as noticeably softer there.
-    let aa = max(fwidth(dist) * 0.5, 0.0001);
+    // How much `dist` changes from one pixel to the next - halved as the
+    // smoothstep *half*-width, so the anti-aliased edge is about 1 screen pixel
+    // wide in total (smoothstep(-aa, aa, ...) spans 2*aa). The length of the
+    // gradient, not fwidth(): fwidth adds |dx| + |dy|, which is 1 on a straight
+    // edge but ~1.41 on a 45-degree one - every rounded corner got a ~41% wider
+    // fade on both sides of its border, so a 1px border looked thicker there.
+    let aa = max(length(vec2<f32>(dpdx(dist), dpdy(dist))) * 0.5, 0.0001);
     if (dist > aa) {
         discard;
     }
@@ -214,32 +228,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // of THAT instead of the sharp destination - background_color's own alpha is
     // what controls how much of the blur shows through / how tinted it looks
     // (bg-white/30 + backdrop-blur-md, in Tailwind terms), background_blur is
-    // purely the radius. The radius itself just crossfades between the sharp and
-    // fully-blurred textures (see MAX_BLUR_RADIUS) rather than sampling a truly
-    // continuous per-radius blur - not physically exact, but every intermediate
-    // value stays as smooth/artifact-free as the endpoints, which is what
-    // actually matters for a UI panel.
+    // purely the radius. The radius picks a blur level (see blur_level), mixing
+    // the two nearest so every radius in between is smooth too.
     //
-    // t_scene/t_blurred only ever hold the 3D scene (captured once, before any
-    // UI draws that frame - see BlurRender) - never other UI elements. So a
-    // blurred node's own backdrop sample can't "see" e.g. a panel drawn earlier
-    // in this same UI pass sitting behind it; it can only ever blur the raw 3D
-    // scene. Outputting fill_color.a as in.color.a (not a hardcoded 1.0) instead
-    // lets the pipeline's normal SrcAlpha/OneMinusSrcAlpha blending do the rest,
-    // same as any other translucent node: at low alpha, whatever's genuinely in
-    // the destination (a panel drawn earlier, sharp scene, whatever) shows
-    // through underneath this node's own blur+tint instead of being replaced
-    // outright - not a true "blur of what's actually behind", but close enough
-    // to read as layered glass instead of a hole punched through everything
-    // beneath it, which a forced-opaque output was doing before.
+    // For the main layer, t_scene/t_blurred only hold the 3D scene (captured
+    // before any UI draws that frame - see BlurRender) - never other UI
+    // elements, so a blurred card can't blur a panel drawn behind it in the
+    // same pass. The always-on-top layer (a modal) gets the frame with the main
+    // layer already drawn instead (BlurRender::blur_backdrop).
     var fill_color = in.color;
     var border_color = in.border_color;
     if (in.background_blur > 0.0) {
         let uv = in.clip_position.xy / u_screen_size.xy;
-        let sharp = textureSample(t_scene, s_scene, uv);
-        let blurred = textureSample(t_blurred, s_blurred, uv);
+        let level = blur_level(in.background_blur);
+        let lower = i32(floor(level));
+        var backdrop = mix(backdrop_level(lower, uv), backdrop_level(min(lower + 1, BLUR_LEVELS), uv), fract(level));
         let t = saturate(in.background_blur / MAX_BLUR_RADIUS);
-        var backdrop = mix(sharp, blurred, t).rgb;
 
         // Plain blur alone reads as "out of focus" (soft, but still literally the
         // same image) rather than "glass" - real frosted/etched glass scatters

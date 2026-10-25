@@ -40,20 +40,46 @@ egui-wgpu = "0.32"
 eframe = "0.32"
 egui_plot = "0.33"
 
+# Examples in a subfolder of examples/ are listed here; ones directly in
+# examples/ are found on their own.
+[[example]]
+name = "basic_window"
+path = "examples/window/basic_window.rs"
+
+[[example]]
+name = "configurable_window"
+path = "examples/window/configurable_window.rs"
+
+[[example]]
+name = "ui_components"
+path = "examples/UI/components.rs"
+
+[[example]]
+name = "ui_greetings"
+path = "examples/UI/greetings.rs"
+
+[[example]]
+name = "input"
+path = "examples/input/input.rs"
+
+[[example]]
+name = "2d"
+path = "examples/2D/2d.rs"
+
+[[example]]
+name = "model_viewer"
+path = "examples/3D/model_viewer.rs"
+
+[[example]]
+name = "water"
+path = "examples/3D/water/water.rs"
+
 [dependencies.gltf]
 version = "1.4"
 features = ["extras", "names", "utils"]
 
-[build-dependencies]
-anyhow = "*"
-cgmath = "*"
-fs_extra = "*"
-glob = "*"
-
-# Dev builds (plain `cargo run`) still optimize every dependency - our own
-# code stays fast to compile and easy to debug, but libraries like the PNG
-# decoder and glTF parser run 10-50x faster than unoptimized (model loading
-# was mostly spent decoding textures). The first build after this recompiles
-# the dependencies once; later builds are as quick as before.
 [profile.dev.package."*"]
 opt-level = 3
+
+[profile.dev]
+opt-level = 1

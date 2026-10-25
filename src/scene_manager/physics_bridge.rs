@@ -1,10 +1,12 @@
+use std::collections::HashMap;
+
 use nalgebra::Vector3;
 
 use crate::game_nodes::game_object::{ColliderType, Physics};
 use crate::physics::physics_resources::PhysicsObjectDef;
 use crate::resources;
 
-use super::properties::{Model, Transform3D};
+use super::node::properties::Model;
 use super::scene::Scene;
 
 /// Bridges a spawned `Node`'s `Transform3D`+`Physics` properties into
@@ -25,14 +27,17 @@ use super::scene::Scene;
 /// already-resolved `PhysicsObjectDef`s, no file access of its own) doing it
 /// later.
 ///
+/// `trimeshes` is the mesh geometry the scene's loading step already read
+/// (by model path) - a path missing from it is read now, on the spot.
+///
 /// Unlike `register_static_model`, this never needs to run again for the
 /// same id later - a physics body's starting position/mass/colliders are
 /// only ever read once, when the physics thread actually starts (see
 /// `App::run`'s `run_fixed_update` call), not kept in sync afterward the way
 /// a model's shared instance buffer is.
-pub fn register_physics_body(scene: &mut Scene, id: &str) -> Result<(), String> {
+pub fn register_physics_body(scene: &mut Scene, id: &str, trimeshes: &TrimeshCache) -> Result<(), String> {
     let node = scene.content.nodes.get(id).ok_or_else(|| format!("no node named '{id}' to register"))?;
-    let transform = *node.get_property::<Transform3D>().ok_or_else(|| format!("node '{id}' has no Transform3D property"))?;
+    let transform = *node.transform_3d().ok_or_else(|| format!("node '{id}' has no Transform3D property"))?;
     let mut physics = node.get_property::<Physics>().ok_or_else(|| format!("node '{id}' has no Physics property"))?.clone();
 
     // Geometry read from a model file is scaled the way the model is drawn:
@@ -41,7 +46,7 @@ pub fn register_physics_body(scene: &mut Scene, id: &str) -> Result<(), String> 
         .map(|model| model.render_scale(transform.scale))
         .unwrap_or(transform.scale);
     physics.colliders = physics.colliders.into_iter()
-        .map(|collider| resolve_collider(collider, geometry_scale, id))
+        .map(|collider| resolve_collider(collider, geometry_scale, id, trimeshes))
         .collect();
 
     scene.content.physics_bodies.push(PhysicsObjectDef { id: id.to_owned(), position: transform.position, rotation: transform.rotation, physics });
@@ -49,10 +54,34 @@ pub fn register_physics_body(scene: &mut Scene, id: &str) -> Result<(), String> 
     Ok(())
 }
 
-fn resolve_collider(collider: ColliderType, scale: Vector3<f32>, id: &str) -> ColliderType {
+/// A model's mesh as a collider sees it - its points and triangles.
+pub type Trimesh = (Vec<Vector3<f32>>, Vec<[u32; 3]>);
+/// Meshes already read for colliders, by model path (see
+/// `ColliderType::TrimeshFromModel`) - or why one couldn't be.
+pub type TrimeshCache = HashMap<String, Result<Trimesh, String>>;
+
+/// Every model path `physics` reads a mesh collider from - for the scene's
+/// loading step to read ahead.
+pub(crate) fn trimesh_paths(physics: &Physics) -> impl Iterator<Item = &str> {
+    physics.colliders.iter().filter_map(|collider| match collider {
+        ColliderType::TrimeshFromModel { model_path } => Some(model_path.as_str()),
+        _ => None,
+    })
+}
+
+/// Reads the mesh at `model_path` (inside the assets folder) for a collider.
+pub(crate) fn load_trimesh(model_path: &str) -> Result<Trimesh, String> {
+    resources::load_trimesh_geometry(model_path).map_err(|error| error.to_string())
+}
+
+fn resolve_collider(collider: ColliderType, scale: Vector3<f32>, id: &str, trimeshes: &TrimeshCache) -> ColliderType {
     let ColliderType::TrimeshFromModel { model_path } = &collider else { return collider };
 
-    match resources::load_trimesh_geometry(model_path) {
+    let loaded = match trimeshes.get(model_path) {
+        Some(loaded) => loaded.clone(),
+        None => load_trimesh(model_path),
+    };
+    match loaded {
         Ok((raw_vertices, indices)) => {
             let vertices = raw_vertices.iter()
                 .map(|v| Vector3::new(v.x * scale.x, v.y * scale.y, v.z * scale.z))
