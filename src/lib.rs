@@ -187,7 +187,7 @@ pub mod particles {
     pub mod renderer;
 
     pub use effect::*;
-    pub use emitter::{Emitter, EmitterKind, ParticleEmitters};
+    pub use emitter::{Emitter, EmitterKind};
 }
 
 pub mod utils {

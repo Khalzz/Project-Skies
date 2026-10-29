@@ -81,6 +81,9 @@ impl Node {
     /// `Transform3D` is `local`: an offset from this node's origin, moving
     /// and turning with it. Mark it `.global()` for a place in the world
     /// that stays put whatever this node does. Children can have children.
+    /// Its id is put under this node's when it spawns: "left_wing" under
+    /// "plane" becomes "plane/left_wing" - `scene.child(&id, "left_wing")`
+    /// finds it.
     pub fn with_child(mut self, child: Node) -> Self {
         self.children.push(child);
         self

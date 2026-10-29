@@ -1,5 +1,5 @@
 //! The engine side of particles and trails - simulates and draws whatever
-//! the scene's nodes' `ParticleEmitters` ask for.
+//! the scene's nodes' `Emitter`s ask for.
 //!
 //! PARTICLES live on the GPU: one big buffer of particle slots, each
 //! particle emitter owning a fixed ring of them (`max_particles`, the oldest
@@ -182,7 +182,6 @@ pub struct ParticleFrameInfo {
 /// node is.
 pub struct EmitterSource<'a> {
     pub node_id: &'a str,
-    pub name: &'a str,
     pub emitter: &'a Emitter,
     pub position: Vector3<f32>,
     pub rotation: UnitQuaternion<f32>,
@@ -224,6 +223,8 @@ struct EmitterRuntime {
     is_trail: bool,
     blend: Blend,
     sprite: Option<String>,
+    /// Its emitter's `sort_offset`, as of the last frame it was seen.
+    sort_offset: f32,
     /// When the last thing it put out will be gone (s, renderer time).
     alive_until: f32,
     // Particles.
@@ -247,6 +248,7 @@ impl EmitterRuntime {
             is_trail,
             blend: Blend::Alpha,
             sprite: None,
+            sort_offset: 0.0,
             alive_until: 0.0,
             slot: None,
             range: None,
@@ -261,17 +263,20 @@ impl EmitterRuntime {
     }
 }
 
-struct ParticleDraw {
+/// One emitter's particles or trail, to draw this frame - see `draw`.
+struct Draw {
     blend: Blend,
     sprite: Option<String>,
-    first: u32,
-    count: u32,
+    kind: DrawKind,
+    /// How far its emitter is from the camera (m) - draws go farthest first.
+    distance: f32,
 }
 
-struct TrailDraw {
-    blend: Blend,
-    sprite: Option<String>,
-    indices: std::ops::Range<u32>,
+enum DrawKind {
+    /// Its ring of particle slots.
+    Particles { first: u32, count: u32 },
+    /// Its ribbon, in the trail index buffer.
+    Trail { indices: std::ops::Range<u32> },
 }
 
 pub struct ParticleRenderer {
@@ -300,16 +305,15 @@ pub struct ParticleRenderer {
 
     free_ranges: Vec<(u32, u32)>,
     free_slots: Vec<u32>,
-    runtimes: HashMap<(String, String), EmitterRuntime>,
-    warned: HashSet<(String, String)>,
+    runtimes: HashMap<String, EmitterRuntime>,
+    warned: HashSet<String>,
     rng: StdRng,
     previous_camera: Option<Vector3<f64>>,
     time: f32,
     /// Set by `update`, cleared by `simulate`.
     simulation_pending: bool,
 
-    particle_draws: Vec<ParticleDraw>,
-    trail_draws: Vec<TrailDraw>,
+    draws: Vec<Draw>,
 
     /// See `set_wind` and `set_sea_level`.
     wind: Vector3<f32>,
@@ -567,8 +571,7 @@ impl ParticleRenderer {
             previous_camera: None,
             time: 0.0,
             simulation_pending: false,
-            particle_draws: Vec::new(),
-            trail_draws: Vec::new(),
+            draws: Vec::new(),
             wind: Vector3::zeros(),
             sea_level: None,
         }
@@ -641,13 +644,13 @@ impl ParticleRenderer {
 
     /// Anything to simulate or draw this frame.
     pub fn has_work(&self) -> bool {
-        !self.particle_draws.is_empty() || !self.trail_draws.is_empty()
+        !self.draws.is_empty()
     }
 
     // ── Per frame ──
 
     /// Spawns, ages and lays trail for every emitter in `sources` (each
-    /// node's `ParticleEmitters`, this frame), lets go of the ones that are
+    /// node's `Emitter`, this frame), lets go of the ones that are
     /// gone once what they put out has died, and prepares this frame's
     /// draws. Call once per frame, before rendering.
     pub fn update<'a>(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, frame: &ParticleFrameInfo, sources: impl IntoIterator<Item = EmitterSource<'a>>) {
@@ -661,8 +664,7 @@ impl ParticleRenderer {
         // spawn, age or draw.
         let mut sources = sources.into_iter().peekable();
         if sources.peek().is_none() && self.runtimes.is_empty() {
-            self.particle_draws.clear();
-            self.trail_draws.clear();
+            self.draws.clear();
             return;
         }
 
@@ -671,7 +673,7 @@ impl ParticleRenderer {
         }
 
         for source in sources {
-            let key = (source.node_id.to_owned(), source.name.to_owned());
+            let key = source.node_id.to_owned();
             let is_trail = matches!(source.emitter.kind, EmitterKind::Trail(_));
             let mut runtime = match self.runtimes.remove(&key) {
                 Some(runtime) if runtime.is_trail == is_trail => runtime,
@@ -682,6 +684,7 @@ impl ParticleRenderer {
                 None => EmitterRuntime::new(is_trail),
             };
             runtime.seen = true;
+            runtime.sort_offset = source.emitter.sort_offset;
             match &source.emitter.kind {
                 EmitterKind::Particles(effect) => self.update_particle_emitter(device, queue, &key, &mut runtime, &source, effect, dt, previous_camera),
                 EmitterKind::Trail(effect) => self.update_trail_emitter(device, queue, &mut runtime, &source, effect, dt, self.wind),
@@ -692,7 +695,7 @@ impl ParticleRenderer {
         // Emitters that are gone (or whose node is): no more spawning, but
         // what they put out lives out its life first.
         let time = self.time;
-        let finished: Vec<(String, String)> = self.runtimes.iter_mut()
+        let finished: Vec<String> = self.runtimes.iter_mut()
             .filter(|(_, runtime)| !runtime.seen)
             .filter_map(|(key, runtime)| {
                 if runtime.is_trail {
@@ -714,11 +717,18 @@ impl ParticleRenderer {
 
         // Only emitters with something possibly still alive - an idle one
         // (e.g. wreck smoke before any crash) costs nothing.
-        self.particle_draws = self.runtimes.values()
+        let mut draws: Vec<Draw> = self.runtimes.values()
             .filter(|runtime| !runtime.is_trail && time < runtime.alive_until)
-            .filter_map(|runtime| runtime.range.map(|(first, count)| ParticleDraw { blend: runtime.blend, sprite: runtime.sprite.clone(), first, count }))
+            .filter_map(|runtime| {
+                let (first, count) = runtime.range?;
+                let distance = runtime.previous.map_or(0.0, |(position, _)| (position - frame.camera_position).magnitude()) + runtime.sort_offset;
+                Some(Draw { blend: runtime.blend, sprite: runtime.sprite.clone(), kind: DrawKind::Particles { first, count }, distance })
+            })
             .collect();
-        self.build_trails(device, queue, frame);
+        draws.extend(self.build_trails(device, queue, frame));
+        // Farthest first, so nearer ones are drawn over them (see `draw`).
+        draws.sort_by(|a, b| b.distance.total_cmp(&a.distance));
+        self.draws = draws;
 
         let view = frame.camera_view;
         let right = Vector3::new(view[(0, 0)], view[(0, 1)], view[(0, 2)]);
@@ -743,9 +753,9 @@ impl ParticleRenderer {
         self.simulation_pending = true;
     }
 
-    fn warn_once(&mut self, key: &(String, String), message: &str) {
-        if self.warned.insert(key.clone()) {
-            eprintln!("particles: emitter '{}' on '{}': {message}", key.1, key.0);
+    fn warn_once(&mut self, key: &str, message: &str) {
+        if self.warned.insert(key.to_owned()) {
+            eprintln!("particles: emitter on '{key}': {message}");
         }
     }
 
@@ -813,7 +823,7 @@ impl ParticleRenderer {
     // ── Particles ──
 
     #[allow(clippy::too_many_arguments)]
-    fn update_particle_emitter(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, key: &(String, String), runtime: &mut EmitterRuntime, source: &EmitterSource, effect: &ParticleEffect, dt: f32, previous_camera: Vector3<f64>) {
+    fn update_particle_emitter(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, key: &str, runtime: &mut EmitterRuntime, source: &EmitterSource, effect: &ParticleEffect, dt: f32, previous_camera: Vector3<f64>) {
         // A ring sized to the effect - reallocated if that changes.
         let max = effect.max_particles.clamp(1, MAX_PARTICLES_PER_EMITTER);
         if runtime.range.map_or(true, |(_, count)| count != max) {
@@ -915,11 +925,9 @@ impl ParticleRenderer {
             let f = (index as f32 + self.rng.gen::<f32>()) / spawn_count as f32;
             let node_position = previous.0.lerp(&current.0, f);
             let node_rotation = previous.1.slerp(&current.1, f);
-            let frame_rotation = node_rotation * emitter.rotation;
-            let origin = node_position + node_rotation * emitter.offset;
-            let position = origin + frame_rotation * sample_shape(&effect.emission_shape, &mut self.rng);
+            let position = node_position + node_rotation * sample_shape(&effect.emission_shape, &mut self.rng);
             let spread = cone_direction(direction, effect.motion.cone_angle, &mut self.rng);
-            let launch = if effect.motion.world_direction { spread } else { frame_rotation * spread };
+            let launch = if effect.motion.world_direction { spread } else { node_rotation * spread };
             let inherited = node_velocity * effect.motion.inherit_velocity;
             let velocity = launch * effect.motion.speed.sample(&mut self.rng) * speed_scale + inherited;
             // Relative to LAST frame's camera - the update pass moves every
@@ -982,9 +990,9 @@ impl ParticleRenderer {
             trail.head = None;
             return;
         }
-        let origin = (source.position + source.rotation * emitter.offset).cast::<f64>();
+        let origin = source.position.cast::<f64>();
         let intensity = emitter.intensity.clamp(0.0, 1.0);
-        let velocity = source.rotation * emitter.rotation * effect.point_velocity;
+        let velocity = source.rotation * effect.point_velocity;
         let laying = trail.head.is_some() && !trail.points.is_empty();
         if !laying {
             // Starting (or restarting after a gap) - not joined to what's older.
@@ -1019,8 +1027,9 @@ impl ParticleRenderer {
         runtime.alive_until = self.time + effect.lifetime;
     }
 
-    /// Every trail as a camera-facing ribbon, into the trail buffers.
-    fn build_trails(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, frame: &ParticleFrameInfo) {
+    /// Every trail as a camera-facing ribbon, into the trail buffers - and
+    /// their draws.
+    fn build_trails(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, frame: &ParticleFrameInfo) -> Vec<Draw> {
         let camera = frame.camera_position.cast::<f64>();
         let view = frame.camera_view;
         let camera_right = Vector3::new(view[(0, 0)], view[(0, 1)], view[(0, 2)]);
@@ -1127,7 +1136,10 @@ impl ParticleRenderer {
             }
             let last_index = indices.len() as u32;
             if last_index > first_index {
-                draws.push(TrailDraw { blend: runtime.blend, sprite: runtime.sprite.clone(), indices: first_index..last_index });
+                // Measured from its newest end - where its emitter is.
+                let newest = trail.head.map(|(head, _)| head).or_else(|| trail.points.front().map(|point| point.position));
+                let distance = newest.map_or(0.0, |newest| (newest - camera).magnitude() as f32) + runtime.sort_offset;
+                draws.push(Draw { blend: runtime.blend, sprite: runtime.sprite.clone(), kind: DrawKind::Trail { indices: first_index..last_index }, distance });
             }
         }
 
@@ -1140,7 +1152,7 @@ impl ParticleRenderer {
             queue.write_buffer(&self.trail_vertex_buffer, 0, bytemuck::cast_slice(&vertices));
             queue.write_buffer(&self.trail_index_buffer, 0, bytemuck::cast_slice(&indices));
         }
-        self.trail_draws = draws;
+        draws
     }
 
     // ── Rendering ──
@@ -1150,7 +1162,8 @@ impl ParticleRenderer {
     /// Runs once per `update` - a frame rendered without one (nothing new
     /// written) doesn't move them a second time.
     pub fn simulate(&mut self, encoder: &mut wgpu::CommandEncoder) {
-        if !std::mem::take(&mut self.simulation_pending) || self.particle_draws.is_empty() {
+        let has_particles = self.draws.iter().any(|draw| matches!(draw.kind, DrawKind::Particles { .. }));
+        if !std::mem::take(&mut self.simulation_pending) || !has_particles {
             return;
         }
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("Particle Update Pass"), timestamp_writes: None });
@@ -1160,29 +1173,36 @@ impl ParticleRenderer {
     }
 
     /// Draws every trail and particle into `pass` (which must have the
-    /// scene's color and depth attached) - alpha-blended ones first, then
-    /// additive ones on top.
+    /// scene's color and depth attached) - emitter by emitter, the farthest
+    /// from the camera first, so nearer ones cover them (or, additive, add
+    /// over them): smoke in front of sparks dims them, sparks in front of
+    /// smoke shine over it. Particles within one emitter aren't sorted, and
+    /// neither are two emitters' clouds where they overlap - each emitter
+    /// is all in front or all behind. The pipeline is only switched when
+    /// the next draw needs another one.
     pub fn draw(&self, pass: &mut wgpu::RenderPass, camera_bind_group: &wgpu::BindGroup) {
         pass.set_bind_group(1, camera_bind_group, &[]);
         pass.set_bind_group(2, &self.depth_bind_group, &[]);
-        for blend in [Blend::Alpha, Blend::Additive] {
-            if self.trail_draws.iter().any(|draw| draw.blend == blend) {
-                pass.set_pipeline(&self.trail_pipelines[blend_index(blend)]);
-                pass.set_bind_group(0, &self.trail_frame_bind_group, &[]);
-                pass.set_vertex_buffer(0, self.trail_vertex_buffer.slice(..));
-                pass.set_index_buffer(self.trail_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                for draw in self.trail_draws.iter().filter(|draw| draw.blend == blend) {
-                    pass.set_bind_group(3, self.sprite(&draw.sprite), &[]);
-                    pass.draw_indexed(draw.indices.clone(), 0, 0..1);
+        // Which pipeline is set: (a trail's, its blend).
+        let mut bound: Option<(bool, Blend)> = None;
+        for draw in &self.draws {
+            let is_trail = matches!(draw.kind, DrawKind::Trail { .. });
+            if bound != Some((is_trail, draw.blend)) {
+                bound = Some((is_trail, draw.blend));
+                if is_trail {
+                    pass.set_pipeline(&self.trail_pipelines[blend_index(draw.blend)]);
+                    pass.set_bind_group(0, &self.trail_frame_bind_group, &[]);
+                    pass.set_vertex_buffer(0, self.trail_vertex_buffer.slice(..));
+                    pass.set_index_buffer(self.trail_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                } else {
+                    pass.set_pipeline(&self.particle_pipelines[blend_index(draw.blend)]);
+                    pass.set_bind_group(0, &self.particle_bind_group, &[]);
                 }
             }
-            if self.particle_draws.iter().any(|draw| draw.blend == blend) {
-                pass.set_pipeline(&self.particle_pipelines[blend_index(blend)]);
-                pass.set_bind_group(0, &self.particle_bind_group, &[]);
-                for draw in self.particle_draws.iter().filter(|draw| draw.blend == blend) {
-                    pass.set_bind_group(3, self.sprite(&draw.sprite), &[]);
-                    pass.draw(0..6, draw.first..draw.first + draw.count);
-                }
+            pass.set_bind_group(3, self.sprite(&draw.sprite), &[]);
+            match &draw.kind {
+                DrawKind::Particles { first, count } => pass.draw(0..6, *first..*first + *count),
+                DrawKind::Trail { indices } => pass.draw_indexed(indices.clone(), 0, 0..1),
             }
         }
     }

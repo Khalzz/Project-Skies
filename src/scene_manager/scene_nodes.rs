@@ -211,6 +211,14 @@ impl SceneNodes {
     }
 }
 
+/// The id a child given to `parent` with `Node::with_child` is spawned
+/// under: "left_wing" under "plane" is "plane/left_wing" (and a child of
+/// that, "plane/left_wing/light"). Set once, when it spawns - a node given
+/// a new parent later keeps its id.
+pub fn child_id(parent: &str, name: &str) -> String {
+    format!("{parent}/{name}")
+}
+
 /// The rotation that points +Z along `direction` with +Y as near up as it
 /// gets - `None` for no direction at all.
 pub fn facing(direction: Vector3<f32>) -> Option<UnitQuaternion<f32>> {

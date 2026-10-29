@@ -20,7 +20,7 @@
 use crate::rendering::camera::handler::SceneCameras;
 
 use super::node::Node;
-use super::scene_nodes::SceneNodes;
+use super::scene_nodes::{child_id, SceneNodes};
 
 /// See the module doc.
 pub struct SceneAccess<'a> {
@@ -51,6 +51,17 @@ impl<'a> SceneAccess<'a> {
     /// The node `id`, to change - right away (see `get_node`).
     pub fn get_node_mut(&mut self, id: &str) -> Option<&mut Node> {
         self.nodes.get_mut(id)
+    }
+
+    /// The child `name` given to the node `parent` with `Node::with_child` -
+    /// `scene.child(&node.id, "left_wing")` for one of this node's own.
+    pub fn child(&self, parent: &str, name: &str) -> Option<&Node> {
+        self.nodes.get(&child_id(parent, name))
+    }
+
+    /// The child `name` of the node `parent`, to change - right away.
+    pub fn child_mut(&mut self, parent: &str, name: &str) -> Option<&mut Node> {
+        self.nodes.get_mut(&child_id(parent, name))
     }
 
     /// Every other node.

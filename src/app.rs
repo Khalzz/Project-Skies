@@ -9,7 +9,7 @@ use crate::asset_manager::AssetManager;
 use crate::audio::audio::{Audio, Sound};
 use crate::game_nodes::timing::Timing;
 use crate::input::input;
-use crate::particles::ParticleEmitters;
+use crate::particles::Emitter;
 use crate::particles::renderer::{EmitterSource, ParticleFrameInfo, ParticleRenderer};
 use crate::physics::PhysicsWorld;
 use crate::rendering::egui_overlay::DebugUi;
@@ -80,7 +80,7 @@ pub struct App {
     pub loading_step: Option<String>,
     pub physics: PhysicsWorld,
     /// GPU particles and trails, fed each frame from every node's
-    /// ParticleEmitters property (see App::update_particles).
+    /// Emitter property (see App::update_particles).
     pub particles: ParticleRenderer,
     pub should_quit: bool,
     event_pump: Option<EventPump>,
@@ -226,7 +226,7 @@ impl App {
         }
     }
 
-    /// Feeds every node's `ParticleEmitters` (at wherever the node is being
+    /// Feeds every node's `Emitter` (at wherever the node is being
     /// drawn this frame) to the particle renderer - see ParticleRenderer::
     /// update. Once per frame, after the camera has moved.
     fn update_particles(&mut self) {
@@ -249,16 +249,14 @@ impl App {
         };
 
         let Some(content) = self.scene_manager.content() else { return };
-        let sources = content.nodes.iter().flat_map(|node| {
-            let emitters = node.get_property::<ParticleEmitters>();
+        let sources = content.nodes.iter().filter_map(|node| {
+            let emitter = node.get_property::<Emitter>()?;
             // Where the node is being drawn - its render instance if it has
             // one (moved by physics), otherwise its own Transform3D.
-            let pose = content.renderizable_instances.get(&node.id)
+            let (position, rotation) = content.renderizable_instances.get(&node.id)
                 .map(|instance| (instance.instance.transform.position, instance.instance.transform.rotation))
-                .or_else(|| node.transform_3d().map(|transform| (transform.position, transform.rotation)));
-            emitters.zip(pose).into_iter().flat_map(move |(emitters, (position, rotation))| {
-                emitters.iter().map(move |(name, emitter)| EmitterSource { node_id: &node.id, name, emitter, position, rotation })
-            })
+                .or_else(|| node.transform_3d().map(|transform| (transform.position, transform.rotation)))?;
+            Some(EmitterSource { node_id: &node.id, emitter, position, rotation })
         });
         self.particles.update(&self.renderer.device, &self.renderer.queue, &frame, sources);
     }

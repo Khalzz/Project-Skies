@@ -69,6 +69,10 @@ path = "examples/3D/free_camera.rs"
 name = "walking"
 path = "examples/3D/walking/main.rs"
 
+[[example]]
+name = "particles"
+path = "examples/3D/particles.rs"
+
 [dependencies.gltf]
 version = "1.4"
 features = ["extras", "names", "utils"]

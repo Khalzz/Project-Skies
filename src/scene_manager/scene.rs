@@ -16,7 +16,7 @@ use crate::scene_manager::physics_bridge::{self, TrimeshCache};
 use crate::scene_manager::node::properties::{CameraLens, Material, Model as NodeModelProperty, Parent, Space, SpawnedLive, Transform3D};
 use crate::scene_manager::render_bridge;
 use crate::scene_manager::scene_access::SceneChanges;
-use crate::scene_manager::scene_nodes::SceneNodes;
+use crate::scene_manager::scene_nodes::{child_id, SceneNodes};
 use crate::rendering::models::model::Model as LoadedModel;
 use crate::resources::{ModelLoad, ModelSource};
 
@@ -168,7 +168,8 @@ impl Scene {
     /// away (a model nothing loaded yet is loaded on the spot - see
     /// `will_use`).
     /// Children given with `Node::with_child` are spawned right after it,
-    /// each with its `Parent`.
+    /// each with its `Parent` and an id under its parent's: "left_wing"
+    /// under "plane" is "plane/left_wing" (see `child_id`).
     /// `Node`/`SceneNodes` stay unaware of rendering/physics either way -
     /// this just composes them at the one place that actually has both
     /// `&mut Scene` and `&mut App` available.
@@ -188,6 +189,7 @@ impl Scene {
                 Space::Global => Transform3D::default(),
             };
             child.set_property(Parent { id: id.clone(), space, local, inherit_rotation });
+            child.id = child_id(&id, &child.id);
             self.spawn_tree(app, child)?;
         }
         // What its behaviors' on_spawn asked for, now it's in.
@@ -373,6 +375,17 @@ impl Scene {
     /// properties (`transform_2d_mut()`, `get_property_mut::<T>()`...).
     pub fn get_node_mut(&mut self, id: &str) -> Option<&mut Node> {
         self.content.nodes.get_mut(id)
+    }
+
+    /// The child `name` given to the node `parent` with `Node::with_child` -
+    /// `scene.child(&node.id, "left_wing")`.
+    pub fn child(&self, parent: &str, name: &str) -> Option<&Node> {
+        self.content.nodes.get(&child_id(parent, name))
+    }
+
+    /// The child `name` of the node `parent`, to change (see `child`).
+    pub fn child_mut(&mut self, parent: &str, name: &str) -> Option<&mut Node> {
+        self.content.nodes.get_mut(&child_id(parent, name))
     }
 
     /// Where the node `id` is in the world (see `SceneNodes::world_transform`).
