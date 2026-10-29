@@ -6,39 +6,26 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]
 sdl2 = {version = "*", default-features = false, features = ["raw-window-handle" ]}
-winit = "0.30.11"
 wgpu = "25"
 tokio = { version = "*", features = ["full"] }
 bytemuck = { version = "*", features = [ "derive" ] }
 image = { version = "*", default-features = false, features = ["png", "jpeg"] }
 anyhow = "*"
-fs_extra = "*"
-glob = "*"
 rand = "0.8"
 glyphon = "0.9"
 rodio = "*"
 
 # Physics
-rapier3d = { version = "*", features = [ "simd-stable", "serde-serialize" ] }
+rapier3d = { version = "*", features = [ "simd-stable", "serde-serialize", "parallel" ] }
 nalgebra = "*"
-rayon = "1"
 
 # External file management
 serde = { version = "1.0", features = ["derive"] }
 ron = "*"
 
-# Head tracking (TrackIR / OpenTrack). `status()` is true only after a frame
-# has arrived, which is what the settings dot and the Retry button wait on.
-head-tracking-rs = "0.2"
-# Same crate sdl2's raw-window-handle feature already pulls in. Needed here so
-# TrackIR can be given this game's window handle.
-raw-window-handle = "0.6"
-
-# Tooling
+# The game's debug windows (see DebugUi)
 egui = "0.32"
 egui-wgpu = "0.32"
-eframe = "0.32"
-egui_plot = "0.33"
 
 # Examples in a subfolder of examples/ are listed here; ones directly in
 # examples/ are found on their own.
@@ -73,6 +60,14 @@ path = "examples/3D/model_viewer.rs"
 [[example]]
 name = "water"
 path = "examples/3D/water/water.rs"
+
+[[example]]
+name = "free_camera"
+path = "examples/3D/free_camera.rs"
+
+[[example]]
+name = "walking"
+path = "examples/3D/walking/main.rs"
 
 [dependencies.gltf]
 version = "1.4"

@@ -1,5 +1,4 @@
 use nalgebra::{Matrix4, Vector3, UnitQuaternion};
-use serde::Deserialize;
 use wgpu::Buffer;
 
 use crate::{game_nodes::game_object::{GameObject, Transform}, rendering::models::model::Model};
@@ -60,13 +59,6 @@ impl ModelDataInstance {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct LevelData {
-    pub id: String,
-    pub description: String,
-    pub children: Vec<GameObject>,
 }
 
 // Quaternions are not very usable in wgpu, so we save the raw instance here directly

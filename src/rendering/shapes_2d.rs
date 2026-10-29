@@ -55,7 +55,7 @@ impl Shapes2D {
     pub(crate) fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shapes 2D shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/shapes_2d.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/2d/shapes_2d.wgsl").into()),
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Shapes 2D screen layout"),

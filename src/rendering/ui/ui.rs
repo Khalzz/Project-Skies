@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use crate::app::Size;
 
 use glyphon::{Cache, FontSystem, SwashCache, TextAtlas, TextRenderer};
 use ron::from_str;
@@ -215,7 +216,7 @@ pub struct Ui {
     pub(crate) blur_bind_group_on_top: BindGroup,
     screen_size_buffer: Buffer,
     // This frame's image draw calls - the images themselves are in
-    // app.assets (see Assets::image), by path.
+    // app.assets (see ImageCache::get), by path.
     pub image_draws: Vec<ImageDraw>,
     // Every image draw's quads, one after another - kept from frame to
     // frame and only made bigger when they don't fit (see grow_buffer).
@@ -298,8 +299,27 @@ impl Ui {
         self.size
     }
 
+    /// `size` as a `Size` (UI units, rounded, at least 1) - what its layout
+    /// pass turns positions into screen space with.
+    pub fn layout_size(&self) -> Size {
+        let (width, height) = self.size;
+        Size { width: width.round().max(1.0) as u32, height: height.round().max(1.0) as u32 }
+    }
+
+    /// Lays every node out again in the UI's current room (see `size`) -
+    /// their Percent sizes and Center/End positions were worked out against
+    /// the old one (see UiNode::resolve). The engine does it after a resize
+    /// or a change of scale; a game can too, after changing nodes' layout.
+    pub fn relayout(&mut self) {
+        let (width, height) = self.size();
+        for node in self.renderizable_elements.values_mut() {
+            node.resolve(width, height);
+        }
+        self.has_changed = true;
+    }
+
     /// Works out the scale for a window `width` x `height` points - true if
-    /// it changed, and the UI has to be laid out again (see App::relayout_ui).
+    /// it changed, and the UI has to be laid out again (see `relayout`).
     pub(crate) fn update_scale(&mut self, width: u32, height: u32) -> bool {
         let fitted = match self.scaling {
             UiScaling::Fixed => 1.0,
@@ -370,7 +390,7 @@ impl Ui {
 
     /// `box_layout`: what its boxes' bind groups are made with -
     /// ShaderLibrary::overlay_layout(Overlay::UiBox); its images' are
-    /// app.assets' (see Assets::image). They're drawn with Ui shaders (see
+    /// app.assets' (see ImageCache::get). They're drawn with Ui shaders (see
     /// engine::rendering::shader_library) - engine/ui unless a node says
     /// otherwise (UiNode::set_material).
     #[allow(clippy::too_many_arguments)]

@@ -1,12 +1,9 @@
-use crate::input::pressable::Pressable;
 
 pub struct Mouse {
     x: i32,
     y: i32,
     rel_x: i32,
     rel_y: i32,
-    l_click: Pressable,
-    r_click: Pressable,
     x_sensitivity: f32,
     y_sensitivity: f32,
     raw_x: i32,
@@ -25,8 +22,6 @@ impl Mouse {
             rel_y: 0,
             x: 0,
             y: 0,
-            l_click: Pressable::new(None),
-            r_click: Pressable::new(None),
             x_sensitivity,
             y_sensitivity,
             raw_x: 0,

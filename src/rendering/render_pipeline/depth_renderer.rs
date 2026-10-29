@@ -1,21 +1,22 @@
 use wgpu::{util::DeviceExt, BindGroup, BindGroupLayout, BindGroupLayoutDescriptor, Buffer, Device, RenderPipeline, SurfaceConfiguration};
 
-use crate::{primitive::manual_vertex::ManualVertexTexturized, rendering::models::textures::Texture};
+use crate::rendering::models::textures::Texture;
+use crate::rendering::vertex::QuadVertex;
 
-const DEPTH_VERTICES: &[ManualVertexTexturized] = &[
-    ManualVertexTexturized {
+const DEPTH_VERTICES: &[QuadVertex] = &[
+    QuadVertex {
         position: [-1.0, -1.0, 0.0],
         tex_coords: [0.0, 1.0],
     },
-    ManualVertexTexturized {
+    QuadVertex {
         position: [1.0, -1.0, 0.0],
         tex_coords: [1.0, 1.0],
     },
-    ManualVertexTexturized {
+    QuadVertex {
         position: [1.0, 1.0, 0.0],
         tex_coords: [1.0, 0.0],
     },
-    ManualVertexTexturized {
+    QuadVertex {
         position: [-1.0, 1.0, 0.0],
         tex_coords: [0.0, 0.0],
     },
@@ -140,7 +141,7 @@ impl DepthRender {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shadow Display Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/depth_map.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/debug/depth_map.wgsl").into()),
         });
 
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -149,7 +150,7 @@ impl DepthRender {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[ManualVertexTexturized::desc()],
+                buffers: &[QuadVertex::desc()],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {

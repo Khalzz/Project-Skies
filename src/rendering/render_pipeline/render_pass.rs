@@ -4,7 +4,8 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use wgpu::RenderPassDepthStencilAttachment;
 
 use crate::app::App;
-use crate::primitive::manual_vertex::ManualVertex;
+use crate::rendering::lines::Lines;
+use crate::rendering::renderer::Renderer;
 use crate::rendering::frame::{FramePlan, FrameStep};
 use crate::rendering::instance_management::ModelDataInstance;
 use crate::rendering::render_sets::RenderSets;
@@ -57,6 +58,7 @@ fn hash_step(step: &FrameStep, hasher: &mut DefaultHasher) {
 /// and its meshes' materials, into `hasher`.
 fn hash_material(material: &Material, hasher: &mut DefaultHasher) {
     material.shader.hash(hasher);
+    material.texture.hash(hasher);
     for (name, value) in &material.params {
         name.hash(hasher);
         for number in &value.0 {
@@ -69,7 +71,7 @@ fn hash_material(material: &Material, hasher: &mut DefaultHasher) {
     }
 }
 
-pub(crate) fn color_attachment(view: &wgpu::TextureView, load: wgpu::LoadOp<wgpu::Color>) -> Option<wgpu::RenderPassColorAttachment> {
+pub(crate) fn color_attachment(view: &wgpu::TextureView, load: wgpu::LoadOp<wgpu::Color>) -> Option<wgpu::RenderPassColorAttachment<'_>> {
     Some(wgpu::RenderPassColorAttachment {
         view,
         resolve_target: None,
@@ -77,7 +79,7 @@ pub(crate) fn color_attachment(view: &wgpu::TextureView, load: wgpu::LoadOp<wgpu
     })
 }
 
-fn depth_attachment(view: &wgpu::TextureView, load: wgpu::LoadOp<f32>) -> Option<RenderPassDepthStencilAttachment> {
+fn depth_attachment(view: &wgpu::TextureView, load: wgpu::LoadOp<f32>) -> Option<RenderPassDepthStencilAttachment<'_>> {
     Some(RenderPassDepthStencilAttachment {
         view,
         depth_ops: Some(wgpu::Operations { load, store: wgpu::StoreOp::Store }),
@@ -88,7 +90,7 @@ fn depth_attachment(view: &wgpu::TextureView, load: wgpu::LoadOp<f32>) -> Option
 impl App {
     // Every model with an instance to draw, by its key.
     fn drawn_models(&self) -> impl Iterator<Item = (&String, &ModelDataInstance)> {
-        self.assets.game_models.iter().filter(|(_, model)| model.instance_count > 0)
+        self.assets.models.drawn.iter().filter(|(_, model)| model.instance_count > 0)
     }
 
     // Renders into BlurRender's scene_color (an offscreen copy of the swapchain),
@@ -220,7 +222,7 @@ impl App {
                 }));
             }
         }
-        for (model_ref, model) in &self.assets.game_models {
+        for (model_ref, model) in &self.assets.models.drawn {
             let meshes = model.model.mesh_lists.iter()
                 .flat_map(|(list, meshes)| meshes.iter().map(move |(key, mesh)| hash_of(|hasher| (list, key, mesh.material).hash(hasher))))
                 .fold(0u64, u64::wrapping_add);
@@ -262,25 +264,37 @@ impl App {
             .collect();
         // Every node's material instance - its shader and its own values -
         // and its model's mesh materials.
-        for model in self.assets.game_models.values_mut() {
+        for model in self.assets.models.drawn.values_mut() {
             model.mesh_materials.clear();
+        }
+        // Textures loaded with the scene are ready; one a node spawned since
+        // brought is loaded now, through the AssetManager.
+        if let Some(content) = self.scene_manager.content() {
+            let textures: Vec<String> = content.nodes.iter()
+                .filter_map(|node| node.get_property::<Material>())
+                .flat_map(|material| material.textures().cloned())
+                .collect();
+            self.assets.textures.load_missing(&self.renderer.device, &self.renderer.queue, textures.iter().map(String::as_str));
         }
         if let Some(content) = self.scene_manager.content() {
             for node in content.nodes.iter() {
                 let Some(material) = node.get_property::<Material>() else { continue };
-                self.renderer.shaders.set_instance(&material.key(&node.id), &material.shader, &material.params);
+                let key = material.key(&node.id);
+                self.renderer.shaders.set_instance(&key, &material.shader, &material.params);
+                self.renderer.shaders.set_instance_texture(&key, material.texture.as_deref());
                 if material.meshes.is_empty() {
                     continue;
                 }
-                let Some(model) = content.renderizable_instances.get(&node.id).and_then(|instance| self.assets.game_models.get_mut(&instance.model_ref)) else { continue };
+                let Some(model) = content.renderizable_instances.get(&node.id).and_then(|instance| self.assets.models.drawn.get_mut(&instance.model_ref)) else { continue };
                 for (mesh, mesh_material) in &material.meshes {
                     let key = mesh_material.mesh_key(&node.id, mesh);
                     self.renderer.shaders.set_instance(&key, &mesh_material.shader, &mesh_material.params);
+                    self.renderer.shaders.set_instance_texture(&key, mesh_material.texture.as_deref());
                     model.mesh_materials.insert(mesh.clone(), key);
                 }
             }
         }
-        let mut materials: HashSet<String> = self.assets.game_models.values()
+        let mut materials: HashSet<String> = self.assets.models.drawn.values()
             .flat_map(|model| model.material_ranges.iter().map(|(material, _)| material.clone()).chain(model.mesh_materials.values().cloned()))
             .collect();
         materials.insert(STANDARD.to_owned());
@@ -329,7 +343,7 @@ impl App {
         }
         // The bind groups 0 of materials with their own (params, textures) -
         // one for each mesh texture they're drawn with.
-        for (model_ref, model) in &self.assets.game_models {
+        for (model_ref, model) in &self.assets.models.drawn {
             for meshes in model.model.mesh_lists.values() {
                 for (mesh_key, mesh) in meshes {
                     let own = model.mesh_materials.get(mesh_base_name(mesh_key));
@@ -340,7 +354,11 @@ impl App {
                     for key in keys {
                         let placed = self.renderer.material_placements.get(key).is_some_and(|placement| *placement != Placement::Error);
                         if placed && self.renderer.shaders.has_group0(key) {
-                            self.renderer.shaders.prepare_group0(key, model_ref, mesh.material, &model.model.materials[mesh.material].diffuse_texture);
+                            // Its own texture, when it has one, instead of the mesh's.
+                            let diffuse = self.renderer.shaders.instance_texture(key)
+                                .and_then(|path| self.assets.textures.get(path))
+                                .map_or(&model.model.materials[mesh.material].diffuse_texture, |texture| &texture.texture);
+                            self.renderer.shaders.prepare_group0(key, model_ref, mesh.material, diffuse);
                         }
                     }
                 }
@@ -398,9 +416,12 @@ impl App {
                         let shell = shell.and_then(|pipeline| self.renderer.shaders.pipeline(key, placement, pipeline));
                         // Its own bind group 0 (params, textures), or the
                         // mesh's (just its texture).
+                        let own_texture = self.renderer.shaders.instance_texture(key).and_then(|path| self.assets.textures.get(path));
                         let group0 = if *placement != Placement::Error && self.renderer.shaders.has_group0(key) {
                             let Some(group0) = self.renderer.shaders.group0(key, model_ref, mesh.material) else { continue };
                             group0
+                        } else if let (false, Some(texture)) = (*placement == Placement::Error, own_texture) {
+                            &texture.bind_group
                         } else {
                             &model_data.model.materials[mesh.material].bind_group
                         };
@@ -491,10 +512,10 @@ impl App {
     // snapshotted for their soft fading (any pass before reading the depth is
     // done with its own copy by then).
     fn render_particle_pass(&mut self, encoder: &mut wgpu::CommandEncoder) {
-        if !self.renderer.particles.has_work() || !self.scene_manager.cameras().is_some_and(|c| c.has_active_camera()) {
+        if !self.particles.has_work() || !self.scene_manager.cameras().is_some_and(|c| c.has_active_camera()) {
             return;
         }
-        self.renderer.particles.simulate(encoder);
+        self.particles.simulate(encoder);
         self.renderer.depth_render.snapshot_depth(encoder);
 
         let view = &self.renderer.blur.scene_color.view;
@@ -505,7 +526,7 @@ impl App {
             occlusion_query_set: None,
             timestamp_writes: None,
         });
-        self.renderer.particles.draw(&mut render_pass, &self.renderer.camera_resources.bind_group);
+        self.particles.draw(&mut render_pass, &self.renderer.camera_resources.bind_group);
     }
 
     // Physics debug lines and UI/text share this pass since they're both drawn on top,
@@ -550,12 +571,11 @@ impl App {
             timestamp_writes: None,
         });
 
-        render_pass.set_pipeline(&self.renderer.render_physics.render_pipeline);
-        render_pass.set_bind_group(0, &self.renderer.render_physics.bind_group, &[]);
-        render_pass.set_bind_group(1, &self.renderer.camera_resources.bind_group, &[]);
-
-        if lines && !self.renderer.show_depth_map && (self.renderer.render_physics.visible || !self.renderer.world_lines.is_empty()) {
-            self.render_physics_debug_lines(&mut render_pass);
+        // The game's lines (and the physics debug view's), under the UI.
+        if lines {
+            let Renderer { line_renderer, lines, debug, device, queue, light, camera_resources, .. } = &mut self.renderer;
+            let physics: &Lines = if debug.physics { self.physics.lines() } else { &Lines::default() };
+            line_renderer.draw(device, queue, &mut render_pass, &light.rendering_data.bind_group, &camera_resources.bind_group, &[lines, physics]);
         }
 
         // Main-pass quads, then main-pass text, THEN always_on_top's quads and
@@ -583,7 +603,7 @@ impl App {
             render_pass.set_index_buffer(self.ui.image_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
             for draw in &self.ui.image_draws {
                 let material = self.renderer.overlay_materials.get(&draw.material).and_then(|key| self.renderer.shaders.overlay(key, Overlay::UiImage));
-                if let (Some(image), Some((pipeline, material))) = (self.assets.image(&draw.path), material) {
+                if let (Some(image), Some((pipeline, material))) = (self.assets.images.get(&draw.path), material) {
                     render_pass.set_pipeline(pipeline);
                     render_pass.set_bind_group(0, material, &[]);
                     render_pass.set_bind_group(1, &self.renderer.camera_resources.bind_group, &[]);
@@ -626,39 +646,6 @@ impl App {
         }
     }
 
-    // Debug lines come from the physics thread in absolute world coordinates,
-    // so make them camera-relative here to match camera.view_proj. The
-    // physics thread's only while F5 is on; the game's own (App::world_lines)
-    // always.
-    fn render_physics_debug_lines<'rp>(&mut self, render_pass: &mut wgpu::RenderPass<'rp>) {
-        let camera_position = self.scene_manager.cameras().map(|c| c.active().camera.position()).unwrap_or_else(nalgebra::Point3::origin);
-        let physics_lines: &[[ManualVertex; 2]] = if self.renderer.render_physics.visible { &self.renderer.render_physics.renderizable_lines } else { &[] };
-        let vertices: Vec<ManualVertex> = physics_lines.iter().chain(&self.renderer.world_lines)
-            .flat_map(|line| line.to_vec())
-            .map(|mut vertex| {
-                vertex.position[0] -= camera_position.x;
-                vertex.position[1] -= camera_position.y;
-                vertex.position[2] -= camera_position.z;
-                vertex
-            })
-            .collect();
-
-        if vertices.is_empty() {
-            return;
-        }
-
-        // Kept from frame to frame - a new one only when the lines outgrow it.
-        let bytes: &[u8] = bytemuck::cast_slice(&vertices);
-        let buffer = &mut self.renderer.render_physics.vertex_buffer;
-        crate::rendering::ui::ui::grow_buffer(buffer, &self.renderer.device, bytes.len() as u64, wgpu::BufferUsages::VERTEX);
-        self.renderer.queue.write_buffer(buffer, 0, bytes);
-
-        // Each line is two vertices, one after the other - drawn in order,
-        // no index buffer needed.
-        render_pass.set_vertex_buffer(0, self.renderer.render_physics.vertex_buffer.slice(..bytes.len() as u64));
-        render_pass.draw(0..vertices.len() as u32, 0..1);
-    }
-
     /// Draws this frame's plan (`App::frame_plan` - the scene's) - see
     /// engine::rendering::frame.
     pub(crate) fn render_scene_passes(&mut self, encoder: &mut wgpu::CommandEncoder, screen_texture: &wgpu::Texture, view: &wgpu::TextureView) {
@@ -690,7 +677,13 @@ impl App {
             FrameStep::Scene { pass } if pass != "opaque" => self.pass_work(pass),
             _ => PassWork::default(),
         }).collect();
+        // The debug views go over the world once it's all drawn - after its
+        // last scene pass.
+        let last_scene = plan.steps.iter().rposition(|step| matches!(step, FrameStep::Scene { .. }));
         for (index, step) in plan.steps.iter().enumerate() {
+            if Some(index) == last_scene.map(|last| last + 1) {
+                self.draw_debug_views(encoder);
+            }
             let view = target.as_ref().unwrap_or(screen);
             match step {
                 FrameStep::Scene { pass } => match pass.as_str() {
@@ -755,8 +748,24 @@ impl App {
                 FrameStep::Custom { run, .. } => run(self, encoder, view),
             }
         }
+        if last_scene == Some(plan.steps.len() - 1) {
+            self.draw_debug_views(encoder);
+        }
         for what in missing {
             plan.report(what);
+        }
+    }
+
+    /// The debug views that are on (see `Renderer::debug`), over the world
+    /// drawn so far: its models' edges, then - in place of the world - its
+    /// depth.
+    fn draw_debug_views(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        let Renderer { debug, wireframe, device, blur, depth_render, camera_resources, .. } = &mut self.renderer;
+        if debug.wireframe && self.scene_manager.cameras().is_some_and(|cameras| cameras.has_active_camera()) {
+            wireframe.draw(device, encoder, &blur.scene_color.view, &depth_render.texture.view, &camera_resources.bind_group, &self.assets.models.drawn);
+        }
+        if debug.depth {
+            depth_render.render(&blur.scene_color.view, encoder);
         }
     }
 

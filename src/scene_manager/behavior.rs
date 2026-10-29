@@ -1,7 +1,6 @@
 use std::any::Any;
 
 use crate::app::App;
-use crate::physics::physics_handler::RenderMessage;
 use super::node::Node;
 use super::scene_access::SceneAccess;
 
@@ -25,7 +24,7 @@ impl<T: Any> AsAny for T {
 }
 
 /// Custom per-element logic and state (a `Player` with its own `lives`, an
-/// enemy's AI, ...), attached to a `Node` via `Node::add_behavior`.
+/// enemy's AI, ...), attached to a `Node` via `Node::with_behavior`.
 ///
 /// Distinct from a property: a property is plain, generic data any system
 /// might read (`Transform3D`, `Model`) - a behavior is one element's own
@@ -50,6 +49,10 @@ pub trait Behavior: Any + AsAny {
     /// `SceneNodes` - not the behavior's own constructor, since properties it
     /// depends on may only be visible once the node is fully built (mirrors
     /// Godot's `_ready` vs `_init` split).
+    ///
+    /// A behavior can set its own node up here: a `Model`, `Physics` or
+    /// `CameraLens` it puts on (`node.set_property(..)`) is drawn, given a
+    /// body or made a camera the same as one the node was spawned with.
     fn on_spawn(&mut self, node: &mut Node, scene: &mut SceneAccess, app: &mut App) {
         let _ = (node, scene, app);
     }
@@ -59,17 +62,19 @@ pub trait Behavior: Any + AsAny {
         let _ = (node, scene, app);
     }
 
-    /// Runs every rendered frame while the scene's physics runs (a scene
-    /// with no physics body has none - then it isn't called at all), after
-    /// every node's `update`, with this node's latest physics results -
-    /// `physics` is None until the physics thread has reported on it (or
-    /// always, for a node without a `Physics` property). Once a frame, not
-    /// at the physics rate: for reacting to
-    /// where the physics put the node. Logic that has to run at the fixed
-    /// physics rate (forces, collisions) goes in a `PhysicsBehavior`
-    /// (`Node::add_physics_behavior`), which runs on the physics thread -
-    /// this can't, since `Node`'s properties can't cross to that thread.
-    fn after_physics(&mut self, node: &mut Node, scene: &mut SceneAccess, app: &mut App, physics: Option<&RenderMessage>) {
-        let _ = (node, scene, app, physics);
+    /// Runs every physics step (`app.physics.timestep()` long - 120 a
+    /// second by default), right before the world advances by it - none,
+    /// one or several times a frame, however many the time that passed
+    /// calls for. Where a body is pushed or its velocity set
+    /// (`app.physics.body_mut(&node.id)`), so it moves the same at any frame
+    /// rate.
+    ///
+    /// Input works here: held keys as anywhere, and a key `just_pressed`
+    /// since the last step is seen by exactly one step - never missed, never
+    /// twice. Mouse movement is a frame's, though: read it in `update`.
+    /// The node's `Transform3D` is where it was drawn last frame - its body
+    /// is where it really is now.
+    fn fixed_update(&mut self, node: &mut Node, scene: &mut SceneAccess, app: &mut App) {
+        let _ = (node, scene, app);
     }
 }

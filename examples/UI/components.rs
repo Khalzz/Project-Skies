@@ -78,11 +78,11 @@ fn list_row() -> ButtonStyle {
 struct UiShowcase;
 
 impl UiShowcase {
-    fn new(scene: &mut Scene, app: &mut App) -> Self {
+    fn new(_scene: &mut Scene, app: &mut App) -> Self {
         // No camera set up here - the engine gives the scene its default one
         // (at the origin, unrotated). Behind the UI, the procedural sky - a
         // computed clear-day gradient, no images - without its sun.
-        scene.settings.environment = Some(Environment::Color(wgpu::Color { r: 0.0, g: 0.1, b: 0.3, a: 1.0 }));
+        app.renderer.set_environment(Environment::Color(UiColor::Rgb(0, 89, 149)));
 
         // A card of buttons - the base style first, then styles made from it.
         let buttons = card(&CardStyle::default())

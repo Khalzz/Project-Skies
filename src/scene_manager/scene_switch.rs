@@ -36,8 +36,8 @@ impl SceneManager {
             return;
         };
 
-        // Nothing carries over between scenes: its nodes, cameras and
-        // environment go with the old Scene itself; its UI, physics thread,
+        // Nothing of the scene carries over: its nodes and cameras go with
+        // the old Scene itself; its UI, physics world,
         // frame plan and line/text sets are cleared here. A load still running
         // for a scene opened before is dropped.
         app.scene_manager.active_scene = None;
@@ -59,18 +59,22 @@ impl SceneManager {
         // scene uses too: those stay, and aren't loaded again.
         resources::unload_level_models(app, &assets.keys);
         let image_paths = app.ui.image_paths();
-        app.assets.keep_only_images(&image_paths);
-        let images = app.assets.images_to_load(&image_paths);
+        app.assets.images.keep_only(&image_paths);
+        let images = app.assets.images.missing_from(&image_paths);
+        app.assets.textures.keep_only(&assets.textures);
+        let textures = app.assets.textures.missing_from(&assets.textures);
 
-        // A skybox's textures are read from disk - that waits under the
-        // loading screen too. A color or the procedural sky is instant.
-        let environment = scene.settings.environment.clone();
+        // An environment the scene set (`Renderer::set_environment`) that
+        // isn't built yet: a skybox's textures are read from disk - that
+        // waits under the loading screen too. A color or the procedural sky
+        // is instant.
+        let environment = (app.renderer.environment() != &app.renderer.prepared_from).then(|| app.renderer.environment().clone());
         let slow_environment = matches!(environment, Some(Environment::Skybox(_)));
-        if assets.models.is_empty() && assets.trimeshes.is_empty() && images.is_empty() && !slow_environment {
+        if assets.models.is_empty() && assets.trimeshes.is_empty() && images.is_empty() && textures.is_empty() && !slow_environment {
             let environment = environment.map(|environment| (environment.clone(), app.renderer.prepare_environment(environment)));
-            Self::start_scene(app, scene, LoadedAssets { models: Vec::new(), trimeshes: HashMap::new(), images: Vec::new(), environment });
+            Self::start_scene(app, scene, LoadedAssets { models: Vec::new(), trimeshes: HashMap::new(), images: Vec::new(), textures: Vec::new(), environment });
         } else {
-            Self::start_load(app, scene, assets, images, environment);
+            Self::start_load(app, scene, assets, images, textures, environment);
         }
     }
 
@@ -78,11 +82,12 @@ impl SceneManager {
     /// mesh colliders, its UI's `images`, its environment - while the
     /// loading screen shows. Device/Queue/BindGroupLayout are cheap,
     /// Arc-backed clones, so the thread builds the GPU resources itself.
-    fn start_load(app: &mut App, scene: Scene, assets: SceneAssets, images: Vec<String>, environment: Option<Environment>) {
+    fn start_load(app: &mut App, scene: Scene, assets: SceneAssets, images: Vec<String>, textures: Vec<String>, environment: Option<Environment>) {
         let device = app.renderer.device.clone();
         let queue = app.renderer.queue.clone();
         let camera_bind_group_layout = app.renderer.camera_resources.bind_group_layout.clone();
-        let image_layout = app.assets.image_layout().clone();
+        let image_layout = app.assets.images.layout().clone();
+        let texture_layout = app.assets.textures.layout().clone();
         let config = app.renderer.config.clone();
         let SceneAssets { models, trimeshes, .. } = assets;
 
@@ -95,10 +100,10 @@ impl SceneManager {
             let reporter = LoadReporter::new(&scene_name, progress_tx);
             let mesh_layout = Mesh::create_bind_group_layout(&device);
             let models = models.into_iter()
-                .map(|source| {
-                    let key = source.key();
+                .map(|load| {
+                    let key = load.key.clone();
                     reporter.step(format!("Model {key}"));
-                    let model = source.load(&device, &queue, &mesh_layout).map_err(|error| format!("failed to load model '{key}': {error}"));
+                    let model = load.load(&device, &queue, &mesh_layout).map_err(|error| format!("failed to load model '{key}': {error}"));
                     (key, model)
                 })
                 .collect();
@@ -112,8 +117,15 @@ impl SceneManager {
             let images = images.into_iter()
                 .map(|path| {
                     reporter.step(format!("Image {path}"));
-                    let image = crate::assets::load_image_file(&path, &device, &queue, &image_layout);
+                    let image = crate::asset_manager::load_image_file(&path, &device, &queue, &image_layout);
                     (path, image)
+                })
+                .collect();
+            let textures = textures.into_iter()
+                .map(|path| {
+                    reporter.step(format!("Texture {path}"));
+                    let texture = crate::asset_manager::load_texture_file(&path, &device, &queue, &texture_layout);
+                    (path, texture)
                 })
                 .collect();
             let environment = environment.map(|environment| {
@@ -122,7 +134,7 @@ impl SceneManager {
                 (environment, prepared)
             });
             reporter.finish();
-            let _ = tx.send(LoadedAssets { models, trimeshes, images, environment });
+            let _ = tx.send(LoadedAssets { models, trimeshes, images, textures, environment });
         });
 
         app.loading_step = None;
@@ -185,13 +197,17 @@ impl SceneManager {
     }
 
     /// Starts a built scene with its assets loaded: its nodes go on the
-    /// renderer and physics, its `on_spawn` runs, its physics thread starts,
+    /// renderer and physics, its `on_spawn` runs, its physics starts,
     /// and it becomes the active scene.
     fn start_scene(app: &mut App, mut scene: Scene, loaded: LoadedAssets) {
         let started = Instant::now();
         resources::adopt_level_models(app, loaded.models);
-        app.assets.adopt_images(loaded.images);
-        scene.environment = loaded.environment;
+        app.assets.images.adopt(loaded.images);
+        app.assets.textures.adopt(loaded.textures);
+        if let Some((environment, prepared)) = loaded.environment {
+            app.renderer.prepared_environment = prepared;
+            app.renderer.prepared_from = environment;
+        }
         scene.finish_loading(app, &loaded.trimeshes);
         scene.run_on_spawn(app);
         println!("[load {}] starting the scene: {:.0} ms", app.scene_manager.active, started.elapsed().as_secs_f64() * 1000.0);
@@ -205,8 +221,7 @@ impl SceneManager {
         // set up - enough to make anything timing its first frames skip ahead.
         app.time.update();
 
-        let thread = scene.start_physics(app);
-        app.physics.start(thread, scene.settings.gravity(&app.settings));
+        scene.start_physics(app);
         app.scene_manager.active_scene = Some(scene);
     }
 }

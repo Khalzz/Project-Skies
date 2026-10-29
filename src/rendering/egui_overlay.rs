@@ -9,9 +9,9 @@
 //!         });
 //!     }
 //!
-//! Hidden until its toggle key (F1 unless `toggle_key` says otherwise) is
-//! pressed, or `visible` is set. While it's up the mouse is free to click it,
-//! and goes back to how it was when it hides.
+//! Hidden until the game sets `visible` - from whatever key or button it
+//! chooses; the engine binds none. While it's up the mouse is free to click
+//! it, and goes back to how it was when it hides.
 //!
 //! Each frame App::run builds the windows (`run`, after the scene's update)
 //! and the render draws them over everything (`paint`).
@@ -29,8 +29,6 @@ pub struct DebugUi {
     pub ctx: egui::Context,
     /// Whether the debug windows are drawn (and the scene's `debug_ui` runs).
     pub visible: bool,
-    /// The key that shows and hides it. None: only `visible` does.
-    pub toggle_key: Option<Keycode>,
     renderer: egui_wgpu::Renderer,
     /// This frame's windows, built by `run`, waiting for `paint`.
     pending: Option<egui::FullOutput>,
@@ -52,23 +50,12 @@ impl DebugUi {
         Self {
             ctx: egui::Context::default(),
             visible: false,
-            toggle_key: Some(Keycode::F1),
             renderer: egui_wgpu::Renderer::new(device, output_color_format, None, 1, false),
             pending: None,
             cursor_was_locked: None,
             cursor: CursorIcon::Default,
             started: std::time::Instant::now(),
             last_frame: None,
-        }
-    }
-
-    /// Flips `visible` when the toggle key was pressed this frame.
-    pub(crate) fn handle_toggle_key(&mut self) {
-        let Some(toggle_key) = self.toggle_key else { return };
-        let pressed = input::typed_input().iter().any(|typed| matches!(typed,
-            input::TypedInput::Key { key, pressed: true, repeat: false, .. } if *key == toggle_key));
-        if pressed {
-            self.visible = !self.visible;
         }
     }
 

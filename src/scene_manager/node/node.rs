@@ -1,10 +1,8 @@
 use std::any::{Any, TypeId};
-use std::collections::HashMap;
+use crate::utils::type_map::TypeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::app::App;
-use crate::physics::physics_behavior::{PhysicsBehavior, PhysicsInput, PhysicsPayload};
-use crate::physics::physics_handler::RenderMessage;
 
 use crate::scene_manager::behavior::Behavior;
 use crate::scene_manager::scene_access::SceneAccess;
@@ -47,22 +45,14 @@ static NEXT_PROPERTY_ORDER: AtomicU64 = AtomicU64::new(0);
 ///
 /// Properties are erased via `Box<dyn Any>` keyed by `TypeId` rather than a
 /// closed enum, specifically so a new property type never requires editing
-/// this file - define a plain struct anywhere and `add_property`/
+/// this file - define a plain struct anywhere and `with_property`/
 /// `get_property_mut` work with it immediately.
 pub struct Node {
     pub id: String,
-    properties: HashMap<TypeId, Box<dyn Any>>,
+    properties: TypeMap<Box<dyn Any>>,
     // When each property was first put on - see `property_order`.
-    property_order: HashMap<TypeId, u64>,
+    property_order: TypeMap<u64>,
     behaviors: Vec<Box<dyn Behavior>>,
-    // This node's physics-thread half (see `PhysicsBehavior`) - only held
-    // here until the scene's physics starts, then moved onto that thread for
-    // good (see `take_physics_behaviors`).
-    physics_behaviors: Vec<Box<dyn PhysicsBehavior>>,
-    // Main → physics messages written this frame, sent once per frame.
-    physics_input: PhysicsInput,
-    // Latest state each physics behavior published, keyed by its concrete type.
-    physics_states: HashMap<TypeId, PhysicsPayload>,
     // Nodes given with `with_child`, waiting to be spawned right after this
     // one (see `Scene::spawn_node`) - empty once it's in the scene.
     children: Vec<Node>,
@@ -76,12 +66,9 @@ impl Node {
     pub fn new(id: impl Into<String>) -> Self {
         Node {
             id: id.into(),
-            properties: HashMap::new(),
-            property_order: HashMap::new(),
+            properties: TypeMap::default(),
+            property_order: TypeMap::default(),
             behaviors: Vec::new(),
-            physics_behaviors: Vec::new(),
-            physics_input: PhysicsInput::default(),
-            physics_states: HashMap::new(),
             children: Vec::new(),
             space: Space::Local,
             inherit_rotation: true,
@@ -132,7 +119,7 @@ impl Node {
         (self.space, self.inherit_rotation)
     }
 
-    /// Puts `property` on (or replaces it) in place - `add_property` for a
+    /// Puts `property` on (or replaces it) in place - `with_property` for a
     /// node that's already built.
     pub fn set_property<T: 'static>(&mut self, property: T) {
         // In the 3D world or on the 2D plane, never both - one transform
@@ -181,8 +168,8 @@ impl Node {
 
     /// Attaches a property, builder-style (chains like `ui_node.rs`'s
     /// `.set_size(...).set_position(...)`). A node holds at most one property
-    /// of a given type - a second `add_property::<T>` call replaces the first.
-    pub fn add_property<T: 'static>(mut self, property: T) -> Self {
+    /// of a given type - a second `with_property::<T>` call replaces the first.
+    pub fn with_property<T: 'static>(mut self, property: T) -> Self {
         self.set_property(property);
         self
     }
@@ -195,8 +182,8 @@ impl Node {
         self.properties.get(&TypeId::of::<T>())?.downcast_ref::<T>()
     }
 
-    /// Attaches a behavior, builder-style - same chaining as `add_property`.
-    pub fn add_behavior<B: Behavior + 'static>(mut self, behavior: B) -> Self {
+    /// Attaches a behavior, builder-style - same chaining as `with_property`.
+    pub fn with_behavior<B: Behavior + 'static>(mut self, behavior: B) -> Self {
         self.behaviors.push(Box::new(behavior));
         self
     }
@@ -215,61 +202,14 @@ impl Node {
         self.behaviors.iter_mut().find_map(|behavior| behavior.as_any_mut().downcast_mut::<B>())
     }
 
-    /// Attaches this node's physics-thread half, builder-style. Only picked up
-    /// if the node is spawned *before* the scene's physics starts (same as a
-    /// `Physics` property's rigidbody) - and it needs that rigidbody to act
-    /// on, so the node must also carry a `Physics` property.
-    pub fn add_physics_behavior<P: PhysicsBehavior + 'static>(mut self, physics_behavior: P) -> Self {
-        self.physics_behaviors.push(Box::new(physics_behavior));
-        self
-    }
-
-    /// Latest `T` this node's physics half published (see
-    /// `PhysicsBehavior::publish`) - a copy from the last frame the physics
-    /// thread reported back, `None` until it has.
-    pub fn physics_state<T: Any>(&self) -> Option<&T> {
-        self.physics_states.get(&TypeId::of::<T>())?.downcast_ref::<T>()
-    }
-
-    /// Sets a latest-value input for this node's physics half (read there via
-    /// `PhysicsCtx::input::<T>()`) - a newer `T` replaces the older one.
-    pub fn set_physics_input<T: Any + Send>(&mut self, input: T) {
-        self.physics_input.set_state(input);
-    }
-
-    /// Queues a one-shot event for this node's physics half (read there via
-    /// `PhysicsCtx::events::<T>()`) - seen by exactly one fixed step.
-    pub fn push_physics_event<T: Any + Send>(&mut self, event: T) {
-        self.physics_input.push_event(event);
-    }
-
-    pub(crate) fn take_physics_behaviors(&mut self) -> Vec<Box<dyn PhysicsBehavior>> {
-        std::mem::take(&mut self.physics_behaviors)
-    }
-
-    pub(crate) fn take_physics_input(&mut self) -> Option<PhysicsInput> {
-        if self.physics_input.is_empty() {
-            return None;
-        }
-        Some(std::mem::take(&mut self.physics_input))
-    }
-
-    pub(crate) fn set_physics_states(&mut self, states: Vec<PhysicsPayload>) {
-        for state in states {
-            // `&*state`, not `state` - the Box's own TypeId would be
-            // `Box<dyn Any + Send>`, not the type inside it.
-            self.physics_states.insert(Any::type_id(&*state), state);
-        }
-    }
-
     /// Runs `on_spawn` on every attached behavior. Called once by
     /// `SceneNodes::spawn`, right after the node is actually in the scene -
     /// not part of construction, since a behavior's `on_spawn` may want to see
-    /// properties a later `add_property` call added after it was attached.
+    /// properties a later `with_property` call added after it was attached.
     pub(crate) fn run_on_spawn(&mut self, scene: &mut SceneAccess, app: &mut App) {
         // Behaviors are taken out of self before calling into them - a
         // behavior stored inside self.behaviors can't also receive &mut self,
-        // that would alias. Same pattern in run_update/run_after_physics below.
+        // that would alias. Same pattern in run_update/run_fixed_update below.
         let mut behaviors = std::mem::take(&mut self.behaviors);
         for behavior in behaviors.iter_mut() {
             behavior.on_spawn(self, scene, app);
@@ -285,10 +225,10 @@ impl Node {
         self.behaviors = behaviors;
     }
 
-    pub(crate) fn run_after_physics(&mut self, scene: &mut SceneAccess, app: &mut App, physics: Option<&RenderMessage>) {
+    pub(crate) fn run_fixed_update(&mut self, scene: &mut SceneAccess, app: &mut App) {
         let mut behaviors = std::mem::take(&mut self.behaviors);
         for behavior in behaviors.iter_mut() {
-            behavior.after_physics(self, scene, app, physics);
+            behavior.fixed_update(self, scene, app);
         }
         self.behaviors = behaviors;
     }
@@ -311,7 +251,7 @@ mod tests {
 
     #[test]
     fn a_maybe_node_reads_its_property_in_one_step() {
-        let mut node = Node::new("player").add_property(Health(3));
+        let mut node = Node::new("player").with_property(Health(3));
         assert_eq!(Some(&node).get_property::<Health>(), Some(&Health(3)));
         assert_eq!(Some(&node).get_property::<Name>(), None);
         assert_eq!(None::<&Node>.get_property::<Health>(), None);
@@ -321,7 +261,7 @@ mod tests {
 
     #[test]
     fn a_replaced_property_keeps_its_place_in_the_order() {
-        let mut node = Node::new("test").add_property(Health(3)).add_property(Name("a"));
+        let mut node = Node::new("test").with_property(Health(3)).with_property(Name("a"));
         let (health, name) = (node.property_order::<Health>().unwrap(), node.property_order::<Name>().unwrap());
         assert!(health < name);
         node.set_property(Health(1));
@@ -332,8 +272,8 @@ mod tests {
     }
 
     #[test]
-    fn add_property_then_get_property_mut_roundtrips() {
-        let mut node = Node::new("test").add_property(Health(3));
+    fn with_property_then_get_property_mut_roundtrips() {
+        let mut node = Node::new("test").with_property(Health(3));
         assert_eq!(node.get_property::<Health>(), Some(&Health(3)));
 
         node.get_property_mut::<Health>().unwrap().0 = 1;
@@ -347,14 +287,14 @@ mod tests {
     }
 
     #[test]
-    fn second_add_property_of_same_type_replaces_the_first() {
-        let mut node = Node::new("test").add_property(Health(3)).add_property(Health(9));
+    fn second_with_property_of_same_type_replaces_the_first() {
+        let mut node = Node::new("test").with_property(Health(3)).with_property(Health(9));
         assert_eq!(node.get_property::<Health>(), Some(&Health(9)));
     }
 
     #[test]
     fn a_node_is_3d_or_2d_never_both() {
-        let mut node = Node::new("test").add_property(Transform3D::default());
+        let mut node = Node::new("test").with_property(Transform3D::default());
         assert!(node.transform_3d().is_some());
         assert!(node.transform_2d().is_none());
 

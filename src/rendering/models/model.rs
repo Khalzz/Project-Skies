@@ -1,9 +1,9 @@
-use std::{collections::HashMap, default, mem};
+use std::{collections::HashMap, mem};
 
 
 use gltf::material::AlphaMode;
 use nalgebra::{UnitQuaternion, Vector3};
-use wgpu::{BindGroup, BindGroupLayoutDescriptor, Device};
+use wgpu::{BindGroupLayoutDescriptor, Device};
 
 use crate::transform::Transform;
 
@@ -131,16 +131,52 @@ impl Model {
     }
 }
 
+/// What a mesh's transform buffer holds (its bind group 2): where the mesh
+/// is in its model, then the lowest corner of its geometry there - see
+/// standard_template.wgsl's `Transform`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct MeshUniform {
+    pub(crate) matrix: [[f32; 4]; 4],
+    /// x, y, z - and 0, to fill the vector.
+    pub(crate) bounds_min: [f32; 4],
+}
+
+impl MeshUniform {
+    /// `transform` (the mesh's in its model), and the lowest corner of
+    /// `local_bounds` (its geometry's, in its own space) once `transform` has
+    /// put it there.
+    pub(crate) fn new(transform: &Transform, local_bounds: ([f32; 3], [f32; 3])) -> Self {
+        let matrix = transform.to_matrix_bufferable();
+        let (lo, hi) = local_bounds;
+        let mut bounds_min = [f32::MAX; 3];
+        for corner in 0..8 {
+            let p = [
+                if corner & 1 == 0 { lo[0] } else { hi[0] },
+                if corner & 2 == 0 { lo[1] } else { hi[1] },
+                if corner & 4 == 0 { lo[2] } else { hi[2] },
+            ];
+            for axis in 0..3 {
+                // Column-major: matrix * (p, 1).
+                let moved = matrix[0][axis] * p[0] + matrix[1][axis] * p[1] + matrix[2][axis] * p[2] + matrix[3][axis];
+                bounds_min[axis] = bounds_min[axis].min(moved);
+            }
+        }
+        Self { matrix, bounds_min: [bounds_min[0], bounds_min[1], bounds_min[2], 0.0] }
+    }
+}
+
 impl Mesh {
     /// This mesh with a transform of its own, starting where this one is -
     /// see `Model::share`.
     fn share(&self, device: &Device, queue: &wgpu::Queue, layout: &wgpu::BindGroupLayout) -> Mesh {
         let transform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Shared mesh transform buffer"),
-            size: mem::size_of::<[[f32; 4]; 4]>() as wgpu::BufferAddress,
+            size: mem::size_of::<MeshUniform>() as wgpu::BufferAddress,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        queue.write_buffer(&transform_buffer, 0, bytemuck::cast_slice(&[MeshUniform::new(&self.transform, self.local_bounds)]));
         let transform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("shared mesh transform bind group"),
             layout,

@@ -9,7 +9,7 @@ pub struct CameraLens {
     pub fovy: f32,
     pub znear: f32,
     /// The size it's drawn at (logical pixels), when it isn't the whole
-    /// screen - F10's map draws in only part of it.
+    /// screen - a map drawn in only part of it, say.
     pub viewport: Option<(u32, u32)>,
 }
 

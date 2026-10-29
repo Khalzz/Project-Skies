@@ -81,6 +81,8 @@ pub const STANDARD: &str = "engine/standard";
 pub const ERROR: &str = "engine/error";
 /// The Fullscreen shader that copies the scene onto the target, untouched.
 pub const BLIT: &str = "engine/blit";
+/// A material's texture repeated at a fixed size - see `Material::tiled`.
+pub const TILED: &str = "engine/tiled";
 /// What UI boxes and images are drawn with unless they say otherwise.
 pub const UI: &str = "engine/ui";
 /// What SDF text sets are drawn with unless they say otherwise.
@@ -90,18 +92,18 @@ pub const THICK_LINES: &str = "engine/thick_lines";
 /// The engine's own images a Fullscreen shader can read (its `.ron`'s
 /// `inputs`) - besides the game's targets (see Renderer::add_target).
 pub const BUILTIN_SCREEN_INPUTS: [&str; 2] = ["scene", "blurred"];
-const FULLSCREEN_TEMPLATE: &str = include_str!("../shaders/fullscreen_template.wgsl");
+const FULLSCREEN_TEMPLATE: &str = include_str!("../shaders/materials/fullscreen_template.wgsl");
 const BLIT_HOOKS: &str = "fn fragment(f: ScreenIn) -> vec4<f32> {\n    return textureSample(scene, scene_sampler, f.uv);\n}\n";
 /// Where a shader that `reads: [Depth]` gets the depth so far - texture,
 /// then sampler - in its bind group 0.
 pub const DEPTH_BINDING: u32 = 16;
 
-const TEMPLATE: &str = include_str!("../shaders/standard_template.wgsl");
-const UI_TEMPLATE: &str = include_str!("../shaders/ui_template.wgsl");
-const UI_IMAGE_TEMPLATE: &str = include_str!("../shaders/ui_image_template.wgsl");
-const SDF_TEXT_TEMPLATE: &str = include_str!("../shaders/sdf_text_template.wgsl");
-const THICK_LINES_TEMPLATE: &str = include_str!("../shaders/thick_lines_template.wgsl");
-const ERROR_SOURCE: &str = include_str!("../shaders/error.wgsl");
+const TEMPLATE: &str = include_str!("../shaders/materials/standard_template.wgsl");
+const UI_TEMPLATE: &str = include_str!("../shaders/materials/ui_template.wgsl");
+const UI_IMAGE_TEMPLATE: &str = include_str!("../shaders/materials/ui_image_template.wgsl");
+const SDF_TEXT_TEMPLATE: &str = include_str!("../shaders/materials/sdf_text_template.wgsl");
+const THICK_LINES_TEMPLATE: &str = include_str!("../shaders/materials/thick_lines_template.wgsl");
+const ERROR_SOURCE: &str = include_str!("../shaders/materials/error.wgsl");
 /// Where a Surface shader's hooks go in the template.
 const HOOKS_MARKER: &str = "//@HOOKS";
 const DEFAULT_VERTEX: &str = "fn vertex(v: VertexIn) -> VertexIn {\n    return v;\n}\n";
@@ -473,6 +475,9 @@ struct Instance {
     /// new String - it's done for every mesh, every frame.
     bind_groups: HashMap<String, HashMap<usize, wgpu::BindGroup>>,
     generation: u64,
+    /// Drawn on its models in place of their own texture (see
+    /// `Material::texture`) - a path in the AssetManager's textures.
+    texture: Option<String>,
 }
 
 /// Why a shader couldn't be built - and its files as they were then, so
@@ -766,9 +771,25 @@ impl ShaderLibrary {
                 }
             }
             _ => {
-                self.instances.insert(key.to_owned(), Instance { shader: shader.to_owned(), params: params.clone(), buffer: None, bind_groups: HashMap::new(), generation: 0 });
+                self.instances.insert(key.to_owned(), Instance { shader: shader.to_owned(), params: params.clone(), buffer: None, bind_groups: HashMap::new(), generation: 0, texture: None });
             }
         }
+    }
+
+    /// The material `key`'s texture, drawn in place of its models' own (see
+    /// `Material::texture`) - after `set_instance`. Its bind groups made
+    /// with another go.
+    pub fn set_instance_texture(&mut self, key: &str, texture: Option<&str>) {
+        let Some(instance) = self.instances.get_mut(key) else { return };
+        if instance.texture.as_deref() != texture {
+            instance.texture = texture.map(str::to_owned);
+            instance.bind_groups.clear();
+        }
+    }
+
+    /// The material `key`'s own texture, if it has one.
+    pub fn instance_texture(&self, key: &str) -> Option<&str> {
+        self.instances.get(key)?.texture.as_deref()
     }
 
     /// Drops the material instances not in `keys` - the ones nothing uses
@@ -908,7 +929,7 @@ impl ShaderLibrary {
         let Some(Ok(shader)) = self.built.get(&name) else { return };
         let generation = shader.generation;
         if !self.instances.contains_key(key) {
-            self.instances.insert(key.to_owned(), Instance { shader: key.to_owned(), params: BTreeMap::new(), buffer: None, bind_groups: HashMap::new(), generation });
+            self.instances.insert(key.to_owned(), Instance { shader: key.to_owned(), params: BTreeMap::new(), buffer: None, bind_groups: HashMap::new(), generation, texture: None });
         }
         let instance = self.instances.get_mut(key).expect("made just above");
         if instance.generation != generation {
@@ -1629,7 +1650,7 @@ mod tests {
     #[test]
     fn the_toast_icons_are_valid() {
         let settings = read_settings("(kind: Ui)").unwrap();
-        for hooks in [include_str!("../shaders/ui_icon_alert.wgsl"), include_str!("../shaders/ui_icon_error.wgsl"), include_str!("../shaders/ui_icon_chevron.wgsl")] {
+        for hooks in [include_str!("../shaders/ui/ui_icon_alert.wgsl"), include_str!("../shaders/ui/ui_icon_error.wgsl"), include_str!("../shaders/ui/ui_icon_chevron.wgsl")] {
             for &overlay in Kind::Ui.overlays() {
                 let (program, first_line) = assemble_overlay(overlay, hooks, &surface_declarations(hooks, &settings));
                 check(&program, first_line, hooks.lines().count(), "icon").unwrap();

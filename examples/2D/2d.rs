@@ -22,9 +22,9 @@ struct Test2DScene;
 impl SceneBehaviour for Test2DScene {
   fn on_spawn(&mut self, scene: &mut pankarta_software::scene_manager::scene::Scene, app: &mut App) {
     let node_2d = Node::new("player")
-      .add_behavior(Player::new(500.0))
-      .add_property(Transform2D { position: Vector2::new(500.0, 500.0), rotation: 0.0, scale: Vector2::new(1.0, 1.0), z_index: 0 })
-      .add_property(Shape2D::square(100.0).color(UiColor::Hex("#f63b3b")));
+      .with_behavior(Player::new(500.0))
+      .with_property(Transform2D { position: Vector2::new(500.0, 500.0), rotation: 0.0, scale: Vector2::new(1.0, 1.0), z_index: 0 })
+      .with_property(Shape2D::square(100.0).color(UiColor::Hex("#f63b3b")));
 
     scene.spawn_node(app, node_2d).unwrap();
 

@@ -1,31 +1,27 @@
 use std::collections::HashMap;
 use std::env;
-use std::rc::Rc;
-use std::time::Instant;
 
 use glyphon::TextArea;
 use nalgebra::Vector3;
 use sdl2::EventPump;
 
-use crate::assets::Assets;
-use crate::audio::audio::Audio;
+use crate::asset_manager::AssetManager;
+use crate::audio::audio::{Audio, Sound};
 use crate::game_nodes::timing::Timing;
 use crate::input::input;
 use crate::particles::ParticleEmitters;
-use crate::particles::renderer::{EmitterSource, ParticleFrameInfo};
-use crate::physics::physics::{DebugPhysicsMessageType, PhysicsState};
-use crate::physics::physics_handler::RenderMessage;
+use crate::particles::renderer::{EmitterSource, ParticleFrameInfo, ParticleRenderer};
+use crate::physics::PhysicsWorld;
 use crate::rendering::egui_overlay::DebugUi;
 use crate::rendering::graphics_backend::GraphicsBackend;
 use crate::rendering::enviroment::environment::PreparedEnvironment;
 use crate::rendering::instance_management::InstanceRaw;
 use crate::rendering::renderer::Renderer;
 use crate::rendering::ui::ui::Ui;
-use crate::scene_manager::node::properties::{Shape2D, ShapeKind};
+use crate::scene_manager::node::properties::{Light, LightKind, Shape2D, ShapeKind};
 use crate::rendering::shapes_2d::ShapeInstance;
 use crate::scene_manager::scene_access::SceneChanges;
-use crate::scene_manager::scene::{FrameContext, SceneManager};
-use crate::settings::ProjectSettings;
+use crate::scene_manager::scene::{FrameContext, Scene, SceneManager};
 use crate::ui::color::UiColor;
 use crate::ui::ui_node::UiNode;
 use crate::ui::ui_transform::PositionValue;
@@ -50,81 +46,64 @@ pub struct Size {
 
         let mut app = App::new().await?;
         app.window.set_title("My Game");
-        app.settings.physics.gravity = Vector3::new(0.0, -9.81, 0.0);
+        app.physics.set_gravity(Vector3::new(0.0, -9.81, 0.0));
         input::load_bindings("settings/input.ron")?;
         app.scene_manager.create_scene("level", Level::new);
         app.scene_manager.open_scene("level");
         app.run();
 
     - window: title, size, window mode, screen, mouse lock.
-    - settings: the project's defaults (gravity, fixed timestep, environment,
-      lighting, particles' wind/sea) - a scene overrides any of them for
-      itself (see crate::settings).
     - assets: the assets folder - models are named by their path in it.
-    - renderer: everything that draws.
+    - renderer: everything that draws - and what's drawn behind everything
+      (set_environment).
     - scene_manager: the scenes, and the one open now.
-    - physics: the open scene's physics thread, and what it last sent.
+    - physics: the open scene's physics world, and the gravity and timestep
+      every scene runs with (see PhysicsWorld).
+    - particles: every node's particles and trails, and the wind and sea
+      they move in (see ParticleRenderer).
+
+    Each system's settings are its own, and global: set once, they hold for
+    every scene until they're set again. The sun is a node (see Light).
     - ui, audio, time (delta time, time scale), debug_ui (the game's egui
       debug windows).
     - Input is global, not here - see crate::input::input.
 */
 pub struct App {
-    /// The window - see `Window`.
     pub window: Window,
-    /// Everything that draws - see `Renderer`.
     pub renderer: Renderer,
-    /// The project's defaults - every scene uses them, unless it sets its own
-    /// (see crate::settings).
-    pub settings: ProjectSettings,
-    /// The assets folder (see `Assets`).
-    pub assets: Assets,
+    pub assets: AssetManager,
     pub scene_manager: SceneManager,
     pub ui: Ui,
     pub audio: Audio,
-    /// Delta time and time scale - see `Timing`.
     pub time: Timing,
-    /// The game's debug windows - see `DebugUi`.
     pub debug_ui: DebugUi,
-    /// What a scene's loading is on right now (see LoadReporter) - shown by
-    /// the loading screen, None when nothing's loading.
     pub loading_step: Option<String>,
-    /// The open scene's physics thread, and what it last sent - see
-    /// `PhysicsState`.
-    pub physics: PhysicsState,
-    /// Set true to quit from code that only has `&mut App` (a UI button's
-    /// click handler, say) - `run` stops at the start of the next frame, the
-    /// same way as closing the window (physics shut down, `run` returns).
+    pub physics: PhysicsWorld,
+    /// GPU particles and trails, fed each frame from every node's
+    /// ParticleEmitters property (see App::update_particles).
+    pub particles: ParticleRenderer,
     pub should_quit: bool,
     event_pump: Option<EventPump>,
 }
 
 impl App {
-    /// The engine, with its window created but not shown yet: 800x600,
-    /// windowed, resizable, titled "Pankarta Software" - change any of it
-    /// through `app.window` before `run`, which shows it. Draws with whichever
-    /// graphics API suits this machine best - see `new_with_backend`.
     pub async fn new() -> Result<App, String> {
         Self::new_with_backend(GraphicsBackend::Auto).await
     }
 
-    /// `new`, drawing with `backend` (see GraphicsBackend) - an error when
-    /// this machine can't use it. It's fixed for the app's life: changing it
-    /// means starting again (`GraphicsBackend::available` lists the choices).
+    // Creates a window with a backend allowing the user to define the backend in particular it wants to use
     pub async fn new_with_backend(backend: GraphicsBackend) -> Result<App, String> {
-        // Read when SDL starts - a fullscreen window stays up when it loses focus.
         env::set_var("SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS", "0");
         let sdl = sdl2::init()?;
         let window = Window::new(sdl.video()?)?;
         input::init(sdl.game_controller()?, sdl.joystick()?);
-        // SDL stays up as long as its subsystems do - nothing else keeps `sdl`.
         let event_pump = sdl.event_pump()?;
 
-        // Asked now, before the device exists, and kept - see
-        // GraphicsBackend::available for why not later.
         GraphicsBackend::available();
-        let renderer = Renderer::new(&window, backend).await?;
 
-        // Its boxes and images are drawn with Ui shaders from the library.
+        let renderer = Renderer::new(&window, backend).await?;
+        let particles = ParticleRenderer::new(&renderer.device, &renderer.queue, renderer.config.format, &renderer.camera_resources.bind_group_layout, &renderer.depth_render.foam_depth_copy.view);
+
         let ui = Ui::new(
             &renderer.device,
             &renderer.queue,
@@ -133,13 +112,12 @@ impl App {
             &renderer.blur,
             renderer.shaders.overlay_layout(crate::rendering::shader_library::Overlay::UiBox),
         );
-        let assets = Assets::new(renderer.shaders.overlay_layout(crate::rendering::shader_library::Overlay::UiImage).clone());
+        let assets = AssetManager::new(renderer.shaders.overlay_layout(crate::rendering::shader_library::Overlay::UiImage).clone(), crate::rendering::models::textures::Texture::create_bind_group_layout(&renderer.device));
         let debug_ui = DebugUi::new(&renderer.device, renderer.config.format);
 
         Ok(App {
             window,
             renderer,
-            settings: ProjectSettings::default(),
             assets,
             scene_manager: SceneManager::new(),
             ui,
@@ -147,42 +125,21 @@ impl App {
             time: Timing::new(),
             debug_ui,
             loading_step: None,
-            physics: PhysicsState::new(),
+            physics: PhysicsWorld::new(),
+            particles,
             should_quit: false,
             event_pump: Some(event_pump),
         })
     }
 
-    /// Resizes the renderer and the UI to the window when its size has
-    /// changed - by the game (`app.window.set_size`, `set_window_mode`...) or
-    /// the user (dragging it, maximizing it). Every frame, before anything's
-    /// drawn.
     fn sync_window_size(&mut self) {
         let (width, height) = self.window.sdl_window().drawable_size();
         if width != self.renderer.config.width || height != self.renderer.config.height {
             self.resize();
         } else if self.ui.update_scale(self.window.size.width, self.window.size.height) {
             // The UI's scaling changed (app.ui.scaling / scale), the window didn't.
-            self.relayout_ui();
+            self.ui.relayout();
         }
-    }
-
-    /// Lays the UI out again in its current room (Ui::size) - every node's
-    /// Percent sizes and Center/End positions were worked out against the
-    /// old one (see UiNode::resolve).
-    fn relayout_ui(&mut self) {
-        let (ui_width, ui_height) = self.ui.size();
-        for node in self.ui.renderizable_elements.values_mut() {
-            node.resolve(ui_width, ui_height);
-        }
-        self.ui.has_changed = true;
-    }
-
-    /// The UI's room as a `Size` (UI units, rounded) - what its layout pass
-    /// turns positions into screen space with.
-    fn ui_layout_size(&self) -> Size {
-        let (width, height) = self.ui.size();
-        Size { width: width.round().max(1.0) as u32, height: height.round().max(1.0) as u32 }
     }
 
     pub(crate) fn resize(&mut self) {
@@ -200,6 +157,8 @@ impl App {
         }
 
         self.renderer.resize(width, height);
+        // The depth copy particles fade against was just rebuilt.
+        self.particles.rebuild_depth_bind_group(&self.renderer.device, &self.renderer.depth_render.foam_depth_copy.view);
         if let Some(cameras) = self.scene_manager.cameras_mut() {
             cameras.resize(width, height);
         }
@@ -212,62 +171,58 @@ impl App {
         // The UI's scale follows the window's size (see UiScaling), and its
         // layout the new room.
         self.ui.update_scale(self.window.size.width, self.window.size.height);
-        self.relayout_ui();
+        self.ui.relayout();
     }
 
-    /// The environment drawn now - the active scene's own, or the project's.
+    /// The environment drawn now (see `Renderer::set_environment`).
     pub(crate) fn current_environment(&self) -> &PreparedEnvironment {
-        self.scene_manager.active_scene.as_ref()
-            .and_then(|scene| scene.environment.as_ref())
-            .map(|(_, prepared)| prepared)
-            .unwrap_or(&self.renderer.project_environment)
+        &self.renderer.prepared_environment
     }
 
-    fn current_environment_mut(&mut self) -> &mut PreparedEnvironment {
-        match self.scene_manager.active_scene.as_mut().and_then(|scene| scene.environment.as_mut()) {
-            Some((_, prepared)) => prepared,
-            None => &mut self.renderer.project_environment,
-        }
+    /// The active scene's sun: toward it (normalized), and the light it
+    /// gives - from its first node with a directional `Light` and a
+    /// `Transform3D`, which shines along the node's +Z. None: no sun.
+    fn sun(&self) -> Option<(Vector3<f32>, [f32; 3])> {
+        let content = self.scene_manager.content()?;
+        content.nodes.iter().find_map(|node| {
+            let light = node.get_property::<Light>().filter(|light| light.kind == LightKind::Directional)?;
+            let transform = node.transform_3d()?;
+            let toward = -(transform.rotation * Vector3::z());
+            Some((toward, light.radiance()))
+        })
     }
 
-    /// Applies the settings the active scene runs with now (its own, or the
-    /// project's) wherever they changed since last frame: builds a changed
-    /// environment again, sends a changed gravity or time scale to the
-    /// physics thread, and fills the light buffer from the lighting.
-    fn apply_settings(&mut self, camera_position: Vector3<f32>) {
-        if self.settings.environment != self.renderer.project_environment_source {
-            self.renderer.project_environment = self.renderer.prepare_environment(self.settings.environment.clone());
-            self.renderer.project_environment_source = self.settings.environment.clone();
+    /// Builds the environment again when it changed - unless a scene's
+    /// assets are loading, which builds it with them - and fills the light
+    /// buffer and the sky's sun disc from the active scene's sun.
+    fn update_lighting(&mut self, camera_position: Vector3<f32>) {
+        if self.renderer.environment() != &self.renderer.prepared_from && self.scene_manager.loading.is_none() {
+            let environment = self.renderer.environment().clone();
+            self.renderer.prepared_environment = self.renderer.prepare_environment(environment.clone());
+            self.renderer.prepared_from = environment;
         }
-        if let Some(scene) = self.scene_manager.active_scene.as_mut() {
-            let current = scene.environment.as_ref().map(|(source, _)| source);
-            if scene.settings.environment.as_ref() != current {
-                scene.environment = scene.settings.environment.clone()
-                    .map(|environment| (environment.clone(), self.renderer.prepare_environment(environment)));
-            }
-        }
-
-        let scene_settings = self.scene_manager.active_scene.as_ref().map(|scene| &scene.settings);
-        let gravity = scene_settings.map_or(self.settings.physics.gravity, |settings| settings.gravity(&self.settings));
-        let lighting = scene_settings.map_or(self.settings.lighting, |settings| settings.lighting(&self.settings));
-
-        self.physics.sync(gravity, self.time.time_scale);
 
         // The sun is infinitely far away - its direction is placed that far
         // along in the shaders' camera-relative space, so it's one fixed
         // direction for every surface on screen. The sky's sun disc follows
-        // the same direction, so disc, lighting and glint all agree.
+        // the same direction, so disc, lighting and glint all agree. No sun:
+        // no sunlight, no disc - only the ambient light.
         const SUN_DISTANCE: f32 = 1.0e9;
-        let sun_direction = lighting.sun_direction.try_normalize(1e-6).unwrap_or_else(Vector3::y);
-        let light_position = sun_direction * SUN_DISTANCE;
-        self.renderer.light.uniform.position = [light_position.x, light_position.y, light_position.z];
-        self.renderer.light.uniform.color = lighting.sun_color;
+        let sun = self.sun();
+        if let Some((toward, radiance)) = sun {
+            let light_position = toward * SUN_DISTANCE;
+            self.renderer.light.uniform.position = [light_position.x, light_position.y, light_position.z];
+            self.renderer.light.uniform.color = radiance;
+        } else {
+            self.renderer.light.uniform.color = [0.0; 3];
+        }
+        self.renderer.light.uniform.ambient = self.renderer.ambient_light();
         self.renderer.light.uniform.time = self.time.shader_time();
         self.renderer.light.uniform.camera_position = camera_position.into();
         self.renderer.queue.write_buffer(&self.renderer.light.rendering_data.buffer, 0, bytemuck::cast_slice(&[self.renderer.light.uniform]));
         let queue = self.renderer.queue.clone();
-        if let Some(skybox) = self.current_environment_mut().skybox.as_mut() {
-            skybox.set_sun_direction(&queue, sun_direction);
+        if let Some(skybox) = self.renderer.prepared_environment.skybox.as_mut() {
+            skybox.set_sun(&queue, sun.map(|(toward, _)| toward));
         }
     }
 
@@ -281,19 +236,16 @@ impl App {
         }
         let active = cameras.active();
         let camera_position = active.camera.position().coords;
-        let particle_settings = self.scene_manager.active_scene.as_ref()
-            .map_or(self.settings.particles, |scene| scene.settings.particles(&self.settings));
         let light = &self.renderer.light.uniform;
         let frame = ParticleFrameInfo {
             camera_position,
             camera_view: active.camera.calc_matrix(),
             near: active.projection.znear,
             delta_time: self.time.delta_time,
-            // No sea: far below anything a particle reaches.
-            sea_level: particle_settings.sea_level.unwrap_or(-1.0e9),
-            wind: particle_settings.wind,
+            gravity: self.physics.gravity(),
             sun_direction: Vector3::from(light.position),
             sun_color: Vector3::from(light.color),
+            ambient: Vector3::from(light.ambient),
         };
 
         let Some(content) = self.scene_manager.content() else { return };
@@ -308,7 +260,7 @@ impl App {
                 emitters.iter().map(move |(name, emitter)| EmitterSource { node_id: &node.id, name, emitter, position, rotation })
             })
         });
-        self.renderer.particles.update(&self.renderer.device, &self.renderer.queue, &frame, sources);
+        self.particles.update(&self.renderer.device, &self.renderer.queue, &frame, sources);
     }
 
     /// Hands the 2D nodes' shapes (see `Shape2D`) to the renderer, in the
@@ -319,7 +271,7 @@ impl App {
     fn prepare_nodes_2d(&mut self) {
         let mut shapes: Vec<((i32, u64), ShapeInstance)> = Vec::new();
         if let Some(content) = self.scene_manager.content() {
-            let pixels_per_unit = self.window.pixel_size.width as f32 / self.ui_layout_size().width as f32;
+            let pixels_per_unit = self.window.pixel_size.width as f32 / self.ui.layout_size().width as f32;
             for node in content.nodes.iter() {
                 let (Some(transform), Some(shape)) = (node.transform_2d(), node.get_property::<Shape2D>()) else { continue };
                 let (center, rotation) = shape.offset.place(transform);
@@ -345,6 +297,17 @@ impl App {
         let shapes: Vec<ShapeInstance> = shapes.into_iter().map(|(_, shape)| shape).collect();
         let screen_px = (self.renderer.config.width, self.renderer.config.height);
         self.renderer.shapes_2d.set(&self.renderer.device, &self.renderer.queue, &shapes, screen_px);
+    }
+
+    /// Plays the sound file `path` (inside the assets folder) - read the
+    /// first time, then kept (see `SoundCache`). Set it up by chaining - see
+    /// engine::audio::audio. Nothing plays when the file can't be read (said
+    /// once) or there's no audio device.
+    pub fn play_sound(&mut self, path: &str) -> Sound<'_> {
+        match self.assets.sounds.load_for_playing(path) {
+            Some(clip) => self.audio.play(clip),
+            None => self.audio.nothing(),
+        }
     }
 
     /// Registers a line set for the frame plan's `Lines` steps - see
@@ -388,6 +351,8 @@ impl App {
         self.debug_ui.paint(&self.renderer.device, &self.renderer.queue, &mut encoder, &view, screen_size_px);
 
         self.renderer.queue.submit(std::iter::once(encoder.finish()));
+        // Drawn - the game fills it again for the next frame.
+        self.renderer.lines.clear();
         output.present();
 
         Ok(())
@@ -505,7 +470,7 @@ impl App {
         // regardless of what space everything else here (UiTransform, mouse
         // position) is in. See Label::text_area's own doc comment. Worked out
         // from the same rounded room the layout uses, so the two always agree.
-        let ui_size = self.ui_layout_size();
+        let ui_size = self.ui.layout_size();
         let dpi_scale = self.window.pixel_size.width as f32 / ui_size.width as f32;
 
         // Debug bounds overlay (Ui::debug_bounds, no key) - has to run before node_content_preparation
@@ -598,7 +563,7 @@ impl App {
         // under the loading screen.
         if self.scene_manager.loading.is_none() {
             let paths = self.ui.ui_rendering.image_quads.keys().map(|(_, path)| path.as_str());
-            self.assets.load_missing_images(&self.renderer.device, &self.renderer.queue, paths);
+            self.assets.images.load_missing(&self.renderer.device, &self.renderer.queue, paths);
         }
 
         // Rebuilt last: glyphon's TextArea values above still borrow from inside
@@ -711,7 +676,6 @@ impl App {
                 SceneManager::apply_open(&mut self);
             } else {
                 SceneManager::poll_load(&mut self);
-                let physics_data = self.receive_physics();
 
                 // The UI bounds overlay (no key - set Ui::debug_bounds) -
                 // rebuilt every frame while it's on, since it has to track
@@ -722,43 +686,25 @@ impl App {
 
                 // Tick the active scene - taken out of its slot first so there's no
                 // conflicting borrow with the &mut self it needs, put back once done.
-                // Its nodes tick right alongside it, in the same taken-out window -
-                // their behaviors' update, then after_physics (once a frame, not at
-                // the physics thread's rate - see Behavior::after_physics).
+                // Its nodes tick right alongside it, in the same taken-out window:
+                // the physics steps due (each after every fixed_update), then
+                // every update.
                 if let Some(mut scene) = self.scene_manager.active_scene.take() {
-                    // Taken out of self.physics (the Rc shared, not the lines
-                    // copied) - the scene gets &mut self too.
-                    let physics_tx = self.physics.command_tx().cloned();
-                    let debug_physics = Rc::clone(&self.physics.debug_lines);
+                    self.run_physics(&mut scene);
+
                     let mut ctx = FrameContext {
                         app_state: &mut app_state,
                         event_pump: &mut event_pump,
-                        physics_command_tx: physics_tx.as_ref(),
-                        physics_data: &physics_data,
-                        debug_physics: &debug_physics,
                     };
-                    // Whatever node physics halves published since last frame,
-                    // in place before any behavior's update gets to read it.
-                    for states in self.physics.take_node_states() {
-                        scene.content.nodes.apply_physics_states(states);
-                    }
-
                     scene.run_update(&mut self, &mut ctx);
 
                     let mut changes = SceneChanges::default();
                     scene.content.nodes.update(&mut scene.cameras, &mut self, &mut changes);
-                    // Only with a physics thread - without one there are no
-                    // results to react to (see Behavior::after_physics).
-                    if self.physics.is_running() {
-                        scene.content.nodes.after_physics(&mut scene.cameras, &mut self, &physics_data, &mut changes);
-                    }
                     // What the behaviors spawned and despawned, now they've all run.
-                    scene.apply_changes(&mut self, changes, physics_tx.as_ref());
-
-                    // Everything behaviors wrote for their physics halves this
-                    // frame, sent as one batch. Always taken, even with no
-                    // physics running, so it can't pile up on the nodes.
-                    self.physics.send_inputs(scene.content.nodes.take_physics_inputs());
+                    scene.apply_changes(&mut self, changes);
+                    // Every moving body's colliders, for the debug view - after
+                    // the behaviors, which may have moved one.
+                    self.physics.draw_colliders();
 
                     // The animation's turn, after the behaviors - then the
                     // hierarchy (children onto their parents, LookAt nodes
@@ -780,12 +726,17 @@ impl App {
                     self.scene_manager.active_scene = Some(scene);
                 }
 
+                // Sounds that got to an `at`, or played to their end, this frame.
+                for callback in self.audio.take_due() {
+                    callback(&mut self);
+                }
+
                 SceneManager::advance_load(&mut self);
                 self.scene_manager.advance_splash(self.time.unscaled_delta_time);
 
                 let camera_position = self.scene_manager.cameras().map(|c| c.active().camera.position().coords).unwrap_or_else(Vector3::zeros);
                 self.write_instance_buffers(camera_position);
-                self.apply_settings(camera_position);
+                self.update_lighting(camera_position);
 
                 // No-op unless something called SceneCameras::transition_to(...) -
                 // advances the blend (if any) before this frame's view_proj upload.
@@ -799,7 +750,7 @@ impl App {
                 // with those values, and they never change.)
                 self.renderer.shaders.watch();
 
-                // TEMP: debug_text!/F3 messages have nowhere on-screen to render yet
+                // TEMP: debug_text! messages have nowhere on-screen to render yet
                 // - dump to stdout for now so debug_text! is actually visible somewhere.
                 let messages = crate::tooling::debug_console::drain_messages();
                 if crate::tooling::debug_console::is_console_visible() {
@@ -825,73 +776,38 @@ impl App {
         }
     }
 
-    /// The physics thread's latest - every body's pose (applied to its node
-    /// and renderer instance here) and its debug lines. Returns the newest
-    /// batch of poses, for FrameContext.
-    fn receive_physics(&mut self) -> Rc<HashMap<String, RenderMessage>> {
-        if !self.physics.is_running() {
-            return Rc::default();
+    /// The physics steps this frame's time calls for - each right after
+    /// every node's `fixed_update` (and the scene's), what they spawned and
+    /// despawned done in between - then every moving body's node placed
+    /// where it's drawn this frame (see `PhysicsWorld::render_poses`).
+    fn run_physics(&mut self, scene: &mut Scene) {
+        let steps = self.physics.steps_due(self.time.delta_time, self.renderer.debug.physics);
+        for _ in 0..steps {
+            input::begin_fixed_step();
+            let mut changes = SceneChanges::default();
+            scene.content.nodes.fixed_update(&mut scene.cameras, self, &mut changes);
+            scene.run_fixed_update(self);
+            scene.apply_changes(self, changes);
+            input::end_fixed_step();
+            self.physics.step();
         }
-        let physics_data = self.physics.receive(self.renderer.render_physics.visible);
 
-        // Paused, the poses aren't applied - the physics thread may still be
-        // a step or two ahead when the pause reaches it, and drawing those
-        // reads as the body coasting on after everything else stopped.
-        let paused = self.time.is_paused();
-        let now = Instant::now();
-
-        self.renderer.render_physics.renderizable_lines.clear();
-        for message in self.physics.debug_lines.iter() {
-            match message {
-                DebugPhysicsMessageType::RenderizableLines { owner, line } => {
-                    let mut line = *line;
-                    // The mesh is drawn ahead of the last physics sample (see
-                    // physics_pose_now). Carry this body's lines by the same
-                    // amount, or they lag behind it.
-                    if let (false, Some(pose)) = (paused, owner.as_ref().and_then(|id| self.physics.poses.get(id))) {
-                        let kinematic = owner.as_ref().is_some_and(|id| self.scene_manager.content().is_some_and(|content| content.kinematic.contains(id)));
-                        if let (false, Some((position, rotation))) = (kinematic, physics_pose_now(pose, now)) {
-                            let sample_rotation = nalgebra::UnitQuaternion::new_normalize(pose.rotation);
-                            let shift = |point: [f32; 3]| {
-                                let local = sample_rotation.inverse() * (Vector3::new(point[0], point[1], point[2]) - pose.translation);
-                                let world = position + rotation * local;
-                                [world.x, world.y, world.z]
-                            };
-                            line[0].position = shift(line[0].position);
-                            line[1].position = shift(line[1].position);
-                        }
-                    }
-                    self.renderer.render_physics.renderizable_lines.push(line);
-                },
-                DebugPhysicsMessageType::RenderizablePoint(_) => {},
+        // Not onto a node an animation is moving (SceneContent::kinematic) -
+        // its body is held still meanwhile.
+        for (id, pose) in self.physics.render_poses() {
+            if scene.content.kinematic.contains(id) {
+                continue;
+            }
+            let (position, rotation) = (pose.translation.vector, pose.rotation);
+            if let Some(renderizable) = scene.content.renderizable_instances.get_mut(id) {
+                renderizable.instance.transform.position = position;
+                renderizable.instance.transform.rotation = rotation;
+            }
+            if let Some(transform) = scene.content.nodes.get_mut(id).and_then(|node| node.transform_3d_mut()) {
+                transform.position = position;
+                transform.rotation = rotation;
             }
         }
-
-        // Each body's pose onto its node's Transform3D - where every node's
-        // pose is read from (the hierarchy, the animation) and where the
-        // renderer instance is synced from at the end of the frame - and its
-        // renderer instance. Not onto a node an animation is moving
-        // (SceneContent::kinematic) - its body is held still meanwhile.
-        if !paused {
-            if let Some(content) = self.scene_manager.content_mut() {
-                for (key, pose) in self.physics.poses.iter() {
-                    if content.kinematic.contains(key) {
-                        continue;
-                    }
-                    let Some((position, rotation)) = physics_pose_now(pose, now) else { continue };
-                    if let Some(renderizable) = content.renderizable_instances.get_mut(key) {
-                        renderizable.instance.transform.position = position;
-                        renderizable.instance.transform.rotation = rotation;
-                    }
-                    if let Some(transform) = content.nodes.get_mut(key).and_then(|node| node.transform_3d_mut()) {
-                        transform.position = position;
-                        transform.rotation = rotation;
-                    }
-                }
-            }
-        }
-
-        physics_data
     }
 
     /// Every model's instance buffer from its nodes' poses - grouped by
@@ -908,7 +824,7 @@ impl App {
             }
         }
 
-        for (model_ref, model) in self.assets.game_models.iter_mut() {
+        for (model_ref, model) in self.assets.models.drawn.iter_mut() {
             model.material_ranges.clear();
             let Some(instances) = model_instances.get_mut(model_ref.as_str()) else { continue };
             instances.sort_by(|a, b| a.0.cmp(b.0));
@@ -930,7 +846,6 @@ impl App {
     /// freed while they're up, and - while they are - the active scene's
     /// `debug_ui` run to build them - drawn by `render`.
     fn run_debug_ui(&mut self) {
-        self.debug_ui.handle_toggle_key();
         // The debug windows free the mouse to click them.
         let shown = self.debug_windows_shown();
         if let Some(locked) = self.debug_ui.cursor_lock_change(shown, self.window.is_cursor_locked()) {
@@ -959,27 +874,8 @@ impl App {
         self.debug_ui.set_frame(output);
     }
 
-    /// Whether the game's debug windows (F1) are drawn this frame.
+    /// Whether the game's debug windows (`debug_ui.visible`) are drawn this frame.
     fn debug_windows_shown(&self) -> bool {
         self.debug_ui.visible
     }
-}
-
-/// Where a physics body is at `now`, from its last reported `pose`: carried
-/// on along its velocity and spin for the time since that pose was true -
-/// `None` when it's stale (see MAX_LEAD).
-/// The physics thread steps at a fixed 120 Hz, out of step with the frames,
-/// so a raw pose is anywhere from 0 to ~2 steps old - drawn as is, a fast
-/// jet stutters next to anything moved smoothly every frame (a missile, the
-/// world around it). Past MAX_LEAD the pose is stale (a hitch, a level
-/// that's just restarted) and the body is left where it's drawn.
-fn physics_pose_now(pose: &RenderMessage, now: std::time::Instant) -> Option<(nalgebra::Vector3<f32>, nalgebra::UnitQuaternion<f32>)> {
-    const MAX_LEAD: f32 = 0.05;
-    let rotation = nalgebra::Unit::new_normalize(pose.rotation);
-    let lead = now.saturating_duration_since(pose.sampled_at).as_secs_f32();
-    if lead > MAX_LEAD {
-        return None;
-    }
-    let spin = nalgebra::UnitQuaternion::from_scaled_axis(pose.angvel * lead);
-    Some((pose.translation + pose.linvel * lead, spin * rotation))
 }

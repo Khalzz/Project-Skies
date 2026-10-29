@@ -3,7 +3,7 @@ use nalgebra::{UnitQuaternion, Vector2, Vector3};
 /// A 3D position/rotation/scale - a node in the 3D world. A `Node`
 /// property, like any other:
 ///
-///     Node::new("plane").add_property(Transform3D { position, ..Default::default() })
+///     Node::new("plane").with_property(Transform3D { position, ..Default::default() })
 ///
 /// A node is in the 3D world or on the 2D plane, never both: putting this
 /// on takes a `Transform2D` off.
@@ -31,6 +31,14 @@ impl Default for Transform3D {
 }
 
 impl Transform3D {
+    /// At the origin, turned so its +Z points along `direction` (+Y as close
+    /// to up as it can) - for a node whose facing is what matters: a
+    /// directional `Light`, a camera. No direction: not turned.
+    pub fn facing(direction: Vector3<f32>) -> Self {
+        let rotation = crate::scene_manager::scene_nodes::facing(direction).unwrap_or_else(UnitQuaternion::identity);
+        Self { rotation, ..Default::default() }
+    }
+
     /// Where a child sitting at `local` from this transform (its parent) is
     /// in the world - see `Parent`. The offset is in meters, turned with the
     /// parent when `inherit_rotation` (otherwise along the world's axes, and

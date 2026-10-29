@@ -1,13 +1,13 @@
 use wgpu::{util::DeviceExt, BindGroup, BindGroupLayoutDescriptor, Buffer, Device, RenderPipeline, SurfaceConfiguration, TextureView};
 
-use crate::primitive::manual_vertex::ManualVertexTexturized;
+use crate::rendering::vertex::QuadVertex;
 use crate::rendering::models::textures::Texture;
 
-const QUAD_VERTICES: &[ManualVertexTexturized] = &[
-    ManualVertexTexturized { position: [-1.0, -1.0, 0.0], tex_coords: [0.0, 1.0] },
-    ManualVertexTexturized { position: [1.0, -1.0, 0.0], tex_coords: [1.0, 1.0] },
-    ManualVertexTexturized { position: [1.0, 1.0, 0.0], tex_coords: [1.0, 0.0] },
-    ManualVertexTexturized { position: [-1.0, 1.0, 0.0], tex_coords: [0.0, 0.0] },
+const QUAD_VERTICES: &[QuadVertex] = &[
+    QuadVertex { position: [-1.0, -1.0, 0.0], tex_coords: [0.0, 1.0] },
+    QuadVertex { position: [1.0, -1.0, 0.0], tex_coords: [1.0, 1.0] },
+    QuadVertex { position: [1.0, 1.0, 0.0], tex_coords: [1.0, 0.0] },
+    QuadVertex { position: [-1.0, 1.0, 0.0], tex_coords: [0.0, 0.0] },
 ];
 const QUAD_INDICES: &[u16] = &[0, 1, 2, 0, 2, 3];
 
@@ -74,7 +74,7 @@ fn fullscreen_pipeline(device: &Device, layout: &wgpu::PipelineLayout, shader: &
         vertex: wgpu::VertexState {
             module: shader,
             entry_point: Some("vs_main"),
-            buffers: &[ManualVertexTexturized::desc()],
+            buffers: &[QuadVertex::desc()],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
@@ -268,7 +268,7 @@ impl BlurRender {
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Blur Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/blur.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/post/blur.wgsl").into()),
         });
         let down_pipeline = fullscreen_pipeline(device, &pipeline_layout, &shader, "fs_down", format);
         let up_pipeline = fullscreen_pipeline(device, &pipeline_layout, &shader, "fs_up", format);

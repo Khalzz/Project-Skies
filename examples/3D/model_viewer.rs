@@ -5,7 +5,8 @@ use pankarta_software::input::input;
 use pankarta_software::rendering::ui::ui::Ui;
 use pankarta_software::scene_manager::behavior::Behavior;
 use pankarta_software::scene_manager::node::Node;
-use pankarta_software::scene_manager::node::properties::{rotation_from_degrees, CameraLens, LookAt, Model, Shape2D, Transform2D, Transform3D};
+use pankarta_software::scene_manager::node::properties::{rotation_from_degrees, CameraLens, Light, LookAt, Model, Shape2D, Transform2D, Transform3D};
+use pankarta_software::resources::ModelSource;
 use pankarta_software::scene_manager::scene::SceneBehaviour;
 use pankarta_software::ui::TextStyle;
 use pankarta_software::ui::layer::Layer;
@@ -67,18 +68,23 @@ impl SceneBehaviour for ModelViewer {
     app.window.set_cursor_locked(true);
 
     let model_node = Node::new("plane")
-      .add_property(Model::new("models/f16.glb").scaled(15.0)) // the file is ~1 unit long; an F-16 is ~15 m
-      .add_property(Transform3D { position: Vector3::new(0.0,0.0,0.0), rotation: rotation_from_degrees(Vector3::new(0.0, 0.0, 0.0)), scale: Vector3::new(1.0,1.0,1.0), });
+      .with_property(Model::new(ModelSource::file("models/f16.glb")).scaled(15.0)) // the file is ~1 unit long; an F-16 is ~15 m
+      .with_property(Transform3D { position: Vector3::new(0.0,0.0,0.0), rotation: rotation_from_degrees(Vector3::new(0.0, 0.0, 0.0)), scale: Vector3::new(1.0,1.0,1.0), });
 
     scene.spawn_node(app, model_node).unwrap();
 
     let camera = Node::new("camera")
-      .add_property(Transform3D { position: Vector3::new(0.0, 5.0, -25.0), ..Default::default() })
-      .add_property(CameraLens::new(60.0))
-      .add_property(LookAt { target: "plane".into() })
-      .add_behavior(CameraMovement { target: "plane".into(), distance: 25.0, yaw: 0.0, pitch: 0.2, sensitivity: 0.005 });
+      .with_property(Transform3D { position: Vector3::new(0.0, 5.0, -25.0), ..Default::default() })
+      .with_property(CameraLens::new(60.0))
+      .with_property(LookAt { target: "plane".into() })
+      .with_behavior(CameraMovement { target: "plane".into(), distance: 25.0, yaw: 0.0, pitch: 0.2, sensitivity: 0.005 });
 
     scene.spawn_node(app, camera).unwrap();
+
+    let sun = Node::new("sun")
+      .with_property(Transform3D::facing(Vector3::new(-0.3, -1.0, -0.2)))
+      .with_property(Light::directional([1.0, 1.0, 1.0]));
+    scene.spawn_node(app, sun).unwrap();
   }
 
   fn update(&mut self, scene: &mut pankarta_software::prelude::Scene, app: &mut App, ctx: &mut pankarta_software::prelude::FrameContext) {

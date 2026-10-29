@@ -127,10 +127,36 @@ impl Window {
 
     /// Re-reads `size` and `pixel_size` from the window - see App::resize.
     pub(crate) fn refresh_size(&mut self) {
-        let (width, height) = self.window.size();
-        let (pixel_width, pixel_height) = self.window.drawable_size();
+        let (mut width, mut height) = self.window.size();
+        let (mut pixel_width, mut pixel_height) = self.window.drawable_size();
+        // Still hidden (before `App::run`), a window set fullscreen keeps its
+        // old size - SDL makes it fullscreen when it's shown. The size it'll
+        // have then, so code before `run` reads the right one. (Its real
+        // pixels - a HiDPI screen's are more - are read once it's shown.)
+        if !self.is_shown() {
+            if let Some((full_width, full_height)) = self.fullscreen_size() {
+                (width, height) = (full_width, full_height);
+                (pixel_width, pixel_height) = (full_width, full_height);
+            }
+        }
         self.size = Size { width, height };
         self.pixel_size = Size { width: pixel_width, height: pixel_height };
+    }
+
+    fn is_shown(&self) -> bool {
+        self.window.window_flags() & sdl2::sys::SDL_WindowFlags::SDL_WINDOW_SHOWN as u32 != 0
+    }
+
+    /// The size a fullscreen mode makes the window - the screen's own for
+    /// `BorderlessFullscreen`, the screen mode chosen for `Fullscreen`.
+    /// None while `Windowed`.
+    fn fullscreen_size(&self) -> Option<(u32, u32)> {
+        let mode = match self.mode {
+            WindowMode::Windowed => return None,
+            WindowMode::BorderlessFullscreen => self.video.desktop_display_mode(self.display()).ok()?,
+            WindowMode::Fullscreen => self.window.display_mode().ok()?,
+        };
+        Some((mode.w as u32, mode.h as u32))
     }
 
     pub fn title(&self) -> &str {

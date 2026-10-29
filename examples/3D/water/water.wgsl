@@ -73,7 +73,7 @@ fn fragment(f: FragmentIn) -> vec4<f32> {
 
     let to_camera = normalize(-f.position);
     let diffuse = max(dot(normal, engine.sun_direction), 0.0);
-    var color = mix(params.shallow.rgb, params.deep.rgb, deepness) * (0.55 + 0.45 * diffuse) * engine.sun_color;
+    var color = mix(params.shallow.rgb, params.deep.rgb, deepness) * (engine.ambient_color + (0.55 + 0.45 * diffuse) * engine.sun_color);
     // More sky reflected the flatter it's looked at.
     let fresnel = pow(1.0 - max(dot(normal, to_camera), 0.0), 5.0);
     color = mix(color, SKY, fresnel * 0.6);

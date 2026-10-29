@@ -15,8 +15,8 @@ pub enum ShapeKind {
 /// the node's position - plus its `offset`:
 ///
 ///     Node::new("box")
-///         .add_property(Transform2D { position, ..Default::default() })
-///         .add_property(Shape2D::square(80.0).color(UiColor::Hex("#3B82F6")))
+///         .with_property(Transform2D { position, ..Default::default() })
+///         .with_property(Shape2D::square(80.0).color(UiColor::Hex("#3B82F6")))
 ///
 /// It scales with the node (a circle by the larger of the node's two
 /// scales). Drawn after the world and before the UI (see

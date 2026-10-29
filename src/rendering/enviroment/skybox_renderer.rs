@@ -58,8 +58,8 @@ pub struct SkyboxRender {
     pub vertex_buffer: Buffer,
     // Procedural sky only (see `new_procedural`): its params and the buffer
     // they live in, so the sun disc can follow the scene's sun (see
-    // `set_sun_direction`).
-    sky: Option<(SkyUniform, Buffer)>,
+    // `set_sun`) - and the disc's own color, black for a sky without one.
+    sky: Option<(SkyUniform, Buffer, [f32; 4])>,
 }
 
 // Uniform for the procedural sky shader (sky.wgsl). All colours are linear
@@ -121,7 +121,7 @@ impl SkyboxRender {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Skybox Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/skybox.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/environment/skybox.wgsl").into()),
         });
 
         let render_pipeline = Self::build_pipeline(device, config, &pipeline_layout, &shader);
@@ -141,8 +141,8 @@ impl SkyboxRender {
         };
         let sky_uniform = SkyUniform {
             // 40 degrees above the horizon - only the starting value: App::run
-            // points it at the scene's own "sun" node every frame (see
-            // `set_sun_direction`).
+            // points it at the scene's sun `Light` every frame (see
+            // `set_sun`).
             sun_direction: normalize3([0.4452, 0.6428, 0.6233]),
             // Based on clear-day sea photos (assets/sprites/examples:
             // sea2.jpg, water.png), in linear: a deep blue overhead
@@ -177,7 +177,7 @@ impl SkyboxRender {
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("procedural_sky_uniform"),
             contents: bytemuck::cast_slice(&[sky_uniform]),
-            // COPY_DST: set_sun_direction rewrites it when the lighting turns.
+            // COPY_DST: set_sun rewrites it when the sun turns.
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -204,23 +204,28 @@ impl SkyboxRender {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Procedural Sky Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/sky.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/environment/sky.wgsl").into()),
         });
 
         let render_pipeline = Self::build_pipeline(device, config, &pipeline_layout, &shader);
 
-        Self { texture: None, bind_group_layout, bind_group, render_pipeline, vertex_buffer, sky: Some((sky_uniform, uniform_buffer)) }
+        Self { texture: None, bind_group_layout, bind_group, render_pipeline, vertex_buffer, sky: Some((sky_uniform, uniform_buffer, sky_uniform.sun_color)) }
     }
 
     /// Points the procedural sky's sun disc along `direction` (world space,
     /// toward the sun) - the same direction the scene is lit from, so the
-    /// disc, the lighting and the water's sun glint all agree. No-op for a
-    /// cubemap skybox (its sun is baked into the texture).
-    pub fn set_sun_direction(&mut self, queue: &wgpu::Queue, direction: Vector3<f32>) {
-        let Some((uniform, buffer)) = &mut self.sky else { return };
-        let direction = [direction.x, direction.y, direction.z, 0.0];
-        if uniform.sun_direction != direction {
+    /// disc, the lighting and the water's sun glint all agree. None: the
+    /// scene has no sun, and the sky no disc. No-op for a cubemap skybox
+    /// (its sun is baked into the texture).
+    pub fn set_sun(&mut self, queue: &wgpu::Queue, direction: Option<Vector3<f32>>) {
+        let Some((uniform, buffer, disc)) = &mut self.sky else { return };
+        let (direction, color) = match direction {
+            Some(direction) => ([direction.x, direction.y, direction.z, 0.0], *disc),
+            None => (uniform.sun_direction, [0.0, 0.0, 0.0, 1.0]),
+        };
+        if uniform.sun_direction != direction || uniform.sun_color != color {
             uniform.sun_direction = direction;
+            uniform.sun_color = color;
             queue.write_buffer(buffer, 0, bytemuck::cast_slice(&[*uniform]));
         }
     }

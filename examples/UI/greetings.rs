@@ -19,8 +19,8 @@ const NAME_INPUT: &str = "greeter/name";
 struct Greetings;
 
 impl Greetings {
-    fn new(scene: &mut Scene, app: &mut App) -> Self {
-        scene.settings.environment = Some(Environment::Color(wgpu::Color { r: 0.0, g: 0.1, b: 0.3, a: 1.0 }));
+    fn new(_scene: &mut Scene, app: &mut App) -> Self {
+        app.renderer.set_environment(Environment::Color(UiColor::Rgb(0, 89, 149)));
 
         let heading = TextStyle::default().size(20.0).weight(Weight::BOLD);
         let hint = TextStyle::default().size(14.0).color(UiColor::Rgb(170, 170, 170));

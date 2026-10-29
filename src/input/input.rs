@@ -8,13 +8,15 @@ use sdl2::controller::GameController;
 use sdl2::event::Event;
 use sdl2::joystick::Joystick;
 use sdl2::{GameControllerSubsystem, JoystickSubsystem};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::input::action::{Action, ActionConfig, Binding, RawInputState};
 use crate::input::source::{InputDevice, InputSource};
 use crate::input::mouse::Mouse;
 
-#[derive(Debug, Deserialize)]
+/// The player's mouse sensitivity - what `mouse_look` multiplies the mouse's
+/// movement by. 1: as the mouse reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 struct MouseSettings {
     x_sensitivity: f32,
     y_sensitivity: f32,
@@ -68,14 +70,28 @@ fn joystick_axis_value(value: i16) -> f32 {
     (value as f32 / i16::MAX as f32).clamp(-1.0, 1.0)
 }
 
-/// The player's saved rebinds at `path` (see `set_user_bindings_path`) -
-/// none if there's no file yet; a broken one is reported and ignored.
-fn load_user_bindings(path: &Path) -> Vec<ActionConfig> {
-    let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
-    ron::from_str(&text).unwrap_or_else(|error| {
-        eprintln!("{} isn't valid ({error}) - using the default controls", path.display());
-        Vec::new()
-    })
+/// The player's own controls file (see `set_user_bindings_path`): only what
+/// they changed from the game's defaults - rebound actions, and their mouse
+/// sensitivity if they set one.
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct UserBindings {
+    #[serde(default)]
+    actions: Vec<ActionConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mouse: Option<MouseSettings>,
+}
+
+/// The player's saved controls at `path` - none if there's no file yet; a
+/// broken one is reported and ignored. A file from before the mouse settings
+/// (just the list of actions) is still read.
+fn load_user_bindings(path: &Path) -> UserBindings {
+    let Ok(text) = std::fs::read_to_string(path) else { return UserBindings::default() };
+    ron::from_str::<UserBindings>(&text)
+        .or_else(|error| ron::from_str::<Vec<ActionConfig>>(&text).map(|actions| UserBindings { actions, mouse: None }).map_err(|_| error))
+        .unwrap_or_else(|error| {
+            eprintln!("{} isn't valid ({error}) - using the default controls", path.display());
+            UserBindings::default()
+        })
 }
 
 /// How far an action's aggregated strength has to go before it counts as "pressed" -
@@ -134,11 +150,18 @@ const PRESS_THRESHOLD: f32 = 0.5;
 ///        mouse: (x_sensitivity: 0.5, y_sensitivity: 0.5),
 ///    )
 ///    ```
+///    `mouse` is the sensitivity the game starts players at; their own (see
+///    `set_mouse_sensitivity`) is saved with their rebinds.
 pub struct InputSubsystem {
     actions: HashMap<String, Action>,
     raw: RawInputState,
     // `raw` as it was last frame - what "just pressed/released" compares to.
     previous: RawInputState,
+    // While a physics step's fixed_update runs (see begin_fixed_step) - then
+    // "just pressed/released" compares to `fixed_baseline` instead: `raw` as
+    // it was at the last step, so a press is seen by exactly one step.
+    in_fixed_step: bool,
+    fixed_baseline: RawInputState,
     // What went down this frame, in order - see `read_inputs`.
     pressed_sources: Vec<InputSource>,
     pub mouse: Mouse,
@@ -155,6 +178,9 @@ pub struct InputSubsystem {
     /// save_bindings compares against, so only the player's changes are
     /// saved.
     default_bindings: HashMap<String, Vec<Binding>>,
+    /// The mouse sensitivity the game's bindings file gives - the same, for
+    /// the player's mouse setting.
+    default_mouse: MouseSettings,
     /// Where the player's own rebinds are saved and read back from - None:
     /// rebinds last until the game closes.
     user_bindings_path: Option<PathBuf>,
@@ -176,6 +202,8 @@ impl InputSubsystem {
             actions: HashMap::new(),
             raw: RawInputState::default(),
             previous: RawInputState::default(),
+            in_fixed_step: false,
+            fixed_baseline: RawInputState::default(),
             pressed_sources: Vec::new(),
             mouse: Mouse::new(mouse_settings.x_sensitivity, mouse_settings.y_sensitivity),
             controller_subsystem,
@@ -186,6 +214,7 @@ impl InputSubsystem {
             captured_binding: None,
             capture_baseline: HashMap::new(),
             default_bindings: HashMap::new(),
+            default_mouse: mouse_settings,
             user_bindings_path: None,
             typed: Vec::new(),
             mouse_button_events: Vec::new(),
@@ -203,6 +232,7 @@ impl InputSubsystem {
             self.actions.insert(action_config.action, Action::new(action_config.bindings));
         }
         self.mouse = Mouse::new(settings.mouse.x_sensitivity, settings.mouse.y_sensitivity);
+        self.default_mouse = settings.mouse;
         self.apply_user_bindings();
         Ok(())
     }
@@ -210,7 +240,11 @@ impl InputSubsystem {
     /// The player's own rebinds (see `user_bindings_path`), over the game's.
     fn apply_user_bindings(&mut self) {
         let Some(path) = &self.user_bindings_path else { return };
-        for action_config in load_user_bindings(path) {
+        let user = load_user_bindings(path);
+        if let Some(mouse) = user.mouse {
+            self.mouse.set_sensitivity(mouse.x_sensitivity, mouse.y_sensitivity);
+        }
+        for action_config in user.actions {
             if let Some(action) = self.actions.get_mut(&action_config.action) {
                 action.bindings = action_config.bindings;
             }
@@ -497,16 +531,45 @@ impl InputSubsystem {
 
     pub fn is_action_just_pressed(&self, action: &str) -> bool {
         match self.actions.get(action) {
-            Some(action) => action.is_just_pressed(),
+            Some(action) => self.action_went(action, true),
             None => { println!("Action {} not found", action); false }
         }
     }
 
     pub fn is_action_just_released(&self, action: &str) -> bool {
         match self.actions.get(action) {
-            Some(action) => action.is_just_released(),
+            Some(action) => self.action_went(action, false),
             None => { println!("Action {} not found", action); false }
         }
+    }
+
+    /// What "just" is measured from: last frame - or, in a physics step's
+    /// fixed_update, the last step (see `begin_fixed_step`).
+    fn baseline(&self) -> &RawInputState {
+        if self.in_fixed_step { &self.fixed_baseline } else { &self.previous }
+    }
+
+    /// Whether `action` went down (`down`) or came up since the baseline.
+    fn action_went(&self, action: &Action, down: bool) -> bool {
+        if !self.in_fixed_step {
+            return if down { action.is_just_pressed() } else { action.is_just_released() };
+        }
+        let was_pressed = action.bindings.iter().map(|binding| binding.strength(&self.fixed_baseline)).fold(0.0, f32::max) > PRESS_THRESHOLD;
+        if down { action.is_pressed() && !was_pressed } else { !action.is_pressed() && was_pressed }
+    }
+
+    /// From here until `end_fixed_step`, "just pressed/released" means since
+    /// the last physics step, not since last frame - see
+    /// `Behavior::fixed_update`.
+    pub(crate) fn begin_fixed_step(&mut self) {
+        self.in_fixed_step = true;
+    }
+
+    /// Back to frames - and what's pressed now is what the next step
+    /// compares to, so this step's presses aren't seen again.
+    pub(crate) fn end_fixed_step(&mut self) {
+        self.in_fixed_step = false;
+        self.fixed_baseline = self.raw.clone();
     }
 
     pub fn action_strength(&self, action: &str) -> f32 {
@@ -535,19 +598,21 @@ impl InputSubsystem {
         }
     }
 
-    /// Whether `source` went down this frame.
+    /// Whether `source` went down this frame (in a physics step's
+    /// fixed_update: since the last step).
     pub fn is_just_pressed(&self, source: &InputSource) -> bool {
         match source.device {
-            InputDevice::Action => self.actions.get(&source.name).is_some_and(Action::is_just_pressed),
-            _ => source.to_binding().is_some_and(|binding| binding.strength(&self.raw) > PRESS_THRESHOLD && binding.strength(&self.previous) <= PRESS_THRESHOLD),
+            InputDevice::Action => self.actions.get(&source.name).is_some_and(|action| self.action_went(action, true)),
+            _ => source.to_binding().is_some_and(|binding| binding.strength(&self.raw) > PRESS_THRESHOLD && binding.strength(self.baseline()) <= PRESS_THRESHOLD),
         }
     }
 
-    /// Whether `source` came up this frame.
+    /// Whether `source` came up this frame (in a physics step's
+    /// fixed_update: since the last step).
     pub fn is_just_released(&self, source: &InputSource) -> bool {
         match source.device {
-            InputDevice::Action => self.actions.get(&source.name).is_some_and(Action::is_just_released),
-            _ => source.to_binding().is_some_and(|binding| binding.strength(&self.raw) <= PRESS_THRESHOLD && binding.strength(&self.previous) > PRESS_THRESHOLD),
+            InputDevice::Action => self.actions.get(&source.name).is_some_and(|action| self.action_went(action, false)),
+            _ => source.to_binding().is_some_and(|binding| binding.strength(&self.raw) <= PRESS_THRESHOLD && binding.strength(self.baseline()) > PRESS_THRESHOLD),
         }
     }
 
@@ -589,7 +654,10 @@ impl InputSubsystem {
             .map(|(name, action)| ActionConfig { action: name.clone(), bindings: action.bindings.clone() })
             .collect();
         actions.sort_by(|a, b| a.action.cmp(&b.action));
-        let text = match ron::ser::to_string_pretty(&actions, ron::ser::PrettyConfig::new().indentor("    ")) {
+        let (x_sensitivity, y_sensitivity) = self.mouse.get_sensitivity();
+        let mouse = MouseSettings { x_sensitivity, y_sensitivity };
+        let user = UserBindings { actions, mouse: (mouse != self.default_mouse).then_some(mouse) };
+        let text = match ron::ser::to_string_pretty(&user, ron::ser::PrettyConfig::new().indentor("    ")) {
             Ok(text) => text,
             Err(error) => {
                 eprintln!("Couldn't write the bindings out: {error}");
@@ -749,6 +817,16 @@ pub fn update(event_pump: &mut sdl2::EventPump, delta_time: f32, debug: bool) ->
     with_input_mut(|input| input.update(event_pump, delta_time, debug))
 }
 
+/// See `InputSubsystem::begin_fixed_step` - App::run, around each physics
+/// step's fixed_updates.
+pub(crate) fn begin_fixed_step() {
+    with_input_mut(|input| input.begin_fixed_step())
+}
+
+pub(crate) fn end_fixed_step() {
+    with_input_mut(|input| input.end_fixed_step())
+}
+
 pub fn is_action_pressed(action: &str) -> bool {
     with_input(|input| input.is_action_pressed(action))
 }
@@ -896,8 +974,31 @@ pub fn mouse_button_events() -> Vec<MouseButtonEvent> {
     with_input(|input| input.mouse_button_events.clone())
 }
 
+/// The player's mouse sensitivity, x and y - see `mouse_look`.
 pub fn mouse_sensitivity() -> (f32, f32) {
     with_input(|input| input.mouse.get_sensitivity())
+}
+
+/// Sets the player's mouse sensitivity (1: as the mouse reports it) - what
+/// `mouse_look` multiplies by. Saved with their controls (see
+/// `set_user_bindings_path`), so it's there next time.
+pub fn set_mouse_sensitivity(x: f32, y: f32) {
+    with_input_mut(|input| {
+        input.mouse.set_sensitivity(x, y);
+        input.save_bindings();
+    })
+}
+
+/// How far the mouse moved this frame, times the player's sensitivity - for
+/// turning a camera, aiming: the game multiplies it by what one count means
+/// to it (an angle, a distance). Right and down are positive. Not rounded:
+/// a sensitivity of 0.8 gives 0.8 of a count. `mouse_rel_x/y` are the raw
+/// counts, for exact pixels.
+pub fn mouse_look() -> Vector2<f32> {
+    with_input(|input| {
+        let (x_sensitivity, y_sensitivity) = input.mouse.get_sensitivity();
+        Vector2::new(input.mouse.get_rel_x() as f32 * x_sensitivity, input.mouse.get_rel_y() as f32 * y_sensitivity)
+    })
 }
 
 pub fn begin_capture() {

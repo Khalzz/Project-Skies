@@ -33,8 +33,8 @@ const ERROR_ICON: &str = "engine/icon_error";
 
 /// Registers the icons' shaders - once, when the renderer starts.
 pub(crate) fn add_icon_shaders(shaders: &mut ShaderLibrary) {
-    shaders.add(ALERT_ICON, include_str!("../../shaders/ui_icon_alert.wgsl"), Some("(kind: Ui)"));
-    shaders.add(ERROR_ICON, include_str!("../../shaders/ui_icon_error.wgsl"), Some("(kind: Ui)"));
+    shaders.add(ALERT_ICON, include_str!("../../shaders/ui/ui_icon_alert.wgsl"), Some("(kind: Ui)"));
+    shaders.add(ERROR_ICON, include_str!("../../shaders/ui/ui_icon_error.wgsl"), Some("(kind: Ui)"));
 }
 
 /// What a toast is about - an alert or an error shows an icon before its

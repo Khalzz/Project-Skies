@@ -37,7 +37,7 @@ static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
 /// Registers the chevron's shader - once, when the renderer starts.
 pub(crate) fn add_icon_shaders(shaders: &mut ShaderLibrary) {
-    shaders.add(CHEVRON, include_str!("../../shaders/ui_icon_chevron.wgsl"), Some("(kind: Ui)"));
+    shaders.add(CHEVRON, include_str!("../../shaders/ui/ui_icon_chevron.wgsl"), Some("(kind: Ui)"));
 }
 
 /// How a `dropdown` and its list look.

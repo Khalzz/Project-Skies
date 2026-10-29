@@ -50,8 +50,6 @@ const FAR_PLANE: f32 = 4_000_000.0;
 /// smooth out physics steps landing unevenly across rendered frames, short
 /// enough to follow real speed changes.
 const VELOCITY_SMOOTHING_SECONDS: f32 = 0.08;
-/// Sky light on lit particles, on top of the sun's.
-const AMBIENT: f32 = 0.45;
 
 // ── GPU layouts (must match particles_update.wgsl / particles.wgsl / trails.wgsl) ──
 
@@ -93,6 +91,8 @@ struct GpuFrame {
     wind: [f32; 4],
     sun_direction: [f32; 4],
     sun_color: [f32; 4],
+    gravity: [f32; 4],
+    ambient: [f32; 4],
 }
 
 #[repr(C)]
@@ -167,12 +167,15 @@ pub struct ParticleFrameInfo {
     pub near: f32,
     /// 0 while paused - everything holds still.
     pub delta_time: f32,
-    pub sea_level: f32,
-    /// World wind velocity (m/s).
-    pub wind: Vector3<f32>,
+    /// The physics world's gravity (m/s²) - what an effect's
+    /// `Forces::gravity` is a multiple of.
+    pub gravity: Vector3<f32>,
     /// Toward the sun.
     pub sun_direction: Vector3<f32>,
     pub sun_color: Vector3<f32>,
+    /// The light from the whole sky (`Renderer::ambient_light`) - on lit
+    /// particles, on top of the sun's.
+    pub ambient: Vector3<f32>,
 }
 
 /// One emitter as it is this frame - which node it's on, and where that
@@ -307,6 +310,10 @@ pub struct ParticleRenderer {
 
     particle_draws: Vec<ParticleDraw>,
     trail_draws: Vec<TrailDraw>,
+
+    /// See `set_wind` and `set_sea_level`.
+    wind: Vector3<f32>,
+    sea_level: Option<f32>,
 }
 
 fn blend_state(blend: Blend) -> wgpu::BlendState {
@@ -387,7 +394,7 @@ impl ParticleRenderer {
         });
         let compute_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Particle Update Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/particles_update.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/particles/particles_update.wgsl").into()),
         });
         let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("particle_update_pipeline"),
@@ -508,7 +515,7 @@ impl ParticleRenderer {
         };
         let particle_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Particle Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/particles.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/particles/particles.wgsl").into()),
         });
         let particle_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("particle_pipeline_layout"),
@@ -518,7 +525,7 @@ impl ParticleRenderer {
         let particle_pipelines = [Blend::Alpha, Blend::Additive].map(|blend| make_pipeline("particle_pipeline", &particle_shader, &particle_pipeline_layout, &[], blend));
         let trail_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Trail Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/trails.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/particles/trails.wgsl").into()),
         });
         let trail_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("trail_pipeline_layout"),
@@ -562,7 +569,34 @@ impl ParticleRenderer {
             simulation_pending: false,
             particle_draws: Vec::new(),
             trail_draws: Vec::new(),
+            wind: Vector3::zeros(),
+            sea_level: None,
         }
+    }
+
+    /// The world's wind (m/s) - see `set_wind`.
+    pub fn wind(&self) -> Vector3<f32> {
+        self.wind
+    }
+
+    /// Sets the world's wind, in m/s toward where it blows - for every
+    /// scene, until it's set again. Particles and trails drift with it, each
+    /// effect as much as its own `wind` says (0 not at all, 1 fully). None
+    /// by default.
+    pub fn set_wind(&mut self, wind: Vector3<f32>) {
+        self.wind = wind;
+    }
+
+    /// The height of the sea particles splash on - see `set_sea_level`.
+    pub fn sea_level(&self) -> Option<f32> {
+        self.sea_level
+    }
+
+    /// Sets the height (world Y) of a sea that particles stop at and splash
+    /// on, as an effect's water settings say - None: no sea, they fall
+    /// forever. For every scene, until it's set again. None by default.
+    pub fn set_sea_level(&mut self, sea_level: Option<f32>) {
+        self.sea_level = sea_level;
     }
 
     fn make_depth_bind_group(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, depth_view: &wgpu::TextureView) -> wgpu::BindGroup {
@@ -650,7 +684,7 @@ impl ParticleRenderer {
             runtime.seen = true;
             match &source.emitter.kind {
                 EmitterKind::Particles(effect) => self.update_particle_emitter(device, queue, &key, &mut runtime, &source, effect, dt, previous_camera),
-                EmitterKind::Trail(effect) => self.update_trail_emitter(device, queue, &mut runtime, &source, effect, dt, frame.wind),
+                EmitterKind::Trail(effect) => self.update_trail_emitter(device, queue, &mut runtime, &source, effect, dt, self.wind),
             }
             self.runtimes.insert(key, runtime);
         }
@@ -664,7 +698,7 @@ impl ParticleRenderer {
                 if runtime.is_trail {
                     runtime.trail.head = None;
                     if let Some(effect) = runtime.trail.effect.clone() {
-                        Self::age_trail(&mut runtime.trail, &effect, dt, frame.wind);
+                        Self::age_trail(&mut runtime.trail, &effect, dt, self.wind);
                     }
                     runtime.trail.points.is_empty().then(|| key.clone())
                 } else {
@@ -698,9 +732,12 @@ impl ParticleRenderer {
             // Wrapped so it stays precise over a long session (it only feeds turbulence).
             camera_forward: [forward.x, forward.y, forward.z, self.time % 1000.0],
             camera_delta: [camera_delta.x, camera_delta.y, camera_delta.z, dt],
-            wind: [frame.wind.x, frame.wind.y, frame.wind.z, frame.sea_level - frame.camera_position.y],
-            sun_direction: [sun.x, sun.y, sun.z, AMBIENT],
+            // No sea: far below anything a particle reaches.
+            wind: [self.wind.x, self.wind.y, self.wind.z, self.sea_level.unwrap_or(-1.0e9) - frame.camera_position.y],
+            sun_direction: [sun.x, sun.y, sun.z, 0.0],
             sun_color: [frame.sun_color.x, frame.sun_color.y, frame.sun_color.z, 0.0],
+            gravity: [frame.gravity.x, frame.gravity.y, frame.gravity.z, 0.0],
+            ambient: [frame.ambient.x, frame.ambient.y, frame.ambient.z, 0.0],
         };
         queue.write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&gpu_frame));
         self.simulation_pending = true;

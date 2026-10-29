@@ -1,5 +1,5 @@
 /// A UI node that displays a loaded texture. Deliberately thin - the actual GPU
-/// texture lives in app.assets, cached by path (see Assets::image), not here; this
+/// texture lives in app.assets, cached by path (see ImageCache::get), not here; this
 /// just remembers which cached image this node wants drawn each frame. Alpha lives
 /// in the owning UiNode's Style instead (see UiNode.style/hover), resolved fresh
 /// each frame in node_content_preparation - same reasoning as Label not storing its

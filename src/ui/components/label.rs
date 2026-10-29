@@ -200,7 +200,7 @@ impl Label {
     /// `indices_slice` are plain slices, not fixed-size arrays - a node's own
     /// background/border quad isn't always exactly 4 vertices/6 indices any more,
     /// see `UiNode::compute_quad`.
-    pub fn ui_node_data_creation(&self, _size: &Size, dpi_scale: f32, vertices: &mut Vec<VertexUi>, vertices_slice: &[VertexUi], indices: &mut Vec<u16>, indices_slice: &[u16], parent_rect: &Rect, color: Color, clip_rect: Option<&Rect>) -> (TextArea, u16, u32) {
+    pub fn ui_node_data_creation(&self, _size: &Size, dpi_scale: f32, vertices: &mut Vec<VertexUi>, vertices_slice: &[VertexUi], indices: &mut Vec<u16>, indices_slice: &[u16], parent_rect: &Rect, color: Color, clip_rect: Option<&Rect>) -> (TextArea<'_>, u16, u32) {
         vertices.extend_from_slice(vertices_slice);
         indices.extend_from_slice(indices_slice);
 
@@ -218,7 +218,7 @@ impl Label {
     // display). Without this, text renders squeezed into whatever fraction of
     // the real screen points-space is of pixel-space (e.g. a quarter of the
     // screen, top-left, at a typical 2x HiDPI scale).
-    pub fn text_area(&self, parent_rect: &Rect, dpi_scale: f32, color: Color, clip_rect: Option<&Rect>) -> TextArea {
+    pub fn text_area(&self, parent_rect: &Rect, dpi_scale: f32, color: Color, clip_rect: Option<&Rect>) -> TextArea<'_> {
         let text_width = self.get_text_width();
         let TextWidth { width, buffer_width } = text_width;
 

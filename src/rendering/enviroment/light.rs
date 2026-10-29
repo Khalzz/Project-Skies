@@ -8,10 +8,11 @@ use crate::rendering::{camera::handler::CameraResources, models::{model::{self, 
 // aligns to 16, but a scalar right after one packs in immediately rather
 // than waiting for the next 16-byte boundary (that's std140's rule, not
 // WGSL's) - position(0..12)+_padding(12..16), color(16..28), time(28..32),
-// camera_position(32..44)+_padding2(44..48). camera_position starts exactly
-// on a 16-byte boundary (32) so it needs no extra padding before it either;
-// _padding2 exists only because the struct's own alignment (16, from the
-// vec3s) requires the total size to be a multiple of 16, and 44 isn't.
+// camera_position(32..44)+_padding2(44..48), ambient(48..60)+_padding3(60..64).
+// camera_position starts exactly on a 16-byte boundary (32) so it needs no
+// extra padding before it either; _padding2 keeps ambient on the next one,
+// and _padding3 exists only because the struct's own alignment (16, from
+// the vec3s) requires the total size to be a multiple of 16, and 60 isn't.
 // Getting this wrong doesn't error - the shader just silently reads whatever
 // raw bytes land at the offset it expects instead of the real value - burned
 // once already (see git history), so any new field added here needs the
@@ -39,6 +40,9 @@ pub struct LightUniform {
     // wherever the camera happens to be.
     pub camera_position: [f32; 3],
     pub _padding2: u32,
+    // The light from the whole sky - see `Renderer::set_ambient_light`.
+    pub ambient: [f32; 3],
+    pub _padding3: u32,
 }
 
 pub struct LightRenderData {
@@ -68,6 +72,8 @@ impl Light {
             time: 0.0,
             camera_position: [0.0, 0.0, 0.0],
             _padding2: 0,
+            ambient: [0.0, 0.0, 0.0],
+            _padding3: 0,
         };
 
         let buffer = device.create_buffer_init(
@@ -110,7 +116,7 @@ impl Light {
 
             let shader = wgpu::ShaderModuleDescriptor {
                 label: Some("Light Shader"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/light.wgsl").into()),
+                source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/environment/light.wgsl").into()),
             };
             
             rendering_utils::create_render_pipeline(

@@ -4,24 +4,27 @@
 //!
 //! Nothing here is the engine's: the water is a game shader (water.wgsl,
 //! water.ron) drawn in a pass the game adds to its frame plan, and the
-//! floating is a game `PhysicsBehavior` (`Buoyancy`) pushing each crate up
-//! where it's under the waves. The waves are defined once, in `WAVES` - the
+//! floating is a game `Behavior` (`Buoyancy`) pushing each crate up where
+//! it's under the waves, every physics step (its `fixed_update`). The waves are defined once, in `WAVES` - the
 //! shader gets them as params, so what's drawn is what things float on.
 
 use nalgebra::{Point3, Vector3};
 use pankarta_software::app::App;
-use pankarta_software::game_nodes::game_object::{ColliderType, Physics, RigidBodyData};
+use pankarta_software::game_nodes::game_object::{Collider, ColliderShape, Physics, RigidBodyData};
 use pankarta_software::input::input;
 use pankarta_software::input::source::{InputSource, Key};
-use pankarta_software::physics::physics_behavior::{DebugDraw, PhysicsBehavior, PhysicsCtx};
 use pankarta_software::rendering::frame::FramePlan;
-use pankarta_software::resources::{register_primitive_model, PrimitiveShape};
+use pankarta_software::rendering::ui::ui::Ui;
+use pankarta_software::resources::ModelSource;
 use pankarta_software::scene_manager::behavior::Behavior;
-use pankarta_software::scene_manager::node::properties::{rotation_from_degrees, CameraLens, LookAt, Material, Model, Transform3D};
+use pankarta_software::scene_manager::node::properties::{rotation_from_degrees, CameraLens, Light, LookAt, Material, Model, Transform3D};
 use pankarta_software::scene_manager::node::Node;
 use pankarta_software::scene_manager::scene::{FrameContext, Scene, SceneBehaviour};
 use pankarta_software::scene_manager::scene_access::SceneAccess;
-use rapier3d::prelude::RigidBody;
+use pankarta_software::ui::layer::Layer;
+use pankarta_software::ui::ui_transform::SizeValue;
+use pankarta_software::ui::widgets::text;
+use pankarta_software::ui::TextStyle;
 
 // The sea
 
@@ -53,34 +56,16 @@ fn wave_height(x: f32, z: f32, time: f32) -> f32 {
 
 // Floating
 
-/// What a crate's physics half needs from the main thread: the time the
-/// waves are drawn at (`app.time.shader_time()`), so it floats on exactly
-/// those.
-struct WaveTime(f32);
-
-/// Sends the drawn waves' time to the node's `Buoyancy`, every frame.
-struct WaveClock;
-
-impl Behavior for WaveClock {
-    fn update(&mut self, node: &mut Node, _scene: &mut SceneAccess, app: &mut App) {
-        node.set_physics_input(WaveTime(app.time.shader_time()));
-    }
-}
-
-/// Floats a box on the waves, on the physics thread: the box is split into
-/// a grid of small cells, and each one under the water is pushed up by the
+/// Floats a box on the waves, every physics step: the box is split into a
+/// grid of small cells, and each one under the water is pushed up by the
 /// weight of the water it displaces and slowed by the water's drag - pushed
 /// where it is, so a box tips and settles the way it lies in the water.
 struct Buoyancy {
     half_extents: Vector3<f32>,
     /// How much a cell under water is slowed, per second.
     drag: f32,
-    /// The waves' time - from the main thread when it sends one, moved on
-    /// by each step in between.
-    time: f32,
-    last_sent: f32,
     /// Where each cell under water was pushed last step, and how hard - for
-    /// F5's debug lines.
+    /// the physics debug view.
     pushes: Vec<(Vector3<f32>, Vector3<f32>)>,
 }
 
@@ -89,25 +74,21 @@ impl Buoyancy {
     const CELLS: usize = 3;
 
     fn new(half_extents: Vector3<f32>) -> Self {
-        Self { half_extents, drag: 1.5, time: 0.0, last_sent: f32::NAN, pushes: Vec::new() }
+        Self { half_extents, drag: 1.5, pushes: Vec::new() }
     }
 }
 
-impl PhysicsBehavior for Buoyancy {
-    fn fixed_update(&mut self, ctx: &mut PhysicsCtx, dt: f32) {
-        match ctx.input::<WaveTime>() {
-            Some(WaveTime(sent)) if *sent != self.last_sent => {
-                self.time = *sent;
-                self.last_sent = *sent;
-            }
-            _ => self.time += dt,
-        }
+impl Behavior for Buoyancy {
+    fn fixed_update(&mut self, node: &mut Node, _scene: &mut SceneAccess, app: &mut App) {
+        // The waves as they're drawn (the shaders' `engine.time`).
+        let time = app.time.shader_time();
+        let dt = app.physics.timestep();
+        let Some(body) = app.physics.body_mut(&node.id) else { return };
 
         let cells = Self::CELLS as f32;
         let size = self.half_extents * 2.0;
         let cell = size / cells;
         let cell_volume = cell.x * cell.y * cell.z;
-        let body = ctx.rigidbody_mut();
         let cell_mass = body.mass() / (cells * cells * cells);
         let pose = *body.position();
 
@@ -123,7 +104,7 @@ impl PhysicsBehavior for Buoyancy {
                     let point = pose * local;
                     // How much of the cell is under the surface: 0 above it,
                     // 1 once its top is (a cell's height around its center).
-                    let depth = wave_height(point.x, point.z, self.time) - point.y;
+                    let depth = wave_height(point.x, point.z, time) - point.y;
                     let under = (depth / cell.y + 0.5).clamp(0.0, 1.0);
                     if under <= 0.0 {
                         continue;
@@ -137,9 +118,11 @@ impl PhysicsBehavior for Buoyancy {
         }
     }
 
-    fn debug_draw(&self, _body: &RigidBody, draw: &mut DebugDraw) {
-        for (point, lift) in &self.pushes {
-            draw.ray(*point, lift * 0.0002, [0.2, 0.6, 1.0]);
+    fn update(&mut self, _node: &mut Node, _scene: &mut SceneAccess, app: &mut App) {
+        if let Some(lines) = app.physics.debug_lines() {
+            for (point, lift) in &self.pushes {
+                lines.ray(*point, lift * 0.0002, [0.2, 0.6, 1.0]);
+            }
         }
     }
 }
@@ -152,25 +135,24 @@ fn crate_node(id: &str, position: Vector3<f32>, tilt: Vector3<f32>) -> Node {
     let half = Vector3::new(0.5, 0.5, 0.5);
     let volume = 8.0 * half.x * half.y * half.z;
     Node::new(id)
-        .add_property(Transform3D { position, rotation: rotation_from_degrees(tilt), ..Default::default() })
-        .add_property(Model::new("cube").with_scale(half * 2.0))
-        .add_property(Physics {
-            rigidbody: RigidBodyData { is_static: false, mass: 600.0 * volume, center_of_mass: Vector3::zeros(), initial_velocity: Vector3::zeros() },
-            colliders: vec![ColliderType::Cuboid { half_extents: (half.x, half.y, half.z), position: (0.0, 0.0, 0.0) }],
+        .with_property(Transform3D { position, rotation: rotation_from_degrees(tilt), ..Default::default() })
+        .with_property(Model::new(ModelSource::Cube).with_scale(half * 2.0))
+        .with_property(Physics {
+            rigidbody: RigidBodyData::dynamic(600.0 * volume),
+            colliders: vec![Collider::new(ColliderShape::Cuboid { half_extents: (half.x, half.y, half.z) })],
         })
-        .add_behavior(WaveClock)
-        .add_physics_behavior(Buoyancy::new(half))
+        .with_behavior(Buoyancy::new(half))
 }
 
 /// A post standing on the seabed, sticking out of the water.
 fn post_node(id: &str, x: f32, z: f32) -> Node {
     let half = Vector3::new(0.4, 4.5, 0.4);
     Node::new(id)
-        .add_property(Transform3D { position: Vector3::new(x, SEABED + half.y, z), ..Default::default() })
-        .add_property(Model::new("cube").with_scale(half * 2.0))
-        .add_property(Physics {
-            rigidbody: RigidBodyData { is_static: true, mass: 0.0, center_of_mass: Vector3::zeros(), initial_velocity: Vector3::zeros() },
-            colliders: vec![ColliderType::Cuboid { half_extents: (half.x, half.y, half.z), position: (0.0, 0.0, 0.0) }],
+        .with_property(Transform3D { position: Vector3::new(x, SEABED + half.y, z), ..Default::default() })
+        .with_property(Model::new(ModelSource::Cube).with_scale(half * 2.0))
+        .with_property(Physics {
+            rigidbody: RigidBodyData::fixed(),
+            colliders: vec![Collider::new(ColliderShape::Cuboid { half_extents: (half.x, half.y, half.z) })],
         })
 }
 
@@ -193,11 +175,11 @@ struct WaterScene {
 }
 
 impl WaterScene {
-    fn drop_crate(&mut self, scene: &mut Scene, app: &mut App, ctx: &FrameContext) {
+    fn drop_crate(&mut self, scene: &mut Scene, app: &mut App) {
         self.crates += 1;
         let position = Vector3::new(rand::random::<f32>() * 10.0 - 5.0, 8.0, rand::random::<f32>() * 10.0 - 5.0);
         let tilt = Vector3::new(rand::random::<f32>() * 60.0, rand::random::<f32>() * 360.0, rand::random::<f32>() * 60.0);
-        if let Err(error) = scene.spawn_node_live(app, crate_node(&format!("crate_{}", self.crates), position, tilt), ctx.physics_command_tx) {
+        if let Err(error) = scene.spawn_node(app, crate_node(&format!("crate_{}", self.crates), position, tilt)) {
             eprintln!("{error}");
         }
     }
@@ -209,28 +191,32 @@ impl SceneBehaviour for WaterScene {
         // its waves from WAVES.
         let waves: Vec<f32> = WAVES.iter().flatten().copied().collect();
         let sea = Node::new("sea")
-            .add_property(Transform3D::default())
-            .add_property(Model::new("sea").with_scale(Vector3::new(SEA_SIZE, 1.0, SEA_SIZE)))
-            .add_property(Material::shader("water").param("waves", waves));
+            .with_property(Transform3D::default())
+            .with_property(Model::new(ModelSource::Plane { subdivisions: 239 }).with_scale(Vector3::new(SEA_SIZE, 1.0, SEA_SIZE)))
+            .with_property(Material::shader("water").param("waves", waves));
 
         // The seabed - a body for things to land on, and something for the
         // water to be deep over.
         let seabed = Node::new("seabed")
-            .add_property(Transform3D { position: Vector3::new(0.0, SEABED, 0.0), ..Default::default() })
-            .add_property(Model::new("seabed").with_scale(Vector3::new(SEA_SIZE, 1.0, SEA_SIZE)))
-            .add_property(Physics {
-                rigidbody: RigidBodyData { is_static: true, mass: 0.0, center_of_mass: Vector3::zeros(), initial_velocity: Vector3::zeros() },
-                colliders: vec![ColliderType::HalfSpace { normal: Vector3::y() }],
+            .with_property(Transform3D { position: Vector3::new(0.0, SEABED, 0.0), ..Default::default() })
+            .with_property(Model::new(ModelSource::Plane { subdivisions: 0 }).with_scale(Vector3::new(SEA_SIZE, 1.0, SEA_SIZE)))
+            .with_property(Physics {
+                rigidbody: RigidBodyData::fixed(),
+                colliders: vec![Collider::new(ColliderShape::HalfSpace { normal: Vector3::y() })],
             });
 
-        let focus = Node::new("focus").add_property(Transform3D::default());
+        let focus = Node::new("focus").with_property(Transform3D::default());
         let camera = Node::new("camera")
-            .add_property(Transform3D::default())
-            .add_property(CameraLens::new(60.0))
-            .add_property(LookAt { target: "focus".into() })
-            .add_behavior(Orbit { angle: 0.0 });
+            .with_property(Transform3D::default())
+            .with_property(CameraLens::new(60.0))
+            .with_property(LookAt { target: "focus".into() })
+            .with_behavior(Orbit { angle: 0.0 });
 
-        let mut nodes = vec![sea, seabed, focus, camera, post_node("post_a", -3.0, 2.0), post_node("post_b", 4.0, -3.5)];
+        let sun = Node::new("sun")
+            .with_property(Transform3D::facing(Vector3::new(-0.3, -1.0, -0.2)))
+            .with_property(Light::directional([1.0, 1.0, 1.0]));
+
+        let mut nodes = vec![sea, seabed, focus, camera, sun, post_node("post_a", -3.0, 2.0), post_node("post_b", 4.0, -3.5)];
         for (index, x) in [-2.0, 0.5, 3.0].into_iter().enumerate() {
             self.crates += 1;
             nodes.push(crate_node(&format!("crate_{}", self.crates), Vector3::new(x, 5.0 + index as f32 * 2.0, 0.0), Vector3::new(25.0, index as f32 * 40.0, 10.0)));
@@ -240,11 +226,22 @@ impl SceneBehaviour for WaterScene {
                 eprintln!("{error}");
             }
         }
+
+        // The frame rate, top left.
+        let framerate = text(app, "- fps", &TextStyle::default())
+            .set_padding((10.0, 10.0))
+            .set_size(SizeValue::Pixels(200.0), SizeValue::Fit);
+        Layer::new(app).set_child("framerate", framerate).build(app);
     }
 
-    fn update(&mut self, scene: &mut Scene, app: &mut App, ctx: &mut FrameContext) {
+    fn update(&mut self, scene: &mut Scene, app: &mut App, _ctx: &mut FrameContext) {
+        if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "framerate").and_then(|node| node.as_label_mut()) {
+            let fps = app.time.fps().round();
+            label.set_text(&mut app.ui.text.font_system, &format!("{fps} fps"), true);
+        }
+
         if input::is_just_pressed(InputSource::key(Key::Space)) {
-            self.drop_crate(scene, app, ctx);
+            self.drop_crate(scene, app);
         }
     }
 }
@@ -260,6 +257,8 @@ async fn main() {
     };
     app.window.set_title("Water");
 
+    app.renderer.set_vsync(false);
+
     // The water's shader - from its file, so saving it while this runs
     // rebuilds it.
     app.renderer.shaders.add_file("water", concat!(env!("CARGO_MANIFEST_DIR"), "/examples/3D/water/water.wgsl"));
@@ -268,18 +267,6 @@ async fn main() {
     // copy of its depth for the water to read, then the water over it.
     app.renderer.default_frame_plan = FramePlan::engine_default()
         .insert_after_scene("opaque", |steps| steps.copy_depth().scene("water"));
-
-    // The models: a box, a fine grid for the sea's waves, a plain one for
-    // the seabed.
-    for (name, shape) in [
-        ("cube", PrimitiveShape::Cube),
-        ("sea", PrimitiveShape::Plane { subdivisions: 239 }),
-        ("seabed", PrimitiveShape::Plane { subdivisions: 0 }),
-    ] {
-        if let Err(error) = register_primitive_model(&mut app, name, shape) {
-            eprintln!("{error}");
-        }
-    }
 
     app.scene_manager.create_scene("main", |_scene, _app| WaterScene { crates: 0 });
     app.scene_manager.open_scene("main");

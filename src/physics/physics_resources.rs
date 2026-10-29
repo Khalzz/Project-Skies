@@ -2,17 +2,13 @@ use std::collections::HashMap;
 use nalgebra::{vector, Point3, Unit, UnitQuaternion, Vector3};
 use rapier3d::prelude::*;
 
-use crate::physics::physics_handler::PhysicsData;
-use crate::game_nodes::game_object::GameObject;
-use crate::resources::load_instances;
 use crate::game_nodes::game_object;
 
-/*
-todo:
-    - Make a new way of saving physics data for each loaded element in the level, this will be saved on the 
-    physics thread, and all the modifications will be done on it, allowing us to create our own iteration of a
-    "FIXED UPDATE" only dedicated to physics
-*/
+/// A body loaded from a `PhysicsObjectDef`, and its colliders.
+pub struct PhysicsData {
+    pub rigidbody_handle: RigidBodyHandle,
+    pub collider_handles: Vec<ColliderHandle>,
+}
 
 
 
@@ -25,27 +21,30 @@ todo:
 /// (1,1,1) and scaled up to its real-life size (colliders/positions authored to match)
 /// gets physically appropriate rotational resistance automatically, with no per-plane
 /// hand-tuning of inertia required.
-pub(crate) fn compute_principal_inertia(mass: f32, center_of_mass: Vector3<f32>, colliders: &[game_object::ColliderType]) -> Vector3<f32> {
+pub(crate) fn compute_principal_inertia(mass: f32, center_of_mass: Vector3<f32>, colliders: &[game_object::Collider]) -> Vector3<f32> {
     struct BoxPart {
         volume: f32,
         half_extents: (f32, f32, f32),
         position: (f32, f32, f32),
     }
 
-    let boxes: Vec<BoxPart> = colliders.iter().filter_map(|collider| match collider {
-        game_object::ColliderType::Cuboid { half_extents, position } => Some(BoxPart {
-            volume: 8.0 * half_extents.0 * half_extents.1 * half_extents.2,
-            half_extents: *half_extents,
-            position: *position,
-        }),
-        // Counted as the box around it - close enough for a thin wing slab.
-        game_object::ColliderType::ConvexHull { points, .. } if !points.is_empty() => {
-            let (low, high) = points.iter().fold((points[0], points[0]), |(low, high), point| (low.inf(point), high.sup(point)));
-            let half = (high - low) * 0.5;
-            let center = (high + low) * 0.5;
-            Some(BoxPart { volume: 8.0 * half.x * half.y * half.z, half_extents: (half.x, half.y, half.z), position: (center.x, center.y, center.z) })
+    let boxes: Vec<BoxPart> = colliders.iter().filter_map(|collider| {
+        let offset = collider.offset;
+        match &collider.shape {
+            game_object::ColliderShape::Cuboid { half_extents } => Some(BoxPart {
+                volume: 8.0 * half_extents.0 * half_extents.1 * half_extents.2,
+                half_extents: *half_extents,
+                position: (offset.x, offset.y, offset.z),
+            }),
+            // Counted as the box around it.
+            game_object::ColliderShape::ConvexHull { points } if !points.is_empty() => {
+                let (low, high) = points.iter().fold((points[0], points[0]), |(low, high), point| (low.inf(point), high.sup(point)));
+                let half = (high - low) * 0.5;
+                let center = (high + low) * 0.5 + offset;
+                Some(BoxPart { volume: 8.0 * half.x * half.y * half.z, half_extents: (half.x, half.y, half.z), position: (center.x, center.y, center.z) })
+            }
+            _ => None,
         }
-        _ => None,
     }).collect();
 
     let total_volume: f32 = boxes.iter().map(|b| b.volume).sum();
@@ -79,15 +78,13 @@ pub(crate) fn compute_principal_inertia(mass: f32, center_of_mass: Vector3<f32>,
 }
 
 /// A node's `Physics` property (see `engine::scene_manager::physics_bridge`)
-/// plus the position and rotation it was spawned at - the plain, `Send`-safe data the
-/// physics thread actually needs, extracted once at spawn time the same way
+/// plus the position and rotation it was spawned at - what its body is made
+/// from, extracted once at spawn time the same way
 /// `render_bridge::register_static_model` extracts `Transform3D`+`Model` into
-/// a plain `GameObject` for rendering. The physics thread never touches a
-/// `Node`/`Scene` directly (`Node`'s `Box<dyn Any>` properties aren't `Send`)
-/// - this is what crosses that boundary instead, collected on
-/// `SceneContent::physics_bodies` as nodes are spawned and handed to
-/// `load_physics_from_definitions` once the scene's `fixed_update` starts the
-/// physics thread (see `App::run`).
+/// a plain `GameObject` for rendering. Collected on
+/// `SceneContent::physics_bodies` while the scene is built, and made into
+/// bodies when its physics starts (see `PhysicsWorld::start`) - a node
+/// spawned after that gets its body right away.
 #[derive(Clone)]
 pub struct PhysicsObjectDef {
     pub id: String,
@@ -96,14 +93,8 @@ pub struct PhysicsObjectDef {
     pub physics: game_object::Physics,
 }
 
-/// Seeds `collider_set`/`rigidbody_set` from code-first `PhysicsObjectDef`s
-/// (see that type's own doc comment) instead of parsing a `data.ron` level
-/// file - the in-memory equivalent of `load_physics_from_level`, minus the
-/// model-name grouping that fn's own file-parsing pass needed (irrelevant
-/// here, every def already carries exactly what one physics body needs) and
-/// minus the `None`-valued `physics_handlers` entries that fn inserted for
-/// every non-physics object (nothing downstream needs those - see
-/// `Physics::physics_thread`'s own `None => {}` skip).
+/// Seeds `collider_set`/`rigidbody_set` from the scene's `PhysicsObjectDef`s
+/// (see that type's own doc comment) - one body each, with its colliders.
 pub fn load_physics_from_definitions(defs: &[PhysicsObjectDef], collider_set: &mut ColliderSet, rigidbody_set: &mut RigidBodySet, physics_handlers: &mut HashMap<String, Option<PhysicsData>>) {
     for def in defs {
         let mut rigid_body = if def.physics.rigidbody.is_static {
@@ -118,11 +109,16 @@ pub fn load_physics_from_definitions(defs: &[PhysicsObjectDef], collider_set: &m
                 &def.physics.colliders,
             );
 
-            RigidBodyBuilder::dynamic()
+            let mut builder = RigidBodyBuilder::dynamic()
                 .additional_mass_properties(rapier3d::prelude::MassProperties::new(def.physics.rigidbody.center_of_mass.into(), def.physics.rigidbody.mass, principal_inertia))
                 .translation(def.position)
                 .angular_damping(2.0)
-                .build()
+                .ccd_enabled(def.physics.rigidbody.ccd)
+                .gravity_scale(def.physics.rigidbody.gravity_scale);
+            if def.physics.rigidbody.lock_rotations {
+                builder = builder.lock_rotations();
+            }
+            builder.build()
         };
 
         rigid_body.set_rotation(def.rotation, true);
@@ -131,44 +127,19 @@ pub fn load_physics_from_definitions(defs: &[PhysicsObjectDef], collider_set: &m
 
         let mut collider_handles: Vec<ColliderHandle> = Vec::new();
         for collider_data in &def.physics.colliders {
-            let collider = match collider_data {
-                game_object::ColliderType::Cuboid { half_extents, position } => {
-                    ColliderBuilder::cuboid(half_extents.0, half_extents.1, half_extents.2)
-                        .translation(vector![position.0, position.1, position.2])
-                        .build()
-                },
-                game_object::ColliderType::HalfSpace { normal } => {
-                    ColliderBuilder::halfspace(Unit::new_normalize(*normal)).build()
-                },
-                game_object::ColliderType::ConvexHull { points, wing } => {
-                    let points: Vec<Point3<f32>> = points.iter().map(|point| Point3::from(*point)).collect();
-                    match ColliderBuilder::convex_hull(&points) {
-                        Some(builder) => {
-                            let builder = match wing {
-                                Some(label) => builder.user_data(game_object::wing_collider_id(label)),
-                                None => builder,
-                            };
-                            builder.build()
-                        }
-                        None => {
-                            eprintln!("convex collider for '{}' couldn't be built (its points are flat or too few)", def.id);
-                            continue;
-                        }
-                    }
-                },
-                game_object::ColliderType::Trimesh { vertices, indices } => {
-                    let points: Vec<Point3<f32>> = vertices.iter().map(|v| Point3::from(*v)).collect();
-                    match ColliderBuilder::trimesh(points, indices.clone()) {
-                        Ok(builder) => builder.build(),
-                        Err(error) => {
-                            eprintln!("trimesh collider for '{}' couldn't be built: {error}", def.id);
-                            continue;
-                        }
-                    }
-                },
-                _ => continue,
-            };
-            let handle = collider_set.insert_with_parent(collider, rigidbody_handle, rigidbody_set);
+            let Some(builder) = collider_builder(&collider_data.shape, &def.id) else { continue };
+            let mut builder = builder
+                .translation(collider_data.offset)
+                .sensor(collider_data.sensor);
+            // The lower friction and the higher bounce of two touching
+            // colliders win - so a 0 friction always slides, whatever it's on.
+            if let Some(friction) = collider_data.friction {
+                builder = builder.friction(friction).friction_combine_rule(CoefficientCombineRule::Min);
+            }
+            if let Some(restitution) = collider_data.restitution {
+                builder = builder.restitution(restitution).restitution_combine_rule(CoefficientCombineRule::Max);
+            }
+            let handle = collider_set.insert_with_parent(builder.build(), rigidbody_handle, rigidbody_set);
             collider_handles.push(handle);
         }
 
@@ -176,89 +147,28 @@ pub fn load_physics_from_definitions(defs: &[PhysicsObjectDef], collider_set: &m
     }
 }
 
-pub fn load_physics_from_level(mut level_path: String, collider_set: &mut ColliderSet, rigidbody_set: &mut RigidBodySet, physics_handlers: &mut HashMap<String, Option<PhysicsData>>) {
-
-    level_path += "/data.ron";
-
-    let mut physics_data: HashMap<String, PhysicsData> = HashMap::new();
-
-    let instances_data_to_load = load_instances(level_path);
-    match instances_data_to_load {
-        Some(instances) => {
-            
-            // Load the models name so we can identify all physics data
-            let mut models: Vec<String> = vec![];
-            
-            for data in &instances {
-                if !models.contains(&data.model.to_string()) {
-                    models.push(data.model.to_string())
-                }
+/// The Rapier collider for `shape` - None (and said why) for one that can't
+/// be built. `id` is the body's node, for the message.
+fn collider_builder(shape: &game_object::ColliderShape, id: &str) -> Option<ColliderBuilder> {
+    use game_object::ColliderShape;
+    match shape {
+        ColliderShape::Cuboid { half_extents } => Some(ColliderBuilder::cuboid(half_extents.0, half_extents.1, half_extents.2)),
+        ColliderShape::Capsule { half_height, radius } => Some(ColliderBuilder::capsule_y(*half_height, *radius)),
+        ColliderShape::HalfSpace { normal } => Some(ColliderBuilder::halfspace(Unit::new_normalize(*normal))),
+        ColliderShape::ConvexHull { points } => {
+            let points: Vec<Point3<f32>> = points.iter().map(|point| Point3::from(*point)).collect();
+            let builder = ColliderBuilder::convex_hull(&points);
+            if builder.is_none() {
+                eprintln!("convex collider for '{id}' couldn't be built (its points are flat or too few)");
             }
-            // Load the models name so we can identify all physics data
-
-            // For each model loaded
-            for model_name in &models {
-                let mut ids: Vec<String> = vec![];
-                let mut model_instances:Vec<GameObject> = vec![];
-
-                for game_object in &instances {
-                    if &game_object.model == model_name {
-                        ids.push(game_object.id.clone());
-                        model_instances.push(game_object.clone());
-                    }
-                }
-
-                for (i, instance_data) in model_instances.iter().enumerate() {
-                    // Physics
-                    let mut physics_data: Option<PhysicsData> = None;
-
-                    if let Some(physics_obj_data) = &instance_data.metadata.physics {
-                        let mut rigid_body = if physics_obj_data.rigidbody.is_static {
-                            RigidBodyBuilder::fixed().additional_mass(physics_obj_data.rigidbody.mass).translation(vector![instance_data.transform.position.x, instance_data.transform.position.y, instance_data.transform.position.z]).build()
-                        } else {
-                            let principal_inertia = compute_principal_inertia(
-                                physics_obj_data.rigidbody.mass,
-                                physics_obj_data.rigidbody.center_of_mass,
-                                &physics_obj_data.colliders,
-                            );
-
-                            RigidBodyBuilder::dynamic()
-                            .additional_mass_properties(rapier3d::prelude::MassProperties::new(physics_obj_data.rigidbody.center_of_mass.into(), physics_obj_data.rigidbody.mass, principal_inertia))
-                            .translation(instance_data.transform.position)
-                            .angular_damping(2.0)
-                            .build()
-                        };
-
-                        rigid_body.set_linvel(physics_obj_data.rigidbody.initial_velocity, true);
-                        let rigidbody_handle = rigidbody_set.insert(rigid_body);
-
-                        // Create colliders
-                        let mut collider_handles: Vec<ColliderHandle> = Vec::new();
-
-                        for collider_data in &physics_obj_data.colliders {
-                            let collider = match collider_data {
-                                game_object::ColliderType::Cuboid { half_extents, position } => {
-                                    ColliderBuilder::cuboid(half_extents.0, half_extents.1, half_extents.2)
-                                        .translation(vector![position.0, position.1, position.2])
-                                        .build()
-                                },
-                                game_object::ColliderType::HalfSpace { normal } => {
-                                    ColliderBuilder::halfspace(Unit::new_normalize(*normal)).build()
-                                },
-                                _ => continue,
-                            };
-                            let handle = collider_set.insert_with_parent(collider, rigidbody_handle, rigidbody_set);
-                            collider_handles.push(handle);
-                        }
-
-                        physics_data = Some(PhysicsData { rigidbody_handle, collider_handles });
-                    };
-
-                    // println!("loaded data: {}", ids[i]);
-                    physics_handlers.insert(ids[i].clone(), physics_data);
-                }
-            }
-        },
-        None => eprintln!("The instance data was not correctly loaded"),
+            builder
+        }
+        ColliderShape::Trimesh { vertices, indices } => {
+            let points: Vec<Point3<f32>> = vertices.iter().map(|v| Point3::from(*v)).collect();
+            ColliderBuilder::trimesh(points, indices.clone())
+                .map_err(|error| eprintln!("trimesh collider for '{id}' couldn't be built: {error}"))
+                .ok()
+        }
+        _ => None,
     }
 }

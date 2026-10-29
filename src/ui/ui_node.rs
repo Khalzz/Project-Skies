@@ -15,7 +15,7 @@ use super::components::label::{Font, Label, DEFAULT_FONT_SIZE, min_height_for_fo
 use super::text_style::TextStyle;
 use super::components::container::{Container, Scrollbar};
 use super::components::image::ImageNode;
-use super::ui_transform::{Anchor, BorderEdges, ChildAnchor, Orientation, Fit, Padding, PositionValue, Rect, SizeValue, UiTransform};
+use super::ui_transform::{Anchor, BorderEdges, ChildAnchor, Orientation, Padding, PositionValue, Rect, SizeValue, UiTransform};
 use super::ui_structure;
 
 pub enum UiNodeContent {
@@ -608,7 +608,7 @@ impl UiNode {
     /// `None` leaves each label on its own color.
     /// `ancestor_disabled`: an ancestor is disabled (see `set_enabled`) - so
     /// this node is too, whatever its own setting.
-    pub fn node_content_preparation(&mut self, size: &Size, dpi_scale: f32, ui: &mut UiRendering, font_system: &mut FontSystem, text_cache: &mut SwashCache, delta_time: f32, hit_testable: bool, clip_rect: Option<&Rect>, ancestor_hover_text: Option<UiColor>, ancestor_disabled: bool) -> (Vec<TextArea>, u16, u32) {
+    pub fn node_content_preparation(&mut self, size: &Size, dpi_scale: f32, ui: &mut UiRendering, font_system: &mut FontSystem, text_cache: &mut SwashCache, delta_time: f32, hit_testable: bool, clip_rect: Option<&Rect>, ancestor_hover_text: Option<UiColor>, ancestor_disabled: bool) -> (Vec<TextArea<'_>>, u16, u32) {
         // Inactive nodes render nothing and can't be hovered/clicked - their
         // *parent's* layout loop is what skips giving them any space (this alone
         // wouldn't stop them occupying a stacking slot), see the Container branch
@@ -1564,7 +1564,7 @@ impl UiNode {
     /// Create an image node from code - `width`/`height` are required (unlike
     /// `label`, there's no natural size to auto-measure without a loaded texture).
     /// `path` is inside the assets folder - loaded with the scene when the scene's
-    /// UI uses it, otherwise the first frame it's drawn (see Assets). Chain
+    /// UI uses it, otherwise the first frame it's drawn (see ImageCache). Chain
     /// `.at(x, y)` for position.
     pub fn image(path: String, width: f32, height: f32) -> Self {
         let transform = UiTransform::new(0.0, 0.0, height, width, 0.0, false);

@@ -4,6 +4,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::rendering::shader_library::ParamValue;
 
+/// What a tiled texture's size is measured on - see `Material::tiled`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextureSpace {
+    /// On the object, scaled like it - the texture moves and turns with it,
+    /// and keeps its size however it's scaled. For things that move.
+    Object,
+    /// In the world - the texture stays where it is, and lines up across
+    /// neighbouring objects. For things that don't: floors, walls.
+    World,
+}
+
 /// A `Node` property choosing the shader its model is drawn with, by name
 /// (see engine::rendering::shader_library) - "engine/standard", or one of
 /// the game's like "hologram" (`assets/shaders/hologram.wgsl`) - the values
@@ -25,11 +36,43 @@ pub struct Material {
     pub params: BTreeMap<String, ParamValue>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub meshes: BTreeMap<String, Material>,
+    /// An image (a path inside the assets folder) drawn on the model in
+    /// place of its own texture - see `texture`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture: Option<String>,
 }
 
 impl Material {
     pub fn shader(name: impl Into<String>) -> Self {
-        Self { shader: name.into(), params: BTreeMap::new(), meshes: BTreeMap::new() }
+        Self { shader: name.into(), params: BTreeMap::new(), meshes: BTreeMap::new(), texture: None }
+    }
+
+    /// engine/standard - the look every model has without a material.
+    pub fn standard() -> Self {
+        Self::shader(crate::rendering::shader_library::STANDARD)
+    }
+
+    /// Builder: draws the image `path` (inside the assets folder) on the
+    /// model in place of its own texture. Loaded with the scene, through the
+    /// AssetManager (`app.assets.textures`), and shared by every node using
+    /// it. It repeats past its edges: texture coordinates past 0..1 tile it.
+    pub fn texture(mut self, path: impl Into<String>) -> Self {
+        self.texture = Some(path.into());
+        self
+    }
+
+    /// Builder: its texture (see `texture`) at a fixed size - one copy every
+    /// `tile_size` meters, repeated across the surface however big it is,
+    /// measured on the object or in the world (`space`). Draws with
+    /// engine/tiled.
+    pub fn tiled(mut self, tile_size: f32, space: TextureSpace) -> Self {
+        self.shader = crate::rendering::shader_library::TILED.to_owned();
+        self.param("tile_size", tile_size).param("world", if space == TextureSpace::World { 1.0 } else { 0.0 })
+    }
+
+    /// Every texture it draws with - its own, and its meshes' materials'.
+    pub fn textures(&self) -> impl Iterator<Item = &String> {
+        self.texture.iter().chain(self.meshes.values().flat_map(|mesh| mesh.texture.iter()))
     }
 
     /// Builder: sets its shader's param `name`.
@@ -54,17 +97,27 @@ impl Material {
     /// params (it's the same as every other use of it), the node's own
     /// otherwise.
     pub fn key(&self, node: &str) -> String {
-        if self.params.is_empty() { self.shader.clone() } else { format!("{}@{node}", self.shader) }
+        match (self.params.is_empty(), &self.texture) {
+            (true, None) => self.shader.clone(),
+            // The same texture and shader on two nodes: one material, drawn
+            // together.
+            (true, Some(texture)) => format!("{}|{texture}", self.shader),
+            (false, _) => format!("{}@{node}", self.shader),
+        }
     }
 
     /// `key`, for this as the material of the mesh `mesh` of the node `node`.
     pub fn mesh_key(&self, node: &str, mesh: &str) -> String {
-        if self.params.is_empty() { self.shader.clone() } else { format!("{}@{node}/{mesh}", self.shader) }
+        match (self.params.is_empty(), &self.texture) {
+            (true, None) => self.shader.clone(),
+            (true, Some(texture)) => format!("{}|{texture}", self.shader),
+            (false, _) => format!("{}@{node}/{mesh}", self.shader),
+        }
     }
 
     /// Whether it's just engine/standard - nothing to put on a node.
     pub fn is_standard(&self) -> bool {
-        self.shader == crate::rendering::shader_library::STANDARD && self.params.is_empty() && self.meshes.is_empty()
+        self.shader == crate::rendering::shader_library::STANDARD && self.params.is_empty() && self.meshes.is_empty() && self.texture.is_none()
     }
 }
 

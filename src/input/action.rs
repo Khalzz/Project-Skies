@@ -223,9 +223,8 @@ pub struct RawInputState {
     pub joystick_hats: HashMap<(String, u32), HatState>,
 }
 
-/// Live state for one action: its bindings plus press/release edge tracking - the same
-/// pressed/just_pressed/just_released shape Pressable used for a single key, just
-/// aggregated over a whole list of bindings instead of one.
+/// Live state for one action: its bindings plus press/release edge tracking -
+/// pressed/just_pressed/just_released, over its whole list of bindings.
 pub struct Action {
     pub bindings: Vec<Binding>,
     strength: f32,

@@ -137,60 +137,60 @@ impl Texture {
         return Self::from_image(&image, device, queue, Some(label))
     }
 
+    /// `image` on the GPU, with every smaller version of it (its mipmaps:
+    /// half, a quarter... down to 1 x 1, each averaged from the one before)
+    /// - what the GPU reads from when it's drawn small, far away, instead of
+    /// picking single texels out of the full image (which sparkles).
     pub fn from_image(image: &DynamicImage, device: &Device, queue: &Queue, label: Option<&str>) -> Result<Self> {
-        let rgba = image.to_rgba8(); // transform the image to an array of rgba bytes
-        let dimensions = image.dimensions(); // get the size/dimensions of the image
+        let (width, height) = image.dimensions();
+        let levels = mip_level_count(width, height);
 
-        let texture_size = Extent3d {
-            width: dimensions.0,
-            height: dimensions.1,
-            depth_or_array_layers: 1 // all our textures are stored as 3D, the 1 means it will be representated as 2D
-        };
-
-        // an image and a texture are diferent elemnents of the same thing, the image is what you see, the texture is the image applied to a shape
-        let texture = device.create_texture(
-            &wgpu::TextureDescriptor {
-                size: texture_size,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb, // we store the image as sRGB
-                // texture_binding tells wgpu that this texture will be used in shaders and the copy_dst means that we will copy data to this texture
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, 
-                label: Some("diffuse_texture"),
-                view_formats: &[],
-            }
-        );
-
-        queue.write_texture(
-            // Tells wgpu where to copy the pixel data
-            wgpu::ImageCopyTexture {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &rgba, // the vector of rgba bytes we made
-            wgpu::ImageDataLayout { // the "layout" of the image
-                offset: 0,
-                bytes_per_row: Some(4 * dimensions.0),
-                rows_per_image: Some(dimensions.1),
-            },
-            texture_size,
-        );
-
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            address_mode_u: wgpu::AddressMode::Repeat,
-            address_mode_v: wgpu::AddressMode::Repeat,
-            address_mode_w: wgpu::AddressMode::Repeat,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
-            ..Default::default()
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            size: Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: levels,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            label: label.or(Some("diffuse_texture")),
+            view_formats: &[],
         });
 
+        let mut level = image.to_rgba8();
+        for mip_level in 0..levels {
+            let (level_width, level_height) = level.dimensions();
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo { texture: &texture, mip_level, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                &level,
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * level_width), rows_per_image: Some(level_height) },
+                Extent3d { width: level_width, height: level_height, depth_or_array_layers: 1 },
+            );
+            if mip_level + 1 < levels {
+                level = image::imageops::resize(&level, (level_width / 2).max(1), (level_height / 2).max(1), image::imageops::FilterType::Triangle);
+            }
+        }
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = device.create_sampler(&Self::mipmapped_sampler(wgpu::AddressMode::Repeat, label));
         Ok(Self { texture, view, sampler })
+    }
+
+    /// A sampler that blends between texels and between mipmap sizes, and
+    /// reads several samples along a surface seen at a low angle (anisotropic
+    /// filtering - a floor stays sharp into the distance), addressing past
+    /// the edges with `address`.
+    pub(crate) fn mipmapped_sampler(address: wgpu::AddressMode, label: Option<&str>) -> wgpu::SamplerDescriptor<'_> {
+        wgpu::SamplerDescriptor {
+            label,
+            address_mode_u: address,
+            address_mode_v: address,
+            address_mode_w: address,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            anisotropy_clamp: 16,
+            ..Default::default()
+        }
     }
 
     /// Builds a single texture_cube from 6 already-decoded face images, in the
@@ -218,14 +218,14 @@ impl Texture {
         for (face_index, image) in images.iter().enumerate() {
             let rgba = image.to_rgba8();
             queue.write_texture(
-                wgpu::ImageCopyTexture {
+                wgpu::TexelCopyTextureInfo {
                     texture: &texture,
                     mip_level: 0,
                     origin: wgpu::Origin3d { x: 0, y: 0, z: face_index as u32 },
                     aspect: wgpu::TextureAspect::All,
                 },
                 &rgba,
-                wgpu::ImageDataLayout {
+                wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(4 * dimensions.0),
                     rows_per_image: Some(dimensions.1),
@@ -289,5 +289,25 @@ impl Texture {
                 },
             ],
         })
+    }
+}
+
+/// How many mipmap sizes a `width` x `height` image has - itself, then each
+/// half the one before, down to 1 x 1.
+pub(crate) fn mip_level_count(width: u32, height: u32) -> u32 {
+    32 - width.max(height).max(1).leading_zeros()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_image_has_a_mipmap_for_each_halving_down_to_one_pixel() {
+        assert_eq!(mip_level_count(1, 1), 1);
+        assert_eq!(mip_level_count(2, 2), 2);
+        assert_eq!(mip_level_count(1024, 1024), 11);
+        assert_eq!(mip_level_count(1024, 16), 11, "the larger side decides");
+        assert_eq!(mip_level_count(300, 200), 9, "300, 150, 75, 37, 18, 9, 4, 2, 1");
     }
 }

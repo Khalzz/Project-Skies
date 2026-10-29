@@ -2,39 +2,33 @@ use std::collections::HashMap;
 
 use nalgebra::Vector3;
 
-use crate::game_nodes::game_object::{ColliderType, Physics};
+use crate::game_nodes::game_object::{Collider, ColliderShape, Physics};
 use crate::physics::physics_resources::PhysicsObjectDef;
 use crate::resources;
 
 use super::node::properties::Model;
 use super::scene::Scene;
 
-/// Bridges a spawned `Node`'s `Transform3D`+`Physics` properties into
-/// `SceneContent::physics_bodies` - the plain, `Send`-safe list
-/// `SceneBehaviour::fixed_update` hands to the physics thread (see
-/// `PhysicsObjectDef`'s own doc comment for why that's a copy, not a live
-/// reference back to the node - `Node`'s `Box<dyn Any>` properties can't
-/// cross the thread boundary). Mirrors `render_bridge::register_static_model`'s
-/// role for rendering - same "extract once at spawn time" shape, just
-/// building a `PhysicsObjectDef` instead of a `GameObject`.
+/// Bridges a spawned `Node`'s `Transform3D`+`Physics` properties into a
+/// `PhysicsObjectDef` - what its body is made from (see that type) - on
+/// `SceneContent::physics_bodies`, until the scene's physics starts or, once
+/// it has, the node's spawn hands it on (see `Scene::spawn_one`). Mirrors
+/// `render_bridge::register_static_model`'s role for rendering - same
+/// "extract once at spawn time" shape, just building a `PhysicsObjectDef`
+/// instead of a `GameObject`.
 ///
-/// Also where `ColliderType::TrimeshFromModel` gets resolved into a real
-/// `ColliderType::Trimesh` (see that variant's own doc comment) - reading
+/// Also where `ColliderShape::TrimeshFromModel` gets resolved into a real
+/// `ColliderShape::Trimesh` (see that variant's own doc comment) - reading
 /// the model file and scaling its geometry by this node's own
-/// `Transform3D::scale` both need to happen exactly here, at spawn time,
-/// same as `register_static_model` resolves a `Model`'s `model_ref` into
-/// real instance data instead of the physics thread (which only ever sees
-/// already-resolved `PhysicsObjectDef`s, no file access of its own) doing it
-/// later.
+/// `Transform3D::scale` both happen here, at spawn time, so the body is
+/// built from geometry already in hand.
 ///
 /// `trimeshes` is the mesh geometry the scene's loading step already read
 /// (by model path) - a path missing from it is read now, on the spot.
 ///
 /// Unlike `register_static_model`, this never needs to run again for the
-/// same id later - a physics body's starting position/mass/colliders are
-/// only ever read once, when the physics thread actually starts (see
-/// `App::run`'s `run_fixed_update` call), not kept in sync afterward the way
-/// a model's shared instance buffer is.
+/// same id later - a body's starting position/mass/colliders are only read
+/// once, when it's made; from then on the body is where it is.
 pub fn register_physics_body(scene: &mut Scene, id: &str, trimeshes: &TrimeshCache) -> Result<(), String> {
     let node = scene.content.nodes.get(id).ok_or_else(|| format!("no node named '{id}' to register"))?;
     let transform = *node.transform_3d().ok_or_else(|| format!("node '{id}' has no Transform3D property"))?;
@@ -57,14 +51,14 @@ pub fn register_physics_body(scene: &mut Scene, id: &str, trimeshes: &TrimeshCac
 /// A model's mesh as a collider sees it - its points and triangles.
 pub type Trimesh = (Vec<Vector3<f32>>, Vec<[u32; 3]>);
 /// Meshes already read for colliders, by model path (see
-/// `ColliderType::TrimeshFromModel`) - or why one couldn't be.
+/// `ColliderShape::TrimeshFromModel`) - or why one couldn't be.
 pub type TrimeshCache = HashMap<String, Result<Trimesh, String>>;
 
 /// Every model path `physics` reads a mesh collider from - for the scene's
 /// loading step to read ahead.
 pub(crate) fn trimesh_paths(physics: &Physics) -> impl Iterator<Item = &str> {
-    physics.colliders.iter().filter_map(|collider| match collider {
-        ColliderType::TrimeshFromModel { model_path } => Some(model_path.as_str()),
+    physics.colliders.iter().filter_map(|collider| match &collider.shape {
+        ColliderShape::TrimeshFromModel { model_path } => Some(model_path.as_str()),
         _ => None,
     })
 }
@@ -74,8 +68,8 @@ pub(crate) fn load_trimesh(model_path: &str) -> Result<Trimesh, String> {
     resources::load_trimesh_geometry(model_path).map_err(|error| error.to_string())
 }
 
-fn resolve_collider(collider: ColliderType, scale: Vector3<f32>, id: &str, trimeshes: &TrimeshCache) -> ColliderType {
-    let ColliderType::TrimeshFromModel { model_path } = &collider else { return collider };
+fn resolve_collider(mut collider: Collider, scale: Vector3<f32>, id: &str, trimeshes: &TrimeshCache) -> Collider {
+    let ColliderShape::TrimeshFromModel { model_path } = &collider.shape else { return collider };
 
     let loaded = match trimeshes.get(model_path) {
         Some(loaded) => loaded.clone(),
@@ -86,16 +80,18 @@ fn resolve_collider(collider: ColliderType, scale: Vector3<f32>, id: &str, trime
             let vertices = raw_vertices.iter()
                 .map(|v| Vector3::new(v.x * scale.x, v.y * scale.y, v.z * scale.z))
                 .collect();
-            ColliderType::Trimesh { vertices, indices }
+            collider.shape = ColliderShape::Trimesh { vertices, indices };
+            collider
         },
         Err(error) => {
             eprintln!("node '{id}': trimesh collider from '{model_path}' couldn't be loaded: {error}");
-            // Falls back to a real (if wrong) ColliderType rather than
+            // Falls back to a real (if wrong) ColliderShape rather than
             // leaving the unresolved TrimeshFromModel in place - the physics
             // thread has no file access to retry this itself, so an empty
             // Trimesh (no collision at all) is the honest failure mode here,
             // not a silent do-over later.
-            ColliderType::Trimesh { vertices: vec![], indices: vec![] }
+            collider.shape = ColliderShape::Trimesh { vertices: vec![], indices: vec![] };
+            collider
         }
     }
 }

@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use wgpu::{Device, DeviceDescriptor, InstanceDescriptor, Limits, Queue, Surface, SurfaceConfiguration, TextureUsages};
 use glyphon::{Cache, Resolution, Viewport};
 
-use crate::particles::renderer::ParticleRenderer;
-use crate::primitive::manual_vertex::ManualVertex;
+use crate::rendering::debug_views::{DebugViews, WireframeRenderer};
+use crate::rendering::lines::{LineRenderer, Lines};
 use crate::rendering::camera::handler::CameraResources;
 use crate::rendering::enviroment::environment::{Environment, PreparedEnvironment};
 use crate::rendering::enviroment::light::Light;
@@ -16,7 +16,6 @@ use crate::rendering::render_pipeline::blur_renderer::{offscreen_texture, BlurRe
 use crate::rendering::render_pipeline::depth_renderer::DepthRender;
 use crate::rendering::render_sets::RenderSets;
 use crate::rendering::shader_library::{Placement, ShaderLibrary, BUILTIN_SCREEN_INPUTS};
-use crate::rendering::ui::physics_rendering::RenderPhysics;
 use crate::window::window::Window;
 
 pub struct Glyphon {
@@ -29,8 +28,8 @@ pub struct Glyphon {
  *
  * Everything that draws: the WGPU device and surface, plus every system that
  * lives as long as the app does and puts something on screen - shaders,
- * camera and light buffers, particles, debug lines. What a scene draws
- * (its nodes, cameras, environment override) lives on the scene itself.
+ * camera and light buffers, the environment, debug lines. What a scene
+ * draws (its nodes, cameras) lives on the scene itself.
  */
 pub struct Renderer {
   // 'static: create_surface_unsafe doesn't actually borrow the window (it
@@ -49,7 +48,7 @@ pub struct Renderer {
   /// camera the active scene has selected, every frame.
   pub camera_resources: CameraResources,
   /// The sun's GPU buffer (direction, color, shader time, camera position) -
-  /// filled every frame from the project's or the scene's `Lighting`.
+  /// filled every frame from the active scene's sun `Light` node.
   pub light: Light,
   /// The shaders models are drawn with, by name (see
   /// rendering::shader_library) - and where each material in use is drawn
@@ -63,9 +62,6 @@ pub struct Renderer {
   /// The fingerprint of what the last material setup read, and the
   /// Fullscreen steps it got ready - see App::place_materials.
   pub(crate) placed: Option<(u64, std::collections::HashSet<String>)>,
-  /// GPU particles and trails, fed each frame from every node's
-  /// ParticleEmitters property (see App::update_particles).
-  pub particles: ParticleRenderer,
   /// 2D nodes' shapes, refilled each frame (see App::prepare_nodes_2d).
   pub shapes_2d: crate::rendering::shapes_2d::Shapes2D,
   /// What a frame draws, in order (see rendering::frame) - the active
@@ -77,20 +73,21 @@ pub struct Renderer {
   /// scene's, registered in its start, dropped on a scene change (see
   /// rendering::render_sets).
   pub render_sets: RenderSets,
-  /// The physics colliders' debug lines - shown while `visible`.
-  pub render_physics: RenderPhysics,
-  /// Lines a scene wants drawn in the world this frame (world-space
-  /// endpoints) - drawn with the physics lines' pipeline whether those are
-  /// shown or not, over everything. Whoever fills it clears it.
-  pub world_lines: Vec<[ManualVertex; 2]>,
-  /// Draws the depth buffer instead of the scene - a renderer debug view.
-  pub show_depth_map: bool,
-  /// The project's environment (`ProjectSettings::environment`) as it's
-  /// drawn - what every scene without its own override shows - and the
-  /// `Environment` it was made from, so App::run can tell when the settings
-  /// change and build it again.
-  pub project_environment: PreparedEnvironment,
-  pub(crate) project_environment_source: Environment,
+  /// Lines the game wants drawn this frame, in the world, over everything -
+  /// emptied once it's drawn (see rendering::lines).
+  pub lines: Lines,
+  /// The engine's debug views - see rendering::debug_views.
+  pub debug: DebugViews,
+  pub(crate) line_renderer: LineRenderer,
+  pub(crate) wireframe: WireframeRenderer,
+  /// What's drawn behind everything - see `set_environment`.
+  environment: Environment,
+  /// See `set_ambient_light`.
+  ambient_light: [f32; 3],
+  /// `environment` built and ready to draw - or, for a moment after it
+  /// changed, the one before it - and the `Environment` it was built from.
+  pub(crate) prepared_environment: PreparedEnvironment,
+  pub(crate) prepared_from: Environment,
   /// The graphics API it's drawing with - see `backend`.
   backend: GraphicsBackend,
   /// The game's own images to draw into - see `add_target`.
@@ -217,17 +214,18 @@ impl Renderer {
     shaders.set_depth_copy(depth_render.foam_depth_copy.view.clone(), depth_render.foam_depth_copy.sampler.clone());
     shaders.set_screen_inputs(Self::screen_inputs(&blur, &HashMap::new()));
     // The toasts' icons (see widgets::toast).
+    shaders.add(crate::rendering::shader_library::TILED, include_str!("../shaders/materials/tiled.wgsl"), None);
     crate::ui::widgets::toast::add_icon_shaders(&mut shaders);
     // The dropdowns' chevron (see widgets::dropdown).
     crate::ui::widgets::dropdown::add_icon_shaders(&mut shaders);
 
-    let particles = ParticleRenderer::new(&device, &queue, config.format, &camera_resources.bind_group_layout, &depth_render.foam_depth_copy.view);
-    let render_physics = RenderPhysics::new(&device, &config, &camera_resources);
+    let line_renderer = LineRenderer::new(&device, config.format, &light.rendering_data.bind_group_layout, &camera_resources.bind_group_layout);
+    let wireframe = WireframeRenderer::new(&device, config.format, &camera_resources.bind_group_layout);
     let shapes_2d = crate::rendering::shapes_2d::Shapes2D::new(&device, config.format);
 
 
-    let project_environment_source = Environment::default();
-    let project_environment = crate::resources::prepare_environment(&device, &queue, &camera_resources.bind_group_layout, &config, project_environment_source.clone());
+    let environment = Environment::default();
+    let prepared_environment = crate::resources::prepare_environment(&device, &queue, &camera_resources.bind_group_layout, &config, environment.clone());
 
     Ok(Renderer {
       surface,
@@ -247,16 +245,18 @@ impl Renderer {
       material_placements: HashMap::new(),
       overlay_materials: HashMap::new(),
       placed: None,
-      particles,
       shapes_2d,
       frame_plan: FramePlan::engine_default(),
       default_frame_plan: FramePlan::engine_default(),
       render_sets: Default::default(),
-      render_physics,
-      world_lines: Vec::new(),
-      show_depth_map: false,
-      project_environment,
-      project_environment_source,
+      lines: Lines::default(),
+      debug: DebugViews::default(),
+      line_renderer,
+      wireframe,
+      ambient_light: [0.25, 0.25, 0.3],
+      prepared_from: environment.clone(),
+      environment,
+      prepared_environment,
       backend,
       targets: HashMap::new(),
     })
@@ -309,11 +309,11 @@ impl Renderer {
 
     self.camera_resources.resize(width, height);
     // The depth copy and blur targets were just rebuilt at the new size - the
-    // shaders and particles that read them need the new ones (a bind group
-    // is tied to the specific texture view it was created against).
+    // shaders that read them need the new ones (a bind group is tied to the
+    // specific texture view it was created against). Particles read the
+    // depth copy too - App::resize hands it to them.
     self.shaders.set_depth_copy(self.depth_render.foam_depth_copy.view.clone(), self.depth_render.foam_depth_copy.sampler.clone());
     self.shaders.set_screen_inputs(Self::screen_inputs(&self.blur, &self.targets));
-    self.particles.rebuild_depth_bind_group(&self.device, &self.depth_render.foam_depth_copy.view);
   }
 
   /// The images Fullscreen shaders read, by name - the world drawn this
@@ -352,9 +352,37 @@ impl Renderer {
     self.targets.contains_key(name)
   }
 
+  /// What's drawn behind everything.
+  pub fn environment(&self) -> &Environment {
+    &self.environment
+  }
+
+  /// Sets what's drawn behind everything - a color, a skybox, the
+  /// procedural sky - for every scene, until it's set again. Set from a
+  /// scene's constructor, a skybox's textures load with the scene's assets,
+  /// under the loading screen; set while a scene runs, they're read on the
+  /// spot.
+  pub fn set_environment(&mut self, environment: Environment) {
+    self.environment = environment;
+  }
+
+  /// The light from the whole sky - see `set_ambient_light`.
+  pub fn ambient_light(&self) -> [f32; 3] {
+    self.ambient_light
+  }
+
+  /// Sets the light from the whole sky (linear RGB) - falling on every
+  /// surface whichever way it faces, sun or no sun: what keeps a surface
+  /// turned away from the sun, or a scene without one, from going black.
+  /// Black for a truly dark scene. For every scene, until it's set again;
+  /// a soft blue-grey (0.25, 0.25, 0.3) by default.
+  pub fn set_ambient_light(&mut self, color: [f32; 3]) {
+    self.ambient_light = color;
+  }
+
   /// Builds `environment` (a skybox's textures, the procedural sky...) - on
   /// the main thread, for a change made while a scene runs.
-  pub fn prepare_environment(&self, environment: Environment) -> PreparedEnvironment {
+  pub(crate) fn prepare_environment(&self, environment: Environment) -> PreparedEnvironment {
     crate::resources::prepare_environment(&self.device, &self.queue, &self.camera_resources.bind_group_layout, &self.config, environment)
   }
 }

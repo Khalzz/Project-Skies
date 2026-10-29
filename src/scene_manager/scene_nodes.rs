@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 
 use crate::app::App;
-use crate::physics::physics_behavior::{PhysicsBehavior, PhysicsInput, PhysicsPayload};
-use crate::physics::physics_handler::RenderMessage;
 use crate::rendering::camera::handler::SceneCameras;
 
 use nalgebra::{UnitQuaternion, Vector3};
@@ -22,12 +20,12 @@ const MAX_DEPTH: usize = 64;
 /// two nodes be mutated independently, which nested ownership would fight.
 /// `resolve_hierarchy` is what makes children follow their parents.
 ///
-/// `spawn`/`update`/`after_physics` all take `&mut App` now, to hand down to
+/// `spawn`/`update`/`fixed_update` all take `&mut App` now, to hand down to
 /// `Behavior`'s hooks (see that trait's own doc comment on why) - which means
 /// this type can no longer be unit-tested on its own the way it originally
 /// was: `App` needs a live window/GPU context to construct, not something a
 /// unit test can reasonably spin up. The behavior-dispatch tests that used to
-/// live in this file (duplicate-id guard, on_spawn/update/after_physics call
+/// live in this file (duplicate-id guard, on_spawn/update/fixed_update call
 /// counts) were removed for that reason, not because the behavior they
 /// covered stopped mattering.
 #[derive(Default)]
@@ -73,7 +71,7 @@ impl SceneNodes {
 
     /// Drops every spawned node - a scene-reset step (see `App::run`), so a
     /// node/behavior spawned by one scene (e.g. `sandbox`'s `Camera`) doesn't
-    /// keep getting `update`/`after_physics` calls after switching to a scene
+    /// keep getting `update`/`fixed_update` calls after switching to a scene
     /// that never spawned it. No `on_despawn` hook exists on `Behavior` yet,
     /// so anything a behavior did outside its own node on spawn (`Camera`
     /// registering itself with `cameras`, hiding the cursor) isn't
@@ -172,40 +170,19 @@ impl SceneNodes {
                     world.rotation = rotation;
                 }
             }
+            // Written over the node's own transform - not a new one put on
+            // in its place every frame.
             if let Some(node) = self.nodes.get_mut(&id) {
-                node.set_property(world);
+                match node.transform_3d_mut() {
+                    Some(transform) => *transform = world,
+                    None => node.set_property(world),
+                }
             }
         }
     }
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Node> {
         self.nodes.values_mut()
-    }
-
-    /// Moves every node's physics half out, keyed by node id - called once,
-    /// when the scene's physics thread starts (see `Scene::start_physics`).
-    pub(crate) fn take_physics_behaviors(&mut self) -> Vec<(String, Vec<Box<dyn PhysicsBehavior>>)> {
-        self.nodes.values_mut()
-            .map(|node| (node.id.clone(), node.take_physics_behaviors()))
-            .filter(|(_, behaviors)| !behaviors.is_empty())
-            .collect()
-    }
-
-    /// Collects this frame's main → physics messages from every node, keyed
-    /// by node id - emptied on the node side, so nothing is sent twice.
-    pub(crate) fn take_physics_inputs(&mut self) -> HashMap<String, PhysicsInput> {
-        self.nodes.values_mut()
-            .filter_map(|node| node.take_physics_input().map(|input| (node.id.clone(), input)))
-            .collect()
-    }
-
-    /// Hands each node the states its physics half published.
-    pub(crate) fn apply_physics_states(&mut self, states: HashMap<String, Vec<PhysicsPayload>>) {
-        for (id, node_states) in states {
-            if let Some(node) = self.nodes.get_mut(&id) {
-                node.set_physics_states(node_states);
-            }
-        }
     }
 
     /// Runs every node's attached behaviors' `update` - called once per
@@ -227,19 +204,10 @@ impl SceneNodes {
         }
     }
 
-    /// Runs every node's attached behaviors' `after_physics` - once a frame,
-    /// after `update` (see `Behavior::after_physics`).
-    /// `physics_data` is this frame's physics-thread results, keyed by node
-    /// id (same map `FrameContext::physics_data` carries to
-    /// `SceneBehaviour::update`) - each node's own behaviors get just their
-    /// own entry, so "react to this node's physics results" is a generic
-    /// hook any `Behavior` can implement instead of a scene hand-picking one
-    /// node by name.
-    pub(crate) fn after_physics(&mut self, cameras: &mut SceneCameras, app: &mut App, physics_data: &HashMap<String, RenderMessage>, changes: &mut SceneChanges) {
-        self.run_behaviors(cameras, app, changes, |node, scene, app| {
-            let physics = physics_data.get(&node.id);
-            node.run_after_physics(scene, app, physics);
-        });
+    /// Runs every node's attached behaviors' `fixed_update` - once per
+    /// physics step (see `Behavior::fixed_update`).
+    pub(crate) fn fixed_update(&mut self, cameras: &mut SceneCameras, app: &mut App, changes: &mut SceneChanges) {
+        self.run_behaviors(cameras, app, changes, |node, scene, app| node.run_fixed_update(scene, app));
     }
 }
 

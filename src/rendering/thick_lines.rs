@@ -1,5 +1,5 @@
 //! Thick lines - segments drawn a fixed number of pixels wide whatever their
-//! distance, for views made of lines (the play scene's F10 tactical map).
+//! distance, for views made of lines (a tactical map, say).
 //! Each segment is one GPU instance that the shader widens into a quad on
 //! screen (thick_lines_template.wgsl - drawn with the set's `material`, a
 //! Lines shader: engine/thick_lines unless it says otherwise), so a big, unchanging set (a terrain's

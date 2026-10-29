@@ -2,6 +2,7 @@
 //! re-exported here, so `node::properties::Material` etc. work as before.
 
 pub mod camera_lens;
+pub mod light;
 pub mod look_at;
 pub mod material;
 pub mod model;
@@ -12,8 +13,9 @@ pub mod spawned_live;
 pub mod transform;
 
 pub use camera_lens::CameraLens;
+pub use light::{Light, LightKind};
 pub use look_at::LookAt;
-pub use material::Material;
+pub use material::{Material, TextureSpace};
 pub use model::Model;
 pub use offset_2d::Offset2D;
 pub use parent::{Parent, Space};
