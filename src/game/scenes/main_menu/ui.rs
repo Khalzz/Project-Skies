@@ -1,16 +1,16 @@
 use std::sync::Mutex;
+use crate::game::ext::ui_layers::{self, click, ClickUi, GameUi};
+use pankarta_software::prelude::Scene;
 
 use serde::Deserialize;
 
-use crate::app::App;
-use crate::engine::input::input;
-use crate::engine::rendering::ui::ui::Ui;
-use crate::engine::ui::color::{Fill, UiColor};
-use crate::engine::ui::layer::Layer;
+use pankarta_software::app::App;
+use crate::game::ext::input::InputExt;
+use pankarta_software::ui::color::{Fill, UiColor};
 use crate::game::game_settings::{GameSettings, HeadTrackingSource, COCKPIT_VIEW_PITCH_MAX, GAME_SETTINGS, HEAD_G_REACTION_MAX};
 use crate::game::head_tracking;
-use crate::engine::ui::ui_node::UiNode;
-use crate::engine::ui::ui_transform::{Anchor, BorderEdges, Orientation, PositionValue, SizeValue};
+use pankarta_software::ui::ui_node::UiNode;
+use pankarta_software::ui::ui_transform::{Anchor, BorderEdges, Orientation, PositionValue, SizeValue};
 use crate::game::selected_level::{SelectedLevel, SELECTED_LEVEL};
 use crate::game::ui::{button, label, main_fade_gradient, set_slider, set_toggle_switch, slider, slider_fraction_at, toggle_switch, with_left_accent};
 use super::rebind_modal;
@@ -42,13 +42,13 @@ pub(crate) fn backdrop() -> UiNode {
         .set_transition(400.0)
 }
 
-fn show_panel(app: &mut App, id: &str) {
+fn show_panel(ui: &mut impl GameUi, app: &mut App, id: &str) {
     for panel_id in ["Main Menu", "Settings", "Play Select"] {
-        if let Some(panel) = Ui::get_ui_node(&mut app.ui.renderizable_elements, panel_id) {
+        if let Some(panel) = ui.ui_node(panel_id) {
             panel.set_active(panel_id == id);
         }
     }
-    if let Some(backdrop) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "Backdrop") {
+    if let Some(backdrop) = ui.ui_node("Backdrop") {
         // Same flat dark backdrop for Play Select as Settings - same reasoning
         // (SETTINGS_BACKDROP's own doc comment): both have enough of their own
         // sidebar+content layout that a flat backdrop reads better than the
@@ -62,29 +62,28 @@ fn show_panel(app: &mut App, id: &str) {
 
 /// Shows one section to the right of the name list. The list, and its Back
 /// button at the bottom, stay where they are.
-fn open_settings_section(app: &mut App, id: &str) {
-    if let Some(content) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "Settings/Content") {
+fn open_settings_section(ui: &mut impl GameUi, app: &mut App, id: &str) {
+    if let Some(content) = ui.ui_node("Settings/Content") {
         content.set_active(true);
     }
     for tab_id in SETTINGS_TABS {
-        if let Some(tab) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &format!("Settings/Content/{tab_id}")) {
+        if let Some(tab) = ui.ui_node(&format!("Settings/Content/{tab_id}")) {
             tab.set_active(tab_id == id);
         }
-        if let Some(button) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &format!("Settings/List/{tab_id}")) {
+        if let Some(button) = ui.ui_node(&format!("Settings/List/{tab_id}")) {
             let selected = tab_id == id;
             let border = if selected { UiColor::WHITE } else { UiColor::TRANSPARENT };
             let text = if selected { UiColor::WHITE } else { UiColor::Rgb(200, 200, 200) };
             button.update_style(|style| style.set_border_color(border).set_text_color(text));
         }
     }
-    app.ui.has_changed = true;
 }
 
 /// A `with_left_accent` button sized for a sidebar row - `button()`'s own
 /// default padding, same height as the main menu's own top-level Play/
 /// Settings/Quit buttons (see `build`), not overridden to something taller.
-pub(crate) fn sidebar_button(app: &mut App, text: &str, on_click: impl Fn(&mut App) + 'static) -> UiNode {
-    with_left_accent(button(app, text, on_click).set_size(SizeValue::Grow, SizeValue::Fit))
+pub(crate) fn sidebar_button(app: &mut App, text: &str, on_click: impl FnMut(&mut ClickUi, &mut App) + 'static) -> UiNode {
+    with_left_accent(button(text, on_click).set_size(SizeValue::Grow, SizeValue::Fit))
 }
 
 /// An invisible spacer that claims *all* the leftover main-axis space in its
@@ -104,7 +103,7 @@ pub fn grow_spacer() -> UiNode {
 /// The section pages stay direct children of "Settings/Content/{tab}", which
 /// is what the slider, toggle and controller rows look up. Safe across scenes
 /// because only one scene's UI tree is alive at a time.
-pub(crate) fn settings_ui(app: &mut App, on_back: impl Fn(&mut App) + 'static) -> UiNode {
+pub(crate) fn settings_ui(app: &mut App, on_back: impl FnMut(&mut ClickUi, &mut App) + 'static) -> UiNode {
     UiNode::container()
         .set_orientation(Orientation::Horizontal)
         .set_background_color(UiColor::TRANSPARENT)
@@ -118,11 +117,11 @@ pub(crate) fn settings_ui(app: &mut App, on_back: impl Fn(&mut App) + 'static) -
                 .set_padding([60.0, 60.0, 40.0, 40.0])
                 .set_child_anchor(Anchor::Start, Anchor::Start)
                 .set_gap(8.0)
-                .set_child("Title", label(app, "Settings").set_font_size(&mut app.ui.text.font_system, 32.0).set_text_color(UiColor::WHITE))
-                .set_child("Controller", sidebar_button(app, "Controller", |app| open_settings_section(app, "Controller")))
-                .set_child("Video", sidebar_button(app, "Video", |app| open_settings_section(app, "Video")))
-                .set_child("Audio", sidebar_button(app, "Audio", |app| open_settings_section(app, "Audio")))
-                .set_child("Head Tracking", sidebar_button(app, "Head Tracking", |app| open_settings_section(app, "Head Tracking")))
+                .set_child("Title", label("Settings").set_font_size(32.0).set_text_color(UiColor::WHITE))
+                .set_child("Controller", sidebar_button(app, "Controller", |ui, app| open_settings_section(ui, app, "Controller")))
+                .set_child("Video", sidebar_button(app, "Video", |ui, app| open_settings_section(ui, app, "Video")))
+                .set_child("Audio", sidebar_button(app, "Audio", |ui, app| open_settings_section(ui, app, "Audio")))
+                .set_child("Head Tracking", sidebar_button(app, "Head Tracking", |ui, app| open_settings_section(ui, app, "Head Tracking")))
                 .set_child("BackSpacer", grow_spacer())
                 .set_child("Back", sidebar_button(app, "Back", on_back))
         )
@@ -147,12 +146,12 @@ pub(crate) fn settings_ui(app: &mut App, on_back: impl Fn(&mut App) + 'static) -
                         // tall List's own content ends up being.
                         .set_size(SizeValue::Grow, SizeValue::Grow)
                         .set_gap(20.0)
-                        .set_child("Title", label(app, "Controller").set_font_size(&mut app.ui.text.font_system, 26.0).set_text_color(UiColor::WHITE))
+                        .set_child("Title", label("Controller").set_font_size(26.0).set_text_color(UiColor::WHITE))
                         .set_child("List", controller_settings_list(app))
                         .set_child("Actions", controller_action_buttons(app))
                         .active(false))
                 .set_child("Video", video_settings(app).active(false))
-                .set_child("Audio", label(app, "Audio Settings").set_font_size(&mut app.ui.text.font_system, 26.0).set_text_color(UiColor::WHITE).active(false))
+                .set_child("Audio", label("Audio Settings").set_font_size(26.0).set_text_color(UiColor::WHITE).active(false))
                 .set_child("Head Tracking", head_tracking_settings(app).active(false))
                 .active(false))
         .active(false)
@@ -164,7 +163,7 @@ fn video_settings(app: &mut App) -> UiNode {
         .set_background_color(UiColor::TRANSPARENT)
         .set_size(SizeValue::Grow, SizeValue::Fit)
         .set_gap(20.0)
-        .set_child("Title", label(app, "Video").set_font_size(&mut app.ui.text.font_system, 26.0).set_text_color(UiColor::WHITE))
+        .set_child("Title", label("Video").set_font_size(26.0).set_text_color(UiColor::WHITE))
         .set_child("FreeCameraFollowsPlane", settings_toggle_row(app, "Video", "FreeCameraFollowsPlane", "Free camera follows plane",
             |settings| settings.free_camera_follows_plane,
             |settings| settings.free_camera_follows_plane = !settings.free_camera_follows_plane))
@@ -193,7 +192,7 @@ fn head_tracking_settings(app: &mut App) -> UiNode {
         .set_background_color(UiColor::TRANSPARENT)
         .set_size(SizeValue::Grow, SizeValue::Fit)
         .set_gap(20.0)
-        .set_child("Title", label(app, "Head Tracking").set_font_size(&mut app.ui.text.font_system, 26.0).set_text_color(UiColor::WHITE))
+        .set_child("Title", label("Head Tracking").set_font_size(26.0).set_text_color(UiColor::WHITE))
         .set_child("Row", head_tracking_row(app))
 }
 
@@ -214,7 +213,7 @@ fn settings_row(app: &mut App, name: &str) -> UiNode {
         .set_gap(16.0)
         .set_transition(80.0)
         .on_hover(|style| style.set_border_color(UiColor::Rgba(255, 255, 255, 160)).set_text_color(UiColor::WHITE))
-        .set_child("Name", label(app, name).set_size(SizeValue::Pixels(260.0), SizeValue::Fit).set_text_color(METHOD_TEXT))
+        .set_child("Name", label(name).set_size(SizeValue::Pixels(260.0), SizeValue::Fit).set_text_color(METHOD_TEXT))
         .set_child("Spacer", grow_spacer())
 }
 
@@ -232,9 +231,9 @@ fn head_tracking_control(app: &mut App) -> UiNode {
         .set_size(SizeValue::Fit, SizeValue::Fit)
         .set_child_anchor(Anchor::Start, Anchor::Center)
         .set_gap(10.0)
-        .set_child("Left", step_triangle(true, |app| step_head_tracking(app, -1)))
+        .set_child("Left", step_triangle(true, |ui, app| step_head_tracking(ui, app, -1)))
         .set_child("Middle", head_tracking_value(app, selected))
-        .set_child("Right", step_triangle(false, |app| step_head_tracking(app, 1)))
+        .set_child("Right", step_triangle(false, |ui, app| step_head_tracking(ui, app, 1)))
 }
 
 /// The method name with its status dot sitting just to the right of it.
@@ -245,7 +244,7 @@ fn head_tracking_value(app: &mut App, selected: HeadTrackingSource) -> UiNode {
         .set_size(SizeValue::Fit, SizeValue::Fit)
         .set_child_anchor(Anchor::Start, Anchor::Center)
         .set_gap(8.0)
-        .set_child("Name", label(app, selected.label()).set_text_color(METHOD_TEXT))
+        .set_child("Name", label(selected.label()).set_text_color(METHOD_TEXT))
         .set_child("Dot", status_dot(head_tracking::source_connected(selected)))
 }
 
@@ -253,7 +252,7 @@ fn head_tracking_value(app: &mut App, selected: HeadTrackingSource) -> UiNode {
 /// The square stays clear until hover, then fills white while the triangle
 /// turns black. A negative corner radius is what asks the UI shader to draw
 /// the triangle (see `ui_template.wgsl`); `points_left` picks the direction.
-fn step_triangle(points_left: bool, on_click: impl Fn(&mut App) + 'static) -> UiNode {
+fn step_triangle(points_left: bool, on_click: impl FnMut(&mut ClickUi, &mut App) + 'static) -> UiNode {
     UiNode::container()
         .set_size(SizeValue::Pixels(22.0), SizeValue::Pixels(22.0))
         .set_child_anchor(Anchor::Center, Anchor::Center)
@@ -262,7 +261,7 @@ fn step_triangle(points_left: bool, on_click: impl Fn(&mut App) + 'static) -> Ui
         .set_corner_radius(4.0)
         .set_transition(50.0)
         .on_hover(|style| style.set_background_color(UiColor::WHITE).set_text_color(UiColor::BLACK))
-        .on_click(on_click)
+        .on_click(click(on_click))
         .set_child("Mark", UiNode::container()
             .set_size(SizeValue::Pixels(8.0), SizeValue::Pixels(10.0))
             .set_background_color(METHOD_TEXT)
@@ -271,14 +270,14 @@ fn step_triangle(points_left: bool, on_click: impl Fn(&mut App) + 'static) -> Ui
             .set_corner_radius(if points_left { -100.0 } else { -1.0 }))
 }
 
-fn step_head_tracking(app: &mut App, delta: isize) {
+fn step_head_tracking(ui: &mut impl GameUi, app: &mut App, delta: isize) {
     let current = GAME_SETTINGS.lock().unwrap().head_tracking;
     let index = HEAD_SOURCES.iter().position(|source| *source == current).unwrap_or(0);
     let len = HEAD_SOURCES.len() as isize;
     let next = (index as isize + delta).rem_euclid(len) as usize;
     GAME_SETTINGS.lock().unwrap().head_tracking = HEAD_SOURCES[next];
     head_tracking::selection_changed();
-    refresh_head_tracking(app);
+    refresh_head_tracking(ui, app);
 }
 
 /// White label on a clear square. Hover fills the square white and turns the
@@ -294,13 +293,13 @@ fn retry_button(app: &mut App) -> UiNode {
         .set_corner_radius(4.0)
         .set_transition(50.0)
         .on_hover(|style| style.set_background_color(UiColor::WHITE).set_text_color(UiColor::BLACK))
-        .on_click(|app| {
+        .on_click(click(|ui, app| {
             head_tracking::retry(app);
-            refresh_head_tracking(app);
-        })
-        .set_child("Label", label(app, "Retry")
+            refresh_head_tracking(ui, app);
+        }))
+        .set_child("Label", label("Retry")
             .set_text_color(UiColor::WHITE)
-            .set_font_size(&mut app.ui.text.font_system, 14.0)
+            .set_font_size(14.0)
             .set_align(glyphon::cosmic_text::Align::Center)
             .set_size(SizeValue::Fit, SizeValue::Pixels(22.0)))
 }
@@ -315,38 +314,37 @@ fn status_dot(connected: bool) -> UiNode {
 /// Rewrites the method name, its dot, and the Retry label when the tracker
 /// changed them. No-op until something has changed, and when this section
 /// isn't in the tree.
-pub(crate) fn refresh_head_tracking_if_needed(app: &mut App) {
+pub(crate) fn refresh_head_tracking_if_needed(ui: &mut impl GameUi, app: &mut App) {
     // The countdown has to repaint every second, not only on the click, so
     // a wait in progress refreshes even when nothing else about the tracker
     // changed this frame.
     let counting = head_tracking::retry_caption() != "Retry";
     if head_tracking::take_changed() || counting {
-        refresh_head_tracking(app);
+        refresh_head_tracking(ui, app);
     }
 }
 
 /// Rewrites the method name, its dot, and the Retry label. No-op when this
 /// section isn't in the tree.
-fn refresh_head_tracking(app: &mut App) {
+fn refresh_head_tracking(ui: &mut impl GameUi, app: &mut App) {
     let selected = GAME_SETTINGS.lock().unwrap().head_tracking;
     let name_path = "Settings/Content/Head Tracking/Row/Control/Middle/Name";
-    if let Some(name) = Ui::get_ui_node(&mut app.ui.renderizable_elements, name_path) {
+    if let Some(name) = ui.ui_node(name_path) {
         if let Some(label) = name.as_label_mut() {
-            label.set_text(&mut app.ui.text.font_system, selected.label(), true);
+            label.set_text(selected.label());
         }
     }
     let dot_path = "Settings/Content/Head Tracking/Row/Control/Middle/Dot";
-    if let Some(dot) = Ui::get_ui_node(&mut app.ui.renderizable_elements, dot_path) {
+    if let Some(dot) = ui.ui_node(dot_path) {
         let color = if head_tracking::source_connected(selected) { CONNECTED_COLOR } else { DISCONNECTED_COLOR };
         dot.update_style(|style| style.set_background_color(color));
     }
     let retry_path = "Settings/Content/Head Tracking/Row/Retry/Label";
-    if let Some(retry) = Ui::get_ui_node(&mut app.ui.renderizable_elements, retry_path) {
+    if let Some(retry) = ui.ui_node(retry_path) {
         if let Some(label) = retry.as_label_mut() {
-            label.set_text(&mut app.ui.text.font_system, head_tracking::retry_caption(), true);
+            label.set_text(head_tracking::retry_caption());
         }
     }
-    app.ui.has_changed = true;
 }
 
 /// A `settings_slider_row`'s values: `min` at the left end, `max` at the
@@ -397,11 +395,11 @@ fn settings_slider_row(app: &mut App, tab: &str, key: &str, name: &str, range: S
     let value = read(&GAME_SETTINGS.lock().unwrap());
 
     settings_row(app, name)
-        .set_child("Slider", slider(range.fraction(value)).on_click(move |app| {
+        .set_child("Slider", slider(range.fraction(value)).on_click(click(move |ui, app| {
             SLIDER_DRAG.with(|drag| *drag.borrow_mut() = Some(SliderDrag { row_path: row_path.clone(), range, write }));
-            update_settings_sliders(app);
-        }))
-        .set_child("Value", label(app, &(range.format)(value)).set_size(SizeValue::Pixels(80.0), SizeValue::Fit).set_text_color(UiColor::WHITE))
+            update_settings_sliders(ui, app);
+        })))
+        .set_child("Value", label(&(range.format)(value)).set_size(SizeValue::Pixels(80.0), SizeValue::Fit).set_text_color(UiColor::WHITE))
 }
 
 fn percent_text(value: f32) -> String {
@@ -416,27 +414,26 @@ fn degrees_text(value: f32) -> String {
 /// held, stores the value under the mouse and moves the slider/readout to
 /// it; once it's let go, the drag ends. Call every frame the settings can be
 /// open (main menu, and the play scene while paused).
-pub(crate) fn update_settings_sliders(app: &mut App) {
+pub(crate) fn update_settings_sliders(ui: &mut impl GameUi, app: &mut App) {
     SLIDER_DRAG.with(|drag| {
         let mut drag = drag.borrow_mut();
         let Some(active) = drag.as_ref() else { return };
-        if !input::is_action_pressed("ui_click") {
+        if !app.input.is_action_pressed("ui_click") {
             *drag = None;
             return;
         }
 
-        let Some(slider_node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &format!("{}/Slider", active.row_path)) else {
+        let Some(slider_node) = ui.ui_node(&format!("{}/Slider", active.row_path)) else {
             *drag = None;
             return;
         };
-        let value = active.range.value_at(slider_fraction_at(slider_node, input::mouse_x() as f32));
+        let value = active.range.value_at(slider_fraction_at(slider_node, app.input.mouse_x() as f32));
         set_slider(slider_node, active.range.fraction(value));
         (active.write)(&mut GAME_SETTINGS.lock().unwrap(), value);
 
-        if let Some(readout) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &format!("{}/Value", active.row_path)).and_then(|n| n.as_label_mut()) {
-            readout.set_text(&mut app.ui.text.font_system, &(active.range.format)(value), true);
+        if let Some(readout) = ui.ui_node(&format!("{}/Value", active.row_path)).and_then(|n| n.as_label_mut()) {
+            readout.set_text(&(active.range.format)(value));
         }
-        app.ui.has_changed = true;
     });
 }
 
@@ -452,17 +449,16 @@ fn settings_toggle_row(app: &mut App, tab: &str, key: &str, name: &str, read: fn
 
     settings_row(app, name)
         .set_child("Switch", toggle_switch(on))
-        .on_click(move |app| {
+        .on_click(click(move |ui, app| {
             let on = {
                 let mut settings = GAME_SETTINGS.lock().unwrap();
                 flip(&mut settings);
                 read(&settings)
             };
-            if let Some(switch) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &switch_path) {
+            if let Some(switch) = ui.ui_node(&switch_path) {
                 set_toggle_switch(switch, on);
             }
-            app.ui.has_changed = true;
-        })
+        }))
 }
 
 /// Which actions get a row here, grouped by job - see settings/controller.ron
@@ -508,8 +504,8 @@ fn controller_settings_list(app: &mut App) -> UiNode {
             .set_gap(4.0)
             .set_child(
                 "Title",
-                label(app, &section.name)
-                    .set_font_size(&mut app.ui.text.font_system, 18.0)
+                label(&section.name)
+                    .set_font_size(18.0)
                     .set_text_color(UiColor::WHITE)
                     .set_padding([16.0, 8.0, 4.0, 0.0]),
             );
@@ -526,17 +522,17 @@ fn controller_settings_list(app: &mut App) -> UiNode {
 /// `controller_settings_section`). A button reads off or its strength; an
 /// axis reads how far it's leaned, so a binding can be tried without leaving
 /// the page. No-op when the settings page isn't built.
-pub(crate) fn refresh_controller_states(app: &mut App) {
+pub(crate) fn refresh_controller_states(ui: &mut impl GameUi, app: &mut App) {
     for section in controller_sections() {
         for action in section.actions {
             let path = format!("Settings/Content/Controller/List/{}/{action}/State", section.name);
-            let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &path) else { continue };
-            let strength = input::action_strength(&action);
-            let live = strength > 0.02 || input::is_action_pressed(&action);
+            let Some(node) = ui.ui_node(&path) else { continue };
+            let strength = app.input.action_strength(&action);
+            let live = strength > 0.02 || app.input.is_action_pressed(&action);
             node.style.text_color = Some(if live { UiColor::Rgb(80, 220, 120) } else { UiColor::Rgb(130, 130, 130) });
             if let Some(label) = node.as_label_mut() {
                 let text = if live { format!("{strength:.2}") } else { "off".to_owned() };
-                label.set_text(&mut app.ui.text.font_system, &text, true);
+                label.set_text(&text);
             }
         }
     }
@@ -559,9 +555,9 @@ fn controller_settings_section(app: &mut App, action: &str) -> UiNode {
 
     let action_name = action.to_owned();
     settings_row(app, &rebind_modal::display_name(action))
-        .set_child("State", label(app, "off").set_size(SizeValue::Pixels(48.0), SizeValue::Fit).set_align(glyphon::cosmic_text::Align::Center).set_text_color(UiColor::Rgb(130, 130, 130)))
+        .set_child("State", label("off").set_size(SizeValue::Pixels(48.0), SizeValue::Fit).set_align(glyphon::cosmic_text::Align::Center).set_text_color(UiColor::Rgb(130, 130, 130)))
         .set_child("Chips", chips)
-        .on_click(move |app| select_controller_action(app, &action_name))
+        .on_click(click(move |ui, app| select_controller_action(ui, app, &action_name)))
 }
 
 /// Add input and Clear input, pinned under the scrolling list. They act on
@@ -573,43 +569,43 @@ fn controller_action_buttons(app: &mut App) -> UiNode {
         .set_size(SizeValue::Grow, SizeValue::Fit)
         .set_child_anchor(Anchor::Start, Anchor::Center)
         .set_gap(10.0)
-        .set_child("Add", keycap_style(button(app, "Add input", add_selected_input)))
-        .set_child("Clear", keycap_style(button(app, "Clear input", clear_selected_input)))
+        .set_child("Add", keycap_style(button("Add input", |ui, app| add_selected_input(ui, app))))
+        .set_child("Clear", keycap_style(button("Clear input", |ui, app| clear_selected_input(ui, app))))
 }
 
-fn select_controller_action(app: &mut App, action: &str) {
+fn select_controller_action(ui: &mut impl GameUi, app: &mut App, action: &str) {
     *SELECTED_CONTROLLER.lock().unwrap() = Some(action.to_owned());
-    paint_controller_selection(app);
+    paint_controller_selection(ui, app);
 }
 
-fn add_selected_input(app: &mut App) {
+fn add_selected_input(ui: &mut impl GameUi, app: &mut App) {
     let Some(action) = SELECTED_CONTROLLER.lock().unwrap().clone() else { return };
-    rebind_modal::open(app, &action, None);
+    rebind_modal::open(ui, app, &action, None);
 }
 
-fn clear_selected_input(app: &mut App) {
+fn clear_selected_input(ui: &mut impl GameUi, app: &mut App) {
     let Some(action) = SELECTED_CONTROLLER.lock().unwrap().clone() else { return };
-    input::clear_bindings(&action);
-    refresh_controller_chips(app, &action);
+    app.input.clear_bindings(&action);
+    refresh_controller_chips(ui, app, &action);
 }
 
 /// Lights the selected row the way a video row looks while the cursor is on it,
 /// and puts the others back to rest.
-fn paint_controller_selection(app: &mut App) {
+fn paint_controller_selection(ui: &mut impl GameUi, app: &mut App) {
     let selected = SELECTED_CONTROLLER.lock().unwrap().clone();
     for section in controller_sections() {
         for action in section.actions {
             let path = format!("Settings/Content/Controller/List/{}/{action}", section.name);
             let on = selected.as_deref() == Some(action.as_str());
-            if let Some(row) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &path) {
+            if let Some(row) = ui.ui_node(&path) {
                 let border = if on { SELECTED_ROW } else { UiColor::TRANSPARENT };
                 row.update_style(|style| style.set_border_color(border));
             }
-            if let Some(name) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &format!("{path}/Name")) {
+            if let Some(name) = ui.ui_node(&format!("{path}/Name")) {
                 let color = if on { UiColor::WHITE } else { METHOD_TEXT };
                 name.update_style(|style| style.set_text_color(color));
             }
-            if let Some(chips) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &format!("{path}/Chips")) {
+            if let Some(chips) = ui.ui_node(&format!("{path}/Chips")) {
                 if let Some(container) = chips.as_container_mut() {
                     let color = if on { UiColor::WHITE } else { CHIP_TEXT };
                     for (_, chip) in &mut container.children {
@@ -619,20 +615,18 @@ fn paint_controller_selection(app: &mut App) {
             }
         }
     }
-    app.ui.has_changed = true;
 }
 
 /// Rebuilds `action`'s chip row after a binding is added or cleared.
-pub(crate) fn refresh_controller_chips(app: &mut App, action: &str) {
+pub(crate) fn refresh_controller_chips(ui: &mut impl GameUi, app: &mut App, action: &str) {
     let chips = controller_chip_nodes(app, action);
     let Some(path) = controller_action_path(action).map(|path| format!("{path}/Chips")) else { return };
-    if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &path) {
+    if let Some(node) = ui.ui_node(&path) {
         if let Some(container) = node.as_container_mut() {
             container.children = chips;
         }
-        app.ui.has_changed = true;
     }
-    paint_controller_selection(app);
+    paint_controller_selection(ui, app);
 }
 
 /// The "keycap" color/hover treatment shared by the settings chips (see
@@ -686,11 +680,11 @@ fn chip_style(node: UiNode) -> UiNode {
 /// binding, keyed `"chip_{index}"`. Also called by `refresh_controller_chips`
 /// after a binding is added or cleared.
 pub fn controller_chip_nodes(app: &mut App, action: &str) -> Vec<(String, UiNode)> {
-    let bindings = input::action_bindings(action);
+    let bindings = app.input.action_bindings(action);
     let mut nodes = Vec::with_capacity(bindings.len());
 
     for (index, binding) in bindings.iter().enumerate() {
-        let chip = chip_style(label(app, &binding.label().to_uppercase()));
+        let chip = chip_style(label(&binding.label().to_uppercase()));
         nodes.push((format!("chip_{index}"), chip));
     }
 
@@ -731,7 +725,7 @@ fn levels() -> Vec<LevelInfo> {
 /// write, because it needs to stay showing regardless of hover/press state.
 /// No-op if `id`
 /// isn't in `assets/levels.ron`.
-fn show_level(app: &mut App, id: &str) {
+fn show_level(ui: &mut impl GameUi, app: &mut App, id: &str) {
     let Some(level) = levels().into_iter().find(|l| l.id == id) else { return };
     *SELECTED_LEVEL.lock().unwrap() = Some(SelectedLevel {
         scene: level.scene.clone(),
@@ -740,21 +734,20 @@ fn show_level(app: &mut App, id: &str) {
         mission_date: level.mission_date.clone(),
     });
 
-    if let Some(name) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "Play Select/Main/Content/Name").and_then(|n| n.as_label_mut()) {
-        name.set_text(&mut app.ui.text.font_system, &level.name, false);
+    if let Some(name) = ui.ui_node("Play Select/Main/Content/Name").and_then(|n| n.as_label_mut()) {
+        name.set_text(&level.name);
     }
-    if let Some(description) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "Play Select/Main/Content/Description").and_then(|n| n.as_label_mut()) {
-        description.set_text(&mut app.ui.text.font_system, &level.description, false);
+    if let Some(description) = ui.ui_node("Play Select/Main/Content/Description").and_then(|n| n.as_label_mut()) {
+        description.set_text(&level.description);
     }
     for other in levels() {
-        if let Some(button) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &format!("Play Select/Main/Sidebar/List/{}", other.id)) {
+        if let Some(button) = ui.ui_node(&format!("Play Select/Main/Sidebar/List/{}", other.id)) {
             let selected = other.id == id;
             let border = if selected { UiColor::WHITE } else { UiColor::TRANSPARENT };
             let text = if selected { UiColor::WHITE } else { UiColor::Rgb(200, 200, 200) };
             button.update_style(|s| s.set_border_color(border).set_text_color(text));
         }
     }
-    app.ui.has_changed = true;
 }
 
 /// A scrollable list of level buttons on the left (see `set_scrollable`'s own
@@ -776,7 +769,7 @@ fn play_select_ui(app: &mut App) -> UiNode {
         .set_scrollable(true);
     for level in levels() {
         let id = level.id.clone();
-        let row = sidebar_button(app, &level.name, move |app| show_level(app, &id));
+        let row = sidebar_button(app, &level.name, move |ui, app| show_level(ui, app, &id));
         level_list = level_list.set_child(level.id, row);
     }
 
@@ -799,7 +792,7 @@ fn play_select_ui(app: &mut App) -> UiNode {
                         .set_padding([60.0, 20.0, 40.0, 20.0])
                         .set_child_anchor(Anchor::Start, Anchor::Start)
                         .set_gap(16.0)
-                        .set_child("Title", label(app, "Select Mission").set_font_size(&mut app.ui.text.font_system, 32.0).set_text_color(UiColor::WHITE))
+                        .set_child("Title", label("Select Mission").set_font_size(32.0).set_text_color(UiColor::WHITE))
                         .set_child("List", level_list)
                 )
                 .set_child("Content",
@@ -818,9 +811,9 @@ fn play_select_ui(app: &mut App) -> UiNode {
                                 .set_corner_radius(10.0)
                                 .set_size(SizeValue::Grow, SizeValue::Pixels(260.0))
                                 .set_child_anchor(Anchor::Center, Anchor::Center)
-                                .set_child("Placeholder", label(app, "No preview available").set_text_color(UiColor::Rgb(140, 140, 140))))
-                        .set_child("Name", label(app, "").set_size(SizeValue::Grow, SizeValue::Fit).set_font_size(&mut app.ui.text.font_system, 28.0).set_text_color(UiColor::WHITE))
-                        .set_child("Description", label(app, "").set_size(SizeValue::Grow, SizeValue::Fit).set_text_color(UiColor::Rgb(200, 200, 200)))
+                                .set_child("Placeholder", label("No preview available").set_text_color(UiColor::Rgb(140, 140, 140))))
+                        .set_child("Name", label("").set_size(SizeValue::Grow, SizeValue::Fit).set_font_size(28.0).set_text_color(UiColor::WHITE))
+                        .set_child("Description", label("").set_size(SizeValue::Grow, SizeValue::Fit).set_text_color(UiColor::Rgb(200, 200, 200)))
                 )
         )
         .set_child("Actions",
@@ -833,11 +826,11 @@ fn play_select_ui(app: &mut App) -> UiNode {
                 .set_size(SizeValue::Grow, SizeValue::Fit)
                 .set_padding([20.0, 20.0, 60.0, 60.0])
                 .set_child_anchor(Anchor::Start, Anchor::Center)
-                .set_child("Back", footer_button(app, "Back", |app| show_panel(app, "Main Menu")))
+                .set_child("Back", footer_button(app, "Back", |ui, app| show_panel(ui, app, "Main Menu")))
                 .set_child("Spacer", grow_spacer())
-                .set_child("Play", footer_button(app, "Play", |app| {
+                .set_child("Play", footer_button(app, "Play", |ui, app| {
                     if let Some(selected) = SELECTED_LEVEL.lock().unwrap().clone() {
-                        app.scene_manager.open_scene(&selected.scene);
+                        crate::game::scenes::loading::scene::go_to(app, &selected.scene);
                     }
                 }))
         )
@@ -853,11 +846,11 @@ fn play_select_ui(app: &mut App) -> UiNode {
 /// - but only vertical padding actually affects button *height*, so that
 /// stays close to `sidebar_button`'s own (6.0) rather than matching the
 /// horizontal bump 1:1.
-fn footer_button(app: &mut App, text: &str, on_click: impl Fn(&mut App) + 'static) -> UiNode {
-    with_left_accent(button(app, text, on_click).set_padding((28.0, 7.0)))
+fn footer_button(app: &mut App, text: &str, on_click: impl FnMut(&mut ClickUi, &mut App) + 'static) -> UiNode {
+    with_left_accent(button(text, on_click).set_padding((28.0, 7.0)))
 }
 
-pub fn build(app: &mut App) {
+pub fn build(scene: &mut Scene, app: &mut App) {
     let main_menu = UiNode::container()
         .set_size(SizeValue::Grow, SizeValue::Grow)
         .set_corner_radius(0.0)
@@ -868,31 +861,29 @@ pub fn build(app: &mut App) {
                 .set_orientation(Orientation::Vertical)
                 .set_size(SizeValue::Fit, SizeValue::Fit)
                 .set_position(PositionValue::Start(40.0), PositionValue::Center(0.0))
-                .set_child("title", label(app, "Project Skies").set_font_size(&mut app.ui.text.font_system, 50.0))
-                .set_child("Play", with_left_accent(button(app, "Play", |app| show_panel(app, "Play Select")).set_size(SizeValue::Grow, SizeValue::Fit)))
-                .set_child("Settings", with_left_accent(button(app, "Settings", |app| show_panel(app, "Settings")).set_size(SizeValue::Grow, SizeValue::Fit)))
-                // Sets App::should_quit rather than std::process::exit(0)
-                // directly - see that field's own doc comment for why: a
-                // raw exit skipped App::run's own graceful shutdown (physics
-                // thread notified, SDL2/wgpu resources actually dropped) and
-                // any code main.rs has after its own `app.run()` call.
-                .set_child("Quit", with_left_accent(button(app, "Quit", |app| { app.should_quit = true; }).set_size(SizeValue::Grow, SizeValue::Fit)))
+                .set_child("title", label("Project Skies").set_font_size(50.0))
+                .set_child("Play", with_left_accent(button("Play", |ui, app| show_panel(ui, app, "Play Select")).set_size(SizeValue::Grow, SizeValue::Fit)))
+                .set_child("Settings", with_left_accent(button("Settings", |ui, app| show_panel(ui, app, "Settings")).set_size(SizeValue::Grow, SizeValue::Fit)))
+                // Sets App::should_quit - the engine's main loop ends and
+                // everything is dropped properly.
+                .set_child("Quit", with_left_accent(button("Quit", |_, app| { app.should_quit = true; }).set_size(SizeValue::Grow, SizeValue::Fit)))
         );
 
-    Layer::new(app)
-        .set_child("Backdrop", backdrop())
-        .set_child("Main Menu", main_menu)
-        .set_child("Settings", settings_ui(app, |app| show_panel(app, "Main Menu")))
-        .set_child("Play Select", play_select_ui(app))
-        .set_child("RebindModal", rebind_modal::build(app))
-        .build(app);
-    app.ui.always_on_bottom.push("Backdrop".to_owned());
-    app.ui.always_on_top.push("RebindModal".to_owned());
+    ui_layers::add(scene, app, "Backdrop", backdrop());
+    ui_layers::add(scene, app, "Main Menu", main_menu);
+    let settings = settings_ui(app, |ui, app| show_panel(ui, app, "Main Menu"));
+    ui_layers::add(scene, app, "Settings", settings);
+    let play_select = play_select_ui(app);
+    ui_layers::add(scene, app, "Play Select", play_select);
+    let rebind = rebind_modal::build(app);
+    ui_layers::add(scene, app, "RebindModal", rebind);
+    scene.ui_on_bottom("Backdrop");
+    scene.ui_on_top("RebindModal");
     // Settings opens on the name list (List is active, Content is not). A
     // section is shown only after its name is chosen.
     // Selects the first level so Content/Play aren't empty/dead the first time
     // the player opens the Play screen, before ever clicking a level button.
     if let Some(first) = levels().first() {
-        show_level(app, &first.id);
+        show_level(scene, app, &first.id);
     }
 }

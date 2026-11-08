@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use nalgebra::{UnitQuaternion, Vector3};
 use serde::{Deserialize, Serialize};
 
-use crate::engine::scene_manager::properties::Space;
+use pankarta_software::scene_manager::node::properties::Space;
 
 /// A level's starting setup - `<scene folder>/map.ron`: its coalitions, every
 /// aircraft in each, where each one starts and whether the player flies it.
@@ -441,7 +441,7 @@ pub struct AircraftPlacement {
     /// its own on top of its plane's (see `Material`). Optional - its
     /// plane's look when left out.
     #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "plain_some")]
-    pub material: Option<crate::engine::scene_manager::properties::Material>,
+    pub material: Option<pankarta_software::scene_manager::node::properties::Material>,
 }
 
 /// Radar altitude (m) that starts the low-altitude warning when a placement

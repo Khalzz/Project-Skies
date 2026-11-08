@@ -1,111 +1,116 @@
-use crate::app::App;
-use crate::engine::rendering::ui::ui::Ui;
-use crate::engine::scene_manager::scene::{FrameContext, Scene, SceneBehaviour};
-use crate::engine::ui::color::UiColor;
-use crate::engine::ui::ui_node::UiNode;
-use crate::engine::ui::ui_transform::{Anchor, Orientation, PositionValue, SizeValue};
+//! The loading screen: "Loading..." in a card on black, pulsing, with how
+//! far the level has got under it - while the level builds and loads in the
+//! background. An ordinary scene, opened with `go_to` each time (the engine
+//! has no loading screen of its own - see its docs/scene_loading.md).
+
 use glyphon::cosmic_text::Align;
+use pankarta_software::prelude::*;
+use pankarta_software::ui::ui_node::UiNode;
+use pankarta_software::ui::ui_transform::{Anchor, Orientation, PositionValue, SizeValue};
+use pankarta_software::utils::lerps::smoothstep;
+
 use crate::game::ui::{card, label};
 
-// pub(crate): App::run drives this scene's fade-out itself once a background
-// load finishes (see PendingSceneLoad::ready), rather than this file owning that
-// transition - see App::run's own comment on why (ordering vs. this scene's own
-// still-ticking Scene::update pulse).
-pub(crate) const BACKDROP_KEY: &str = "loading_backdrop";
-pub(crate) const PANEL_KEY: &str = "loading_panel";
-/// The line saying what's loading right now - its own node at the bottom of
-/// the screen, apart from the "Loading..." panel in the middle.
-pub(crate) const STEP_KEY: &str = "loading_step";
-/// How long App::run spends fading this scene's UI back out once a background
-/// load finishes, before swapping to the real scene - see PendingSceneLoad::ready.
-pub(crate) const FADE_OUT_SECS: f32 = 0.35;
-
-/// The loading step line's width (px) - room for the longest ("Model
-/// assets/planes/<plane>/model/<plane>.glb") - and how far above the
-/// screen's bottom edge it sits.
+/// The loading screen's node - its UI layer.
+const NODE: &str = "loading";
+const PANEL_LABEL: &str = "panel/label";
+const STEP: &str = "step";
+/// How long the screen fades out once the level is ready, before the level
+/// opens.
+const FADE_OUT_SECS: f32 = 0.35;
+/// The progress line's width and how far above the screen's bottom edge it
+/// sits.
 const STEP_WIDTH: f32 = 420.0;
 const STEP_BOTTOM_MARGIN: f32 = 48.0;
 
-/// Stand-in `Scene` shown while a `SceneManager::create_loaded_scene`-registered
-/// scene's background prepare thread is running (see `App::run`'s reset handling) -
-/// occupies `active_scene` so the normal render path keeps presenting frames
-/// instead of the window sitting frozen for however long the load takes.
+/// Opens the loading screen, which loads `scene` (a registered scene's name)
+/// and opens it once it's ready.
+pub fn go_to(app: &mut App, scene: &str) {
+    let target = scene.to_owned();
+    // Built again from scratch - a restart doesn't reuse the old level.
+    app.scene_manager.cancel_preload(&target);
+    app.scene_manager.open(move |scene, app| LoadingScreenScene::new(scene, app, target.clone()));
+}
+
 pub struct LoadingScreenScene {
+    target: String,
     elapsed: f32,
-    /// The step last shown under the title (see App::loading_step).
-    shown_step: Option<String>,
+    /// Seconds into the fade-out, once the target is ready.
+    fading: Option<f32>,
+    /// The progress last shown.
+    shown_percent: Option<u32>,
 }
 
 impl LoadingScreenScene {
-    pub fn new(app: &mut App) -> Self {
-        let screen_width = app.window_manager.size.width as f32;
-        let screen_height = app.window_manager.size.height as f32;
+    pub fn new(scene: &mut Scene, app: &mut App, target: String) -> Self {
+        app.renderer.set_environment(Environment::Color(UiColor::Rgb(0, 0, 0)));
 
-        let mut backdrop = UiNode::container()
-            .set_size(SizeValue::Percent(100.0), SizeValue::Percent(100.0))
-            .set_position(PositionValue::Start(0.0), PositionValue::Start(0.0))
-            .set_background_color(UiColor::Rgba(0, 0, 0, 255));
-        backdrop.resolve(screen_width, screen_height);
-        app.ui.add_to_ui(BACKDROP_KEY.to_owned(), backdrop);
-
-        let mut panel = card()
+        let panel = card()
             .set_position(PositionValue::Center(0.0), PositionValue::Center(0.0))
             .set_orientation(Orientation::Vertical)
             .set_child_anchor(Anchor::Center, Anchor::Start)
-            .set_child("label", label(app, "Loading..."));
-        panel.resolve(screen_width, screen_height);
-        app.ui.add_to_ui(PANEL_KEY.to_owned(), panel);
-
-        // What's loading right now - filled in from App::loading_step - at the
-        // bottom of the screen. A fixed width: a label is only as wide as the
-        // text it was made with (here none), and later text doesn't widen it
-        // - it was cut down to its first letter.
-        let mut step = label(app, " ")
+            .set_child("label", label("Loading..."));
+        // How far the level has got - at the bottom of the screen. A fixed
+        // width, so longer text later still fits.
+        let step = label(" ")
             .set_size(SizeValue::Pixels(STEP_WIDTH), SizeValue::Fit)
             .set_position(PositionValue::Center(0.0), PositionValue::End(-STEP_BOTTOM_MARGIN))
             .set_align(Align::Center)
-            .set_font_size(&mut app.ui.text.font_system, 14.0)
+            .set_font_size(14.0)
             .set_text_color(UiColor::Rgb(170, 170, 170));
-        step.resolve(screen_width, screen_height);
-        app.ui.add_to_ui(STEP_KEY.to_owned(), step);
+        let root = UiNode::container()
+            .set_size(SizeValue::Percent(100.0), SizeValue::Percent(100.0))
+            .set_background_color(UiColor::Rgba(0, 0, 0, 255))
+            .set_child("panel", panel)
+            .set_child(STEP, step);
+        if let Err(error) = scene.spawn_node(app, Node::new(NODE).with_property(UiLayer::new(root))) {
+            eprintln!("{error}");
+        }
 
-        // Same ordering trick play::scene's mission-intro card uses: pushed in this
-        // order so the panel (pushed second) lands on top of the backdrop.
-        app.ui.always_on_top.push(BACKDROP_KEY.to_owned());
-        app.ui.always_on_top.push(PANEL_KEY.to_owned());
-        app.ui.always_on_top.push(STEP_KEY.to_owned());
-        app.ui.has_changed = true;
-
-        Self { elapsed: 0.0, shown_step: None }
+        Self { target, elapsed: 0.0, fading: None, shown_percent: None }
     }
 }
 
 impl SceneBehaviour for LoadingScreenScene {
-    fn update(&mut self, _scene: &mut Scene, app: &mut App, _ctx: &mut FrameContext) {
-        self.elapsed += app.time.delta_time;
+    fn on_spawn(&mut self, _scene: &mut Scene, app: &mut App) {
+        app.scene_manager.preload(&self.target);
+    }
 
-        // Indeterminate progress (no real byte/step counter is wired up) - a slow
-        // pulse is enough to read as "still working" rather than frozen. Keeps
-        // running unconditionally, even once the background load has actually
-        // finished and App::run has started fading this same label back out
-        // (PendingSceneLoad::ready) - that fade-out code runs later in the same
-        // frame and overwrites whatever alpha this sets, so the pulse just has no
-        // visible effect during those last few frames rather than needing to be
-        // explicitly paused.
+    fn update(&mut self, scene: &mut Scene, app: &mut App, _ctx: &mut FrameContext) {
+        let delta_time = app.time.unscaled_delta_time;
+        self.elapsed += delta_time;
+
+        // Indeterminate pulse - reads as "still working" rather than frozen.
         let pulse = 0.55 + 0.45 * (self.elapsed * 3.0).sin();
+        let percent = (app.scene_manager.load_progress(&self.target) * 100.0).round() as u32;
 
-        // What the background load is on now (see LoadReporter) - only
-        // touched when it changes.
-        if app.loading_step != self.shown_step {
-            self.shown_step = app.loading_step.clone();
-            let text = self.shown_step.clone().unwrap_or_else(|| " ".to_owned());
-            if let Some(step) = Ui::get_ui_node(&mut app.ui.renderizable_elements, STEP_KEY).and_then(|node| node.as_label_mut()) {
-                step.set_text(&mut app.ui.text.font_system, &text, true);
+        if self.fading.is_none() && app.scene_manager.is_ready(&self.target) {
+            self.fading = Some(0.0);
+        }
+        let alpha = match &mut self.fading {
+            Some(seconds) => {
+                *seconds += delta_time;
+                1.0 - smoothstep(*seconds / FADE_OUT_SECS)
+            }
+            None => 1.0,
+        };
+
+        let Some(layer) = scene.get_node_mut(NODE).and_then(|node| node.get_property_mut::<UiLayer>()) else { return };
+        if self.shown_percent != Some(percent) {
+            self.shown_percent = Some(percent);
+            if let Some(step) = layer.label_mut(STEP) {
+                step.set_text(format!("{percent}%"));
             }
         }
-        if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &format!("{PANEL_KEY}/label")) {
-            node.set_alpha(pulse);
+        if let Some(label) = layer.get_mut(PANEL_LABEL) {
+            label.set_alpha(pulse * alpha);
         }
-        app.ui.has_changed = true;
+        if let Some(step) = layer.get_mut(STEP) {
+            step.set_alpha(alpha);
+        }
+
+        if self.fading.is_some_and(|seconds| seconds >= FADE_OUT_SECS) {
+            app.scene_manager.open_scene(&self.target);
+        }
     }
 }

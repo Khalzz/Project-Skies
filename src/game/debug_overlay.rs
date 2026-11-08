@@ -1,14 +1,17 @@
-//! The game's debug and tool windows, drawn with egui over the frame -
-//! F7's flight rates and debug info, F10's flight editor, the title's shot
-//! panel (F10 there), F11's HUD layout, the debug view's telemetry while
-//! spectating. One frame plan step (`App::render_aero_debug_overlay_pass`,
-//! see game::frame_plans) - moved out of the engine, since all of it is the
-//! game's.
+//! The play scene's debug and tool windows, drawn with egui over the frame
+//! - F7's flight rates and debug info, F10's flight editor, F11's HUD
+//! layout, the debug view's telemetry while spectating. Built by `draw`,
+//! from the scene's `SceneBehaviour::debug_ui` - the engine's `DebugUi`
+//! feeds egui the input, shows its cursor and paints it, while
+//! `app.debug_ui.visible` is on.
 
 use nalgebra::Vector3;
 
-use crate::app::App;
-use crate::engine::input::input;
+use pankarta_software::prelude::*;
+use crate::game::ext::physics_behavior::PhysicsNodeExt;
+use crate::game::scenes::play::flight_editor::{FlightEditor, Telemetry};
+use crate::game::scenes::play::scene::HudLayout;
+use crate::game::scenes::play::tactical_ui::TacticalUi;
 use crate::game::game_settings::{COCKPIT_VIEW_PITCH_MAX, GAME_SETTINGS, HEAD_G_REACTION_MAX};
 use crate::game::scenes::play::camera::camera::Camera;
 use crate::game::scenes::play::plane::aero_spec::{AeroSpec, SurfaceKind};
@@ -273,245 +276,101 @@ impl DebugWindows {
     }
 }
 
-/// SDL typing (see input::TypedInput) as egui input - the characters, and
-/// the keys a text field edits with. Anything else is left out.
-fn egui_typing_event(typed: &input::TypedInput) -> Option<egui::Event> {
-    use sdl2::keyboard::Keycode;
-    match typed {
-        input::TypedInput::Text(text) => Some(egui::Event::Text(text.clone())),
-        input::TypedInput::Key { key, pressed, repeat, ctrl, shift } => {
-            let key = match *key {
-                Keycode::Backspace => egui::Key::Backspace,
-                Keycode::Delete => egui::Key::Delete,
-                Keycode::Left => egui::Key::ArrowLeft,
-                Keycode::Right => egui::Key::ArrowRight,
-                Keycode::Up => egui::Key::ArrowUp,
-                Keycode::Down => egui::Key::ArrowDown,
-                Keycode::Home => egui::Key::Home,
-                Keycode::End => egui::Key::End,
-                Keycode::Return | Keycode::KpEnter => egui::Key::Enter,
-                Keycode::Tab => egui::Key::Tab,
-                Keycode::Escape => egui::Key::Escape,
-                Keycode::A => egui::Key::A,
-                Keycode::C => egui::Key::C,
-                Keycode::V => egui::Key::V,
-                Keycode::X => egui::Key::X,
-                Keycode::Z => egui::Key::Z,
-                _ => return None,
-            };
-            let modifiers = egui::Modifiers { ctrl: *ctrl, command: *ctrl, shift: *shift, ..Default::default() };
-            Some(egui::Event::Key { key, physical_key: None, pressed: *pressed, repeat: *repeat, modifiers })
-        }
-    }
+/// What the play scene's debug windows show and change - its own state,
+/// lent for the frame (see `draw`).
+pub struct DebugView<'a> {
+    /// F7's windows are up.
+    pub show_debug: bool,
+    /// F7 freed the mouse.
+    pub mouse_free: bool,
+    /// The aircraft the player flies (its node id).
+    pub player: &'a str,
+    pub windows: &'a mut DebugWindows,
+    pub flight_editor: &'a mut FlightEditor,
+    pub tactical_ui: &'a mut TacticalUi,
+    pub hud_layout: &'a mut HudLayout,
+    pub editor_active: bool,
+    pub tactical_map_active: bool,
+    pub spectate_telemetry: Option<Telemetry>,
 }
 
-impl App {
-    // F7 (see App::show_aero_debug_overlay's own doc comment) - two live
-    // egui windows (see engine::rendering::egui_overlay for why it's egui
-    // rendered into this same wgpu frame rather than a separate native
-    // window): the roll-authority-gain chart (rolling_rate's theoretical
-    // curve against the player's own recent trail), plus a second "Debug
-    // Info" window with everything else Plane::flight_data tracks (speed,
-    // altitude, mach, g, AoA, turn rates, ...) - this used to only be
-    // readable from the in-HUD text labels (still there, unaffected) or the
-    // old F3 debug_panel (FPS/position only) - this consolidates the same
-    // numbers into one place alongside the chart they're for tuning
-    // against. Input is deliberately minimal (pointer position + primary
-    // button + scroll) - just enough for egui_plot's own pan/zoom/hover,
-    // not full egui interactivity (no keyboard/text - this is a read-only
-    // debug view).
-    //
-    // Also draws the flight editor (F10's editor view) (see play::flight_editor) - one egui
-    // frame for both, with keyboard typing fed in too while the editor is
-    // open (its text fields need it).
-    pub(crate) fn render_aero_debug_overlay_pass(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
-        let show_debug = self.debug_overlay_visible();
-        let title_shot = self.scene_manager.active == "main_menu" && self.menu_shot.open;
-        let hud_panel = self.scene_manager.active == "playing" && self.hud_layout.open;
-        if !show_debug && !self.tactical_map_active && !self.editor_active && self.spectate_telemetry.is_none() && !title_shot && !hud_panel {
-            // No egui - back to the plain arrow (the pause menu's, say), and
-            // the mouse let go if a drag had it.
-            self.end_infinite_drag();
-            self.egui_overlay.cursor_icon = egui::CursorIcon::Default;
-            self.apply_egui_cursor();
-            return;
-        }
+/// Builds every debug and tool window the play scene has up this frame.
+///
+/// F7: the roll-authority chart (rolling_rate's theoretical curve against
+/// the player's own recent trail), "Debug Info" with everything
+/// Plane::flight_data tracks, the camera editor, G and rate charts. Also
+/// F10's flight editor and map panels, F11's HUD layout, and the debug
+/// view's telemetry while spectating.
+pub fn draw(ctx: &egui::Context, view: DebugView, scene: &mut Scene, app: &mut App) {
+    let show_debug = view.show_debug;
+    let hud_panel = view.hud_layout.open;
+    let logical_size = [app.window.size.width, app.window.size.height];
+    // Both right-aligned against the actual (logical) screen width -
+    // "Debug Info" top-right, chart bottom-right beneath it.
+    let debug_info_default_x = (logical_size[0] as f32 - 300.0).max(20.0);
+    let aero_chart_default_x = (logical_size[0] as f32 - 580.0).max(20.0);
 
-        // screen_rect/pointer input have to be in LOGICAL (window, not
-        // drawable) pixels - the same space input::mouse_x()/mouse_y()
-        // already report in (see that fn's own doc comment) - while the
-        // actual render target (`view`) is sized in PHYSICAL/drawable
-        // pixels. Mixing these up is what confines the whole overlay into
-        // one corner of the window on a HiDPI/Retina display instead of
-        // filling it - see EguiOverlay::render's own doc comment on
-        // pixels_per_point for why both are needed.
-        let logical_size = [self.window_manager.size.width, self.window_manager.size.height];
-        let physical_size = [self.window_manager.pixel_size.width, self.window_manager.pixel_size.height];
-        let pixels_per_point = physical_size[0] as f32 / logical_size[0] as f32;
-        // Both right-aligned against the actual (logical) screen width -
-        // "Debug Info" top-right, chart bottom-right beneath it, each
-        // independently right-aligned to its own estimated window width
-        // (300 for Debug Info's narrow text column, 580 for the chart's
-        // wider plot) rather than a fixed offset from each other, so both
-        // actually hug the real right edge on any screen size. 420 for the
-        // chart's Y assumes Debug Info's own window (title bar + ~13 rows +
-        // 2 separators + padding) is roughly that tall - not exact, just
-        // enough clearance that they don't start out overlapping.
-        let debug_info_default_x = (logical_size[0] as f32 - 300.0).max(20.0);
-        let aero_chart_default_x = (logical_size[0] as f32 - 580.0).max(20.0);
-        // Where egui thinks the pointer is: the real cursor - or, while a
-        // drag has the mouse captured, the virtual pointer moved by the
-        // mouse's raw movement (see update_infinite_drag).
-        let pointer_pos = match &mut self.infinite_drag {
-            Some(virtual_pointer) => {
-                *virtual_pointer += egui::vec2(input::mouse_rel_x() as f32, input::mouse_rel_y() as f32);
-                *virtual_pointer
-            }
-            None => egui::pos2(input::mouse_x() as f32, input::mouse_y() as f32),
-        };
-        let capturing = self.infinite_drag.is_some();
-        let mut raw_input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(logical_size[0] as f32, logical_size[1] as f32))),
-            events: vec![
-                egui::Event::PointerMoved(pointer_pos),
-                egui::Event::MouseWheel {
-                    unit: egui::MouseWheelUnit::Line,
-                    delta: egui::vec2(0.0, input::mouse_scroll_y()),
-                    modifiers: egui::Modifiers::default(),
-                },
-            ],
-            ..Default::default()
-        };
-        // Held Shift/Ctrl - e.g. a faster drag step in the editor.
-        let (shift, ctrl) = (input::shift_down(), input::ctrl_down());
-        raw_input.modifiers = egui::Modifiers { shift, ctrl, command: ctrl, ..Default::default() };
+    // The player's plane, and the history it keeps for these charts (see
+    // Plane::debug_trails).
+    let player_node = scene.get_node(view.player);
+    let player_plane = player_node.and_then(|node| node.get_behavior::<Plane>());
+    let aero_samples: Vec<AeroSample> = player_plane.map(|plane| plane.debug_trails.aero.iter().copied().collect()).unwrap_or_default();
+    let main_wing_lift_trail: Vec<[f64; 2]> = player_plane.map(|plane| plane.debug_trails.wing_lift.iter()
+        .map(|(index, main_lift_y, _elevator_lift_y)| [*index as f64, *main_lift_y as f64])
+        .collect()).unwrap_or_default();
+    let elevator_wing_lift_trail: Vec<[f64; 2]> = player_plane.map(|plane| plane.debug_trails.wing_lift.iter()
+        .map(|(index, _main_lift_y, elevator_lift_y)| [*index as f64, *elevator_lift_y as f64])
+        .collect()).unwrap_or_default();
+    let fps = app.time.fps();
+    let player_position = player_node.and_then(|node| node.transform_3d()).map(|transform| transform.position);
+    let flight_data = player_node
+        .and_then(|node| Some((node.get_behavior::<Plane>()?, &node.physics_state::<AircraftState>()?.flight_data)))
+        .map(|(plane, f)| (plane.controls.throttle, f.speedometer, f.altimeter, f.mach, f.g_meter, f.aoa_x, f.aoa_y, f.aoa, f.roll_rate, f.pitch_rate, f.yaw_rate, f.stall, plane.controls.aileron, plane.controls.elevator, plane.controls.rudder, plane.controls.trim.roll, plane.controls.trim.pitch, plane.controls.trim.yaw));
+    // G Forces window: (lateral_g, longitudinal_g, body_g).
+    let g_forces = player_node
+        .and_then(|node| node.physics_state::<AircraftState>())
+        .map(|state| (state.flight_data.lateral_g, state.flight_data.longitudinal_g, state.flight_data.body_g));
+    // Pitch Rate window: x = seconds relative to the newest sample, y
+    // negated so nose-up plots upward.
+    let pitch_rate_trail: Vec<(f32, f32)> = player_plane.map(|plane| plane.debug_trails.pitch_rate.iter().copied().collect()).unwrap_or_default();
+    let pitch_now_t = pitch_rate_trail.last().map(|(t, _)| *t).unwrap_or(0.0);
+    let pitch_trail: Vec<[f64; 2]> = pitch_rate_trail.iter()
+        .map(|(t, rate)| [(t - pitch_now_t) as f64, -*rate as f64])
+        .collect();
 
-        // Every press and release as it happened, where it happened - not
-        // the button's state sampled once a frame, which misses a click
-        // that goes down and up between two frames (and egui takes every
-        // repeated "pressed" as a new press).
-        for event in input::mouse_button_events() {
-            let button = match event.button {
-                sdl2::mouse::MouseButton::Left => egui::PointerButton::Primary,
-                sdl2::mouse::MouseButton::Right => egui::PointerButton::Secondary,
-                sdl2::mouse::MouseButton::Middle => egui::PointerButton::Middle,
-                _ => continue,
-            };
-            // Captured, the real cursor's frozen - it happened at the virtual
-            // pointer.
-            let pos = if capturing { pointer_pos } else { egui::pos2(event.x as f32, event.y as f32) };
-            raw_input.events.push(egui::Event::PointerMoved(pos));
-            raw_input.events.push(egui::Event::PointerButton { pos, button, pressed: event.pressed, modifiers: raw_input.modifiers });
-        }
-        // Back to where the pointer is now, after any presses elsewhere.
-        raw_input.events.push(egui::Event::PointerMoved(pointer_pos));
-        // Typing for text fields - F10's editor, the title shot panel, and
-        // F11's HUD layout.
-        if self.editor_active || title_shot || hud_panel {
-            raw_input.events.extend(input::typed_input().iter().filter_map(egui_typing_event));
-        }
+    // The play camera (the "camera" node's Camera behavior).
+    let camera_info: Option<(&'static str, Vector3<f32>, Vector3<f32>, bool, f32)> = scene.get_node("camera")
+        .and_then(|node| node.get_behavior::<Camera>())
+        .map(|cam| (cam.state_name(), cam.debug_base_offset, cam.debug_offset, cam.debug_mode_active, cam.cockpit_target_fov));
+    let windows = view.windows;
+    let mouse_free = view.mouse_free;
 
-        // The F7 "Flight Rates" window's samples - copied out for the
-        // closure below (it can't borrow `self`).
-        let aero_samples: Vec<AeroSample> = self.aero_debug_trail.iter().copied().collect();
-        // See App::wing_lift_trail's own doc comment - two separate line
-        // series sharing one x (sample index), gathered here same as
-        // trail/curve above for the same borrow-checker reason.
-        let main_wing_lift_trail: Vec<[f64; 2]> = self.wing_lift_trail.iter()
-            .map(|(index, main_lift_y, _elevator_lift_y)| [*index as f64, *main_lift_y as f64])
-            .collect();
-        let elevator_wing_lift_trail: Vec<[f64; 2]> = self.wing_lift_trail.iter()
-            .map(|(index, _main_lift_y, elevator_lift_y)| [*index as f64, *elevator_lift_y as f64])
-            .collect();
+    // Filled by the Camera Editor window's buttons; applied after.
+    let mut camera_offset_delta = Vector3::<f32>::zeros();
+    let mut camera_set_active: Option<bool> = None;
+    let mut camera_reset_offset = false;
+    // Set by the copy buttons - put on the clipboard after.
+    let mut clipboard_text: Option<String> = None;
+    // How far the editor's held nudge buttons move the camera this frame.
+    let nudge_step = 2.0 * app.time.unscaled_delta_time;
+    let flight_editor = view.flight_editor;
+    let tactical_ui = view.tactical_ui;
+    let tactical_map_active = view.tactical_map_active;
+    let editor_active = view.editor_active;
+    let spectate_telemetry = view.spectate_telemetry;
+    let hud_layout = view.hud_layout;
+    // The map draws on the whole screen now - F10's editor is round the
+    // world instead.
+    crate::game::frame_plans::set_tactical_viewport(None);
 
-        // Everything else this debug view shows - gathered up front into
-        // plain locals (same reason curve/trail are, above) since the
-        // build_ui closure below can't also borrow `self`. `flight_data` is
-        // the plane's published `AircraftState` struct, already Copy-friendly f32s, so this is just
-        // cheap field reads, not a real per-frame cost.
-        let fps = self.time.get_fps();
-        let player_position = self.scene_manager.content()
-            .and_then(|content| content.renderizable_instances.get(self.player_node.as_str()))
-            .map(|instance| instance.instance.transform.position);
-        let flight_data = self.scene_manager.content()
-            .and_then(|content| content.nodes.get(self.player_node.as_str()))
-            .and_then(|node| Some((node.get_behavior::<Plane>()?, &node.physics_state::<AircraftState>()?.flight_data)))
-            .map(|(plane, f)| (plane.controls.throttle, f.speedometer, f.altimeter, f.mach, f.g_meter, f.aoa_x, f.aoa_y, f.aoa, f.roll_rate, f.pitch_rate, f.yaw_rate, f.stall, plane.controls.aileron, plane.controls.elevator, plane.controls.rudder, plane.controls.trim.roll, plane.controls.trim.pitch, plane.controls.trim.yaw));
-
-        // G Forces window: (lateral_g, longitudinal_g, body_g) - see
-        // FlightData's own.
-        let g_forces = self.scene_manager.content()
-            .and_then(|content| content.nodes.get(self.player_node.as_str()))
-            .and_then(|node| node.physics_state::<AircraftState>())
-            .map(|state| (state.flight_data.lateral_g, state.flight_data.longitudinal_g, state.flight_data.body_g));
-        // Pitch Rate window: x = seconds relative to the newest sample (so
-        // "now" is always 0 at the right edge), y negated so nose-up plots
-        // upward - FlightData::pitch_rate is the rate about the body's +X,
-        // and +X is the LEFT wing (see Camera's cockpit look: positive yaw
-        // turns toward +X, which is the mouse moving left), so its own
-        // positive is nose DOWN.
-        let pitch_now_t = self.pitch_rate_trail.back().map(|(t, _)| *t).unwrap_or(0.0);
-        let pitch_trail: Vec<[f64; 2]> = self.pitch_rate_trail.iter()
-            .map(|(t, rate)| [(t - pitch_now_t) as f64, -*rate as f64])
-            .collect();
-
-        // Play camera (the "camera" node's Camera behavior), read into plain
-        // Copy locals for the build_ui closure. name / base offset / editor
-        // offset / whether the editor is currently applied.
-        let camera_info: Option<(&'static str, Vector3<f32>, Vector3<f32>, bool, f32)> = self.scene_manager.content()
-            .and_then(|content| content.nodes.get("camera"))
-            .and_then(|node| node.get_behavior::<Camera>())
-            .map(|cam| (cam.state_name(), cam.debug_base_offset, cam.debug_offset, cam.debug_mode_active, cam.cockpit_target_fov));
-        // The windows' open/closed toggles - a copy the closure below can
-        // change (panel buttons, each window's close button), written back
-        // after render().
-        let mut windows = self.debug_windows.clone();
-        let mouse_free = self.debug_mouse_free;
-
-        // Filled by the Camera Editor window's buttons; applied after render().
-        let mut camera_offset_delta = Vector3::<f32>::zeros();
-        let mut camera_set_active: Option<bool> = None;
-        let mut camera_reset_offset = false;
-        // Set by the Camera Editor's "Copy" button - put on the system
-        // clipboard after render() (egui's own copy needs platform output
-        // this overlay doesn't handle).
-        let mut clipboard_text: Option<String> = None;
-        // How far the editor's held nudge buttons move the camera this frame
-        // (units/s - same speed as F5's own keys, see Camera::update).
-        let nudge_step = 2.0 * self.time.delta_time;
-        // Taken out for the closure below, put back after render().
-        let mut flight_editor = std::mem::take(&mut self.flight_editor);
-        let mut tactical_ui = std::mem::take(&mut self.tactical_ui);
-        let tactical_map_active = self.tactical_map_active;
-        let editor_active = self.editor_active;
-        let spectate_telemetry = self.spectate_telemetry.clone();
-        let mut menu_shot = self.menu_shot;
-        let mut hud_layout = self.hud_layout;
-        // The map draws on the whole screen now - F10's editor is round the
-        // world instead.
-        let tactical_viewport = None;
-
-        self.egui_overlay.render(
-            &self.renderer.device,
-            &self.renderer.queue,
-            encoder,
-            view,
-            physical_size,
-            pixels_per_point,
-            raw_input,
-            |ctx| {
-                if title_shot {
-                    if let Some(text) = crate::game::scenes::main_menu::scene::draw_menu_shot(ctx, &mut menu_shot) {
-                        clipboard_text = Some(text);
-                    }
-                }
+    let mut build_ui = |ctx: &egui::Context| {
                 if hud_panel {
-                    if let Some(text) = crate::game::scenes::play::scene::draw_hud_layout(ctx, &mut hud_layout) {
+                    if let Some(text) = crate::game::scenes::play::scene::draw_hud_layout(ctx, hud_layout) {
                         clipboard_text = Some(text);
                     }
                 }
                 if editor_active {
-                    flight_editor.draw_docked(ctx, &mut tactical_ui);
+                    flight_editor.draw_docked(ctx, tactical_ui);
                 } else if tactical_map_active {
                     tactical_ui.draw(ctx, None);
                 }
@@ -1089,108 +948,29 @@ impl App {
                                 plot_ui.line(egui_plot::Line::new("Elevator wing (Right)", egui_plot::PlotPoints::from(elevator_wing_lift_trail.clone())));
                             });
                     });
-            },
-        );
+    };
+    build_ui(ctx);
 
-        self.debug_windows = windows;
-        self.menu_shot = menu_shot;
-        let closed_hud_panel = self.hud_layout.open && !hud_layout.open;
-        self.hud_layout = hud_layout;
-        if closed_hud_panel && !self.is_paused {
-            self.window_manager.context.mouse().set_relative_mouse_mode(!self.mouse_free());
-        }
+    if let Some(text) = clipboard_text {
+        println!("Copied to clipboard:\n{text}");
+        ctx.copy_text(text);
+    }
 
-        self.flight_editor = flight_editor;
-        self.tactical_ui = tactical_ui;
-        self.tactical_viewport = tactical_viewport;
-        self.apply_egui_cursor();
-        self.update_infinite_drag(pointer_pos);
-
-        if let Some(text) = clipboard_text {
-            match self.window_manager.context.video().and_then(|video| video.clipboard().set_clipboard_text(&text)) {
-                Ok(()) => println!("Copied to clipboard:\n{text}"),
-                Err(error) => println!("Couldn't copy camera values ({error}):\n{text}"),
+    // Apply the Camera Editor window's button presses.
+    if camera_offset_delta != Vector3::zeros() || camera_set_active.is_some() || camera_reset_offset {
+        if let Some(cam) = scene.get_node_mut("camera").and_then(|node| node.get_behavior_mut::<Camera>()) {
+            if camera_reset_offset {
+                cam.debug_offset = Vector3::zeros();
             }
-        }
-
-        // Apply the Camera Editor window's button presses (couldn't touch
-        // `self` from inside the build_ui closure above).
-        if camera_offset_delta != Vector3::zeros() || camera_set_active.is_some() || camera_reset_offset {
-            if let Some(cam) = self.scene_manager.content_mut()
-                .and_then(|content| content.nodes.get_mut("camera"))
-                .and_then(|node| node.get_behavior_mut::<Camera>())
-            {
-                if camera_reset_offset {
-                    cam.debug_offset = Vector3::zeros();
-                }
-                cam.debug_offset += camera_offset_delta;
-                if let Some(v) = camera_set_active {
-                    cam.debug_mode_active = v;
-                }
-                // A nudge is meaningless unless the editor offset is actually
-                // being applied - turn it on.
-                if camera_offset_delta != Vector3::zeros() {
-                    cam.debug_mode_active = true;
-                }
+            cam.debug_offset += camera_offset_delta;
+            if let Some(v) = camera_set_active {
+                cam.debug_mode_active = v;
+            }
+            // A nudge is meaningless unless the editor offset is actually
+            // being applied - turn it on.
+            if camera_offset_delta != Vector3::zeros() {
+                cam.debug_mode_active = true;
             }
         }
     }
-
-    /// Captures the mouse while something's dragged in egui - a value, the F10
-    /// map, a flight plan point or row, the map camera orbited - so the drag
-    /// keeps going past the screen's edge: the cursor hides, and egui's
-    /// pointer moves by the mouse's raw movement from `pointer` (where it
-    /// was). Let go, the cursor's put back where the drag ended (inside the
-    /// window).
-    fn update_infinite_drag(&mut self, pointer: egui::Pos2) {
-        let any_button = input::mouse_left_button_down() || input::mouse_right_button_down() || input::mouse_middle_button_down();
-        let dragging = self.egui_overlay.ctx.dragged_id().is_some() || (self.tactical_map_active && self.tactical_ui.is_dragging());
-        if self.infinite_drag.is_none() {
-            if dragging && any_button && self.mouse_free() && !self.is_paused {
-                self.infinite_drag = Some(pointer);
-                self.window_manager.context.mouse().set_relative_mouse_mode(true);
-            }
-        } else if !any_button {
-            self.end_infinite_drag();
-        }
-    }
-
-    /// Lets the mouse go after an infinite drag (see update_infinite_drag) -
-    /// the cursor back, where the drag ended. Nothing if none's going on.
-    fn end_infinite_drag(&mut self) {
-        let Some(pointer) = self.infinite_drag.take() else { return };
-        let mouse = self.window_manager.context.mouse();
-        mouse.set_relative_mouse_mode(!self.mouse_free());
-        let x = pointer.x.clamp(0.0, self.window_manager.size.width.saturating_sub(1) as f32) as i32;
-        let y = pointer.y.clamp(0.0, self.window_manager.size.height.saturating_sub(1) as f32) as i32;
-        mouse.warp_mouse_in_window(self.window_manager.canvas.window(), x, y);
-    }
-
-    /// Shows the mouse cursor egui last asked for (a hand over a clickable
-    /// aircraft on the F10 map, a text beam over a text field...) - only
-    /// re-created when it changes.
-    fn apply_egui_cursor(&mut self) {
-        use sdl2::mouse::SystemCursor;
-        let icon = self.egui_overlay.cursor_icon;
-        if self.egui_cursor.as_ref().is_some_and(|(current, _)| *current == icon) {
-            return;
-        }
-        let system = match icon {
-            egui::CursorIcon::PointingHand => SystemCursor::Hand,
-            egui::CursorIcon::Text | egui::CursorIcon::VerticalText => SystemCursor::IBeam,
-            egui::CursorIcon::Move | egui::CursorIcon::Grab | egui::CursorIcon::Grabbing | egui::CursorIcon::AllScroll => SystemCursor::SizeAll,
-            egui::CursorIcon::ResizeHorizontal | egui::CursorIcon::ResizeEast | egui::CursorIcon::ResizeWest | egui::CursorIcon::ResizeColumn => SystemCursor::SizeWE,
-            egui::CursorIcon::ResizeVertical | egui::CursorIcon::ResizeNorth | egui::CursorIcon::ResizeSouth | egui::CursorIcon::ResizeRow => SystemCursor::SizeNS,
-            egui::CursorIcon::ResizeNeSw | egui::CursorIcon::ResizeNorthEast | egui::CursorIcon::ResizeSouthWest => SystemCursor::SizeNESW,
-            egui::CursorIcon::ResizeNwSe | egui::CursorIcon::ResizeNorthWest | egui::CursorIcon::ResizeSouthEast => SystemCursor::SizeNWSE,
-            egui::CursorIcon::NotAllowed | egui::CursorIcon::NoDrop => SystemCursor::No,
-            egui::CursorIcon::Wait | egui::CursorIcon::Progress => SystemCursor::Wait,
-            _ => SystemCursor::Arrow,
-        };
-        if let Ok(cursor) = sdl2::mouse::Cursor::from_system(system) {
-            cursor.set();
-            self.egui_cursor = Some((icon, cursor));
-        }
-    }
-
 }

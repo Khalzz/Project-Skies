@@ -2,13 +2,14 @@ use glyphon::cosmic_text::Align::{Center, Left};
 
 use glyphon::Weight;
 
-use crate::app::App;
-use crate::engine::ui::components::label::Font;
-use crate::engine::ui::color::{Fill, GradientDirection, GradientStop, UiColor};
-use crate::engine::ui::ui_node::UiNode;
-use crate::engine::ui::ui_transform::{Anchor, BorderEdges, ChildAnchor, SizeValue};
-use crate::engine::ui::ui_transform::Orientation::Horizontal;
-use crate::engine::ui::ui_transform::PositionValue;
+use pankarta_software::prelude::App;
+use crate::game::ext::ui_layers::{click, ClickUi};
+use pankarta_software::ui::components::label::Font;
+use pankarta_software::ui::color::{Fill, GradientDirection, GradientStop, UiColor};
+use pankarta_software::ui::ui_node::UiNode;
+use pankarta_software::ui::ui_transform::{Anchor, BorderEdges, ChildAnchor, SizeValue};
+use pankarta_software::ui::ui_transform::Orientation::Horizontal;
+use pankarta_software::ui::ui_transform::PositionValue;
 
 /// A full-screen dark gradient fade - opaque on the left, ramping down to fully
 /// transparent by ~30% across, then staying transparent the rest of the way -
@@ -143,19 +144,21 @@ pub fn card() -> UiNode {
 /// small HUD sizes than the default sans-serif, and the same on every platform.
 pub const HUD_FONT: Font = Font { family: Some("Inter"), weight: Weight::NORMAL };
 
-pub fn label(app: &mut App, label: &str) -> UiNode {
-  UiNode::label(&mut app.ui.text.font_system, label, None, None)
+pub fn label(label: &str) -> UiNode {
+  UiNode::label(label, None, None)
 }
 
-pub fn button(app: &mut App, text: &str, on_click: impl Fn(&mut App) + 'static) -> UiNode {
-  label(app, text)
+/// A text button - `on_click` reaches the UI through a `ClickUi` (the
+/// clicked layer's node and the rest of the scene - see ext::ui_layers).
+pub fn button(text: &str, on_click: impl FnMut(&mut ClickUi, &mut App) + 'static) -> UiNode {
+  label(text)
     .set_text_color(UiColor::Rgb(200, 200, 200))
     // .set_corner_radius(10.0)
     .set_padding((10.0, 2.0))
-    .set_font_size(&mut app.ui.text.font_system, 20.0)
+    .set_font_size(20.0)
     .on_hover(|s| s.set_background_color(UiColor::Rgba(0, 0, 0, 128)).set_text_color(UiColor::WHITE))
     .set_transition(50.0)
-    .on_click(on_click)
+    .on_click(click(on_click))
     .set_border_width(1.0)
 }
 
@@ -181,15 +184,15 @@ pub fn with_left_accent(node: UiNode) -> UiNode {
         .on_hover(|s| s.set_border_color(UiColor::WHITE))
 }
 
-pub fn modal(app: &mut App) -> UiNode {
+pub fn modal() -> UiNode {
   card()
     .set_position(PositionValue::Center(0.0), PositionValue::Center(0.0))
-    .set_child("title", label(app, "Este es un ejemplo de un modal").set_align(Left))
+    .set_child("title", label("Este es un ejemplo de un modal").set_align(Left))
     .set_child("options", card()
       .set_padding(0.0)
       .set_background_color(UiColor::TRANSPARENT)
       .set_orientation(Horizontal)
-      .set_child("Cancel", button(app, "Cancel", |_| {}).set_align(Center).set_border_color(UiColor::WHITE))
-      .set_child("Accept", button(app, "Accept", |_| {}).set_align(Center).set_border_color(UiColor::WHITE))
+      .set_child("Cancel", button("Cancel", |_, _| {}).set_align(Center).set_border_color(UiColor::WHITE))
+      .set_child("Accept", button("Accept", |_, _| {}).set_align(Center).set_border_color(UiColor::WHITE))
     )
 }

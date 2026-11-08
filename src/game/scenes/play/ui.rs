@@ -9,15 +9,16 @@
 //! `level_planning.ron` had to toggle all of them individually.
 
 use glyphon::cosmic_text::Align;
+use crate::game::ext::ui_layers::{self, ClickUi, GameUi};
+use pankarta_software::prelude::Scene;
 use glyphon::Weight;
 
-use crate::app::App;
-use crate::engine::ui::components::label::Font;
-use crate::engine::rendering::ui::ui::Ui;
-use crate::engine::ui::color::UiColor;
-use crate::engine::ui::layer::Layer;
-use crate::engine::ui::ui_node::UiNode;
-use crate::engine::ui::ui_transform::{Orientation, PositionValue, SizeValue};
+use pankarta_software::app::App;
+use pankarta_software::ui::components::label::Font;
+use pankarta_software::rendering::ui::ui::Ui;
+use pankarta_software::ui::color::UiColor;
+use pankarta_software::ui::ui_node::UiNode;
+use pankarta_software::ui::ui_transform::{Orientation, PositionValue, SizeValue};
 use crate::game::scenes::main_menu::ui as main_menu_ui;
 use crate::game::ui::{button, label, with_left_accent, HUD_FONT};
 
@@ -27,10 +28,10 @@ use crate::game::ui::{button, label, with_left_accent, HUD_FONT};
 // were never set there either, so they're left at Style::default() here too,
 // same as they always rendered).
 fn hud_label(app: &mut App, text: &str, width: f32, height: f32) -> UiNode {
-    label(app, text)
+    label(text)
         .set_size(SizeValue::Pixels(width), SizeValue::Pixels(height))
-        .set_font(&mut app.ui.text.font_system, HUD_FONT)
-        .set_font_size(&mut app.ui.text.font_system, 10.0)
+        .set_font(HUD_FONT)
+        .set_font_size(10.0)
         .set_text_color(UiColor::Rgb(0, 255, 0))
         .set_border_color(UiColor::Rgb(0, 255, 0))
         .set_align(Align::Center)
@@ -84,10 +85,10 @@ pub const HUD_WARN_FACE: Font = Font { family: Some("Inter"), weight: Weight::TH
 /// One of `HUD_READOUTS` - built hidden. The HUD's text is the regular
 /// weight, a touch heavier than the thin default.
 pub fn build_hud_readout(app: &mut App, text: &str, font_size: f32, width: f32) -> UiNode {
-    label(app, text)
+    label(text)
         .set_size(SizeValue::Pixels(width), SizeValue::Pixels(HUD_READOUT_SIZE.1))
-        .set_font(&mut app.ui.text.font_system, HUD_FONT)
-        .set_font_size(&mut app.ui.text.font_system, font_size)
+        .set_font(HUD_FONT)
+        .set_font_size(font_size)
         .set_text_color(UiColor::Rgb(0, 255, 77))
         .set_background_color(UiColor::TRANSPARENT)
         .set_align(Align::Center)
@@ -140,7 +141,7 @@ pub fn kill_feed_piece_key(row: usize, piece: usize) -> String {
 /// A kill feed row's box - dark, see-through, rounded, sized to its text
 /// every frame. Built hidden.
 pub fn build_kill_feed_box(app: &mut App) -> UiNode {
-    label(app, "")
+    label("")
         .set_size(SizeValue::Pixels(KILL_FEED_PIECE_MAX_WIDTH), SizeValue::Pixels(KILL_FEED_ROW_HEIGHT))
         .set_background_color(UiColor::Rgba(0, 0, 0, 150))
         .set_corner_radius(4.0)
@@ -150,10 +151,10 @@ pub fn build_kill_feed_box(app: &mut App) -> UiNode {
 /// A piece of a kill feed row's text - on no box of its own (the row's is
 /// under it), its color set with its text. Built hidden.
 pub fn build_kill_feed_piece(app: &mut App) -> UiNode {
-    label(app, "")
+    label("")
         .set_size(SizeValue::Pixels(KILL_FEED_PIECE_MAX_WIDTH), SizeValue::Pixels(KILL_FEED_ROW_HEIGHT))
-        .set_font(&mut app.ui.text.font_system, HUD_FONT)
-        .set_font_size(&mut app.ui.text.font_system, KILL_FEED_FONT_SIZE)
+        .set_font(HUD_FONT)
+        .set_font_size(KILL_FEED_FONT_SIZE)
         .set_text_color(UiColor::Rgb(230, 230, 230))
         .set_background_color(UiColor::TRANSPARENT)
         .set_align(Align::Left)
@@ -172,10 +173,10 @@ pub fn heat_label_key(index: usize) -> String {
 /// One of the `HEAT_LABELS` - built hidden, white so it reads over the
 /// heat colors.
 pub fn build_heat_label(app: &mut App) -> UiNode {
-    label(app, "0")
+    label("0")
         .set_size(SizeValue::Pixels(HEAT_LABEL_SIZE.0), SizeValue::Pixels(HEAT_LABEL_SIZE.1))
-        .set_font(&mut app.ui.text.font_system, HUD_FONT)
-        .set_font_size(&mut app.ui.text.font_system, 10.0)
+        .set_font(HUD_FONT)
+        .set_font_size(10.0)
         .set_text_color(UiColor::Rgb(255, 255, 255))
         .set_background_color(UiColor::TRANSPARENT)
         .set_align(Align::Center)
@@ -184,10 +185,10 @@ pub fn build_heat_label(app: &mut App) -> UiNode {
 
 /// One of the `HUD_PITCH_LABELS` or `HUD_HEADING_LABELS` - built hidden.
 pub fn build_hud_small_label(app: &mut App) -> UiNode {
-    label(app, "0")
+    label("0")
         .set_size(SizeValue::Pixels(HUD_SMALL_LABEL_SIZE.0), SizeValue::Pixels(HUD_SMALL_LABEL_SIZE.1))
-        .set_font(&mut app.ui.text.font_system, HUD_FONT)
-        .set_font_size(&mut app.ui.text.font_system, 10.0)
+        .set_font(HUD_FONT)
+        .set_font_size(10.0)
         .set_text_color(UiColor::Rgb(0, 255, 77))
         .set_background_color(UiColor::TRANSPARENT)
         .set_align(Align::Center)
@@ -233,10 +234,10 @@ const STORE_ROW_HEIGHT: f32 = 18.0;
 pub const WEAPON_LIST_ROWS: usize = 8;
 
 fn store_label(app: &mut App, text: &str, font_size: f32) -> UiNode {
-    label(app, text)
+    label(text)
         .set_size(SizeValue::Pixels(STORE_ROW_WIDTH), SizeValue::Pixels(STORE_ROW_HEIGHT))
-        .set_font(&mut app.ui.text.font_system, HUD_FONT)
-        .set_font_size(&mut app.ui.text.font_system, font_size)
+        .set_font(HUD_FONT)
+        .set_font_size(font_size)
         .set_text_color(UiColor::Rgb(0, 255, 77))
         .set_background_color(UiColor::TRANSPARENT)
         .set_align(Align::Left)
@@ -277,10 +278,10 @@ fn build_hud_stores(app: &mut App) -> UiNode {
 /// Fills the weapons box from `entries` - each one's name and whether it's
 /// the one selected. A `>` marks only that row. Rows past the last entry
 /// are hidden.
-pub fn update_weapon_list(app: &mut App, entries: &[(String, bool)]) {
+pub fn update_weapon_list(ui: &mut impl GameUi, app: &mut App, entries: &[(String, bool)]) {
     for row in 0..WEAPON_LIST_ROWS {
         let key = format!("game_ui/hud_stores/weapons/row{row}");
-        let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &key) else { continue };
+        let Some(node) = ui.ui_node(&key) else { continue };
         match entries.get(row) {
             Some((text, selected)) => {
                 node.set_active(true);
@@ -288,7 +289,7 @@ pub fn update_weapon_list(app: &mut App, entries: &[(String, bool)]) {
                 node.update_style(|style| style.set_text_color(color));
                 if let Some(label) = node.as_label_mut() {
                     let text = if *selected { format!("> {text}") } else { text.clone() };
-                    label.set_text(&mut app.ui.text.font_system, &text, true);
+                    label.set_text(&text);
                 }
             }
             None => node.set_active(false),
@@ -307,9 +308,9 @@ pub fn update_weapon_list(app: &mut App, entries: &[(String, bool)]) {
 /// node with no parent at all is never touched by anything but whoever
 /// explicitly repositions it.
 pub fn build_velocity_marker(app: &mut App) -> UiNode {
-    label(app, "o")
+    label("o")
         .set_size(SizeValue::Pixels(20.0), SizeValue::Pixels(20.0))
-        .set_font_size(&mut app.ui.text.font_system, 14.0)
+        .set_font_size(14.0)
         .set_text_color(UiColor::Rgb(0, 255, 77))
         .set_align(Align::Center)
         .active(false)
@@ -321,7 +322,7 @@ pub fn build_velocity_marker(app: &mut App) -> UiNode {
 /// fully owned by `Subtitle::update` (rests at 0, only shown when a line's
 /// actually queued).
 pub fn build_subtitles(app: &mut App) -> UiNode {
-    label(app, "")
+    label("")
         .set_size(SizeValue::Pixels(800.0), SizeValue::Pixels(35.0))
         .set_position(PositionValue::Center(0.0), PositionValue::End(-150.0))
         .set_text_color(UiColor::Rgba(255, 255, 255, 0))
@@ -336,7 +337,7 @@ pub fn build_subtitles(app: &mut App) -> UiNode {
 /// to the input lock itself; a level shouldn't need to hand-author a matching
 /// Alpha/Active pair every time it adds one.
 pub fn build_skip_prompt(app: &mut App) -> UiNode {
-    label(app, "Hold ESC to skip")
+    label("Hold ESC to skip")
         .set_size(SizeValue::Pixels(300.0), SizeValue::Pixels(30.0))
         .set_position(PositionValue::Center(0.0), PositionValue::End(-40.0))
         .set_text_color(UiColor::Rgba(255, 255, 255, 180))
@@ -354,29 +355,29 @@ pub fn build_skip_prompt(app: &mut App) -> UiNode {
 // than toggle with them.
 const PAUSE_PANELS: [&str; 2] = ["Pause", "Settings"];
 
-fn show_pause_panel(app: &mut App, id: &str) {
+fn show_pause_panel(ui: &mut impl GameUi, app: &mut App, id: &str) {
     for panel_id in PAUSE_PANELS {
-        if let Some(panel) = Ui::get_ui_node(&mut app.ui.renderizable_elements, panel_id) {
+        if let Some(panel) = ui.ui_node(panel_id) {
             panel.set_active(panel_id == id);
         }
     }
 }
 
-/// Brings the pause menu up - sets `app.is_paused` (see its own doc comment
+/// Brings the pause menu up - sets `app.time.is_paused()` (see its own doc comment
 /// on `App` for what that actually gates in `GameLogic::update`: physics and
 /// `Plane::update`) and shows the root "Pause" panel. Currently only called
 /// from the "toggle_pause_menu" key (see `GameLogic::update`), but any UI
 /// button could call this too.
-pub fn open_pause_menu(app: &mut App) {
-    app.is_paused = true;
+pub fn open_pause_menu(ui: &mut impl GameUi, app: &mut App) {
+    app.time.time_scale = 0.0;
     // Frees the cursor so the pause buttons are actually clickable -
     // relative mode (see play::scene::GameLogic::finish, which turns it
     // back on for flight) captures/hides it for mouse-look otherwise.
-    app.window_manager.context.mouse().set_relative_mouse_mode(false);
-    if let Some(backdrop) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "PauseBackdrop") {
+    app.window.set_cursor_locked(false);
+    if let Some(backdrop) = ui.ui_node("PauseBackdrop") {
         backdrop.set_active(true);
     }
-    show_pause_panel(app, "Pause");
+    show_pause_panel(ui, app, "Pause");
 
     // Hide the flight HUD while paused - PauseBackdrop's gradient fades to
     // fully transparent well before the screen's right edge, exactly where
@@ -384,13 +385,15 @@ pub fn open_pause_menu(app: &mut App) {
     // through it. Remembers whichever of these were actually active (see
     // App::paused_hud_visibility's own doc comment) so close_pause_menu can
     // restore exactly that instead of just forcing both back on.
-    let game_ui_active = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui").is_some_and(|n| n.is_active);
-    let velocity_marker_active = Ui::get_ui_node(&mut app.ui.renderizable_elements, "velocity_marker").is_some_and(|n| n.is_active);
-    app.paused_hud_visibility = Some((game_ui_active, velocity_marker_active));
-    if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui") {
+    let game_ui_active = ui.ui_node("game_ui").is_some_and(|n| n.is_active);
+    let velocity_marker_active = ui.ui_node("velocity_marker").is_some_and(|n| n.is_active);
+    if let Some(node) = ui.node_mut_by_id(&ui_layers::node_id("Pause")) {
+        node.set_property(PausedHud(Some((game_ui_active, velocity_marker_active))));
+    }
+    if let Some(node) = ui.ui_node("game_ui") {
         node.set_active(false);
     }
-    if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "velocity_marker") {
+    if let Some(node) = ui.ui_node("velocity_marker") {
         node.set_active(false);
     }
 }
@@ -399,31 +402,36 @@ pub fn open_pause_menu(app: &mut App) {
 /// shared by the "Resume" button, "toggle_pause_menu" pressed again while
 /// already paused, and Restart/Back-to-menu (both about to tear down this
 /// scene's whole UI anyway via `SceneManager::open_scene`, but closing first
-/// keeps `app.is_paused` correctly cleared before that reset runs - otherwise
+/// keeps `app.time.is_paused()` correctly cleared before that reset runs - otherwise
 /// the next scene would start already paused with nothing on screen to
 /// explain why, see `App::is_paused`'s own doc comment).
-pub fn close_pause_menu(app: &mut App) {
-    app.is_paused = false;
+pub fn close_pause_menu(ui: &mut impl GameUi, app: &mut App) {
+    app.time.time_scale = 1.0;
     // Restores mouse-look - unless F8 had the mouse freed for the debug
     // overlay (App::debug_mouse_free). Harmless even for Restart/Back-to-
     // menu (both call this right before SceneManager::open_scene) - whichever
     // scene that switches to sets its own correct mode in its own
     // constructor the very next frame anyway.
-    app.window_manager.context.mouse().set_relative_mouse_mode(!app.mouse_free());
-    if let Some(backdrop) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "PauseBackdrop") {
+    // (The play scene puts mouse-look back next frame - unless the mouse is
+    // freed for a debug window.)
+    app.window.set_cursor_locked(true);
+    if let Some(backdrop) = ui.ui_node("PauseBackdrop") {
         backdrop.set_active(false);
     }
     for panel_id in PAUSE_PANELS {
-        if let Some(panel) = Ui::get_ui_node(&mut app.ui.renderizable_elements, panel_id) {
+        if let Some(panel) = ui.ui_node(panel_id) {
             panel.set_active(false);
         }
     }
 
-    if let Some((game_ui_active, velocity_marker_active)) = app.paused_hud_visibility.take() {
-        if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "game_ui") {
+    let remembered = ui.node_mut_by_id(&ui_layers::node_id("Pause"))
+        .and_then(|node| node.get_property_mut::<PausedHud>())
+        .and_then(|paused| paused.0.take());
+    if let Some((game_ui_active, velocity_marker_active)) = remembered {
+        if let Some(node) = ui.ui_node("game_ui") {
             node.set_active(game_ui_active);
         }
-        if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "velocity_marker") {
+        if let Some(node) = ui.ui_node("velocity_marker") {
             node.set_active(velocity_marker_active);
         }
     }
@@ -434,7 +442,7 @@ pub fn close_pause_menu(app: &mut App) {
 /// main_menu's own gradient backdrop and Settings panel wholesale (see
 /// `main_menu::ui::backdrop`/`settings_ui`'s own doc comments) rather than
 /// rebuilding either from scratch.
-pub fn build_pause_menu(app: &mut App) {
+pub fn build_pause_menu(scene: &mut Scene, app: &mut App) {
     let pause_panel = UiNode::container()
         .set_size(SizeValue::Grow, SizeValue::Grow)
         .set_background_color(UiColor::TRANSPARENT)
@@ -452,38 +460,39 @@ pub fn build_pause_menu(app: &mut App) {
                 // longest label with room to spare.
                 .set_size(SizeValue::Pixels(320.0), SizeValue::Fit)
                 .set_position(PositionValue::Start(40.0), PositionValue::Center(0.0))
-                .set_child("title", label(app, "Paused").set_font_size(&mut app.ui.text.font_system, 50.0))
-                .set_child("Resume", with_left_accent(button(app, "Resume", close_pause_menu).set_size(SizeValue::Grow, SizeValue::Fit)))
-                .set_child("Restart", with_left_accent(button(app, "Restart", |app: &mut App| {
-                    close_pause_menu(app);
+                .set_child("title", label("Paused").set_font_size(50.0))
+                .set_child("Resume", with_left_accent(button("Resume", |ui, app| close_pause_menu(ui, app)).set_size(SizeValue::Grow, SizeValue::Fit)))
+                .set_child("Restart", with_left_accent(button("Restart", |ui, app| {
+                    close_pause_menu(ui, app);
                     app.scene_manager.open_scene("playing");
                 }).set_size(SizeValue::Grow, SizeValue::Fit)))
-                .set_child("Settings", with_left_accent(button(app, "Settings", |app: &mut App| show_pause_panel(app, "Settings")).set_size(SizeValue::Grow, SizeValue::Fit)))
-                .set_child("MainMenu", with_left_accent(button(app, "Back to Main Menu", |app: &mut App| {
-                    close_pause_menu(app);
+                .set_child("Settings", with_left_accent(button("Settings", |ui, app| show_pause_panel(ui, app, "Settings")).set_size(SizeValue::Grow, SizeValue::Fit)))
+                .set_child("MainMenu", with_left_accent(button("Back to Main Menu", |ui, app| {
+                    close_pause_menu(ui, app);
                     app.scene_manager.open_scene("main_menu");
                 }).set_size(SizeValue::Grow, SizeValue::Fit)))
         )
         .active(false);
 
-    let settings = main_menu_ui::settings_ui(app, |app| show_pause_panel(app, "Pause")).active(false);
+    let settings = main_menu_ui::settings_ui(app, |ui, app| show_pause_panel(ui, app, "Pause")).active(false);
 
-    Layer::new(app)
-        .set_child("PauseBackdrop", main_menu_ui::backdrop())
-        .set_child("Pause", pause_panel)
-        .set_child("Settings", settings)
-        .build(app);
+    ui_layers::add(scene, app, "PauseBackdrop", main_menu_ui::backdrop());
+    ui_layers::add(scene, app, "Pause", pause_panel);
+    ui_layers::add(scene, app, "Settings", settings);
+    if let Some(node) = scene.get_node_mut(&ui_layers::node_id("Pause")) {
+        node.set_property(PausedHud(None));
+    }
 
     // Layer::build resolves every child but doesn't know any of these should
     // start hidden - PauseBackdrop has no .active(false) of its own to chain
     // (main_menu::ui::backdrop() is shared with main_menu, which wants it
     // active immediately), so it's set explicitly here instead.
-    if let Some(backdrop) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "PauseBackdrop") {
+    if let Some(backdrop) = scene.ui_node("PauseBackdrop") {
         backdrop.set_active(false);
     }
-    app.ui.always_on_top.push("PauseBackdrop".to_owned());
-    app.ui.always_on_top.push("Pause".to_owned());
-    app.ui.always_on_top.push("Settings".to_owned());
+    scene.ui_on_top("PauseBackdrop");
+    scene.ui_on_top("Pause");
+    scene.ui_on_top("Settings");
 }
 
 /// Shows the death screen - see `play::scene::GameLogic::check_water_death`'s
@@ -493,14 +502,14 @@ pub fn build_pause_menu(app: &mut App) {
 /// menu's own gradient backdrop, which is meant to be a translucent overlay,
 /// not a hard cut.
 #[allow(dead_code)] // not shown for now - see play::scene::GameLogic::check_crash
-pub fn open_death_screen(app: &mut App) {
+pub fn open_death_screen(ui: &mut impl GameUi, app: &mut App) {
     // Frees the cursor so Restart/Back to Main Menu are actually clickable -
     // same reasoning as open_pause_menu's own doc comment.
-    app.window_manager.context.mouse().set_relative_mouse_mode(false);
-    if let Some(backdrop) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "DeathBackdrop") {
+    app.window.set_cursor_locked(false);
+    if let Some(backdrop) = ui.ui_node("DeathBackdrop") {
         backdrop.set_active(true);
     }
-    if let Some(panel) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "DeathPanel") {
+    if let Some(panel) = ui.ui_node("DeathPanel") {
         panel.set_active(true);
     }
 }
@@ -510,14 +519,14 @@ pub fn open_death_screen(app: &mut App) {
 /// (same reasoning as `close_pause_menu`'s own doc comment - keeps state
 /// clean before the reset, not because there's any "resume" affordance from
 /// death).
-fn close_death_screen(app: &mut App) {
+fn close_death_screen(ui: &mut impl GameUi, app: &mut App) {
     // Harmless even though this is always followed by SceneManager::
     // open_scene - see close_pause_menu's own doc comment on the same call.
-    app.window_manager.context.mouse().set_relative_mouse_mode(true);
-    if let Some(backdrop) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "DeathBackdrop") {
+    app.window.set_cursor_locked(true);
+    if let Some(backdrop) = ui.ui_node("DeathBackdrop") {
         backdrop.set_active(false);
     }
-    if let Some(panel) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "DeathPanel") {
+    if let Some(panel) = ui.ui_node("DeathPanel") {
         panel.set_active(false);
     }
 }
@@ -528,7 +537,7 @@ fn close_death_screen(app: &mut App) {
 /// menu's own gradient one (`main_menu_ui::backdrop()`) - this is meant to
 /// read as "the screen went black", not a translucent overlay you can still
 /// see gameplay through.
-pub fn build_death_screen(app: &mut App) {
+pub fn build_death_screen(scene: &mut Scene, app: &mut App) {
     let backdrop = UiNode::container()
         .set_size(SizeValue::Percent(100.0), SizeValue::Percent(100.0))
         .set_background_color(UiColor::Rgba(0, 0, 0, 255))
@@ -539,24 +548,21 @@ pub fn build_death_screen(app: &mut App) {
         .set_size(SizeValue::Pixels(360.0), SizeValue::Fit)
         .set_position(PositionValue::Center(0.0), PositionValue::Center(0.0))
         .set_background_color(UiColor::TRANSPARENT)
-        .set_child("title", label(app, "YOU DIED").set_font_size(&mut app.ui.text.font_system, 50.0))
-        .set_child("Restart", with_left_accent(button(app, "Restart", |app: &mut App| {
-            close_death_screen(app);
+        .set_child("title", label("YOU DIED").set_font_size(50.0))
+        .set_child("Restart", with_left_accent(button("Restart", |ui, app| {
+            close_death_screen(ui, app);
             app.scene_manager.open_scene("playing");
         }).set_size(SizeValue::Grow, SizeValue::Fit)))
-        .set_child("MainMenu", with_left_accent(button(app, "Back to Main Menu", |app: &mut App| {
-            close_death_screen(app);
+        .set_child("MainMenu", with_left_accent(button("Back to Main Menu", |ui, app| {
+            close_death_screen(ui, app);
             app.scene_manager.open_scene("main_menu");
         }).set_size(SizeValue::Grow, SizeValue::Fit)))
         .active(false);
 
-    Layer::new(app)
-        .set_child("DeathBackdrop", backdrop)
-        .set_child("DeathPanel", panel)
-        .build(app);
-
-    app.ui.always_on_top.push("DeathBackdrop".to_owned());
-    app.ui.always_on_top.push("DeathPanel".to_owned());
+    ui_layers::add(scene, app, "DeathBackdrop", backdrop);
+    ui_layers::add(scene, app, "DeathPanel", panel);
+    scene.ui_on_top("DeathBackdrop");
+    scene.ui_on_top("DeathPanel");
 }
 
 /// F3 debug view - a readout of fps and player position. Built inactive;
@@ -574,9 +580,9 @@ pub fn build_death_screen(app: &mut App) {
 /// this HUD is single-line, which is why nothing else has hit this.
 pub fn build_debug_panel(app: &mut App) -> UiNode {
     let stats_line = |app: &mut App, text: &str| {
-        label(app, text)
+        label(text)
             .set_size(SizeValue::Pixels(320.0), SizeValue::Pixels(20.0))
-            .set_font_size(&mut app.ui.text.font_system, 14.0)
+            .set_font_size(14.0)
             .set_text_color(UiColor::Rgb(0, 255, 0))
             .set_align(Align::Left)
     };
@@ -601,3 +607,8 @@ pub fn build_debug_panel(app: &mut App) -> UiNode {
         .active(false)
 }
 
+
+/// Which of the flight HUD's two layers were showing when the pause menu
+/// opened - kept on the pause menu's own node (its buttons close it, and
+/// they only reach the UI), put back when it closes.
+pub struct PausedHud(Option<(bool, bool)>);

@@ -1,9 +1,9 @@
 use std::{collections::HashMap, time::Duration};
 use serde::Deserialize;
 
-use crate::engine::audio::audio::{self, Audio};
-use crate::app::App;
-use crate::engine::audio::subtitles::{Subtitle, SubtitleData};
+use pankarta_software::app::App;
+use crate::game::ext::ui_layers::GameUi;
+use crate::game::ext::subtitles::{Subtitle, SubtitleData};
 use super::animation_tracks::{self, UiTrack};
 
 #[derive(Debug, Deserialize)]
@@ -83,9 +83,9 @@ impl EventSystem {
     /// `animation_tracks` for the keyframe/lerp model. Stateless (unlike
     /// `handle_events`' `activated` latch): every frame just recomputes "what
     /// should this target's value be right now".
-    pub fn apply_tracks(&self, seconds: f64, app: &mut App) {
+    pub fn apply_tracks(&self, seconds: f64, scene: &mut impl GameUi) {
         let game_time_ms = Duration::from_secs_f64(seconds).as_millis() as u64;
-        animation_tracks::apply_all(&self.ui_tracks, game_time_ms, app);
+        animation_tracks::apply_all(&self.ui_tracks, game_time_ms, scene);
     }
 
     /// The end time (ms) of whichever `input_locks` window currently contains
@@ -102,14 +102,14 @@ impl EventSystem {
     }
 
 
-    pub fn handle_events(&mut self, seconds: f64, app: &mut App, subtitle_system: &mut Subtitle) {  
+    pub fn handle_events(&mut self, seconds: f64, scene: &mut impl GameUi, app: &mut App, subtitle_system: &mut Subtitle) {  
         let duration = Duration::from_secs_f64(seconds).as_millis();
         
         for (millis, event) in &mut self.event_list {
             if duration > (*millis).into() {
                 match &mut event.event_type {
                     EventType::PlayAudio(audio_file) => {
-                        EventSystem::handle_play_audio(event.activated, app, audio_file, subtitle_system);
+                        EventSystem::handle_play_audio(event.activated, scene, app, audio_file, subtitle_system);
                     },
                     _ => {
 
@@ -121,10 +121,12 @@ impl EventSystem {
         }
     }
 
-    pub fn handle_play_audio(activated: bool, app: &mut App, audio_file: &mut AudioFile, subtitle_system: &mut Subtitle) {
+    pub fn handle_play_audio(activated: bool, scene: &mut impl GameUi, app: &mut App, audio_file: &mut AudioFile, subtitle_system: &mut Subtitle) {
         if !activated {
             // run once for each element
-            app.audio.play_audio(audio_file.file_name.clone());
+            // The clip is "<folder>/audio.ogg" - a path inside the assets folder
+            // for the engine.
+            app.play_sound(&format!("{}/audio.ogg", crate::game::models::asset_relative(&audio_file.file_name)));
         } else {
             // run from now untill the end
             audio_file.timer += app.time.delta_time as f64;
@@ -136,7 +138,9 @@ impl EventSystem {
                         Ok(subtitles) => {
                             for (time, entry) in subtitles.subtitles {
                                 if !audio_file.played.contains(&(time as u64)) && duration > time.into() {
-                                    subtitle_system.add_text(&entry.text, entry.duration, app);
+                                    if let Some(layer) = scene.ui_layer(crate::game::ext::subtitles::SUBTITLES_PATH) {
+                                        subtitle_system.add_text(&entry.text, entry.duration, layer, app.ui.size().0);
+                                    }
                                     audio_file.played.push(time as u64);
                                 }
                             }

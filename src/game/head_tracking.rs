@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use head_tracking_rs::{HeadPose, HeadTracker, HeadTrackerMethod, DEFAULT_PORT};
 
-use crate::app::App;
+use pankarta_software::app::App;
 use crate::game::game_settings::{HeadTrackingSource, GAME_SETTINGS};
 
 /// The id from head-tracking-rs's own example. OpenTrack accepts any number.
@@ -363,13 +363,32 @@ fn trackir_method(_app: &App) -> Result<HeadTrackerMethod, String> {
 
 /// The game window's HWND. `None` if it cannot be read - TrackIR then falls
 /// back to the console window, which the real software may reject.
+///
+/// ENGINE GAP: the engine keeps its SDL window to itself, so the handle is
+/// read from SDL directly - the game's one window (the one with the
+/// keyboard, or SDL's first).
 #[cfg(windows)]
-fn game_window_handle(app: &App) -> Option<isize> {
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+fn game_window_handle(_app: &App) -> Option<isize> {
+    use sdl2::sys::{SDL_GetKeyboardFocus, SDL_GetVersion, SDL_GetWindowFromID, SDL_GetWindowWMInfo, SDL_SysWMinfo, SDL_SYSWM_TYPE};
 
-    let handle = app.window_manager.canvas.window().window_handle().ok()?;
-    match handle.as_raw() {
-        RawWindowHandle::Win32(win32) => Some(win32.hwnd.get()),
-        _ => None,
+    // SAFETY: plain SDL queries on the main thread, after the engine set up
+    // its window; `info` is zeroed and versioned as SDL_GetWindowWMInfo asks.
+    unsafe {
+        let mut window = SDL_GetKeyboardFocus();
+        if window.is_null() {
+            window = SDL_GetWindowFromID(1);
+        }
+        if window.is_null() {
+            return None;
+        }
+        let mut info: SDL_SysWMinfo = std::mem::zeroed();
+        SDL_GetVersion(&mut info.version);
+        if SDL_GetWindowWMInfo(window, &mut info) == sdl2::sys::SDL_bool::SDL_FALSE || info.subsystem != SDL_SYSWM_TYPE::SDL_SYSWM_WINDOWS {
+            return None;
+        }
+        // The Win32 part of the union (its window handle first) isn't in the
+        // bindings sdl2-sys ships - read straight off its bytes.
+        let bytes: [u8; std::mem::size_of::<usize>()] = info.info.dummy[..std::mem::size_of::<usize>()].try_into().ok()?;
+        Some(usize::from_ne_bytes(bytes) as isize)
     }
 }

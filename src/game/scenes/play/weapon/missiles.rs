@@ -11,13 +11,13 @@
 
 use nalgebra::{UnitQuaternion, Vector3};
 
-use crate::app::App;
-use crate::engine::particles::{Emitter, EmissionShape, Forces, ParticleEffect, ParticleEmitters};
-use crate::engine::scene_manager::node::Node;
-use crate::engine::scene_manager::properties::{Model, Transform3D};
-use crate::engine::scene_manager::scene::Scene;
-use crate::resources::DoubleSidedMeshes;
-use crate::transform::Transform;
+use pankarta_software::app::App;
+use pankarta_software::particles::{EmissionShape, Forces, ParticleEffect};
+use crate::game::ext::emitters::{Emitter, ParticleEmitters};
+use pankarta_software::scene_manager::node::Node;
+use pankarta_software::scene_manager::node::properties::{Model, Transform3D};
+use pankarta_software::scene_manager::scene::Scene;
+use pankarta_software::prelude::DoubleSidedMeshes;
 
 use super::missile::{MissileFlight, Outcome, Surroundings, TargetTrack};
 use crate::game::scenes::play::world_collision::WorldCollision;
@@ -191,8 +191,8 @@ impl Missiles {
         }
         let _ = scene.spawn_node(app,
             Node::new(&smoke_id)
-                .add_property(Transform3D { position: tail(&spec, &flight), rotation: pose.1, scale: Vector3::new(1.0, 1.0, 1.0) })
-                .add_property(ParticleEmitters::new().add("smoke", Emitter::particles(smoke_puffs()))),
+                .with_property(Transform3D { position: tail(&spec, &flight), rotation: pose.1, scale: Vector3::new(1.0, 1.0, 1.0) })
+                .with_property(ParticleEmitters::new().add("smoke", Emitter::particles(smoke_puffs()))),
         );
         println!("Fox 2 - {} away{}", spec.id, flight.target_aircraft().map(|target| format!(" at {target}")).unwrap_or_default());
         let trail = vec![flight.position];
@@ -205,7 +205,7 @@ impl Missiles {
     /// Call once a frame while the game runs; `update_plumes` every frame.
     pub fn update(&mut self, scene: &mut Scene, app: &mut App, aircraft: &[TargetTrack], ground: &WorldCollision, sun: Option<Vector3<f32>>, delta_time: f32) -> MissileEvents {
         let mut events = MissileEvents::default();
-        let sea_level = app.sea_level;
+        let sea_level = app.particles.sea_level().unwrap_or(0.0);
 
         let mut ended = Vec::new();
         for (index, missile) in self.flying.iter_mut().enumerate() {
@@ -216,7 +216,7 @@ impl Missiles {
             // Burnt out: over to the plain copy, plume gone.
             if missile.burning_model && !missile.flight.burning(&missile.spec) {
                 missile.burning_model = false;
-                scene.despawn_node(app, &missile.node_id, None);
+                scene.despawn_node(app, &missile.node_id);
                 let _ = scene.spawn_node(app, missile_node(&missile.node_id, &missile.spec, pose(&missile.spec, &missile.flight), false));
             }
 
@@ -227,10 +227,6 @@ impl Missiles {
                 }
             }
             let (position, rotation) = pose(&missile.spec, &missile.flight);
-            if let Some(instance) = scene.content.renderizable_instances.get_mut(&missile.node_id) {
-                instance.instance.transform.position = position;
-                instance.instance.transform.rotation = rotation;
-            }
             if let Some(transform) = scene.content.nodes.get_mut(&missile.node_id).and_then(|node| node.get_property_mut::<Transform3D>()) {
                 transform.position = position;
                 transform.rotation = rotation;
@@ -283,7 +279,7 @@ impl Missiles {
         // where it went off.
         for (index, blast) in ended.into_iter().rev() {
             let missile = self.flying.remove(index);
-            scene.despawn_node(app, &missile.node_id, None);
+            scene.despawn_node(app, &missile.node_id);
             if let Some(emitter) = scene.content.nodes.get_mut(&missile.smoke_id)
                 .and_then(|node| node.get_property_mut::<ParticleEmitters>())
                 .and_then(|emitters| emitters.get_mut("smoke")) {
@@ -294,8 +290,8 @@ impl Missiles {
                 let explosion_id = format!("{}:explosion", missile.node_id);
                 let spawned = scene.spawn_node(app,
                     Node::new(&explosion_id)
-                        .add_property(Transform3D { position: at, ..Transform3D::default() })
-                        .add_property(explosion_emitters()),
+                        .with_property(Transform3D { position: at, ..Transform3D::default() })
+                        .with_property(explosion_emitters()),
                 );
                 if spawned.is_ok() {
                     self.leftovers.push(Leftover { node_id: explosion_id, seconds_left: EXPLOSION_SECONDS });
@@ -306,7 +302,7 @@ impl Missiles {
         for leftover in &mut self.leftovers {
             leftover.seconds_left -= delta_time;
             if leftover.seconds_left <= 0.0 {
-                scene.despawn_node(app, &leftover.node_id, None);
+                scene.despawn_node(app, &leftover.node_id);
             }
         }
         self.leftovers.retain(|leftover| leftover.seconds_left > 0.0);
@@ -328,14 +324,11 @@ impl Missiles {
     }
 
     /// The model `model_key`'s plume at `scale` times its own size.
-    fn size_plume(&mut self, app: &mut App, model_key: &str, scale: f32) {
-        let Some(model) = app.game_models.get_mut(model_key) else { return };
-        let Some(mesh) = model.model.mesh_lists.values_mut().find_map(|meshes| meshes.get_mut(PLUME_MESH)) else { return };
-        let size = *self.plume_sizes.entry(model_key.to_owned()).or_insert(mesh.transform.scale);
-        // Not quite zero - a degenerate matrix isn't worth the risk.
-        let size = size * scale.max(1e-4);
-        mesh.change_transform(&app.renderer.queue, Transform::new(mesh.transform.position, mesh.transform.rotation, size));
-    }
+    ///
+    /// ENGINE GAP: this resized the plume mesh inside the missile's loaded
+    /// model; the engine keeps loaded models out of the game's reach (a file
+    /// model's own meshes can't be moved per node), so the plume isn't sized.
+    fn size_plume(&mut self, _app: &mut App, _model_key: &str, _scale: f32) {}
 }
 
 /// Where a missile's model goes - its position, turned along its flight
@@ -357,11 +350,13 @@ fn tail(spec: &WeaponSpec, flight: &MissileFlight) -> Vector3<f32> {
 
 /// A missile's model node - the burning copy or the plain one.
 fn missile_node(node_id: &str, spec: &WeaponSpec, (position, rotation): (Vector3<f32>, UnitQuaternion<f32>), burning: bool) -> Node {
-    let model = Model::from_file(&spec.model.model).double_sided(DoubleSidedMeshes::Meshes(spec.model.double_sided.clone()));
-    let model = if burning { model.variant(FLYING_VARIANT) } else { model };
+    // The burning copy was a variant whose plume mesh was sized up (see
+    // size_plume) - nothing the engine lets the game do, so one model.
+    let _ = burning;
+    let model = Model::file(crate::game::models::asset_relative(&spec.model.model)).double_sided(DoubleSidedMeshes::Meshes(spec.model.double_sided.clone()));
     Node::new(node_id)
-        .add_property(Transform3D { position, rotation, scale: Vector3::new(1.0, 1.0, 1.0) })
-        .add_property(model.scaled(spec.model.scale))
+        .with_property(Transform3D { position, rotation, scale: Vector3::new(1.0, 1.0, 1.0) })
+        .with_property(crate::game::models::scaled(model, spec.model.scale))
 }
 
 /// The white smoke a rocket motor leaves. Puffs are spaced on the order of

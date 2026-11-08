@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 use nalgebra::Vector3;
 
-use crate::engine::game_nodes::game_object::ColliderType;
+use crate::game::ext::game_object::ColliderType;
 
 use super::aero_spec::AeroSpec;
 use super::engine::EngineSpec;

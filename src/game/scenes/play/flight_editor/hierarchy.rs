@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use egui::RichText;
 use nalgebra::Vector3;
 
-use crate::engine::scene_manager::properties::{degrees_from_rotation, rotation_from_degrees, Space, Transform3D};
+use pankarta_software::scene_manager::node::properties::{degrees_from_rotation, rotation_from_degrees, Space, Transform3D};
 use crate::game::scenes::play::map::{AnimAction, CameraSpec, DefaultFollow, NodeSpec, Pace};
 
 use super::{inspector_header, padded, property, row_line, section, tree_row, Icon, NodeKind, RowClick, SceneNodeInfo, Selection, TreeRow, AXIS_COLORS, FlightEditor, PLAYER_COLOR};

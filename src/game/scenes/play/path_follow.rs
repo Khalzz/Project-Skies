@@ -12,14 +12,13 @@
 //!   back to the aircraft's own flight plan.
 
 use std::collections::HashMap;
-use std::sync::mpsc::Sender;
 
 use nalgebra::Vector3;
 
-use crate::engine::game_nodes::game_object::Physics;
-use crate::engine::physics::physics_handler::PhysicsCommand;
-use crate::engine::scene_manager::scene::Scene;
-use crate::engine::scene_manager::scene_nodes::facing;
+use crate::game::ext::game_object::Physics;
+use pankarta_software::physics::PhysicsWorld;
+use pankarta_software::scene_manager::scene::Scene;
+use pankarta_software::scene_manager::scene_nodes::facing;
 
 use super::flight_manager::cruise_speed;
 use super::map::{Difficulty, FollowMode, MapSpec, Pace, PathSpec};
@@ -168,13 +167,19 @@ fn points_ahead(points: &[(f32, f32, f32)], looped: bool, distance: f32) -> Vec<
     }
 }
 
-/// Holds node `id` still for something else to move: the physics' pose
-/// isn't written onto it, and its body (if it has one) goes kinematic.
-fn hold_node(scene: &mut Scene, id: &str, physics_command_tx: Option<&Sender<PhysicsCommand>>) {
-    scene.content.kinematic.insert(id.to_owned());
-    let has_body = scene.content.nodes.get(id).is_some_and(|node| node.get_property::<Physics>().is_some());
-    if let (true, Some(tx)) = (has_body, physics_command_tx) {
-        let _ = tx.send(PhysicsCommand::SetKinematic { name: id.to_owned(), kinematic: true });
+/// A node an animation is moving right now - the physics' pose isn't
+/// written onto it meanwhile, its body (if it has one) held kinematic and
+/// kept on it (see `sync_held_bodies`). (The engine keeps its own such set
+/// to itself, so the game marks them.)
+pub struct Held;
+
+/// Holds node `id` still for something else to move: its body (if it has
+/// one) goes kinematic and follows the node.
+fn hold_node(scene: &mut Scene, id: &str, physics: &mut PhysicsWorld) {
+    let Some(node) = scene.get_node_mut(id) else { return };
+    node.set_property(Held);
+    if node.get_property::<Physics>().is_some() {
+        physics.set_kinematic(id, true);
     }
 }
 
@@ -182,18 +187,41 @@ fn hold_node(scene: &mut Scene, id: &str, physics_command_tx: Option<&Sender<Phy
 /// it is now at `velocity`. True when it has a body (it stays off the
 /// physics' pose RELEASE_GRACE_SECONDS longer); without one it's out
 /// already.
-fn release_node(scene: &mut Scene, id: &str, velocity: Vector3<f32>, physics_command_tx: Option<&Sender<PhysicsCommand>>) -> bool {
-    let has_body = scene.content.nodes.get(id).is_some_and(|node| node.get_property::<Physics>().is_some());
+fn release_node(scene: &mut Scene, id: &str, velocity: Vector3<f32>, physics: &mut PhysicsWorld) -> bool {
+    let has_body = scene.get_node(id).is_some_and(|node| node.get_property::<Physics>().is_some());
     let velocity = if velocity.magnitude() > MAX_RELEASE_SPEED { velocity.normalize() * MAX_RELEASE_SPEED } else { velocity };
-    match (has_body, physics_command_tx, scene.world_transform(id)) {
-        (true, Some(tx), Some(world)) => {
-            let _ = tx.send(PhysicsCommand::SetKinematic { name: id.to_owned(), kinematic: false });
-            let _ = tx.send(PhysicsCommand::SetTransform { name: id.to_owned(), translation: world.position, rotation: world.rotation.into_inner(), linvel: velocity });
+    match (has_body, scene.world_transform(id)) {
+        (true, Some(world)) => {
+            physics.set_kinematic(id, false);
+            physics.teleport(id, world.position, world.rotation);
+            if let Some(body) = physics.body_mut(id) {
+                body.set_linvel(velocity, true);
+            }
             true
         }
         _ => {
-            scene.content.kinematic.remove(id);
+            unhold(scene, id);
             false
+        }
+    }
+}
+
+/// Takes the `Held` mark off node `id`.
+fn unhold(scene: &mut Scene, id: &str) {
+    if let Some(node) = scene.get_node_mut(id) {
+        node.remove_property::<Held>();
+    }
+}
+
+/// Puts every held node's body where its node is - an animation moved the
+/// node; the body follows (kinematic, so nothing else moves it). After the
+/// animations, every frame.
+pub fn sync_held_bodies(scene: &Scene, physics: &mut PhysicsWorld) {
+    for node in scene.content.nodes.iter().filter(|node| node.get_property::<Held>().is_some()) {
+        if let Some(world) = scene.world_transform(&node.id) {
+            if physics.body(&node.id).is_some() {
+                physics.teleport(&node.id, world.position, world.rotation);
+            }
         }
     }
 }
@@ -233,14 +261,14 @@ impl PathFollower {
     /// One frame: `requests` - what each node follows now (the running
     /// animations') - and, for map nodes nothing else has on a path, their
     /// own (`NodeSpec::follow`); places, flies or lets go of each.
-    pub fn update(&mut self, delta_time: f32, scene: &mut Scene, map: &MapSpec, requests: Vec<(String, FollowRequest)>, physics_command_tx: Option<&Sender<PhysicsCommand>>) {
+    pub fn update(&mut self, delta_time: f32, scene: &mut Scene, map: &MapSpec, requests: Vec<(String, FollowRequest)>, physics: &mut PhysicsWorld) {
         self.level_time += delta_time;
         self.releasing.retain(|id, remaining| {
             *remaining -= delta_time;
             if *remaining > 0.0 {
                 return true;
             }
-            scene.content.kinematic.remove(id);
+            unhold(scene, id);
             false
         });
 
@@ -298,8 +326,9 @@ impl PathFollower {
                             world.position = start;
                             world.rotation = facing(heading).unwrap_or(world.rotation);
                             scene.set_world_transform(id, world);
-                            if let Some(tx) = physics_command_tx {
-                                let _ = tx.send(PhysicsCommand::SetTransform { name: id.clone(), translation: start, rotation: world.rotation.into_inner(), linvel: heading * flying_speed });
+                            physics.teleport(id, start, world.rotation);
+                            if let Some(body) = physics.body_mut(id) {
+                                body.set_linvel(heading * flying_speed, true);
                             }
                         }
                     }
@@ -321,7 +350,7 @@ impl PathFollower {
             let (position, heading) = sampled.at(distance);
             if !self.animated.contains_key(id) {
                 self.releasing.remove(id);
-                hold_node(scene, id, physics_command_tx);
+                hold_node(scene, id, physics);
             }
             let Some(mut world) = scene.world_transform(id) else { continue };
             world.position = position;
@@ -339,7 +368,7 @@ impl PathFollower {
 
         // Let go of what isn't followed any more.
         for (id, velocity) in std::mem::take(&mut self.animated) {
-            if !still_animated.contains_key(&id) && release_node(scene, &id, velocity, physics_command_tx) {
+            if !still_animated.contains_key(&id) && release_node(scene, &id, velocity, physics) {
                 self.releasing.insert(id, RELEASE_GRACE_SECONDS);
             }
         }

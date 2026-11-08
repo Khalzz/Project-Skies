@@ -14,13 +14,14 @@
 //!   legend beside it listing what each direction does.
 
 use glyphon::cosmic_text::Align;
+use crate::game::ext::ui_layers::{self, GameUi};
 
-use crate::app::App;
-use crate::engine::input::input;
-use crate::engine::rendering::ui::ui::Ui;
-use crate::engine::ui::color::UiColor;
-use crate::engine::ui::ui_node::UiNode;
-use crate::engine::ui::ui_transform::{Anchor, Orientation, PositionValue, SizeValue};
+
+use pankarta_software::prelude::Input;
+use pankarta_software::rendering::ui::ui::Ui;
+use pankarta_software::ui::color::UiColor;
+use pankarta_software::ui::ui_node::UiNode;
+use pankarta_software::ui::ui_transform::{Anchor, Orientation, PositionValue, SizeValue};
 use crate::game::ui::label;
 
 /// Top-level UI node id - see `build_quick_menu_ui`.
@@ -284,7 +285,7 @@ impl QuickMenu {
 
     /// Reads the D-pad and navigates - returns the action to run, if a
     /// pressed slot has one. Call only while the player has control.
-    pub fn update(&mut self, delta_time: f32) -> Option<QuickAction> {
+    pub fn update(&mut self, input: &Input, delta_time: f32) -> Option<QuickAction> {
         self.idle_seconds += delta_time;
         if let Some((_, remaining)) = &mut self.flash {
             *remaining -= delta_time;
@@ -293,7 +294,7 @@ impl QuickMenu {
             }
         }
 
-        let pressed = Direction::ALL.into_iter().find(|direction| input::is_action_just_pressed(direction.action()));
+        let pressed = Direction::ALL.into_iter().find(|direction| input.is_action_just_pressed(direction.action()));
         let Some(direction) = pressed else {
             if !self.open.is_empty() && self.idle_seconds >= IDLE_RETURN_SECONDS {
                 self.open.clear();
@@ -323,11 +324,11 @@ impl QuickMenu {
 
     /// Brings the HUD in line with the menu - shown only when `visible`.
     /// Touches each node only when what it shows actually changed.
-    pub fn refresh_ui(&mut self, app: &mut App, status: &QuickMenuStatus, visible: bool) {
+    pub fn refresh_ui(&mut self, scene: &mut impl GameUi, status: &QuickMenuStatus, visible: bool) {
         let mut changed = false;
 
         if self.shown_visible != Some(visible) {
-            if let Some(root) = Ui::get_ui_node(&mut app.ui.renderizable_elements, QUICK_MENU_UI) {
+            if let Some(root) = scene.ui_node(QUICK_MENU_UI) {
                 root.set_active(visible);
                 self.shown_visible = Some(visible);
                 changed = true;
@@ -335,7 +336,6 @@ impl QuickMenu {
         }
         if !visible {
             if changed {
-                app.ui.has_changed = true;
             }
             return;
         }
@@ -343,8 +343,8 @@ impl QuickMenu {
         let (title, _) = menu(self.current());
         if self.shown_title != title {
             let path = format!("{QUICK_MENU_UI}/Legend/Title");
-            if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &path).and_then(|node| node.as_label_mut()) {
-                node.set_text(&mut app.ui.text.font_system, title, true);
+            if let Some(node) = scene.ui_node(&path).and_then(|node| node.as_label_mut()) {
+                node.set_text(title);
                 self.shown_title = title.to_owned();
                 changed = true;
             }
@@ -359,8 +359,8 @@ impl QuickMenu {
                 _ => format!("{}  {}", direction.arrow(), slot.label(status)),
             };
             if self.shown_labels[index] != text {
-                if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &direction.label_path()).and_then(|node| node.as_label_mut()) {
-                    node.set_text(&mut app.ui.text.font_system, &text, true);
+                if let Some(node) = scene.ui_node(&direction.label_path()).and_then(|node| node.as_label_mut()) {
+                    node.set_text(&text);
                     self.shown_labels[index] = text;
                     changed = true;
                 }
@@ -372,7 +372,7 @@ impl QuickMenu {
                 _ => KeyLook::Normal,
             };
             if self.shown_looks[index] != Some(look) {
-                if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &direction.key_path()) {
+                if let Some(node) = scene.ui_node(&direction.key_path()) {
                     style_key(node, look);
                     self.shown_looks[index] = Some(look);
                     changed = true;
@@ -381,7 +381,6 @@ impl QuickMenu {
         }
 
         if changed {
-            app.ui.has_changed = true;
         }
     }
 }
@@ -417,10 +416,10 @@ fn key(direction: Direction) -> UiNode {
 
 /// One legend line - left-aligned, fixed height so the column doesn't shift
 /// as lines empty and fill.
-fn legend_line(app: &mut App) -> UiNode {
-    label(app, "")
+fn legend_line() -> UiNode {
+    label("")
         .set_size(SizeValue::Pixels(LEGEND_WIDTH), SizeValue::Pixels(LABEL_HEIGHT))
-        .set_font_size(&mut app.ui.text.font_system, LABEL_FONT_SIZE)
+        .set_font_size(LABEL_FONT_SIZE)
         .set_text_color(UiColor::Rgb(220, 220, 220))
         .set_align(Align::Left)
 }
@@ -430,7 +429,7 @@ fn legend_line(app: &mut App) -> UiNode {
 /// line per direction, each marked with its arrow). No panel behind it.
 /// Built inactive and blank - `QuickMenu::refresh_ui` fills it in and shows
 /// it. Its arm textures need loading separately - see `ARM_SPRITES`.
-pub fn build_quick_menu_ui(app: &mut App) -> UiNode {
+pub fn build_quick_menu_ui() -> UiNode {
     // Only self-positioned arms inside, on a fixed-size square - so the arms
     // can overlap each other's corners (their V-shaped points nest together)
     // instead of being stacked side by side.
@@ -447,9 +446,9 @@ pub fn build_quick_menu_ui(app: &mut App) -> UiNode {
         .set_size(SizeValue::Fit, SizeValue::Fit)
         .set_background_color(UiColor::TRANSPARENT)
         .set_padding([0.0, 0.0, LEGEND_GAP, 0.0])
-        .set_child("Title", legend_line(app).set_text_color(UiColor::WHITE));
+        .set_child("Title", legend_line().set_text_color(UiColor::WHITE));
     for direction in Direction::ALL {
-        legend = legend.set_child(direction.name(), legend_line(app));
+        legend = legend.set_child(direction.name(), legend_line());
     }
 
     UiNode::container()

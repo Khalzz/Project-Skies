@@ -1,7 +1,7 @@
 use nalgebra::Vector3;
 use rapier3d::prelude::RigidBody;
 
-use crate::engine::utils::lerps::lerp;
+use pankarta_software::utils::lerps::lerp;
 use crate::game::scenes::play::plane::controls::PlaneControls;
 
 use super::wings::wing::AIR_DENSITY;

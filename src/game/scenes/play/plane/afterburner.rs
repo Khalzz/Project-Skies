@@ -1,6 +1,6 @@
 use rand::{rngs::ThreadRng, Rng};
 
-use crate::engine::utils::lerps::lerp;
+use pankarta_software::utils::lerps::lerp;
 
 /// The afterburner's own little animation state - flame scale with a bit of
 /// random jitter (real afterburner flicker), lerped rather than snapping.

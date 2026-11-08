@@ -5,11 +5,12 @@
 
 use nalgebra::Vector3;
 
-use crate::app::App;
-use crate::engine::particles::{Emitter, EmissionShape, Forces, ParticleEffect, ParticleEmitters};
-use crate::engine::scene_manager::node::Node;
-use crate::engine::scene_manager::properties::Transform3D;
-use crate::engine::scene_manager::scene::Scene;
+use pankarta_software::app::App;
+use pankarta_software::particles::{EmissionShape, Forces, ParticleEffect};
+use crate::game::ext::emitters::{Emitter, ParticleEmitters};
+use pankarta_software::scene_manager::node::Node;
+use pankarta_software::scene_manager::node::properties::Transform3D;
+use pankarta_software::scene_manager::scene::Scene;
 
 /// How long (s) an effect's node is kept - its longest particle.
 const EXPLOSION_SECONDS: f32 = 9.0;
@@ -42,8 +43,8 @@ impl CrashEffects {
         };
         let spawned = scene.spawn_node(app,
             Node::new(&node_id)
-                .add_property(Transform3D { position: at, ..Transform3D::default() })
-                .add_property(emitters),
+                .with_property(Transform3D { position: at, ..Transform3D::default() })
+                .with_property(emitters),
         );
         if spawned.is_ok() {
             self.playing.push((node_id, seconds));
@@ -55,7 +56,7 @@ impl CrashEffects {
         for (node_id, seconds_left) in &mut self.playing {
             *seconds_left -= delta_time;
             if *seconds_left <= 0.0 {
-                scene.despawn_node(app, node_id, None);
+                scene.despawn_node(app, node_id);
             }
         }
         self.playing.retain(|(_, seconds_left)| *seconds_left > 0.0);

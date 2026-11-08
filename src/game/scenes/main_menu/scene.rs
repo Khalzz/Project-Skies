@@ -1,21 +1,18 @@
-use nalgebra::{Point3, UnitQuaternion, Vector3};
+use nalgebra::{UnitQuaternion, Vector3};
 
-use crate::app::App;
-use crate::engine::game_nodes::game_object::Lighting;
-use crate::engine::rendering::enviroment::environment::Environment;
-use crate::engine::scene_manager::node::Node;
-use crate::engine::scene_manager::properties::{Model, Transform3D};
-use crate::engine::rendering::camera::camera::yaw_pitch_rotation;
-use crate::engine::input::input;
+use pankarta_software::prelude::*;
+use pankarta_software::rendering::camera::camera::yaw_pitch_rotation;
+
+use crate::game::camera::camera::looking_along;
+use crate::game::models;
 use crate::game::ocean::{Ocean, WakeSource};
-use crate::engine::scene_manager::scene::{FrameContext, Scene, SceneBehaviour};
-#[allow(unused_imports)]
-use crate::game::camera::camera::{Camera, CameraConfig, Fov, Speed};
-use crate::resources;
-use crate::transform::Transform;
+use crate::game::scenes::follow_test::scene::sun_node;
 
 use super::rebind_modal;
 use super::ui;
+
+/// The menu's camera node.
+const CAMERA: &str = "main_menu";
 
 // Resting pose the camera drifts around (see GameLogic::drift_camera).
 const BASE_POSITION: Vector3<f32> = Vector3::new(2.20, 0.90, -3.60);
@@ -70,119 +67,93 @@ pub struct GameLogic {
     flown: f32,
     /// The sea - streaming past, with the jet's wake on it.
     ocean: Ocean,
+    /// The title shot, edited from the F10 panel.
+    menu_shot: MenuShot,
 }
 
 impl GameLogic {
-    // this is called once, when the scene becomes active. Synchronous - no
-    // level to background-load any more (see main.rs's own comment on why
-    // this scene moved off create_loaded_scene).
     pub fn new(scene: &mut Scene, app: &mut App, environment: Environment) -> Self {
-        resources::apply_environment(scene, app, environment);
+        app.renderer.set_environment(environment);
+        app.window.set_cursor_locked(false);
 
-        app.window_manager.context.mouse().set_relative_mouse_mode(false);
-
-        ui::build(app);
-
+        ui::build(scene, app);
         Self::spawn_world(scene, app);
 
-        let camera = scene.create_camera("main_menu", Transform::new(BASE_POSITION, yaw_pitch_rotation(BASE_YAW_DEG, BASE_PITCH_DEG), Vector3::new(1.0, 1.0, 1.0)), 70.0);
-        // camera.look_at = Some(LookAtTarget::Node("plane".to_owned()));
-        scene.select_camera("main_menu");
-
-        app.menu_shot = MenuShot::default();
-
-        Self { elapsed: 0.0, flown: 0.0, ocean: Ocean::default() }
+        Self { elapsed: 0.0, flown: 0.0, ocean: Ocean::default(), menu_shot: MenuShot::default() }
     }
 
     fn spawn_world(scene: &mut Scene, app: &mut App) {
-        scene.spawn_node(app,
-            Node::new("sun")
-                .add_property(Transform3D {
-                    // Only its direction from the world origin matters - the
-                    // sun is treated as infinitely far away (see App::run's
-                    // lighting update). 40 degrees above the horizon.
-                    position: Vector3::new(445_200.0, 642_800.0, 623_300.0),
-                    rotation: UnitQuaternion::identity(),
-                    scale: Vector3::new(1.0, 1.0, 1.0),
-                })
-                .add_property(Model::new(crate::MARKER_MODEL))
-        ).expect("main_menu should only spawn 'sun' once");
-        if let Some(sun) = scene.content.renderizable_instances.get_mut("sun") {
-            sun.instance.metadata.lighting = Some(Lighting { intensity: 1.0, color: Vector3::new(0.7, 0.7, 0.8) });
-        }
-
-        scene.spawn_node(app,
+        let nodes = [
+            sun_node([0.7, 0.7, 0.8]),
             Node::new("plane")
-                .add_property(Transform3D {
+                .with_property(Transform3D {
                     position: PLANE_POSITION,
                     rotation: plane_rotation(PLANE_ROTATION_DEG),
                     scale: Vector3::new(1.0, 1.0, 1.0),
                 })
-                // Its own copy of the jet, so hiding the wheels here doesn't
-                // hide them on the one you fly. Drawn bigger than the file
-                // (the model shrank to real size, x0.4777) so the shot stays framed.
-                .add_property(title_f16(app))
-        ).expect("main_menu should only spawn 'plane' once");
-        if let Some(source) = app.model_sources.get("F16") {
-            hide_wheels(app, &source.clone().variant("title").key());
-        }
-
-        scene.spawn_node(app,
+                // Drawn bigger than the file (the model shrank to real size,
+                // x0.4777) so the shot stays framed.
+                // ENGINE GAP: the title jet used its own copy of the model
+                // with the wheel meshes hidden; the engine can't hide a file
+                // model's meshes per node, so its wheels show.
+                .with_property(title_f16()),
             Node::new("world")
-                .add_property(Transform3D {
-                    position: Vector3::new(0.0, -10.0, 0.0),
-                    rotation: UnitQuaternion::identity(),
-                    // The ocean ring mesh is in world units (see main.rs's
-                    // OCEAN_SURFACE_MODEL) - centered here, near the menu's
-                    // slowly drifting camera, its finest rings are in view.
-                    scale: Vector3::new(1.0, 1.0, 1.0),
-                })
-                .add_property(Model::new(crate::OCEAN_SURFACE_MODEL))
-                .add_property(crate::game::ocean::Ocean::material())
-        ).expect("main_menu should only spawn 'world' once");
+                .with_property(Transform3D { position: Vector3::new(0.0, -10.0, 0.0), ..Default::default() })
+                // The ocean ring mesh is in world units - centered here, near
+                // the menu's slowly drifting camera, its finest rings are in view.
+                .with_property(models::ocean_surface(0.0)),
+            Node::new(CAMERA)
+                .with_property(camera_transform(BASE_POSITION, BASE_YAW_DEG, BASE_PITCH_DEG))
+                .with_property(CameraLens::new(70.0)),
+        ];
+        for node in nodes {
+            if let Err(error) = scene.spawn_node(app, node) {
+                eprintln!("{error}");
+            }
+        }
     }
 
     pub fn update(&mut self, scene: &mut Scene, app: &mut App, delta_time: f32) {
-        if input::is_action_just_pressed("toggle_editor") {
-            app.menu_shot.open = !app.menu_shot.open;
+        if app.input.is_action_just_pressed("toggle_editor") {
+            self.menu_shot.open = !self.menu_shot.open;
+            app.debug_ui.visible = self.menu_shot.open;
         }
 
-        self.flown += delta_time * app.menu_shot.speed;
-        let heading = horizontal_from_yaw(app.menu_shot.water_yaw_deg);
+        self.flown += delta_time * self.menu_shot.speed;
+        let heading = horizontal_from_yaw(self.menu_shot.water_yaw_deg);
         // The wave field shifts opposite the heading, so the sea travels
         // along the heading itself.
         self.ocean.set_flow(-heading.x * self.flown, -heading.z * self.flown);
         // The same foam wake the player's jet leaves when it's fast and low.
         // The jet stays put, so the trail is carried along with the sea.
-        let speed = app.menu_shot.speed;
+        let speed = self.menu_shot.speed;
         self.ocean.set_wake_source(Some(WakeSource {
-            position: app.menu_shot.plane,
+            position: self.menu_shot.plane,
             velocity: -heading * speed,
         }));
         self.ocean.scroll_wake(heading.x * speed * delta_time, heading.z * speed * delta_time);
 
-        if let Some(plane) = scene.content.nodes.get_mut("plane").and_then(|node| node.get_property_mut::<Transform3D>()) {
-            plane.position = app.menu_shot.plane;
-            plane.rotation = plane_rotation(app.menu_shot.plane_rotation_deg);
+        if let Some(plane) = scene.get_node_mut("plane").and_then(|node| node.transform_3d_mut()) {
+            plane.position = self.menu_shot.plane;
+            plane.rotation = plane_rotation(self.menu_shot.plane_rotation_deg);
         }
-        if app.menu_shot.open {
-            self.place_camera(scene, app.menu_shot.camera, app.menu_shot.camera_yaw_deg, app.menu_shot.camera_pitch_deg);
+        if self.menu_shot.open {
+            let shot = self.menu_shot;
+            Self::place_camera(scene, shot.camera, shot.camera_yaw_deg, shot.camera_pitch_deg);
         } else {
             self.drift_camera(scene, app);
         }
-        rebind_modal::update(app);
-        ui::update_settings_sliders(app);
-        ui::refresh_controller_states(app);
+        rebind_modal::update(scene, app);
+        ui::update_settings_sliders(scene, app);
+        ui::refresh_controller_states(scene, app);
         crate::game::head_tracking::poll(app);
-        ui::refresh_head_tracking_if_needed(app);
-
-        app.ui.has_changed = true;
+        ui::refresh_head_tracking_if_needed(scene, app);
     }
 
     fn drift_camera(&mut self, scene: &mut Scene, app: &App) {
         self.elapsed += app.time.delta_time;
         let t = self.elapsed;
-        let shot = app.menu_shot;
+        let shot = self.menu_shot;
 
         let offset = Vector3::new(
             (t * 0.6).sin() * 0.4,
@@ -192,15 +163,21 @@ impl GameLogic {
         let yaw_drift = (t * 0.35).sin() * 1.5;
         let pitch_drift = (t * 0.5).sin() * 0.8;
 
-        self.place_camera(scene, shot.camera + offset, shot.camera_yaw_deg + yaw_drift, shot.camera_pitch_deg + pitch_drift);
+        Self::place_camera(scene, shot.camera + offset, shot.camera_yaw_deg + yaw_drift, shot.camera_pitch_deg + pitch_drift);
     }
 
-    fn place_camera(&self, scene: &mut Scene, position: Vector3<f32>, yaw_deg: f32, pitch_deg: f32) {
-        if let Some(camera) = scene.cameras.get_mut("main_menu") {
-            camera.camera.set_position(Point3::from(position));
-            camera.camera.set_yaw_pitch(yaw_deg.to_radians(), pitch_deg.to_radians());
+    fn place_camera(scene: &mut Scene, position: Vector3<f32>, yaw_deg: f32, pitch_deg: f32) {
+        if let Some(node) = scene.get_node_mut(CAMERA) {
+            node.set_property(camera_transform(position, yaw_deg, pitch_deg));
         }
     }
+}
+
+/// The menu camera's node transform at `position`, looking along
+/// `yaw_deg`/`pitch_deg` (yaw 0 = +X, 90 = +Z).
+fn camera_transform(position: Vector3<f32>, yaw_deg: f32, pitch_deg: f32) -> Transform3D {
+    let forward = yaw_pitch_rotation(yaw_deg, pitch_deg) * Vector3::x();
+    Transform3D { position, rotation: looking_along(forward), ..Default::default() }
 }
 
 /// F10's title-shot panel. `Some` is text for the clipboard.
@@ -269,26 +246,10 @@ fn drag_vec(ui: &mut egui::Ui, value: &mut Vector3<f32>) {
     });
 }
 
-/// The title jet: the declared F-16, its own mesh copy, drawn at the menu's size.
-fn title_f16(app: &App) -> Model {
-    match app.model_sources.get("F16") {
-        Some(source) => Model::from_source(source.clone().variant("title")).scaled(29.3),
-        None => Model::new("F16").scaled(29.3),
-    }
-}
-
-/// Drops the wheel meshes from the title jet. `num_elements` of 0 draws nothing.
-fn hide_wheels(app: &mut App, model_ref: &str) {
-    let Some(model) = app.game_models.get_mut(model_ref) else { return };
-    for meshes in model.model.mesh_lists.values_mut() {
-        for (key, mesh) in meshes.iter_mut() {
-            let key = key.to_ascii_lowercase();
-            let name = mesh.name.to_ascii_lowercase();
-            if key.contains("wheel") || name.contains("wheel") {
-                mesh.num_elements = 0;
-            }
-        }
-    }
+/// The title jet: the F-16, drawn at the menu's size.
+fn title_f16() -> Model {
+    let scale = 29.3;
+    models::model(models::F16).transform(Transform3D { scale: Vector3::new(scale, scale, scale), ..Default::default() })
 }
 
 /// Roll, pitch, yaw in degrees, about X, Y, and Z.
@@ -298,7 +259,7 @@ fn plane_rotation(degrees: Vector3<f32>) -> UnitQuaternion<f32> {
 
 /// Heading on the water. 0 = +X, 90 = +Z, matching the camera's yaw.
 fn horizontal_from_yaw(yaw_deg: f32) -> Vector3<f32> {
-    let forward = UnitQuaternion::from_quaternion(yaw_pitch_rotation(yaw_deg, 0.0)) * Vector3::new(1.0, 0.0, 0.0);
+    let forward = yaw_pitch_rotation(yaw_deg, 0.0) * Vector3::new(1.0, 0.0, 0.0);
     Vector3::new(forward.x, 0.0, forward.z).try_normalize(1e-6).unwrap_or_else(Vector3::x)
 }
 
@@ -311,5 +272,18 @@ impl SceneBehaviour for GameLogic {
     fn after_cameras(&mut self, scene: &mut Scene, app: &mut App) {
         // The sea's waves and wake, around where the camera is drawn from.
         self.ocean.update(scene, "world", app.time.delta_time);
+    }
+
+    fn debug_ui(&mut self, ctx: &egui::Context, _scene: &mut Scene, app: &mut App) {
+        if !self.menu_shot.open {
+            return;
+        }
+        if let Some(text) = draw_menu_shot(ctx, &mut self.menu_shot) {
+            ctx.copy_text(text);
+        }
+        // Closed from its own button.
+        if !self.menu_shot.open {
+            app.debug_ui.visible = false;
+        }
     }
 }

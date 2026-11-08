@@ -1,24 +1,24 @@
 use std::collections::HashMap;
+use crate::game::ext::ui_layers::{self, GameUi};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use glyphon::cosmic_text::Align;
-use std::sync::mpsc::Sender;
 
 use nalgebra::{Point3, UnitQuaternion, Vector3};
 
-use crate::app::App;
-use crate::engine::game_nodes::game_object::{Camera as GameObjectCamera, Cameras};
-use crate::engine::particles::ParticleEmitters;
-use crate::engine::physics::physics_handler::PhysicsCommand;
-use crate::engine::physics::water_contact::WaterContact;
-use crate::engine::rendering::ui::ui::Ui;
-use crate::engine::scene_manager::node::Node;
-use crate::engine::scene_manager::properties::{Model, Parent, Space, Transform3D};
-use crate::engine::ui::color::UiColor;
-use crate::engine::ui::ui_transform::SizeValue;
-use crate::resources::{DoubleSidedMeshes, ModelSource};
-use crate::engine::scene_manager::scene::Scene;
+use pankarta_software::app::App;
+use crate::game::ext::game_object::{Camera as GameObjectCamera, Cameras};
+use crate::game::ext::emitters::ParticleEmitters;
+use crate::game::ext::physics_behavior::PhysicsNodeExt;
+use crate::game::models;
+use pankarta_software::prelude::DoubleSidedMeshes;
+use crate::game::ext::water_contact::WaterContact;
+use pankarta_software::scene_manager::node::Node;
+use pankarta_software::scene_manager::node::properties::{Model, Parent, Space, Transform3D};
+use pankarta_software::ui::color::UiColor;
+use pankarta_software::ui::ui_transform::SizeValue;
+use pankarta_software::scene_manager::scene::Scene;
 use crate::game::game_settings::GAME_SETTINGS;
 use crate::game::ui::label;
 use crate::game::scenes::play::camera::camera;
@@ -55,9 +55,9 @@ fn plane_cameras(spec: &AircraftSpec) -> Cameras {
 /// What an aircraft is drawn with: its map placement's material (else
 /// engine/standard), with its plane's mesh materials under the placement's
 /// own - None when that's just engine/standard.
-fn plane_material(spec: &AircraftSpec, placement: Option<&AircraftPlacement>) -> Option<crate::engine::scene_manager::properties::Material> {
-    use crate::engine::scene_manager::properties::Material;
-    let mut material = placement.and_then(|placement| placement.material.clone()).unwrap_or_else(|| Material::shader(crate::engine::rendering::shader_library::STANDARD));
+fn plane_material(spec: &AircraftSpec, placement: Option<&AircraftPlacement>) -> Option<pankarta_software::scene_manager::node::properties::Material> {
+    use pankarta_software::scene_manager::node::properties::Material;
+    let mut material = placement.and_then(|placement| placement.material.clone()).unwrap_or_else(|| Material::shader(pankarta_software::rendering::shader_library::STANDARD));
     for (mesh, mesh_material) in &spec.materials {
         material.meshes.entry(mesh.clone()).or_insert_with(|| mesh_material.clone());
     }
@@ -104,29 +104,6 @@ fn load_map(scene_folder: &str) -> MapSpec {
             ..Default::default()
         }
     })
-}
-
-/// The model file of every plane the level's map.ron puts in it, and of every
-/// weapon their loadouts hang on them - for the play scene to load them under
-/// its loading screen (see SceneManager::preload_models).
-pub fn models(scene_folder: &str) -> Vec<ModelSource> {
-    let map = load_map(scene_folder);
-    let mut planes: Vec<&str> = map.aircraft().map(|(_, aircraft)| aircraft.plane.as_str()).collect();
-    planes.sort_unstable();
-    planes.dedup();
-    let mut weapons: Vec<&str> = map.aircraft().flat_map(|(_, aircraft)| aircraft.loadout.values().map(String::as_str)).collect();
-    weapons.sort_unstable();
-    weapons.dedup();
-    let plane_models = planes.into_iter()
-        .filter_map(|plane| AircraftSpec::load(plane).ok())
-        .map(|spec| ModelSource::asset(&spec.model.model).double_sided(DoubleSidedMeshes::Meshes(spec.model.double_sided)));
-    let weapon_models = weapons.into_iter()
-        .filter_map(|weapon| WeaponSpec::load(weapon).ok())
-        // The copy flying missiles use (see play::weapon::missiles) is a
-        // light one, shared off this when it's first needed - nothing more
-        // to load up front.
-        .map(|spec| ModelSource::asset(&spec.model.model).double_sided(DoubleSidedMeshes::Meshes(spec.model.double_sided)));
-    plane_models.chain(weapon_models).collect()
 }
 
 /// A plane's mass and center of mass with a loadout on (kg, the jet's frame)
@@ -338,19 +315,17 @@ impl flight_manager {
             }
             // Its views - the cockpit at the pilot's seat - where the file
             // now puts them.
-            if let Some(instance) = scene.content.renderizable_instances.get_mut(&plane.node_id) {
-                instance.instance.metadata.cameras = Some(plane_cameras(&spec));
-            }
             let Some(node) = scene.content.nodes.get_mut(&plane.node_id) else { continue };
+            node.set_property(plane_cameras(&spec));
             // Its emitters, rebuilt where the file now puts them (the plane
             // switches them on again as needed next frame).
             if let Some(emitters) = node.get_property_mut::<ParticleEmitters>() {
-                *emitters = effects::plane_emitters(&spec.effects, &spec.gear, &spec.aero.wings);
+                emitters.replace(effects::plane_emitters(&spec.effects, &spec.gear, &spec.aero.wings));
             }
             // What it's drawn with - its mesh materials as the file now has them.
-            match plane_material(&spec, self.applied.find(&plane.node_id).map(|(_, placement)| placement)) {
-                Some(material) => node.set_property(material),
-                None => { node.remove_property::<crate::engine::scene_manager::properties::Material>(); }
+            let material = plane_material(&spec, self.applied.find(&plane.node_id).map(|(_, placement)| placement));
+            if let Some(model) = node.get_property_mut::<Model>() {
+                model.material = material;
             }
             if let Some(plane) = node.get_behavior_mut::<Plane>() {
                 plane.set_effects(&spec.effects);
@@ -373,7 +348,7 @@ impl flight_manager {
         let map = load_map(scene_folder);
         self.player_id = map.player().name.clone();
         for (coalition, placement) in map.aircraft() {
-            if let Err(error) = self.add_plane(scene, app, None, coalition, placement, map.flight_plan(placement)) {
+            if let Err(error) = self.add_plane(scene, app, coalition, placement, map.flight_plan(placement)) {
                 if placement.player {
                     panic!("{error} - the player's aircraft can't be left out");
                 }
@@ -394,7 +369,7 @@ impl flight_manager {
     /// A map that doesn't `validate` (two aircraft with one name, no player
     /// while one is being switched...) changes nothing - its error comes
     /// back. Aircraft that couldn't be spawned are reported too.
-    pub fn sync(&mut self, scene: &mut Scene, app: &mut App, physics_command_tx: Option<&Sender<PhysicsCommand>>, edited: &MapSpec) -> Result<(), String> {
+    pub fn sync(&mut self, scene: &mut Scene, app: &mut App, edited: &MapSpec) -> Result<(), String> {
         if *edited == self.applied {
             return Ok(());
         }
@@ -404,26 +379,26 @@ impl flight_manager {
         for (_, before) in old.aircraft() {
             let keep = edited.find(&before.name).is_some_and(|(_, after)| after.plane == before.plane);
             if !keep {
-                self.remove_plane(scene, app, physics_command_tx, &before.name);
+                self.remove_plane(scene, app, &before.name);
             }
         }
 
         let mut errors = Vec::new();
         for (coalition, after) in edited.aircraft() {
             let Some((old_coalition, before)) = old.find(&after.name).filter(|(_, before)| before.plane == after.plane) else {
-                if let Err(error) = self.add_plane(scene, app, physics_command_tx, coalition, after, edited.flight_plan(after)) {
+                if let Err(error) = self.add_plane(scene, app, coalition, after, edited.flight_plan(after)) {
                     errors.push(error);
                 }
                 continue;
             };
             if before.start != after.start {
-                if let Err(error) = self.respawn(scene, app, physics_command_tx, &after.name) {
+                if let Err(error) = self.respawn(scene, app, &after.name) {
                     errors.push(error);
                 }
                 continue;
             }
             if before.position != after.position || before.rotation != after.rotation || before.speed != after.speed {
-                self.teleport(scene, physics_command_tx, after);
+                self.teleport(scene, app, after);
             }
             let flight_plan = edited.flight_plan(after);
             if old.flight_plan(before) != flight_plan || before.speed != after.speed || before.difficulty != after.difficulty {
@@ -440,7 +415,7 @@ impl flight_manager {
                 }
             }
             if old_coalition.color != coalition.color {
-                Self::color_name_tag(app, &after.name, coalition);
+                Self::color_name_tag(scene, &after.name, coalition);
             }
             if before.loadout != after.loadout || before.flares != after.flares || before.chaff != after.chaff {
                 self.rearm(scene, app, after);
@@ -463,29 +438,29 @@ impl flight_manager {
 
     /// Spawns every aircraft again, where and as the map has it - fresh
     /// planes (a wreck flies again).
-    pub fn respawn_all(&mut self, scene: &mut Scene, app: &mut App, physics_command_tx: Option<&Sender<PhysicsCommand>>) -> Result<(), String> {
+    pub fn respawn_all(&mut self, scene: &mut Scene, app: &mut App) -> Result<(), String> {
         let names: Vec<String> = self.applied.aircraft().map(|(_, aircraft)| aircraft.name.clone()).collect();
         let errors: Vec<String> = names.iter()
-            .filter_map(|name| self.respawn(scene, app, physics_command_tx, name).err())
+            .filter_map(|name| self.respawn(scene, app, name).err())
             .collect();
         if errors.is_empty() { Ok(()) } else { Err(errors.join("\n")) }
     }
 
     /// Spawns the aircraft `name` again, where and as the map has it.
-    pub fn respawn(&mut self, scene: &mut Scene, app: &mut App, physics_command_tx: Option<&Sender<PhysicsCommand>>, name: &str) -> Result<(), String> {
+    pub fn respawn(&mut self, scene: &mut Scene, app: &mut App, name: &str) -> Result<(), String> {
         let Some((coalition, placement)) = self.applied.find(name).map(|(coalition, placement)| (coalition.clone(), placement.clone())) else {
             return Err(format!("no aircraft named '{name}'"));
         };
-        self.remove_plane(scene, app, physics_command_tx, name);
+        self.remove_plane(scene, app, name);
         let flight_plan = self.applied.flight_plan(&placement);
-        self.add_plane(scene, app, physics_command_tx, &coalition, &placement, flight_plan)
+        self.add_plane(scene, app, &coalition, &placement, flight_plan)
     }
 
     /// Makes where the aircraft `name` is right now (position and attitude)
     /// its place in the map - without moving it. Returns the new place, for
     /// the editor's copy of the map.
     pub fn capture_current(&mut self, scene: &Scene, name: &str) -> Option<((f32, f32, f32), (f32, f32, f32))> {
-        let transform = scene.content.renderizable_instances.get(name)?.instance.transform;
+        let transform = crate::game::ext::drawn::get(scene, name)?.instance.transform;
         let position = (transform.position.x, transform.position.y, transform.position.z);
         let rotation = AircraftPlacement::rotation_degrees(&transform.rotation);
         let placement = self.applied.find_mut(name)?;
@@ -497,7 +472,7 @@ impl flight_manager {
     /// The aircraft `name` as it is right now - `None` if it isn't in the
     /// scene.
     pub fn live(&self, scene: &Scene, name: &str) -> Option<LiveAircraft> {
-        let transform = scene.content.renderizable_instances.get(name)?.instance.transform;
+        let transform = crate::game::ext::drawn::get(scene, name)?.instance.transform;
         let node = scene.content.nodes.get(name);
         let flight_data = node.and_then(|node| node.physics_state::<AircraftState>()).map(|state| &state.flight_data);
         Some(LiveAircraft {
@@ -528,7 +503,7 @@ impl flight_manager {
     /// Scene::spawn_node_live).
     /// `flight_plan`: the points it flies and whether round and round (see
     /// MapSpec::flight_plan).
-    fn add_plane(&mut self, scene: &mut Scene, app: &mut App, physics_command_tx: Option<&Sender<PhysicsCommand>>, coalition: &Coalition, placement: &AircraftPlacement, flight_plan: (Vec<(f32, f32, f32)>, bool)) -> Result<(), String> {
+    fn add_plane(&mut self, scene: &mut Scene, app: &mut App, coalition: &Coalition, placement: &AircraftPlacement, flight_plan: (Vec<(f32, f32, f32)>, bool)) -> Result<(), String> {
         let aircraft_spec = AircraftSpec::load(&placement.plane)
             .map_err(|error| format!("map aircraft '{}': {error}", placement.name))?;
 
@@ -560,50 +535,43 @@ impl flight_manager {
         let plane = if placement.player { plane } else { plane.bot() };
 
         let material = plane_material(&aircraft_spec, Some(placement));
-        let node = Node::new(&placement.name);
-        let node = match material {
-            Some(material) => node.add_property(material),
-            None => node,
-        };
-        scene.spawn_node_live(app,
-            node
-                .add_behavior(plane)
-                .add_property(Transform3D {
+        let mut model = models::scaled(Model::file(models::asset_relative(&aircraft_spec.model.model))
+            .double_sided(DoubleSidedMeshes::Meshes(aircraft_spec.model.double_sided.clone())), aircraft_spec.model.scale);
+        model.material = material;
+        scene.spawn_node(app,
+            Node::new(&placement.name)
+                .with_behavior(plane)
+                .with_property(Transform3D {
                     position: placement.position(),
                     rotation,
                     scale: Vector3::new(1.0, 1.0, 1.0),
                 })
-                // Its own copy of the model (light - see Model::share), so
-                // its control surfaces, gear and afterburner move apart from
-                // every other aircraft of the same plane's.
-                .add_property(Model::from_file(&aircraft_spec.model.model)
-                    .double_sided(DoubleSidedMeshes::Meshes(aircraft_spec.model.double_sided.clone()))
-                    .variant(placement.name.clone())
-                    .scaled(aircraft_spec.model.scale))
-                .add_property(effects::plane_emitters(&aircraft_spec.effects, &aircraft_spec.gear, &aircraft_spec.aero.wings))
-                .add_property(physics)
+                // One shared load of the plane's model (the engine can't move
+                // a file model's meshes per node, so there's nothing for a
+                // copy of its own to keep apart - see plane::Plane::update).
+                .with_property(model)
+                // Its views - the cockpit at the pilot's seat.
+                .with_property(plane_cameras(&aircraft_spec))
+                .with_property(effects::plane_emitters(&aircraft_spec.effects, &aircraft_spec.gear, &aircraft_spec.aero.wings))
+                .with_property(physics.to_engine())
                 .add_physics_behavior(AircraftPhysics::new(&aircraft_spec.aero, &aircraft_spec.engine, &aircraft_spec.gear, &aircraft_spec.effects, center_of_mass, colliders, mass, placement.start.gear_down()))
-                .add_physics_behavior(WaterContact::new(app.sea_level).sinks(WRECK_FLOAT_SECONDS, WRECK_SINK_SECONDS)),
-            physics_command_tx,
+                .add_physics_behavior(WaterContact::new(app.particles.sea_level().unwrap_or(0.0)).sinks(WRECK_FLOAT_SECONDS, WRECK_SINK_SECONDS)),
         ).map_err(|error| format!("map aircraft '{}': {error}", placement.name))?;
-        if let Some(instance) = scene.content.renderizable_instances.get_mut(&placement.name) {
-            instance.instance.metadata.cameras = Some(plane_cameras(&aircraft_spec));
-        }
 
         // Its name over it - placed every frame by update_name_tags (which
         // leaves the player's hidden).
-        let mut tag = label(app, &placement.name)
+        let mut tag = label(&placement.name)
             .set_size(SizeValue::Pixels(NAME_TAG_WIDTH), SizeValue::Pixels(NAME_TAG_HEIGHT))
-            .set_font_size(&mut app.ui.text.font_system, 14.0)
+            .set_font_size(14.0)
             .set_text_color(coalition_color(coalition))
             .set_align(Align::Center)
             .active(false);
-        tag.resolve(app.window_manager.size.width as f32, app.window_manager.size.height as f32);
-        app.ui.add_to_ui(name_tag_key(&placement.name), tag);
+        tag.resolve(app.window.size.width as f32, app.window.size.height as f32);
+        ui_layers::add(scene, app, name_tag_key(&placement.name), tag);
 
         // Its HUD glass, from its model - sized like the model's drawn.
         let hud_glass = aircraft_spec.model.hud_glass.as_ref().and_then(|mesh| {
-            match crate::resources::load_mesh_points(Path::new(&aircraft_spec.model.model), mesh) {
+            match crate::game::ext::mesh_data::load_mesh_points(Path::new(&aircraft_spec.model.model), mesh) {
                 Ok(points) => Some(points.into_iter().map(|point| point * aircraft_spec.model.scale).collect()),
                 Err(error) => {
                     eprintln!("map aircraft '{}': HUD glass - {error}", placement.name);
@@ -643,11 +611,10 @@ impl flight_manager {
             let local = Transform3D { position: pylon.position, rotation: weapon.model.rotation(), scale: Vector3::new(1.0, 1.0, 1.0) };
             let spawned = scene.spawn_node(app,
                 Node::new(&node_id)
-                    .add_property(local)
-                    .add_property(Parent { id: placement.name.clone(), space: Space::Local, local, inherit_rotation: true })
-                    .add_property(Model::from_file(&weapon.model.model)
-                        .double_sided(DoubleSidedMeshes::Meshes(weapon.model.double_sided.clone()))
-                        .scaled(weapon.model.scale)),
+                    .with_property(local)
+                    .with_property(Parent { id: placement.name.clone(), space: Space::Local, local, local_2d: Default::default(), inherit_rotation: true })
+                    .with_property(models::scaled(Model::file(models::asset_relative(&weapon.model.model))
+                        .double_sided(DoubleSidedMeshes::Meshes(weapon.model.double_sided.clone())), weapon.model.scale)),
             );
             match spawned {
                 Ok(()) => stores.push(Store { node_id, pylon: pylon.name.clone(), weapon: weapon.id.clone(), offset: pylon.position }),
@@ -660,7 +627,7 @@ impl flight_manager {
     /// Takes the weapons hung on aircraft `name` off.
     fn remove_stores(&mut self, scene: &mut Scene, app: &mut App, name: &str) {
         for store in self.stores.remove(name).unwrap_or_default() {
-            scene.despawn_node(app, &store.node_id, None);
+            scene.despawn_node(app, &store.node_id);
         }
     }
 
@@ -698,11 +665,10 @@ impl flight_manager {
 
     /// Takes the aircraft `name` out of the scene - node, body, name tag,
     /// the weapons hung on it.
-    fn remove_plane(&mut self, scene: &mut Scene, app: &mut App, physics_command_tx: Option<&Sender<PhysicsCommand>>, name: &str) {
+    fn remove_plane(&mut self, scene: &mut Scene, app: &mut App, name: &str) {
         self.remove_stores(scene, app, name);
-        scene.despawn_node(app, name, physics_command_tx);
-        app.ui.renderizable_elements.remove(&name_tag_key(name));
-        app.ui.has_changed = true;
+        scene.despawn_node(app, name);
+        ui_layers::remove(scene, app, &name_tag_key(name));
         self.watched.retain(|plane| plane.node_id != name);
         self.spawned.remove(name);
         self.fired.remove(name);
@@ -749,7 +715,7 @@ impl flight_manager {
         let stores = self.stores.get_mut(name)?;
         let index = stores.iter().position(|store| store.pylon == pylon)?;
         let store = stores.remove(index);
-        scene.despawn_node(app, &store.node_id, None);
+        scene.despawn_node(app, &store.node_id);
         self.fired.entry(name.to_owned()).or_default().insert(pylon.to_owned());
 
         let plane = self.applied.find(name).map(|(_, placement)| placement.plane.clone());
@@ -764,20 +730,16 @@ impl flight_manager {
 
     /// Puts the aircraft at its place in the map, at its map `speed` along
     /// the nose (or its data.ron `initial_velocity` without one), no spin.
-    fn teleport(&self, scene: &mut Scene, physics_command_tx: Option<&Sender<PhysicsCommand>>, placement: &AircraftPlacement) {
+    fn teleport(&self, scene: &mut Scene, app: &mut App, placement: &AircraftPlacement) {
         let position = placement.position();
         let rotation = placement.rotation();
         let linvel = match placement.speed {
             Some(speed) => rotation * Vector3::new(0.0, 0.0, speed),
             None => self.spawned.get(&placement.name).map(|spawned| spawned.data_initial_velocity).unwrap_or_else(Vector3::zeros),
         };
-        if let Some(tx) = physics_command_tx {
-            let _ = tx.send(PhysicsCommand::SetTransform { name: placement.name.clone(), translation: position, rotation: rotation.into_inner(), linvel });
-        }
-        // Shown there right away, not a frame later when physics reports.
-        if let Some(instance) = scene.content.renderizable_instances.get_mut(&placement.name) {
-            instance.instance.transform.position = position;
-            instance.instance.transform.rotation = rotation;
+        app.physics.teleport(&placement.name, position, rotation);
+        if let Some(body) = app.physics.body_mut(&placement.name) {
+            body.set_linvel(linvel, true);
         }
         if let Some(transform) = scene.content.nodes.get_mut(&placement.name).and_then(|node| node.get_property_mut::<Transform3D>()) {
             transform.position = position;
@@ -785,11 +747,10 @@ impl flight_manager {
         }
     }
 
-    fn color_name_tag(app: &mut App, name: &str, coalition: &Coalition) {
-        if let Some(tag) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &name_tag_key(name)) {
+    fn color_name_tag(scene: &mut Scene, name: &str, coalition: &Coalition) {
+        if let Some(tag) = scene.ui_node(&name_tag_key(name)) {
             let color = coalition_color(coalition);
             tag.update_style(|style| style.set_text_color(color));
-            app.ui.has_changed = true;
         }
     }
 
@@ -797,18 +758,18 @@ impl flight_manager {
     /// hidden for the player's own aircraft, while it's off screen or behind
     /// the camera, while `hidden` (the flight HUD is), or when the "Show
     /// aircraft names" setting is off. The caller marks the UI changed.
-    pub fn update_name_tags(&self, scene: &Scene, app: &mut App, hidden: bool) {
+    pub fn update_name_tags(&self, scene: &mut Scene, app: &mut App, hidden: bool) {
         let show = !hidden && GAME_SETTINGS.lock().unwrap().show_aircraft_names;
-        let (width, height) = (app.window_manager.size.width, app.window_manager.size.height);
+        let (width, height) = (app.window.size.width, app.window.size.height);
         for node_id in self.spawned.keys() {
             let screen_position = if show && *node_id != self.player_id {
-                scene.content.renderizable_instances.get(node_id)
+                crate::game::ext::drawn::get(scene, node_id)
                     .map(|instance| Point3::from(instance.instance.transform.position + Vector3::new(0.0, NAME_TAG_HEIGHT_METERS, 0.0)))
-                    .and_then(|anchor| app.camera_resources.world_to_screen(scene.cameras.active(), anchor, width, height))
+                    .and_then(|anchor| app.renderer.camera_resources.world_to_screen(scene.cameras.active(), anchor, width, height))
             } else {
                 None
             };
-            let Some(tag) = Ui::get_ui_node(&mut app.ui.renderizable_elements, &name_tag_key(node_id)) else { continue };
+            let Some(tag) = scene.ui_node(&name_tag_key(node_id)) else { continue };
             let Some(screen_position) = screen_position else {
                 tag.set_active(false);
                 continue;
@@ -925,7 +886,7 @@ mod tests {
     fn the_f16s_hud_glass_is_in_front_of_the_pilot() {
         let spec = AircraftSpec::load("f16").unwrap();
         let mesh = spec.model.hud_glass.as_deref().expect("the F-16 has a HUD glass");
-        let points = crate::resources::load_mesh_points(Path::new(&spec.model.model), mesh).unwrap();
+        let points = crate::game::ext::mesh_data::load_mesh_points(Path::new(&spec.model.model), mesh).unwrap();
         let eye = spec.aero.pilot_position;
         for point in points.iter().map(|point| point * spec.model.scale) {
             // Under a meter ahead of the eye, about level with it, centered.

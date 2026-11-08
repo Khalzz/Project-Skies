@@ -12,7 +12,7 @@ use std::collections::{HashMap, VecDeque};
 
 use nalgebra::{UnitQuaternion, Vector3};
 
-use crate::engine::rendering::thick_lines::LineInstance;
+use pankarta_software::rendering::thick_lines::LineInstance;
 use crate::game::scenes::play::flight_manager::LiveAircraft;
 use crate::game::scenes::play::map::MapSpec;
 

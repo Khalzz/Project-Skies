@@ -5,15 +5,14 @@
 //! where they say, and its events fire as it passes them.
 
 use std::collections::HashSet;
-use std::sync::mpsc::Sender;
 
 use nalgebra::{UnitQuaternion, Vector3};
 
-use crate::engine::physics::physics_handler::PhysicsCommand;
-use crate::engine::scene_manager::properties::{rotation_from_degrees, Transform3D};
-use crate::engine::scene_manager::scene::Scene;
-use crate::engine::scene_manager::scene_nodes::facing;
-use crate::engine::utils::lerps::{lerp, smoothstep};
+use pankarta_software::physics::PhysicsWorld;
+use pankarta_software::scene_manager::node::properties::{rotation_from_degrees, Transform3D};
+use pankarta_software::scene_manager::scene::Scene;
+use pankarta_software::scene_manager::scene_nodes::facing;
+use pankarta_software::utils::lerps::{lerp, smoothstep};
 
 use super::map::{AnimAction, AnimationDef, CameraKey, FollowMode, MapSpec, Pace, Transition, WaveOn};
 use super::path_follow::{FollowRequest, PathFollower};
@@ -247,7 +246,7 @@ impl Animations {
 
     /// One frame - see `AnimationFrame`. Call after the behaviors (see
     /// SceneBehaviour::late_update).
-    pub fn update(&mut self, delta_time: f32, scene: &mut Scene, map: &MapSpec, physics_command_tx: Option<&Sender<PhysicsCommand>>) -> AnimationFrame {
+    pub fn update(&mut self, delta_time: f32, scene: &mut Scene, map: &MapSpec, physics: &mut PhysicsWorld) -> AnimationFrame {
         let mut frame = AnimationFrame::default();
         self.wave_time = (self.wave_time + delta_time).rem_euclid(10_000.0);
         let wave_time = self.wave_time;
@@ -331,7 +330,7 @@ impl Animations {
                 self.start(&node, &name);
             }
         }
-        self.follower.update(delta_time, scene, map, requests, physics_command_tx);
+        self.follower.update(delta_time, scene, map, requests, physics);
         frame
     }
 }

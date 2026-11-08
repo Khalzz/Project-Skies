@@ -2,17 +2,14 @@ use std::collections::{HashMap, HashSet};
 
 use nalgebra::{UnitQuaternion, Vector3};
 
-use crate::app::App;
-use crate::engine::input::input;
-use crate::engine::physics::water_contact::WaterContactState;
+use pankarta_software::prelude::*;
+use crate::game::ext::input::InputExt;
+use crate::game::ext::physics_behavior::PhysicsNodeExt;
+use crate::game::ext::ui_layers::GameUi;
+use crate::game::ext::water_contact::WaterContactState;
 use crate::game::debug_overlay::AeroSample;
-use crate::engine::rendering::camera::handler::SceneCameras;
-use crate::engine::scene_manager::behavior::Behavior;
-use crate::engine::scene_manager::node::Node;
-use crate::engine::scene_manager::properties::{Model as ModelProperty, Transform3D};
-use crate::engine::utils::lerps::lerp;
+use pankarta_software::utils::lerps::lerp;
 use crate::game::scenes::play::crash_effects::Crash;
-use crate::transform::Transform;
 
 use super::afterburner::Afterburner;
 use super::fuel::Fuel;
@@ -23,9 +20,8 @@ use super::landing_gear::GearMeshes;
 use super::messages::{AircraftEvent, AircraftState};
 use super::effects::{self, EffectKind, EffectSpec};
 use super::pilot::Pilot;
-use crate::engine::particles::ParticleEmitters;
-use crate::engine::game_nodes::game_object::ColliderType;
-use crate::engine::physics::physics_handler::RenderMessage;
+use crate::game::ext::emitters::ParticleEmitters;
+use crate::game::ext::game_object::ColliderType;
 use super::autopilot::{Autopilot, Speed};
 use crate::game::scenes::play::map::Difficulty;
 use super::quick_list::QuickList;
@@ -52,6 +48,18 @@ const CALM_GRACE_SECONDS: f32 = 2.5;
 /// physics half (`AircraftPhysics`), and animates the model from whatever
 /// the physics half reports back (`AircraftState`). Owns no physical state
 /// itself - see messages.rs for everything the two halves exchange.
+/// The F7 debug windows' rolling flight history - see `Plane::debug_trails`.
+#[derive(Default)]
+pub struct DebugTrails {
+    /// Recent flight samples (speed, AoA, altitude, the rates and the
+    /// stick) for the "Flight Rates" window - see AeroSample.
+    pub aero: std::collections::VecDeque<AeroSample>,
+    /// (sample_index, main wing lift N, elevator wing lift N).
+    pub wing_lift: std::collections::VecDeque<(f32, f32, f32)>,
+    /// (seconds, pitch rate deg/s), bounded by time.
+    pub pitch_rate: std::collections::VecDeque<(f32, f32)>,
+}
+
 pub struct Plane {
     pub controls: PlaneControls,
     /// Flown by the player: reads the stick/keys and drives the quick menu
@@ -67,6 +75,9 @@ pub struct Plane {
     /// Where the aircraft is and how it's turned, as physics last reported
     /// (see `fixed_update`) - what the autopilot steers from.
     pose: Option<(Vector3<f32>, UnitQuaternion<f32>)>,
+    /// The F7 flight charts' recent history (see game::debug_overlay) -
+    /// kept only while the debug windows are up.
+    pub debug_trails: DebugTrails,
     pub input_locked: bool,
     /// Its autopilot flies it even when it's the player's - a timeline has
     /// it fly a path (see play::path_follow).
@@ -198,6 +209,7 @@ impl Plane {
             autopilot: None,
             throttle_lever: None,
             pose: None,
+            debug_trails: DebugTrails::default(),
             input_locked: false,
             scripted: false,
             held: false,
@@ -444,11 +456,11 @@ impl Plane {
 
     /// Stick/throttle/trim into `controls`, toggles into `fcs`, and one-shot
     /// gear commands straight to the physics half as events.
-    fn read_pilot_input(&mut self, node: &mut Node, delta_time: f32) {
+    fn read_pilot_input(&mut self, node: &mut Node, app: &App, delta_time: f32) {
         const STICK_INPUT_LERP_SPEED: f32 = 6.0;
-        let target_elevator = input::get_axis("pitch_down", "pitch_up");
-        let target_aileron = input::get_axis("roll_left", "roll_right");
-        let target_rudder = input::get_axis("rudder_left", "rudder_right");
+        let target_elevator = app.input.action_axis("pitch_down", "pitch_up");
+        let target_aileron = app.input.action_axis("roll_left", "roll_right");
+        let target_rudder = app.input.action_axis("rudder_left", "rudder_right");
 
         let target_elevator = if self.fcs.pitch_autotrim {
             target_elevator
@@ -464,12 +476,12 @@ impl Plane {
         self.controls.rudder = lerp(self.controls.rudder, target_rudder, delta_time * STICK_INPUT_LERP_SPEED);
 
         const THROTTLE_RATE: f32 = 0.5;
-        self.controls.throttle = (self.controls.throttle + input::get_axis("throttle_down", "throttle_up") * THROTTLE_RATE * delta_time).clamp(0.0, 1.0);
+        self.controls.throttle = (self.controls.throttle + app.input.action_axis("throttle_down", "throttle_up") * THROTTLE_RATE * delta_time).clamp(0.0, 1.0);
         // A throttle lever (a HOTAS throttle - "throttle_axis") sets the
         // throttle to where it is whenever it moves; the keys/triggers above
         // still nudge it while it doesn't.
         const LEVER_MOVED: f32 = 0.002;
-        if let Some(lever) = input::absolute_value("throttle_axis") {
+        if let Some(lever) = app.input.absolute_value("throttle_axis") {
             if self.throttle_lever.is_none_or(|last| (last - lever).abs() > LEVER_MOVED) {
                 self.controls.throttle = lever;
                 self.throttle_lever = Some(lever);
@@ -477,33 +489,33 @@ impl Plane {
         } else {
             self.throttle_lever = None;
         }
-        self.controls.trim.update(delta_time);
+        self.controls.trim.update(&app.input, delta_time);
 
-        if input::is_action_just_pressed("toggle_fbw_pitch") {
+        if app.input.is_action_just_pressed("toggle_fbw_pitch") {
             self.apply_quick_action(node, QuickAction::ToggleFlyByWire);
         }
 
-        self.controls.wheel_brake = input::action_strength("wheel_brake");
-        if input::is_action_just_pressed("toggle_parking_brake") {
+        self.controls.wheel_brake = app.input.action_strength("wheel_brake");
+        if app.input.is_action_just_pressed("toggle_parking_brake") {
             self.apply_quick_action(node, QuickAction::ToggleParkingBrake);
         }
 
-        if input::is_action_just_pressed("toggle_landing_gear") {
+        if app.input.is_action_just_pressed("toggle_landing_gear") {
             self.apply_quick_action(node, QuickAction::ToggleGear);
         }
-        if input::is_action_just_pressed("landing_gear_up") {
+        if app.input.is_action_just_pressed("landing_gear_up") {
             node.push_physics_event(AircraftEvent::GearUp);
         }
-        if input::is_action_just_pressed("landing_gear_down") {
+        if app.input.is_action_just_pressed("landing_gear_down") {
             node.push_physics_event(AircraftEvent::GearDown);
         }
-        if input::is_action_just_pressed("toggle_air_brake") {
+        if app.input.is_action_just_pressed("toggle_air_brake") {
             node.push_physics_event(AircraftEvent::ToggleSpeedBrake);
         }
-        if input::is_action_just_pressed("air_brake_extend") {
+        if app.input.is_action_just_pressed("air_brake_extend") {
             node.push_physics_event(AircraftEvent::SpeedBrakeExtend);
         }
-        if input::is_action_just_pressed("air_brake_retract") {
+        if app.input.is_action_just_pressed("air_brake_retract") {
             node.push_physics_event(AircraftEvent::SpeedBrakeRetract);
         }
     }
@@ -531,14 +543,14 @@ impl Plane {
 
     /// The contextual aircraft list stays hidden. Gear, brakes and
     /// fly-by-wire stay on their own keys in `read_pilot_input`.
-    fn update_quick_menu(&mut self, _node: &mut Node, app: &mut App) {
+    fn update_quick_menu(&mut self, scene: &mut SceneAccess) {
         let status = QuickMenuStatus {
             gear: GearStatus::Up,
             speed_brake: GearStatus::Up,
             parking_brake: false,
             fly_by_wire: false,
         };
-        self.quick_menu.refresh_ui(app, &status, false);
+        self.quick_menu.refresh_ui(scene, &status, false);
     }
 
     /// Any part of the plane touching the water (see the node's
@@ -605,7 +617,7 @@ impl Plane {
         if !self.fuel.has_tanks() {
             return;
         }
-        if !app.is_paused && !self.wrecked && self.fuel.kg > 0.0 {
+        if !app.time.is_paused() && !self.wrecked && self.fuel.kg > 0.0 {
             let burned = self.fuel.burn_kg_s(self.controls.throttle, self.military) * delta_time;
             self.fuel.kg = (self.fuel.kg - burned).max(0.0);
         }
@@ -722,7 +734,7 @@ impl Plane {
     /// cinematics (physics is paused, the G is stale), and after a wreck
     /// only the crash itself (see Pilot::recover).
     fn update_pilot(&mut self, node: &Node, app: &App, delta_time: f32) {
-        if app.is_paused {
+        if app.time.is_paused() {
             return;
         }
         let flight_data = node.physics_state::<AircraftState>().map(|state| &state.flight_data);
@@ -740,9 +752,10 @@ impl Plane {
 
     /// F7 overlay's rolling history - see `App::aero_debug_trail`/
     /// `App::wing_lift_trail`/`App::pitch_rate_trail`.
-    fn record_aero_debug_trail(app: &mut App, state: &AircraftState, controls: &PlaneControls, delta_time: f32) {
+    fn record_aero_debug_trail(&mut self, state: &AircraftState, delta_time: f32) {
+        let controls = &self.controls;
         let flight_data = &state.flight_data;
-        app.aero_debug_trail.push_back(AeroSample {
+        self.debug_trails.aero.push_back(AeroSample {
             speed_kt: flight_data.speedometer,
             mach: flight_data.mach,
             aoa_deg: flight_data.aoa_y,
@@ -760,38 +773,39 @@ impl Plane {
             rudder: controls.rudder,
             up_alignment: flight_data.up_alignment,
         });
-        if app.aero_debug_trail.len() > Self::AERO_DEBUG_TRAIL_CAPACITY {
-            app.aero_debug_trail.pop_front();
+        if self.debug_trails.aero.len() > Self::AERO_DEBUG_TRAIL_CAPACITY {
+            self.debug_trails.aero.pop_front();
         }
 
         let main_wing_lift_y = state.wing_lift_forces.get("Left wing").map(|f| f.y).unwrap_or(0.0);
         let elevator_wing_lift_y = state.wing_lift_forces.get("Right elevator wing").map(|f| f.y).unwrap_or(0.0);
-        let next_index = app.wing_lift_trail.back().map(|(i, _, _)| i + 1.0).unwrap_or(0.0);
-        app.wing_lift_trail.push_back((next_index, main_wing_lift_y, elevator_wing_lift_y));
-        if app.wing_lift_trail.len() > Self::AERO_DEBUG_TRAIL_CAPACITY {
-            app.wing_lift_trail.pop_front();
+        let next_index = self.debug_trails.wing_lift.back().map(|(i, _, _)| i + 1.0).unwrap_or(0.0);
+        self.debug_trails.wing_lift.push_back((next_index, main_wing_lift_y, elevator_wing_lift_y));
+        if self.debug_trails.wing_lift.len() > Self::AERO_DEBUG_TRAIL_CAPACITY {
+            self.debug_trails.wing_lift.pop_front();
         }
 
-        let now = app.pitch_rate_trail.back().map(|(t, _)| t + delta_time).unwrap_or(0.0);
-        app.pitch_rate_trail.push_back((now, flight_data.pitch_rate));
-        while app.pitch_rate_trail.front().is_some_and(|(t, _)| now - t > Self::PITCH_RATE_TRAIL_SECONDS) {
-            app.pitch_rate_trail.pop_front();
+        let now = self.debug_trails.pitch_rate.back().map(|(t, _)| t + delta_time).unwrap_or(0.0);
+        self.debug_trails.pitch_rate.push_back((now, flight_data.pitch_rate));
+        while self.debug_trails.pitch_rate.front().is_some_and(|(t, _)| now - t > Self::PITCH_RATE_TRAIL_SECONDS) {
+            self.debug_trails.pitch_rate.pop_front();
         }
     }
 }
 
 impl Behavior for Plane {
     /// Keeps where physics says the aircraft is - for the autopilot.
-    fn fixed_update(&mut self, _node: &mut Node, _cameras: &mut SceneCameras, _app: &mut App, _dt: f32, physics_message: Option<&RenderMessage>) {
-        if let Some(message) = physics_message {
-            self.pose = Some((message.translation, UnitQuaternion::new_normalize(message.rotation)));
+    fn fixed_update(&mut self, node: &mut Node, _scene: &mut SceneAccess, app: &mut App) {
+        if let Some(body) = app.physics.body(&node.id) {
+            self.pose = Some((*body.translation(), *body.rotation()));
         }
     }
 
-    fn update(&mut self, node: &mut Node, _cameras: &mut SceneCameras, app: &mut App, delta_time: f32) {
+    fn update(&mut self, node: &mut Node, scene: &mut SceneAccess, app: &mut App) {
+        let delta_time = app.time.delta_time;
         if self.held || self.calm {
             self.calm_left = CALM_GRACE_SECONDS;
-        } else if !app.is_paused {
+        } else if !app.time.is_paused() {
             self.calm_left = (self.calm_left - delta_time).max(0.0);
         }
         // Placed by an animation: the physics' view of it (held still, at
@@ -799,7 +813,7 @@ impl Behavior for Plane {
         // it - until it's let go.
         if self.held {
             self.flown_by = "placed by an animation";
-            if !app.is_paused {
+            if !app.time.is_paused() {
                 self.update_effects(node, delta_time);
             }
             return;
@@ -808,7 +822,7 @@ impl Behavior for Plane {
         self.update_pilot(node, app, delta_time);
         self.read_blast_result(node);
         self.check_wreck(node);
-        if !app.is_paused {
+        if !app.time.is_paused() {
             self.update_effects(node, delta_time);
         }
         self.flown_by = if self.pilot.is_dead() && !self.wrecked {
@@ -837,12 +851,12 @@ impl Behavior for Plane {
             // path; without one its controls are left as they are.
             let flight_data = node.physics_state::<AircraftState>().map(|state| state.flight_data.clone());
             if let (Some(autopilot), Some((position, rotation)), Some(flight_data)) = (&mut self.autopilot, self.pose, flight_data) {
-                if !self.wrecked && !app.is_paused {
+                if !self.wrecked && !app.time.is_paused() {
                     autopilot.fly(&mut self.controls, position, rotation, &flight_data, delta_time);
                 }
             }
         } else if !self.input_locked && !self.wrecked && !self.pilot.is_unconscious() {
-            self.read_pilot_input(node, delta_time);
+            self.read_pilot_input(node, app, delta_time);
         } else if self.pilot.is_unconscious() {
             // Passed out: stick and pedals straight back to center, held
             // there until the pilot comes to (the throttle stays where it
@@ -855,7 +869,7 @@ impl Behavior for Plane {
             self.controls.rudder = 0.0;
         }
         if self.is_player {
-            self.update_quick_menu(node, app);
+            self.update_quick_menu(scene);
         }
         self.update_fuel(node, app, delta_time);
         if !(self.pilot.is_dead() && !self.wrecked) {
@@ -863,47 +877,33 @@ impl Behavior for Plane {
         }
         node.set_physics_input(self.controls.clone());
 
-        // 2. Physics half → model. `None` until the physics thread has
+        // 2. Physics half → model. `None` until the physics half has
         // reported back for the first time.
-        let state = node.physics_state::<AircraftState>();
-        let node_scale = node.get_property::<Transform3D>().map(|transform| transform.scale).unwrap_or(Vector3::new(1.0, 1.0, 1.0));
-        let Some(model_property) = node.get_property::<ModelProperty>() else { return };
-        // What maps model space to the world - node x model scale.
-        let scale = model_property.render_scale(node_scale);
-        // The key its loaded copy is kept under - see render_bridge.
-        let model_ref = model_property.source.as_ref().map(|source| source.key())
-            .or_else(|| app.model_sources.get(&model_property.model_ref).map(|source| source.key()))
-            .unwrap_or_else(|| model_property.model_ref.clone());
-        let model_ref = &model_ref;
-        let Some(model_instance) = app.game_models.get_mut(model_ref) else { return };
-        let model = &mut model_instance.model;
+        let state = node.physics_state::<AircraftState>().cloned();
 
         let engine_dead = self.wrecked || self.fuel.starved;
         if engine_dead {
             self.afterburner.value = 0.0;
         } else {
-            self.afterburner.update(state.map(|state| state.afterburner).unwrap_or(0.0), delta_time);
-        }
-        if let Some(afterburner_mesh) = model.mesh_lists.get_mut("transparent").and_then(|meshes| meshes.get_mut("Afterburner")) {
-            let base = *self.afterburner_base_scale.get_or_insert(afterburner_mesh.transform.scale);
-            let new_transform = Transform::new(afterburner_mesh.transform.position, afterburner_mesh.transform.rotation, Vector3::new(base.x, base.y, base.z * self.afterburner.value));
-            afterburner_mesh.change_transform(&app.renderer.queue, new_transform);
+            self.afterburner.update(state.as_ref().map(|state| state.afterburner).unwrap_or(0.0), delta_time);
         }
 
-        let simulated_elevator = state.map(|state| state.elevator_control_input);
-        for surface in &mut self.control_surfaces {
-            surface.apply(model, &self.controls, simulated_elevator, delta_time, &app.renderer.queue);
-        }
+        // ENGINE GAP: the afterburner flame's length, the control surfaces'
+        // deflection and the landing gear's travel used to be drawn by
+        // moving those meshes inside the loaded F-16 model. The engine keeps
+        // a file model's meshes on its shared loaded copy, out of the game's
+        // reach ("moving or hiding the file's own meshes per node isn't
+        // supported" - its docs/meshes_and_models.md), so they're computed
+        // (`self.afterburner`, `self.controls`, the gear state) but not
+        // shown until the engine has per-node mesh transforms.
+        let _ = (&self.control_surfaces, &self.gear_meshes, &self.afterburner_base_scale);
 
-        if self.gear_meshes.armed_deploy().is_some() {
-            self.gear_meshes.show_armed(model, scale, &app.renderer.queue);
-        }
         if let Some(state) = state {
-            self.gear_meshes.place(model, &state.wheels, state.gear_deploy, scale, &app.renderer.queue);
             self.gear_meshes.disarm();
-
-            if self.is_player && app.debug_overlay_visible() {
-                Self::record_aero_debug_trail(app, state, &self.controls, delta_time);
+            // The F7 flight charts' history - only while the debug windows
+            // are up.
+            if self.is_player && app.debug_ui.visible {
+                self.record_aero_debug_trail(&state, delta_time);
             }
         }
     }
