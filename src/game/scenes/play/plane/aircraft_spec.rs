@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::engine::game_nodes::game_object::{Cameras, ColliderType, HeadLimits, Physics};
+use crate::game::ext::game_object::{Cameras, ColliderType, HeadLimits, Physics};
 
 use super::aero_spec::AeroSpec;
 use super::engine::EngineSpec;
@@ -74,7 +74,7 @@ pub struct AircraftSpec {
     /// Some of its model's meshes drawn with other materials, by mesh name -
     /// `data.ron`'s `materials: { "Canopy": (shader: "gold_canopy", params:
     /// { ... }) }` (optional). See Material.
-    pub materials: std::collections::BTreeMap<String, crate::engine::scene_manager::properties::Material>,
+    pub materials: std::collections::BTreeMap<String, pankarta_software::scene_manager::node::properties::Material>,
     /// Its flares and chaff, and the dispensers they come out of -
     /// `data.ron`'s `countermeasures: ( ... )` (optional: none).
     pub countermeasures: Option<CountermeasureSpec>,
@@ -102,7 +102,7 @@ struct PlaneData {
     #[serde(default)]
     cockpit_sill: Vec<(f32, f32)>,
     #[serde(default)]
-    materials: std::collections::BTreeMap<String, crate::engine::scene_manager::properties::Material>,
+    materials: std::collections::BTreeMap<String, pankarta_software::scene_manager::node::properties::Material>,
     #[serde(default)]
     countermeasures: Option<CountermeasureSpec>,
 }

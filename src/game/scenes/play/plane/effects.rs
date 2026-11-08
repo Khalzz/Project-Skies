@@ -6,7 +6,8 @@
 use nalgebra::Vector3;
 use serde::Deserialize;
 
-use crate::engine::particles::{Curve, Emitter, Gradient, EmitterKind, EmissionShape, Facing, Forces, IntensityScales, ParticleEffect, ParticleEmitters, TrailEffect};
+use pankarta_software::particles::{Curve, Gradient, EmitterKind, EmissionShape, Facing, Forces, IntensityScales, ParticleEffect, TrailEffect};
+use crate::game::ext::emitters::{Emitter, ParticleEmitters};
 
 use super::aero_spec::WingSpec;
 use super::gear_spec::GearSpec;

@@ -7,7 +7,7 @@
 
 use nalgebra::{UnitQuaternion, Vector3};
 
-use crate::engine::game_nodes::game_object::ColliderType;
+use crate::game::ext::game_object::ColliderType;
 
 /// A collider the fuze can test, in the aircraft's frame. Cuboids and the
 /// wing hulls (`Wing` resolved to a convex hull when the plane loads).

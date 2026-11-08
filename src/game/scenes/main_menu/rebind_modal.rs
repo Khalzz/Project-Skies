@@ -3,7 +3,7 @@
 //! `begin_capture`/`captured_binding`/`cancel_capture` - this module is the
 //! "future rebinding menu" that doc comment already anticipated).
 //!
-//! Opened via `open(app, action, edit_index)` from the controller page's
+//! Opened via `open(ui, app, action, edit_index)` from the controller page's
 //! "Add input" button (see `main_menu::ui::add_selected_input`) -
 //! `edit_index: Some(i)` replaces that action's existing binding `i` in place
 //! (and shows "Delete Bind"); `None` appends a brand new one instead (nothing
@@ -12,7 +12,7 @@
 //! Opening the modal does NOT start capturing by itself - it shows a "Bind"
 //! button/chip (see `BIND_PATH`) displaying either the existing binding
 //! (`edit_index: Some`) or a "Click here to bind" placeholder (`None`).
-//! Clicking THAT is what calls `input::begin_capture()` (see `start_capture`).
+//! Clicking THAT is what calls `app.input.begin_capture()` (see `start_capture`).
 //! This one extra step matters: capturing intercepts every raw input event,
 //! including the mouse click that would otherwise land on Cancel (see
 //! `InputSubsystem::update`'s `if self.capturing { ... continue; }` branch,
@@ -29,18 +29,19 @@
 //! modal any other way) discards the staged binding instead, leaving whatever
 //! was bound before untouched. `InputSubsystem`'s own capture already stops
 //! listening for further input the instant one binding comes in (see
-//! `capturing = false` in `InputSubsystem::update`), so `update(app)` only
+//! `capturing = false` in `InputSubsystem::update`), so `update(ui, app)` only
 //! needs to poll while `RebindModalState::capturing` is true.
 
 use std::sync::Mutex;
+use crate::game::ext::ui_layers::{self, GameUi};
 
-use crate::app::App;
-use crate::engine::input::action::Binding;
-use crate::engine::input::input;
-use crate::engine::rendering::ui::ui::Ui;
-use crate::engine::ui::color::UiColor;
-use crate::engine::ui::ui_node::UiNode;
-use crate::engine::ui::ui_transform::{Anchor, Orientation, SizeValue};
+use pankarta_software::app::App;
+use pankarta_software::input::action::Binding;
+use crate::game::ext::input::InputExt;
+
+use pankarta_software::ui::color::UiColor;
+use pankarta_software::ui::ui_node::UiNode;
+use pankarta_software::ui::ui_transform::{Anchor, Orientation, SizeValue};
 use crate::game::ui::{button, card, label};
 use super::ui::keycap_style;
 
@@ -70,7 +71,7 @@ struct RebindModalState {
     edit_index: Option<usize>,
     // True from a "Bind" click (see `start_capture`) until a binding comes in
     // (see `update`) - gates whether `update` bothers polling
-    // `input::captured_binding()` at all, see this module's own doc comment.
+    // `app.input.captured_binding()` at all, see this module's own doc comment.
     capturing: bool,
     // The binding captured since the last `start_capture` (if any yet) -
     // staged, not yet written back to the input settings. See this module's
@@ -84,11 +85,11 @@ static STATE: Mutex<RebindModalState> = Mutex::new(RebindModalState { open_actio
 /// for all three of its states (bound/placeholder at open, "listening" during
 /// capture, "New binding: ..." once one's staged), see this module's own doc
 /// comment.
-fn set_bind_display(app: &mut App, text: &str, color: UiColor) {
-    if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, BIND_PATH) {
+fn set_bind_display(ui: &mut impl GameUi, app: &mut App, text: &str, color: UiColor) {
+    if let Some(node) = ui.ui_node(BIND_PATH) {
         node.update_style(|s| s.set_text_color(color));
         if let Some(label_ref) = node.as_label_mut() {
-            label_ref.set_text(&mut app.ui.text.font_system, text, false);
+            label_ref.set_text(text);
         }
     }
 }
@@ -105,7 +106,7 @@ pub fn display_name(action: &str) -> String {
     }).collect::<Vec<_>>().join(" ")
 }
 
-fn delete_current(app: &mut App) {
+fn delete_current(ui: &mut impl GameUi, app: &mut App) {
     let (action, index) = {
         let state = STATE.lock().unwrap();
         match (state.open_action.clone(), state.edit_index) {
@@ -113,16 +114,16 @@ fn delete_current(app: &mut App) {
             _ => return, // Delete is hidden whenever edit_index is None - shouldn't be reachable, but nothing to delete either way.
         }
     };
-    input::unbind(&action, index);
-    super::ui::refresh_controller_chips(app, &action);
-    close(app);
+    app.input.unbind(&action, index);
+    super::ui::refresh_controller_chips(ui, app, &action);
+    close(ui, app);
 }
 
 /// Writes the staged `captured` binding back to the input settings - the only
 /// place that actually happens (see this module's own doc comment). No-op if
 /// nothing's been captured yet (Save is `.active(false)` until then, so
 /// shouldn't be reachable, but nothing to save either way).
-fn save_current(app: &mut App) {
+fn save_current(ui: &mut impl GameUi, app: &mut App) {
     let (action, edit_index, binding) = {
         let state = STATE.lock().unwrap();
         match (state.open_action.clone(), state.captured.clone()) {
@@ -131,18 +132,18 @@ fn save_current(app: &mut App) {
         }
     };
     match edit_index {
-        Some(index) => input::rebind_at(&action, index, binding),
-        None => input::rebind(&action, binding),
+        Some(index) => app.input.rebind_at(&action, index, binding),
+        None => app.input.rebind(&action, binding),
     }
-    super::ui::refresh_controller_chips(app, &action);
-    close(app);
+    super::ui::refresh_controller_chips(ui, app, &action);
+    close(ui, app);
 }
 
 /// Opens the modal for `action` without starting capture yet - see this
 /// module's own doc comment for what `edit_index` means and why capturing is
 /// deferred to an explicit "Bind" click. Safe to call again while already
 /// open (e.g. clicking a different chip without closing first).
-pub fn open(app: &mut App, action: &str, edit_index: Option<usize>) {
+pub fn open(ui: &mut impl GameUi, app: &mut App, action: &str, edit_index: Option<usize>) {
     {
         let mut state = STATE.lock().unwrap();
         state.open_action = Some(action.to_owned());
@@ -152,30 +153,29 @@ pub fn open(app: &mut App, action: &str, edit_index: Option<usize>) {
     }
     // A capture from whatever chip was open before this one shouldn't bleed
     // into this one - harmless no-op if nothing was actually in progress.
-    input::cancel_capture();
+    app.input.cancel_capture();
 
-    if let Some(title) = Ui::get_ui_node(&mut app.ui.renderizable_elements, TITLE_PATH).and_then(|n| n.as_label_mut()) {
-        title.set_text(&mut app.ui.text.font_system, &display_name(action), false);
+    if let Some(title) = ui.ui_node(TITLE_PATH).and_then(|n| n.as_label_mut()) {
+        title.set_text(&display_name(action));
     }
-    let existing = edit_index.and_then(|index| input::action_bindings(action).get(index).cloned());
+    let existing = edit_index.and_then(|index| app.input.action_bindings(action).get(index).cloned());
     match existing {
-        Some(binding) => set_bind_display(app, &binding.label(), UiColor::Rgb(220, 220, 220)),
-        None => set_bind_display(app, CLICK_TO_BIND, UiColor::Rgb(160, 160, 160)),
+        Some(binding) => set_bind_display(ui, app, &binding.label(), UiColor::Rgb(220, 220, 220)),
+        None => set_bind_display(ui, app, CLICK_TO_BIND, UiColor::Rgb(160, 160, 160)),
     }
-    if let Some(delete_button) = Ui::get_ui_node(&mut app.ui.renderizable_elements, DELETE_PATH) {
+    if let Some(delete_button) = ui.ui_node(DELETE_PATH) {
         delete_button.set_active(edit_index.is_some());
     }
-    if let Some(save_button) = Ui::get_ui_node(&mut app.ui.renderizable_elements, SAVE_PATH) {
+    if let Some(save_button) = ui.ui_node(SAVE_PATH) {
         save_button.set_active(false);
     }
-    if let Some(modal) = Ui::get_ui_node(&mut app.ui.renderizable_elements, MODAL_KEY) {
+    if let Some(modal) = ui.ui_node(MODAL_KEY) {
         modal.set_active(true);
     }
-    app.ui.has_changed = true;
 }
 
-pub fn close(app: &mut App) {
-    input::cancel_capture();
+pub fn close(ui: &mut impl GameUi, app: &mut App) {
+    app.input.cancel_capture();
     {
         let mut state = STATE.lock().unwrap();
         state.open_action = None;
@@ -183,17 +183,16 @@ pub fn close(app: &mut App) {
         state.capturing = false;
         state.captured = None;
     }
-    if let Some(modal) = Ui::get_ui_node(&mut app.ui.renderizable_elements, MODAL_KEY) {
+    if let Some(modal) = ui.ui_node(MODAL_KEY) {
         modal.set_active(false);
     }
-    app.ui.has_changed = true;
 }
 
 /// The "Bind" button/chip's `on_click` - starts (or restarts, if the player
 /// wants to try a different key before saving) listening for the next input
 /// event. Discards anything already staged, since a fresh capture is about to
 /// replace it.
-fn start_capture(app: &mut App) {
+fn start_capture(ui: &mut impl GameUi, app: &mut App) {
     {
         let mut state = STATE.lock().unwrap();
         if state.open_action.is_none() {
@@ -202,22 +201,22 @@ fn start_capture(app: &mut App) {
         state.capturing = true;
         state.captured = None;
     }
-    input::begin_capture();
-    if let Some(save_button) = Ui::get_ui_node(&mut app.ui.renderizable_elements, SAVE_PATH) {
+    app.input.begin_capture();
+    if let Some(save_button) = ui.ui_node(SAVE_PATH) {
         save_button.set_active(false);
     }
     let lever = STATE.lock().unwrap().open_action.as_deref().is_some_and(|action| LEVER_ACTIONS.contains(&action));
-    set_bind_display(app, if lever { LISTENING_LEVER_LABEL } else { LISTENING_LABEL }, UiColor::Rgb(255, 210, 120));
+    set_bind_display(ui, app, if lever { LISTENING_LEVER_LABEL } else { LISTENING_LABEL }, UiColor::Rgb(255, 210, 120));
 }
 
 /// Polls for a newly captured binding while the modal's open - call every
 /// frame regardless (see `main_menu::scene::update`), a cheap early-return
 /// when inactive. Only actually polls
-/// `input::captured_binding()` while `capturing` is true (see `start_capture`)
+/// `app.input.captured_binding()` while `capturing` is true (see `start_capture`)
 /// - before the player's clicked "Bind" there's nothing to catch, and once a
 /// binding's been staged, capture already stopped listening on its own (see
 /// this module's own doc comment), so there's nothing left to poll either way.
-pub fn update(app: &mut App) {
+pub fn update(ui: &mut impl GameUi, app: &mut App) {
     let capturing = {
         let state = STATE.lock().unwrap();
         if state.open_action.is_none() {
@@ -228,7 +227,7 @@ pub fn update(app: &mut App) {
     if !capturing {
         return;
     }
-    let Some(mut binding) = input::captured_binding() else { return };
+    let Some(mut binding) = app.input.captured_binding() else { return };
 
     {
         let mut state = STATE.lock().unwrap();
@@ -240,11 +239,10 @@ pub fn update(app: &mut App) {
         state.capturing = false;
         state.captured = Some(binding.clone());
     }
-    set_bind_display(app, &format!("New binding: {}", binding.label()), UiColor::WHITE);
-    if let Some(save_button) = Ui::get_ui_node(&mut app.ui.renderizable_elements, SAVE_PATH) {
+    set_bind_display(ui, app, &format!("New binding: {}", binding.label()), UiColor::WHITE);
+    if let Some(save_button) = ui.ui_node(SAVE_PATH) {
         save_button.set_active(true);
     }
-    app.ui.has_changed = true;
 }
 
 /// Builds the modal's shell once - call from main_menu::ui::build and add the
@@ -281,9 +279,9 @@ pub fn build(app: &mut App) -> UiNode {
                 .set_orientation(Orientation::Vertical)
                 .set_child_anchor(Anchor::Start, Anchor::Center)
                 .set_gap(15.0)
-                .set_child("Title", label(app, "Action").set_size(SizeValue::Grow, SizeValue::Fit).set_align(glyphon::cosmic_text::Align::Center).set_font_size(&mut app.ui.text.font_system, 22.0).set_text_color(UiColor::WHITE))
+                .set_child("Title", label("Action").set_size(SizeValue::Grow, SizeValue::Fit).set_align(glyphon::cosmic_text::Align::Center).set_font_size(22.0).set_text_color(UiColor::WHITE))
                 .set_child("Bind", keycap_style(
-                    button(app, CLICK_TO_BIND, |app| start_capture(app))
+                    button(CLICK_TO_BIND, |ui, app| start_capture(ui, app))
                         .set_size(SizeValue::Grow, SizeValue::Fit)
                 ))
                 // Below Bind, right-aligned (Anchor::End on the horizontal
@@ -297,12 +295,12 @@ pub fn build(app: &mut App) -> UiNode {
                         .set_size(SizeValue::Grow, SizeValue::Fit)
                         .set_child_anchor(Anchor::End, Anchor::Center)
                         .set_gap(10.0)
-                        .set_child("Delete", keycap_style(button(app, "Delete Bind", |app| delete_current(app))).active(false))
-                        .set_child("Cancel", keycap_style(button(app, "Cancel", |app| close(app))))
+                        .set_child("Delete", keycap_style(button("Delete Bind", |ui, app| delete_current(ui, app))).active(false))
+                        .set_child("Cancel", keycap_style(button("Cancel", |ui, app| close(ui, app))))
                         // Inactive until a binding's actually been captured (see
                         // `update`) - nothing to write back before then, see this
                         // module's own doc comment on why Save/staging exists at all.
-                        .set_child("Save", keycap_style(button(app, "Save", |app| save_current(app))).active(false))
+                        .set_child("Save", keycap_style(button("Save", |ui, app| save_current(ui, app))).active(false))
                 )
         )
         .active(false)

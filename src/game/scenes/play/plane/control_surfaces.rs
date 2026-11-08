@@ -1,8 +1,8 @@
 use nalgebra::{Quaternion, Unit, UnitQuaternion, Vector3};
 
-use crate::engine::rendering::models::model::Model as LoadedModel;
-use crate::engine::utils::lerps::lerp_quaternion;
-use crate::transform::Transform;
+use pankarta_software::rendering::models::model::Model as LoadedModel;
+use pankarta_software::utils::lerps::lerp_quaternion;
+use pankarta_software::prelude::Transform3D;
 
 use super::controls::PlaneControls;
 
@@ -89,14 +89,14 @@ impl ControlSurface {
         let base = match &mut self.base {
             SurfaceBase::None => UnitQuaternion::identity(),
             SurfaceBase::Fixed(rotation) => *rotation,
-            SurfaceBase::Captured(captured) => UnitQuaternion::from_quaternion(*captured.get_or_insert(current_rotation)),
+            SurfaceBase::Captured(captured) => UnitQuaternion::from_quaternion(*captured.get_or_insert(*current_rotation.quaternion())),
         };
 
         let control_value = self.input.value(controls, simulated_elevator);
         let target = base * UnitQuaternion::from_axis_angle(&Unit::new_normalize(self.axis), self.scale * control_value);
-        let new_rotation = lerp_quaternion(current_rotation, *target, delta_time * self.lerp_speed);
+        let new_rotation = UnitQuaternion::from_quaternion(lerp_quaternion(*current_rotation.quaternion(), *target.quaternion(), delta_time * self.lerp_speed));
         for mesh in meshes.iter_mut() {
-            let new_transform = Transform::new(mesh.transform.position, new_rotation, mesh.transform.scale);
+            let new_transform = Transform3D { position: mesh.transform.position, rotation: new_rotation, scale: mesh.transform.scale };
             mesh.change_transform(queue, new_transform);
         }
     }

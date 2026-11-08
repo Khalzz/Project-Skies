@@ -10,12 +10,12 @@
 // last it holds the last one.
 
 use serde::Deserialize;
+use crate::game::ext::ui_layers::{self, GameUi};
 
-use crate::app::App;
-use crate::engine::rendering::ui::ui::Ui;
-use crate::engine::ui::color::{lerp_rgba, Fill, UiColor};
-use crate::engine::ui::ui_node::Style;
-use crate::engine::utils::lerps::lerp;
+use pankarta_software::app::App;
+use pankarta_software::ui::color::{Fill, UiColor};
+use pankarta_software::ui::ui_node::Style;
+use pankarta_software::utils::lerps::lerp;
 
 #[derive(Debug, Deserialize, Clone, Copy)]
 pub struct Vec2Value {
@@ -130,39 +130,35 @@ impl UiTrack {
         }
     }
 
-    fn apply(&self, game_time_ms: u64, app: &mut App) {
+    fn apply(&self, game_time_ms: u64, scene: &mut impl GameUi) {
         match self {
             UiTrack::Position { target, start_time, keyframes } => {
                 let Some(local) = local_time(game_time_ms, *start_time) else { return };
                 let Some(value) = sample(keyframes, local, lerp_vec2) else { return };
-                if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, target) {
+                if let Some(node) = scene.ui_node(target) {
                     node.move_to(value.x, value.y);
-                    app.ui.has_changed = true;
                 }
             }
             UiTrack::Alpha { target, start_time, keyframes } => {
                 let Some(local) = local_time(game_time_ms, *start_time) else { return };
                 let Some(value) = sample(keyframes, local, lerp) else { return };
-                if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, target) {
+                if let Some(node) = scene.ui_node(target) {
                     node.set_alpha(value);
-                    app.ui.has_changed = true;
                 }
             }
             UiTrack::Color { target, start_time, keyframes } => {
                 let Some(local) = local_time(game_time_ms, *start_time) else { return };
                 let Some(value) = sample(keyframes, local, lerp_color) else { return };
-                if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, target) {
+                if let Some(node) = scene.ui_node(target) {
                     let color = value.to_ui_color();
                     node.update_style(|style| Style { background_color: Some(Fill::Solid(color)), ..style });
-                    app.ui.has_changed = true;
                 }
             }
             UiTrack::Active { target, start_time, keyframes } => {
                 let Some(local) = local_time(game_time_ms, *start_time) else { return };
                 let Some(value) = sample(keyframes, local, step) else { return };
-                if let Some(node) = Ui::get_ui_node(&mut app.ui.renderizable_elements, target) {
+                if let Some(node) = scene.ui_node(target) {
                     node.set_active(value);
-                    app.ui.has_changed = true;
                 }
             }
         }
@@ -173,6 +169,11 @@ pub(crate) fn normalize_all(ui: &mut [UiTrack]) {
     for track in ui { track.normalize(); }
 }
 
-pub(crate) fn apply_all(ui: &[UiTrack], game_time_ms: u64, app: &mut App) {
-    for track in ui { track.apply(game_time_ms, app); }
+pub(crate) fn apply_all(ui: &[UiTrack], game_time_ms: u64, scene: &mut impl GameUi) {
+    for track in ui { track.apply(game_time_ms, scene); }
+}
+
+/// Linear blend of two RGBA colors, channel by channel.
+fn lerp_rgba(from: [f32; 4], to: [f32; 4], t: f32) -> [f32; 4] {
+    [lerp(from[0], to[0], t), lerp(from[1], to[1], t), lerp(from[2], to[2], t), lerp(from[3], to[3], t)]
 }

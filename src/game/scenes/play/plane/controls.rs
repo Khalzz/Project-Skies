@@ -1,4 +1,4 @@
-use crate::engine::input::input;
+use pankarta_software::prelude::Input;
 
 /// How far pilot trim has shifted each axis's neutral position - its own
 /// struct rather than three loose fields on `PlaneControls`, since it's a
@@ -21,24 +21,24 @@ impl Trim {
         Self { pitch: -0.16, roll: 0.0, yaw: 0.0 }
     }
 
-    pub fn update(&mut self, delta_time: f32) {
+    pub fn update(&mut self, input: &Input, delta_time: f32) {
         let trim_speed = 0.5;
-        if input::is_action_pressed("trim_pitch_up") {
+        if input.is_action_pressed("trim_pitch_up") {
             self.pitch = (self.pitch + trim_speed * delta_time).clamp(-1.0, 1.0);
         }
-        if input::is_action_pressed("trim_pitch_down") {
+        if input.is_action_pressed("trim_pitch_down") {
             self.pitch = (self.pitch - trim_speed * delta_time).clamp(-1.0, 1.0);
         }
-        if input::is_action_pressed("trim_roll_left") {
+        if input.is_action_pressed("trim_roll_left") {
             self.roll = (self.roll - trim_speed * delta_time).clamp(-1.0, 1.0);
         }
-        if input::is_action_pressed("trim_roll_right") {
+        if input.is_action_pressed("trim_roll_right") {
             self.roll = (self.roll + trim_speed * delta_time).clamp(-1.0, 1.0);
         }
-        if input::is_action_pressed("trim_yaw_left") {
+        if input.is_action_pressed("trim_yaw_left") {
             self.yaw = (self.yaw - trim_speed * delta_time).clamp(-1.0, 1.0);
         }
-        if input::is_action_pressed("trim_yaw_right") {
+        if input.is_action_pressed("trim_yaw_right") {
             self.yaw = (self.yaw + trim_speed * delta_time).clamp(-1.0, 1.0);
         }
     }

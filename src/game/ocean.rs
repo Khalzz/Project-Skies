@@ -13,8 +13,8 @@ use std::collections::VecDeque;
 
 use nalgebra::Vector3;
 
-use crate::engine::scene_manager::properties::Material;
-use crate::engine::scene_manager::scene::Scene;
+use pankarta_software::scene_manager::node::properties::Material;
+use pankarta_software::scene_manager::scene::Scene;
 
 pub use waves::{OceanSettings, OceanWaves, MAX_WAKE_POINTS, MAX_WAVES, WAKE_NOISE_PERIOD};
 
@@ -146,7 +146,7 @@ impl Ocean {
         self.flow = (0.0, 0.0);
         let mut params = self.waves.params(camera_position.x + flow_x, camera_position.z + flow_z);
         self.write_wake(&mut params, camera_position, intensity);
-        let Some(material) = scene.content.nodes.get_mut(node).and_then(|node| node.get_property_mut::<Material>()) else { return };
+        let Some(material) = scene.content.nodes.get_mut(node).and_then(|node| node.get_property_mut::<pankarta_software::prelude::Mesh>()).and_then(|mesh| mesh.material.as_mut()) else { return };
         for (name, values) in params {
             material.set(&name, values);
         }

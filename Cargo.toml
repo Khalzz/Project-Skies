@@ -1,31 +1,31 @@
 [package]
-name = "pankarta-software"
+name = "project-skies"
 version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]
-sdl2 = {version = "*", default-features = false, features = ["raw-window-handle" ]}
-winit = "0.30.11"
-wgpu = "25"
-tokio = { version = "*", features = ["full"] }
-bytemuck = { version = "*", features = [ "derive" ] }
-image = { version = "*", default-features = false, features = ["png", "jpeg"] }
-anyhow = "*"
-fs_extra = "*"
-glob = "*"
-rand = "0.8"
-glyphon = "0.9"
-rodio = "*"
+# The engine: window, rendering, physics, input, audio, UI, scenes and nodes.
+pankarta-software = "0.1"
 
-# Physics
-rapier3d = { version = "*", features = [ "simd-stable", "serde-serialize" ] }
-nalgebra = "*"
-rayon = "1"
+# Same versions the engine uses, so their types are the engine's own
+# (an nalgebra Vector3 or a rapier RigidBody from another version wouldn't be).
+nalgebra = "0.33"
+rapier3d = { version = "0.26", features = [ "simd-stable", "serde-serialize", "parallel" ] }
+egui = "0.32"
+egui_plot = "0.33"
+wgpu = "25"
+glyphon = "0.9"
+sdl2 = { version = "0.37", default-features = false, features = ["raw-window-handle"] }
+
+tokio = { version = "1.45", features = ["full"] }
+bytemuck = { version = "1.23", features = [ "derive" ] }
+anyhow = "1.0"
+rand = "0.8"
 
 # External file management
 serde = { version = "1.0", features = ["derive"] }
-ron = "*"
+ron = "0.10"
 
 # Head tracking (TrackIR / OpenTrack). `status()` is true only after a frame
 # has arrived, which is what the settings dot and the Retry button wait on.
@@ -34,21 +34,9 @@ head-tracking-rs = "0.2"
 # TrackIR can be given this game's window handle.
 raw-window-handle = "0.6"
 
-# Tooling
-egui = "0.32"
-egui-wgpu = "0.32"
-eframe = "0.32"
-egui_plot = "0.33"
-
 [dependencies.gltf]
 version = "1.4"
 features = ["extras", "names", "utils"]
-
-[build-dependencies]
-anyhow = "*"
-cgmath = "*"
-fs_extra = "*"
-glob = "*"
 
 # Dev builds (plain `cargo run`) still optimize every dependency - our own
 # code stays fast to compile and easy to debug, but libraries like the PNG

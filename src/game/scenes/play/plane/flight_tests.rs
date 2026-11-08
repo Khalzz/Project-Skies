@@ -3,14 +3,14 @@
 //! thread does (see Physics::physics_thread), with no level around it - so
 //! how the jet answers its stick can be measured instead of guessed.
 //!
-//! `cargo test --bin pankarta-software flight_tests -- --nocapture` prints
+//! `cargo test --bin project-skies flight_tests -- --nocapture` prints
 //! each test's g trace.
 
 use nalgebra::{UnitQuaternion, Vector3};
 use rapier3d::prelude::*;
 
-use crate::engine::physics::physics_behavior::{PhysicsBehavior, PhysicsInput, PhysicsNode};
-use crate::engine::physics::physics_resources::{load_physics_from_definitions, PhysicsObjectDef};
+use crate::game::ext::physics_behavior::{PhysicsBehavior, PhysicsInput, PhysicsNode};
+use pankarta_software::physics::physics_resources::{load_physics_from_definitions, PhysicsObjectDef};
 use crate::game::scenes::play::plane::aircraft_physics::AircraftPhysics;
 use crate::game::scenes::play::plane::aircraft_spec::AircraftSpec;
 use crate::game::scenes::play::plane::controls::PlaneControls;
@@ -55,7 +55,10 @@ impl Sim {
         let mut physics = spec.physics.clone();
         (physics.rigidbody.mass, physics.rigidbody.center_of_mass) = crate::game::scenes::play::flight_manager::loaded_mass(&spec, loadout);
         physics.rigidbody.initial_velocity = rotation * Vector3::new(0.0, 0.0, speed);
-        let def = PhysicsObjectDef { id: "f16".to_owned(), position: Vector3::new(0.0, altitude, 0.0), rotation, physics };
+        // The game's description of its colliders (wing labels and all), for
+        // its physics half; the engine's, for the body.
+        let described_colliders = physics.colliders.clone();
+        let def = PhysicsObjectDef { id: "f16".to_owned(), position: Vector3::new(0.0, altitude, 0.0), rotation, physics: physics.to_engine() };
 
         let mut bodies = RigidBodySet::new();
         let mut colliders = ColliderSet::new();
@@ -63,7 +66,7 @@ impl Sim {
         load_physics_from_definitions(std::slice::from_ref(&def), &mut colliders, &mut bodies, &mut elements);
         let handle = elements["f16"].as_ref().expect("the jet has a body").rigidbody_handle;
 
-        let behaviors: Vec<Box<dyn PhysicsBehavior>> = vec![Box::new(AircraftPhysics::new(&spec.aero, &spec.engine, &spec.gear, &spec.effects, def.physics.rigidbody.center_of_mass, def.physics.colliders.clone(), def.physics.rigidbody.mass, true))];
+        let behaviors: Vec<Box<dyn PhysicsBehavior>> = vec![Box::new(AircraftPhysics::new(&spec.aero, &spec.engine, &spec.gear, &spec.effects, def.physics.rigidbody.center_of_mass, described_colliders, def.physics.rigidbody.mass, true))];
         let mut node = PhysicsNode::new("f16".to_owned(), handle, behaviors);
         let mut input = PhysicsInput::default();
         input.push_event(AircraftEvent::GearUp);
@@ -281,7 +284,7 @@ fn f16_roll_does_not_reverse_when_the_stick_centers() {
     let mut worst_reverse = 0.0_f32;
     while sim.time < centered + 2.5 {
         // Same easing as Plane::read_pilot_input, once per physics step.
-        aileron = crate::engine::utils::lerps::lerp(aileron, 0.0, STEP * 6.0);
+        aileron = pankarta_software::utils::lerps::lerp(aileron, 0.0, STEP * 6.0);
         controls.aileron = aileron;
         sim.step_with(controls.clone());
         let data = sim.state().flight_data;

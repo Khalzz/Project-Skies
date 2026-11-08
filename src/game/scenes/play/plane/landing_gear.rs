@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use nalgebra::{UnitQuaternion, Vector3};
 
-use crate::engine::rendering::models::model::Model as LoadedModel;
-use crate::engine::utils::lerps::lerp_vector3;
+use pankarta_software::rendering::models::model::Model as LoadedModel;
+use pankarta_software::utils::lerps::lerp_vector3;
 use crate::game::scenes::play::plane::physics::wheels::wheel::WheelData;
 
 // Gear extend/retract speed, as a fraction of the full cycle per second
@@ -197,8 +197,8 @@ impl GearMeshes {
             let center = lerp_vector3(retracted, deployed, deploy);
             let turn = UnitQuaternion::identity().slerp(&stowed_turn, (1.0 - deploy).clamp(0.0, 1.0));
             for mesh in meshes.iter_mut() {
-                let modelled_rotation = UnitQuaternion::from_quaternion(mesh.base_transform.rotation);
-                mesh.transform.rotation = (turn * modelled_rotation).into_inner();
+                let modelled_rotation = mesh.base_transform.rotation;
+                mesh.transform.rotation = turn * modelled_rotation;
                 mesh.transform.position = center - turn * mesh.center_offset();
                 mesh.update_transform(queue);
             }

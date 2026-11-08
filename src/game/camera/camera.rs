@@ -1,13 +1,8 @@
 use std::f32::consts::PI;
 
-use nalgebra::{Point3, Vector3};
+use nalgebra::{UnitQuaternion, Vector3};
 
-use crate::app::App;
-use crate::engine::input::input;
-use crate::engine::rendering::camera::handler::SceneCameras;
-use crate::engine::scene_manager::behavior::Behavior;
-use crate::engine::scene_manager::node::Node;
-use crate::transform::Transform;
+use pankarta_software::prelude::*;
 
 pub struct Speed {
   pub base_speed: f32,
@@ -20,45 +15,36 @@ pub struct Fov {
   pub speed: f32
 }
 
-/// Everything needed to spawn a `Camera` behavior, gathered into one struct
-/// instead of a long positional parameter list - see the design discussion
-/// this came out of. `transform` uses the same type `data.ron`-sourced
-/// objects do (`crate::transform::Transform`) and is handed straight through
-/// to `CameraHandler::create_camera`, which does the actual rotation-to-yaw/
-/// pitch decomposition - this behavior doesn't duplicate that math itself,
-/// it's just a thin spawner around the engine's own base camera API.
+/// Everything needed to spawn a `Camera` - the node it goes on is the camera
+/// (`camera_node`): a `CameraLens` and `Transform3D` at `transform`, moved by
+/// this behavior.
 pub struct CameraConfig {
     pub camera_name: String,
-    pub transform: Transform,
+    pub transform: Transform3D,
     pub speed: Speed,
     pub fov: Fov,
     pub look_sensitivity_scale: f32,
     pub max_pitch_deg: f32,
-    // If false, on_spawn still creates+selects the camera at transform's
-    // pose, but update() never touches it again afterward - a fixed camera.
-    // Not the same thing as main_menu's own scripted drift_camera or play's
-    // flight-follow-cam, which are their own bespoke per-scene logic on top
-    // of a camera, not something this flag turns on.
+    // If false, the camera just sits at `transform` - a fixed camera.
     pub free: bool,
     // Input action that toggles this camera between free-fly and
-    // orbit-a-target mode (matching play's own `CameraState::Free` - pivots
-    // around a point and always looks at it). `None` keeps the old behavior
-    // exactly: always free-fly, no toggle. Orbit mode does nothing until the
+    // orbit-a-target mode (pivots around a point and always looks at it).
+    // `None`: always free-fly, no toggle. Orbit mode does nothing until the
     // owning scene feeds it a pivot via `Camera::set_orbit_target` (call it
-    // every frame from `SceneBehaviour::update` while the target can move).
-    // Only meaningful when `free` is true.
+    // every frame while the target can move). Only meaningful when `free`.
     pub orbit_toggle_action: Option<String>,
 }
 
 pub struct Camera {
-  camera_name: String,
-  origin_transform: Transform,
   speed: Speed,
   fov: Fov,
   look_sensitivity_scale: f32,
   max_pitch_deg: f32,
   free: bool,
   orbit_toggle_action: Option<String>,
+  // Free-fly look, radians: yaw around +Y from +X toward +Z, pitch up.
+  yaw: f32,
+  pitch: f32,
   // Runtime orbit-mode state (see CameraConfig::orbit_toggle_action).
   orbiting: bool,
   orbit_target: Option<Vector3<f32>>,
@@ -67,23 +53,43 @@ pub struct Camera {
   orbit_distance: f32,
 }
 
+/// The way a camera looking at `yaw`/`pitch` (radians - see `Camera::yaw`)
+/// faces: forward.
+fn forward_of(yaw: f32, pitch: f32) -> Vector3<f32> {
+    Vector3::new(yaw.cos() * pitch.cos(), pitch.sin(), yaw.sin() * pitch.cos())
+}
+
+/// A camera node's rotation looking along `forward`, level (+Y up).
+pub fn looking_along(forward: Vector3<f32>) -> UnitQuaternion<f32> {
+    UnitQuaternion::face_towards(&forward, &Vector3::y())
+}
+
 impl Camera {
-    pub fn new(config: CameraConfig) -> Self {
-        Camera {
-            camera_name: config.camera_name,
-            origin_transform: config.transform,
+    /// The camera's node: its lens and transform, and this behavior.
+    pub fn camera_node(config: CameraConfig) -> Node {
+        let forward = config.transform.rotation * Vector3::z();
+        let yaw = forward.z.atan2(forward.x);
+        let pitch = forward.y.clamp(-1.0, 1.0).asin();
+        let fov = config.fov.max;
+        let camera = Camera {
             speed: config.speed,
             fov: config.fov,
             look_sensitivity_scale: config.look_sensitivity_scale,
             max_pitch_deg: config.max_pitch_deg,
             free: config.free,
             orbit_toggle_action: config.orbit_toggle_action,
+            yaw,
+            pitch,
             orbiting: false,
             orbit_target: None,
             orbit_yaw: 0.0,
             orbit_pitch: 18.0,
             orbit_distance: 45.0,
-        }
+        };
+        Node::new(config.camera_name)
+            .with_property(config.transform)
+            .with_property(CameraLens::new(fov))
+            .with_behavior(camera)
     }
 
     /// Point the orbit-mode camera pivots around and looks at. Call every
@@ -100,112 +106,98 @@ impl Camera {
 
     // Orbit-a-target update - mouse yaw/pitch swing the camera around
     // `target` on a boom of `orbit_distance`, scroll reels the boom in/out,
-    // and the camera always looks straight at `target`. Same idea as play's
-    // `CameraState::Free`.
-    fn update_orbit(&mut self, cameras: &mut SceneCameras, target: Vector3<f32>, _dt: f32) {
-        let sens = input::mouse_sensitivity();
+    // and the camera always looks straight at `target`.
+    fn update_orbit(&mut self, transform: &mut Transform3D, target: Vector3<f32>, app: &App) {
+        let sens = app.input.mouse_sensitivity();
 
-        let scroll = input::mouse_scroll_y();
+        let scroll = app.input.mouse_scroll_y();
         if scroll != 0.0 {
             self.orbit_distance = (self.orbit_distance - scroll * 4.0).clamp(6.0, 500.0);
         }
 
-        self.orbit_yaw -= input::mouse_rel_x() as f32 * sens.0 * self.look_sensitivity_scale;
-        self.orbit_pitch = (self.orbit_pitch - input::mouse_rel_y() as f32 * sens.1 * self.look_sensitivity_scale)
+        self.orbit_yaw -= app.input.mouse_rel_x() as f32 * sens.0 * self.look_sensitivity_scale;
+        self.orbit_pitch = (self.orbit_pitch - app.input.mouse_rel_y() as f32 * sens.1 * self.look_sensitivity_scale)
             .clamp(-self.max_pitch_deg, self.max_pitch_deg);
 
-        let yaw = self.orbit_yaw.to_radians();
-        let pitch = self.orbit_pitch.to_radians();
         // Spherical offset from the target - +orbit_pitch lifts the eye up
         // and over, so it looks down at the target.
-        let offset = Vector3::new(
-            yaw.cos() * pitch.cos(),
-            pitch.sin(),
-            yaw.sin() * pitch.cos(),
-        ) * self.orbit_distance;
-
-        let active = cameras.active_mut();
-        active.camera.set_position(Point3::from(target + offset));
-        active.camera.look_at(Point3::from(target));
-        active.camera.up = *Vector3::y_axis();
+        let offset = forward_of(self.orbit_yaw.to_radians(), self.orbit_pitch.to_radians()) * self.orbit_distance;
+        transform.position = target + offset;
+        transform.rotation = looking_along(-offset);
     }
 }
 
 impl Behavior for Camera {
-    // Same setup sandbox::scene::GameLogic::new used to do directly - a
-    // camera is created and selected explicitly (same convention data.ron's
-    // named cameras used to use) from origin_transform directly, rather than
-    // mutating whatever "active" already happened to be. The cursor is only
-    // hidden for a free camera - a static one (e.g. main_menu's) still needs
+    // The cursor is only hidden for a free camera - a static one still needs
     // the cursor visible to click UI.
-    fn on_spawn(&mut self, _node: &mut Node, cameras: &mut SceneCameras, app: &mut App) {
-        cameras.create_camera(&self.camera_name, self.origin_transform, self.fov.max);
-        cameras.select_camera(&self.camera_name);
+    fn on_spawn(&mut self, node: &mut Node, scene: &mut SceneAccess, app: &mut App) {
+        scene.cameras_mut().select_camera(&node.id);
         if self.free {
-            app.window_manager.context.mouse().show_cursor(false);
+            app.window.set_cursor_locked(true);
         }
     }
 
     // A plain, always-on fly-around camera (mouse look + WASD/Space/Left
     // Ctrl, Left Shift to sprint, scroll for fov) when free - a no-op
     // otherwise, so a static Camera just sits at its spawned pose forever.
-    fn update(&mut self, _node: &mut Node, cameras: &mut SceneCameras, _app: &mut App, dt: f32) {
+    fn update(&mut self, node: &mut Node, _scene: &mut SceneAccess, app: &mut App) {
         if !self.free {
             return;
         }
+        let dt = app.time.delta_time;
 
         // Free-fly <-> orbit-a-target toggle (see CameraConfig::orbit_toggle_action).
         if let Some(action) = &self.orbit_toggle_action {
-            if input::is_action_just_pressed(action) {
+            if app.input.is_action_just_pressed(action) {
                 self.orbiting = !self.orbiting;
             }
         }
         if self.orbiting {
-            if let Some(target) = self.orbit_target {
-                self.update_orbit(cameras, target, dt);
+            if let (Some(target), Some(mut transform)) = (self.orbit_target, node.transform_3d().copied()) {
+                self.update_orbit(&mut transform, target, app);
+                node.set_property(transform);
             }
             return;
         }
 
-        let sens = input::mouse_sensitivity();
-        let scroll = input::mouse_scroll_y();
-        let active = cameras.active_mut();
+        let sens = app.input.mouse_sensitivity();
+        let scroll = app.input.mouse_scroll_y();
 
-        let mut yaw = active.camera.yaw() + (input::mouse_rel_x() as f32 * sens.0 * self.look_sensitivity_scale).to_radians();
-        let pitch = (active.camera.pitch() - (input::mouse_rel_y() as f32 * sens.1 * self.look_sensitivity_scale).to_radians())
+        self.yaw += (app.input.mouse_rel_x() as f32 * sens.0 * self.look_sensitivity_scale).to_radians();
+        self.pitch = (self.pitch - (app.input.mouse_rel_y() as f32 * sens.1 * self.look_sensitivity_scale).to_radians())
             .clamp(-self.max_pitch_deg.to_radians(), self.max_pitch_deg.to_radians());
-
         // Keep yaw from growing unbounded over a long session.
-        if yaw > PI {
-            yaw -= 2.0 * PI;
-        } else if yaw < -PI {
-            yaw += 2.0 * PI;
+        if self.yaw > PI {
+            self.yaw -= 2.0 * PI;
+        } else if self.yaw < -PI {
+            self.yaw += 2.0 * PI;
         }
-        active.camera.set_yaw_pitch(yaw, pitch);
 
         let world_up = Vector3::new(0.0, 1.0, 0.0);
-        let forward = active.camera.calc_forward_direction();
+        let forward = forward_of(self.yaw, self.pitch);
         let right = forward.cross(&world_up).normalize();
 
         let mut direction = Vector3::new(0.0, 0.0, 0.0);
-        if input::is_action_pressed("debug_cam_forward") { direction += forward; }
-        if input::is_action_pressed("debug_cam_back") { direction -= forward; }
-        if input::is_action_pressed("debug_cam_right") { direction += right; }
-        if input::is_action_pressed("debug_cam_left") { direction -= right; }
-        if input::is_action_pressed("debug_cam_up") { direction += world_up; }
-        if input::is_action_pressed("debug_cam_down") { direction -= world_up; }
+        if app.input.is_action_pressed("debug_cam_forward") { direction += forward; }
+        if app.input.is_action_pressed("debug_cam_back") { direction -= forward; }
+        if app.input.is_action_pressed("debug_cam_right") { direction += right; }
+        if app.input.is_action_pressed("debug_cam_left") { direction -= right; }
+        if app.input.is_action_pressed("debug_cam_up") { direction += world_up; }
+        if app.input.is_action_pressed("debug_cam_down") { direction -= world_up; }
+        let speed = if app.input.is_action_pressed("debug_cam_sprint") { self.speed.base_speed * self.speed.sprint_multiplier } else { self.speed.base_speed };
 
-        if direction.norm_squared() > 0.0 {
-            let speed = if input::is_action_pressed("debug_cam_sprint") { self.speed.base_speed * self.speed.sprint_multiplier } else { self.speed.base_speed };
-            active.camera.set_position(active.camera.position() + direction.normalize() * speed * dt);
+        if let Some(transform) = node.transform_3d_mut() {
+            transform.rotation = looking_along(forward);
+            if direction.norm_squared() > 0.0 {
+                transform.position += direction.normalize() * speed * dt;
+            }
         }
 
         if scroll != 0.0 {
-            active.projection.fovy = (active.projection.fovy - scroll * self.fov.speed).clamp(self.fov.min, self.fov.max);
+            let (min, max, step) = (self.fov.min, self.fov.max, self.fov.speed);
+            if let Some(lens) = node.get_property_mut::<CameraLens>() {
+                lens.fovy = (lens.fovy - scroll * step).clamp(min, max);
+            }
         }
     }
-
-    // No fixed_update override - this camera has nothing to react to in
-    // physics results, so the trait's own no-op default already does the
-    // right thing.
 }

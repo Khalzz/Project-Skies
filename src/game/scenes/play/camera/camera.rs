@@ -1,14 +1,15 @@
 use nalgebra::{UnitQuaternion, Vector3};
 
-use crate::app::App;
-use crate::engine::game_nodes::game_object::Cameras;
-use crate::engine::input::input;
-use crate::engine::rendering::camera::handler::SceneCameras;
-use crate::engine::scene_manager::behavior::Behavior;
-use crate::engine::scene_manager::node::Node;
-use crate::engine::scene_manager::properties::{CameraLens, Transform3D};
-use crate::engine::scene_manager::scene_nodes::facing;
-use crate::engine::utils::lerps::{lerp, lerp_quaternion, smoothstep};
+use pankarta_software::app::App;
+use pankarta_software::prelude::{Input, SceneAccess};
+use crate::game::ext::game_object::Cameras;
+use crate::game::ext::input::InputExt;
+use pankarta_software::rendering::camera::handler::SceneCameras;
+use pankarta_software::scene_manager::behavior::Behavior;
+use pankarta_software::scene_manager::node::Node;
+use pankarta_software::scene_manager::node::properties::{CameraLens, Transform3D};
+use pankarta_software::scene_manager::scene_nodes::facing;
+use pankarta_software::utils::lerps::{lerp, lerp_quaternion, smoothstep};
 use crate::game::game_settings::GAME_SETTINGS;
 
 use super::head_motion::{HeadInput, HeadMotion};
@@ -183,9 +184,9 @@ impl LookInput {
         Self { x: 0.0, y: 0.0, raw_x: 0.0, raw_y: 0.0 }
     }
 
-    fn read() -> Self {
-        let raw_x = input::get_axis("look_left", "look_right");
-        let raw_y = input::get_axis("look_down", "look_up");
+    fn read(input: &Input) -> Self {
+        let raw_x = input.action_axis("look_left", "look_right");
+        let raw_y = input.action_axis("look_down", "look_up");
         Self { x: Self::rescale(raw_x), y: Self::rescale(raw_y), raw_x, raw_y }
     }
 
@@ -204,11 +205,11 @@ struct MouseLook {
 }
 
 impl MouseLook {
-    fn read(freed: bool) -> Self {
+    fn read(input: &Input, freed: bool) -> Self {
         if freed {
             return Self { rel_x: 0.0, rel_y: 0.0, scroll: 0.0 };
         }
-        Self { rel_x: input::mouse_rel_x() as f32, rel_y: input::mouse_rel_y() as f32, scroll: input::mouse_scroll_y() }
+        Self { rel_x: input.mouse_rel_x() as f32, rel_y: input.mouse_rel_y() as f32, scroll: input.mouse_scroll_y() }
     }
 }
 
@@ -225,10 +226,10 @@ impl ZoomInput {
     }
 
     /// `last_lever` is where the lever was the last time it set the zoom.
-    fn read(last_lever: &mut Option<f32>) -> Self {
-        let held = input::get_axis("zoom_in", "zoom_out");
+    fn read(input: &Input, last_lever: &mut Option<f32>) -> Self {
+        let held = input.action_axis("zoom_in", "zoom_out");
         let mut lever_fov = None;
-        if let Some(lever) = input::absolute_value("zoom_axis") {
+        if let Some(lever) = input.absolute_value("zoom_axis") {
             if last_lever.is_none_or(|last| (last - lever).abs() > ZOOM_LEVER_MOVED) {
                 lever_fov = Some(lerp(ZOOM_MAX_FOV, ZOOM_MIN_FOV, lever));
                 *last_lever = Some(lever);
@@ -276,6 +277,15 @@ pub struct CameraTarget {
 }
 
 pub struct Camera {
+    /// The mouse is a pointer for the debug windows, not looking round -
+    /// set by the play scene every frame (see GameLogic::mouse_free).
+    pub mouse_free: bool,
+    /// An egui window (F7's, the map's) is up over the view - set by the
+    /// play scene every frame.
+    pub overlay_up: bool,
+    /// The editor camera took a cinematic over - the play scene stops the
+    /// flight editor's timeline preview and clears this.
+    pub stop_timeline_preview: bool,
     state: CameraState,
     target: Option<CameraTarget>,
     pub look_at: Option<Vector3<f32>>,
@@ -329,6 +339,9 @@ pub struct Camera {
 impl Camera {
     pub fn new() -> Self {
         Self {
+            mouse_free: false,
+            overlay_up: false,
+            stop_timeline_preview: false,
             state: CameraState::Cockpit,
             target: None,
             look_at: None,
@@ -416,15 +429,15 @@ impl Camera {
             }
         }
         let Some(editor) = self.editor.as_mut() else { return };
-        let over_ui = app.egui_overlay.ctx.is_pointer_over_area();
-        let right = input::mouse_right_button_down();
-        let take_over = cinematic && right && !over_ui && !app.is_paused;
+        let over_ui = app.debug_ui.ctx.is_pointer_over_area();
+        let right = app.input.mouse_right_button_down();
+        let take_over = cinematic && right && !over_ui && !app.time.is_paused();
         if take_over {
-            app.flight_editor.timeline_preview = false;
+            self.stop_timeline_preview = true;
         }
         if cinematic && !take_over {
-            if editor.looking && !app.is_paused {
-                app.window_manager.context.mouse().set_relative_mouse_mode(false);
+            if editor.looking && !app.time.is_paused() {
+                app.window.set_cursor_locked(false);
             }
             editor.looking = false;
             let (position, forward) = (editor.position, editor.forward());
@@ -439,30 +452,30 @@ impl Camera {
         }
         // The cursor held while looking, so it never stops at the screen's
         // edge - let go with the button.
-        if editor.looking != was_looking && !app.is_paused {
-            app.window_manager.context.mouse().set_relative_mouse_mode(editor.looking);
+        if editor.looking != was_looking && !app.time.is_paused() {
+            app.window.set_cursor_locked(editor.looking);
         }
-        let scroll = input::mouse_scroll_y();
-        if editor.looking && !app.is_paused {
-            editor.yaw -= input::mouse_rel_x() as f32 * EDITOR_TURN_PER_PIXEL;
-            editor.pitch = (editor.pitch - input::mouse_rel_y() as f32 * EDITOR_TURN_PER_PIXEL).clamp(-1.55, 1.55);
+        let scroll = app.input.mouse_scroll_y();
+        if editor.looking && !app.time.is_paused() {
+            editor.yaw -= app.input.mouse_rel_x() as f32 * EDITOR_TURN_PER_PIXEL;
+            editor.pitch = (editor.pitch - app.input.mouse_rel_y() as f32 * EDITOR_TURN_PER_PIXEL).clamp(-1.55, 1.55);
             if scroll != 0.0 {
                 editor.speed = (editor.speed * EDITOR_SPEED_STEP.powf(scroll)).clamp(EDITOR_MIN_SPEED, EDITOR_MAX_SPEED);
             }
             let forward = editor.forward();
             let right_dir = forward.cross(&Vector3::y()).try_normalize(1e-6).unwrap_or_else(Vector3::x);
             let mut direction = Vector3::zeros();
-            if input::is_action_pressed("debug_cam_forward") { direction += forward; }
-            if input::is_action_pressed("debug_cam_back") { direction -= forward; }
-            if input::is_action_pressed("debug_cam_right") { direction += right_dir; }
-            if input::is_action_pressed("debug_cam_left") { direction -= right_dir; }
-            if input::is_action_pressed("debug_cam_up") { direction += Vector3::y(); }
-            if input::is_action_pressed("debug_cam_down") { direction -= Vector3::y(); }
-            let sprint = if input::is_action_pressed("debug_cam_sprint") { EDITOR_SPRINT } else { 1.0 };
+            if app.input.is_action_pressed("debug_cam_forward") { direction += forward; }
+            if app.input.is_action_pressed("debug_cam_back") { direction -= forward; }
+            if app.input.is_action_pressed("debug_cam_right") { direction += right_dir; }
+            if app.input.is_action_pressed("debug_cam_left") { direction -= right_dir; }
+            if app.input.is_action_pressed("debug_cam_up") { direction += Vector3::y(); }
+            if app.input.is_action_pressed("debug_cam_down") { direction -= Vector3::y(); }
+            let sprint = if app.input.is_action_pressed("debug_cam_sprint") { EDITOR_SPRINT } else { 1.0 };
             if let Some(direction) = direction.try_normalize(1e-6) {
                 editor.position += direction * editor.speed * sprint * delta_time;
             }
-        } else if scroll != 0.0 && !over_ui && !app.is_paused {
+        } else if scroll != 0.0 && !over_ui && !app.time.is_paused() {
             editor.position += editor.forward() * scroll * editor.speed * EDITOR_DOLLY_SECONDS;
         }
         let (position, forward) = (editor.position, editor.forward());
@@ -609,17 +622,17 @@ impl Camera {
         let Some(orbit) = self.tactical.as_mut() else { return };
         let Some(target) = self.target.take() else { return };
 
-        let mouse_free = app.mouse_free();
+        let mouse_free = self.mouse_free;
         // Its own bar and flight plan window are egui too.
-        let overlay_up = app.debug_overlay_visible() || app.tactical_map_active;
-        let over_ui = overlay_up && app.egui_overlay.ctx.is_pointer_over_area();
-        let turning = !app.is_paused && (!mouse_free || (input::mouse_right_button_down() && !over_ui));
+        let overlay_up = self.overlay_up;
+        let over_ui = overlay_up && app.debug_ui.ctx.is_pointer_over_area();
+        let turning = !app.time.is_paused() && (!mouse_free || (app.input.mouse_right_button_down() && !over_ui));
         if turning {
-            orbit.yaw += input::mouse_rel_x() as f32 * TACTICAL_TURN_PER_PIXEL_DEG;
-            orbit.pitch = (orbit.pitch + input::mouse_rel_y() as f32 * TACTICAL_TURN_PER_PIXEL_DEG).clamp(-85.0, 89.0);
+            orbit.yaw += app.input.mouse_rel_x() as f32 * TACTICAL_TURN_PER_PIXEL_DEG;
+            orbit.pitch = (orbit.pitch + app.input.mouse_rel_y() as f32 * TACTICAL_TURN_PER_PIXEL_DEG).clamp(-85.0, 89.0);
         }
-        let scroll = input::mouse_scroll_y();
-        if scroll != 0.0 && !app.is_paused && !over_ui {
+        let scroll = app.input.mouse_scroll_y();
+        if scroll != 0.0 && !app.time.is_paused() && !over_ui {
             orbit.distance = (orbit.distance * TACTICAL_ZOOM_STEP.powf(-scroll)).clamp(TACTICAL_MIN_DISTANCE, TACTICAL_MAX_DISTANCE);
         }
 
@@ -633,9 +646,9 @@ impl Camera {
         let offset = Vector3::new(yaw.cos() * pitch.cos(), pitch.sin(), yaw.sin() * pitch.cos()) * orbit.distance;
         // Shaped like where it's drawn - the editor view's middle, or the
         // whole screen.
-        let (width, height) = app.tactical_viewport
+        let (width, height) = crate::game::frame_plans::tactical_viewport()
             .map(|[_, _, width, height]| (width, height))
-            .unwrap_or((app.window_manager.size.width as f32, app.window_manager.size.height as f32));
+            .unwrap_or((app.window.size.width as f32, app.window.size.height as f32));
         let lens = CameraLens { fovy: TACTICAL_FOV, znear: 1.0, viewport: Some((width.max(1.0) as u32, height.max(1.0) as u32)) };
         set_pose(node, pivot + offset, pivot, Vector3::y(), lens);
         self.target = Some(target);
@@ -732,7 +745,9 @@ impl Camera {
 }
 
 impl Behavior for Camera {
-    fn update(&mut self, node: &mut Node, _cameras: &mut SceneCameras, app: &mut App, delta_time: f32) {
+    fn update(&mut self, node: &mut Node, scene: &mut SceneAccess, app: &mut App) {
+        let delta_time = app.time.delta_time;
+        let _cameras = scene.cameras();
         crate::game::head_tracking::poll(app);
         // F10 - the editor camera takes over while it's up.
         if self.editor.is_some() {
@@ -745,7 +760,7 @@ impl Behavior for Camera {
             return;
         }
         // The pause menu has the cursor. Looking stays where it was.
-        if app.is_paused {
+        if app.time.is_paused() {
             return;
         }
         let cinematic = _cameras.active_name() == "animation_camera";
@@ -758,12 +773,12 @@ impl Behavior for Camera {
         // Locked (the intro, an animation): no looking round - the view
         // eases back to its center.
         let locked = self.look_locked;
-        let look = if locked || cinematic { LookInput::none() } else { LookInput::read() };
+        let look = if locked || cinematic { LookInput::none() } else { LookInput::read(&app.input) };
         // F7 (or the editor) frees the mouse - it's clicking buttons then, not
         // looking around (see App::mouse_free). The animation camera owns the
         // view meanwhile, so the player's own look stays put.
-        let mouse = MouseLook::read(app.mouse_free() || locked || cinematic);
-        let zoom = if locked || cinematic { ZoomInput::none() } else { ZoomInput::read(&mut self.zoom_lever) };
+        let mouse = MouseLook::read(&app.input, self.mouse_free || locked || cinematic);
+        let zoom = if locked || cinematic { ZoomInput::none() } else { ZoomInput::read(&app.input, &mut self.zoom_lever) };
         if locked {
             let ease = (delta_time * LOOK_CENTER_RATE).clamp(0.0, 1.0);
             self.cockpit_yaw += (0.0 - self.cockpit_yaw) * ease;
@@ -821,7 +836,7 @@ impl Behavior for Camera {
 
                     let max_yaw: f32 = 170.0;
                     let max_pitch: f32 = 70.0;
-                    let sens = input::mouse_sensitivity();
+                    let sens = app.input.mouse_sensitivity();
 
                     // While TrackIR is delivering frames, it owns the cockpit look.
                     // A leftover mouse offset eases back to center.
@@ -905,7 +920,7 @@ impl Behavior for Camera {
                     self.free_current_fov = lerp(self.free_current_fov, self.free_target_fov, delta_time * 8.0);
                     lens.fovy = self.free_current_fov;
 
-                    let sens = input::mouse_sensitivity();
+                    let sens = app.input.mouse_sensitivity();
                     self.free_yaw = self.free_yaw - mouse.rel_x * sens.0;
                     self.free_pitch = (self.free_pitch + mouse.rel_y * sens.1).clamp(-89.0, 89.0);
 
@@ -968,27 +983,27 @@ impl Behavior for Camera {
                 let speed = 2.0 * delta_time;
                 let mut changed = false;
 
-                if input::is_action_pressed("throttle_up") {
+                if app.input.is_action_pressed("throttle_up") {
                     self.debug_offset.z += speed;
                     changed = true;
                 }
-                if input::is_action_pressed("throttle_down") {
+                if app.input.is_action_pressed("throttle_down") {
                     self.debug_offset.z -= speed;
                     changed = true;
                 }
-                if input::is_action_pressed("up_wheel") {
+                if app.input.is_action_pressed("up_wheel") {
                     self.debug_offset.x += speed;
                     changed = true;
                 }
-                if input::is_action_pressed("down_wheel") {
+                if app.input.is_action_pressed("down_wheel") {
                     self.debug_offset.x -= speed;
                     changed = true;
                 }
-                if input::is_action_pressed("pitch_up") {
+                if app.input.is_action_pressed("pitch_up") {
                     self.debug_offset.y += speed;
                     changed = true;
                 }
-                if input::is_action_pressed("pitch_down") {
+                if app.input.is_action_pressed("pitch_down") {
                     self.debug_offset.y -= speed;
                     changed = true;
                 }
@@ -1024,7 +1039,7 @@ impl Behavior for Camera {
             self.target = Some(target);
         }
 
-        if input::is_action_just_pressed("change_camera") && self.wreck_sea_level.is_none() && !self.look_locked {
+        if app.input.is_action_just_pressed("change_camera") && self.wreck_sea_level.is_none() && !self.look_locked {
             self.next_camera();
         }
     }

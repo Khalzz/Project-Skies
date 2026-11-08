@@ -4,10 +4,10 @@
 
 use nalgebra::Vector3;
 
-use crate::app::App;
-use crate::engine::scene_manager::node::Node;
-use crate::engine::scene_manager::properties::{CameraLens, LookAt, Parent, Space, Transform3D};
-use crate::engine::scene_manager::scene::Scene;
+use pankarta_software::app::App;
+use pankarta_software::scene_manager::node::Node;
+use pankarta_software::scene_manager::node::properties::{CameraLens, LookAt, Parent, Space, Transform3D};
+use pankarta_software::scene_manager::scene::Scene;
 
 use super::map::{MapSpec, NodeSpec};
 
@@ -30,7 +30,7 @@ impl MapNodes {
     pub fn sync(&mut self, scene: &mut Scene, app: &mut App, map: &MapSpec) {
         for before in &self.applied {
             if map.node(&before.id).is_none() {
-                scene.despawn_node(app, &before.id, None);
+                scene.despawn_node(app, &before.id);
             }
         }
 
@@ -78,11 +78,11 @@ fn parent_property(spec: &NodeSpec, scene: &Scene) -> Option<Parent> {
         Space::Local => given_transform(spec),
         Space::Global => Transform3D::default(),
     };
-    Some(Parent { id: id.clone(), space: spec.space, local, inherit_rotation: spec.follow_rotation })
+    Some(Parent { id: id.clone(), space: spec.space, local, local_2d: Default::default(), inherit_rotation: spec.follow_rotation })
 }
 
 fn build_node(spec: &NodeSpec, scene: &Scene) -> Node {
-    let mut node = Node::new(&spec.id).add_property(given_transform(spec));
+    let mut node = Node::new(&spec.id).with_property(given_transform(spec));
     if let Some(parent) = parent_property(spec, scene) {
         node.set_property(parent);
     }
@@ -117,9 +117,10 @@ fn apply_spec(scene: &mut Scene, spec: &NodeSpec) {
             node.set_property(CameraLens { fovy: camera.fov, znear: camera.near, viewport });
         }
         None => {
-            if node.remove_property::<CameraLens>().is_some() {
-                scene.cameras.remove_camera(&spec.id);
-            }
+            // No lens, no camera - the engine keeps the camera it made
+            // registered (it can't be taken off from a game), but nothing
+            // places or selects it any more.
+            node.remove_property::<CameraLens>();
         }
     }
     let Some(node) = scene.content.nodes.get_mut(&spec.id) else { return };

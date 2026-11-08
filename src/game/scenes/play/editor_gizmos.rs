@@ -7,9 +7,9 @@
 
 use nalgebra::Vector3;
 
-use crate::engine::rendering::thick_lines::LineInstance;
-use crate::engine::scene_manager::properties::{CameraLens, LookAt, Parent, Space, Transform3D};
-use crate::engine::scene_manager::scene::Scene;
+use pankarta_software::rendering::thick_lines::LineInstance;
+use pankarta_software::scene_manager::node::properties::{CameraLens, LookAt, Parent, Space, Transform3D};
+use pankarta_software::scene_manager::scene::Scene;
 
 use super::map::MapSpec;
 use super::tactical_map::{self, View};

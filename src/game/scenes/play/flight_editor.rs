@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 use egui::{Color32, RichText};
 use nalgebra::Vector3;
 
-use crate::engine::scene_manager::properties::Space;
+use pankarta_software::scene_manager::node::properties::Space;
 
 use crate::game::scenes::play::flight_manager::LiveAircraft;
 use crate::game::scenes::play::map::{AircraftPlacement, Coalition, Difficulty, MapSpec, Start};
@@ -169,6 +169,9 @@ enum Selection {
 
 #[derive(Default)]
 pub struct FlightEditor {
+    /// What the pitch inputs read this frame (pull, push) - filled by the
+    /// play scene for the inspector's "Pitch input" row.
+    pub pitch_inputs: (f32, f32),
     /// The map being edited - applied to the world every frame.
     pub map: MapSpec,
     /// Every plane folder under assets/planes/ that loads - what an
@@ -1014,9 +1017,8 @@ impl FlightEditor {
                     // of its bindings (a key, or a controller axis) - the stick
                     // goes to pull minus push. A push here while only pulling
                     // is a controller axis that isn't centered.
+                    let (pull, push) = self.pitch_inputs;
                     property(ui, "Pitch input", |ui| {
-                        let pull = crate::engine::input::input::action_strength("pitch_down");
-                        let push = crate::engine::input::input::action_strength("pitch_up");
                         ui.label(format!("pull {:.0}% · push {:.0}%", pull * 100.0, push * 100.0));
                         if pull > 0.05 && push > 0.05 {
                             ui.label(RichText::new("both at once - an axis isn't centered?").small().color(ERROR_COLOR));

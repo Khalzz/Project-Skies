@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::engine::game_nodes::game_object::Physics;
+use crate::game::ext::game_object::Physics;
 
 /// Where every weapon's folder lives: `<category>/<name>` under it
 /// (`assets/weapons/missiles/aim-9x/`).

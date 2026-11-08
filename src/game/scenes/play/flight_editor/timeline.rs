@@ -15,7 +15,7 @@
 use egui::{Color32, RichText};
 use nalgebra::Vector3;
 
-use crate::engine::scene_manager::properties::{degrees_from_rotation, rotation_from_degrees, Transform3D};
+use pankarta_software::scene_manager::node::properties::{degrees_from_rotation, rotation_from_degrees, Transform3D};
 use crate::game::scenes::play::map::{AnimAction, AnimEvent, AnimationDef, CameraKey, Difficulty, FollowMode, PathClip, Transition, WaveOn};
 use crate::game::scenes::play::path_follow::{corner_distances, SampledPath};
 

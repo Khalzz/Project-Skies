@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use nalgebra::{Point3, Vector3};
 use rapier3d::prelude::RigidBody;
 
-use crate::engine::physics::physics_behavior::{DebugDraw, PhysicsBehavior, PhysicsCtx, PhysicsPayload};
+use crate::game::ext::physics_behavior::{DebugDraw, PhysicsBehavior, PhysicsCtx, PhysicsPayload};
 use crate::game::scenes::play::plane::aero_spec::AeroSpec;
 
 use super::airframe::{dynamic_drag, Airframe};
@@ -11,8 +11,8 @@ use super::controls::PlaneControls;
 use super::flight_system::FlightSystem;
 use super::instrumentation::Instrumentation;
 use super::messages::{AircraftEvent, AircraftReload, AircraftState, ProfileSwitch};
-use crate::engine::game_nodes::game_object::{wing_collider_id, ColliderType};
-use crate::engine::physics::physics_resources::compute_principal_inertia;
+use crate::game::ext::game_object::{wing_collider_id, ColliderType};
+use crate::game::ext::game_object::{compute_principal_inertia, stamp_wing_colliders};
 use super::physics::rolling_rate::{commanded_roll_rate_deg_s, RollRateParams};
 use super::physics::wheels::wheel_manager::{WheelInputs, WheelManager};
 use super::physics::wings::wing_manager::WingManager;
@@ -458,6 +458,10 @@ const SHOT_DOWN_PITCH: f32 = 0.15;
 
 impl PhysicsBehavior for AircraftPhysics {
     fn fixed_update(&mut self, ctx: &mut PhysicsCtx, dt: f32) {
+        // Each wing collider carries its wing's id (the engine's colliders
+        // have no user data of their own to describe it with) - for which
+        // surface a blast or a strike hit.
+        stamp_wing_colliders(ctx.body, ctx.bodies, ctx.colliders, &self.colliders);
         // Default (throttle idle, stick centred) until the main half has sent
         // its first controls.
         let controls = ctx.input::<PlaneControls>().cloned().unwrap_or_else(PlaneControls::new);

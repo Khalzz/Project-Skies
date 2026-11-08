@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::engine::rendering::shader_library::ParamValue;
+use pankarta_software::rendering::shader_library::ParamValue;
 
 /// The play scene's Fullscreen shader - its material, by the same name.
 pub const G_VISION: &str = "g_vision";
