@@ -10,7 +10,7 @@ use nalgebra::Vector3;
 use pankarta_software::prelude::*;
 use crate::game::ext::physics_behavior::PhysicsNodeExt;
 use crate::game::scenes::play::flight_editor::{FlightEditor, Telemetry};
-use crate::game::scenes::play::scene::HudLayout;
+use crate::game::scenes::play::HudLayout;
 use crate::game::scenes::play::tactical_ui::TacticalUi;
 use crate::game::game_settings::{COCKPIT_VIEW_PITCH_MAX, GAME_SETTINGS, HEAD_G_REACTION_MAX};
 use crate::game::scenes::play::camera::camera::Camera;
@@ -365,7 +365,7 @@ pub fn draw(ctx: &egui::Context, view: DebugView, scene: &mut Scene, app: &mut A
 
     let mut build_ui = |ctx: &egui::Context| {
                 if hud_panel {
-                    if let Some(text) = crate::game::scenes::play::scene::draw_hud_layout(ctx, hud_layout) {
+                    if let Some(text) = crate::game::scenes::play::draw_hud_layout(ctx, hud_layout) {
                         clipboard_text = Some(text);
                     }
                 }

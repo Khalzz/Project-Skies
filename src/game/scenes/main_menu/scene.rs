@@ -4,7 +4,6 @@ use pankarta_software::prelude::*;
 use pankarta_software::rendering::camera::camera::yaw_pitch_rotation;
 
 use crate::game::camera::camera::looking_along;
-use crate::game::models;
 use crate::game::ocean::{Ocean, WakeSource};
 use crate::game::scenes::follow_test::scene::sun_node;
 
@@ -92,16 +91,14 @@ impl GameLogic {
                     scale: Vector3::new(1.0, 1.0, 1.0),
                 })
                 // Drawn bigger than the file (the model shrank to real size,
-                // x0.4777) so the shot stays framed.
-                // ENGINE GAP: the title jet used its own copy of the model
-                // with the wheel meshes hidden; the engine can't hide a file
-                // model's meshes per node, so its wheels show.
+                // x0.4777) so the shot stays framed. Its wheels are hidden
+                // in `update`.
                 .with_property(title_f16()),
             Node::new("world")
                 .with_property(Transform3D { position: Vector3::new(0.0, -10.0, 0.0), ..Default::default() })
                 // The ocean ring mesh is in world units - centered here, near
                 // the menu's slowly drifting camera, its finest rings are in view.
-                .with_property(models::ocean_surface(0.0)),
+                .with_property(Ocean::surface(0.0)),
             Node::new(CAMERA)
                 .with_property(camera_transform(BASE_POSITION, BASE_YAW_DEG, BASE_PITCH_DEG))
                 .with_property(CameraLens::new(70.0)),
@@ -136,6 +133,13 @@ impl GameLogic {
         if let Some(plane) = scene.get_node_mut("plane").and_then(|node| node.transform_3d_mut()) {
             plane.position = self.menu_shot.plane;
             plane.rotation = plane_rotation(self.menu_shot.plane_rotation_deg);
+        }
+        // The title jet's flying: its wheels hidden (on this node alone - see
+        // Model::mesh_mut), once its file has loaded.
+        if let Some(model) = scene.get_node_mut("plane").and_then(|node| node.get_property_mut::<Model>()) {
+            for mesh in model.meshes_mut().filter(|mesh| mesh.name().to_lowercase().contains("wheel")) {
+                mesh.visible = false;
+            }
         }
         if self.menu_shot.open {
             let shot = self.menu_shot;
@@ -249,7 +253,7 @@ fn drag_vec(ui: &mut egui::Ui, value: &mut Vector3<f32>) {
 /// The title jet: the F-16, drawn at the menu's size.
 fn title_f16() -> Model {
     let scale = 29.3;
-    models::model(models::F16).transform(Transform3D { scale: Vector3::new(scale, scale, scale), ..Default::default() })
+    Model::file("planes/f16/model/f16.glb").double_sided(DoubleSidedMeshes::Meshes(vec!["Afterburner".to_owned()])).transform(Transform3D { scale: Vector3::new(scale, scale, scale), ..Default::default() })
 }
 
 /// Roll, pitch, yaw in degrees, about X, Y, and Z.

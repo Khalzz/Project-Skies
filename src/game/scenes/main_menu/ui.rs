@@ -697,7 +697,7 @@ pub fn controller_chip_nodes(app: &mut App, action: &str) -> Vec<(String, UiNode
 /// (registered in `main.rs`) - not necessarily the same string as `id`,
 /// which is purely this list's own stable key (RON authoring convenience,
 /// UI node paths, `SELECTED_LEVEL`). `mission_title`/`location`/
-/// `mission_date` are for the in-scene mission-intro card (see `play::scene::
+/// `mission_date` are for the in-scene mission-intro card (see `play::
 /// GameLogic`, the only other reader - via `SELECTED_LEVEL`), not this list's
 /// own `name`/`description` - see `assets/levels.ron`'s own doc comment.
 #[derive(Deserialize, Clone)]
@@ -718,7 +718,7 @@ fn levels() -> Vec<LevelInfo> {
 }
 
 /// Selects `id` as the current level: stages it for the "Play" button (see
-/// `SELECTED_LEVEL`, which `play::scene::GameLogic::new` reads back once the
+/// `SELECTED_LEVEL`, which `play::Play::new` reads back once the
 /// chosen scene actually opens - see its own doc comment for why this static
 /// exists at all), fills in Content's name/description text, and updates
 /// every sidebar button's persistent selected-highlight with a direct style

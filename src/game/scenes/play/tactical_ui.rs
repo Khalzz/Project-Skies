@@ -114,6 +114,10 @@ pub struct TacticalUi {
     /// The camera follows the selected aircraft (the center button on) -
     /// otherwise it's free, moved by dragging the map.
     pub following: bool,
+    /// The game world itself seen straight down, flat, like a chart on paper
+    /// (an orthographic camera), the map's markers over it - otherwise the
+    /// map's lines alone, in the 3D view orbiting the map.
+    pub top_down: bool,
     /// How far the map's been dragged since the scene last looked, in screen
     /// pixels (x right, y down) - for the scene to move the camera (taken
     /// there).
@@ -274,6 +278,14 @@ impl TacticalUi {
                         let center = crosshair_button(ui, can_center, self.following).on_hover_text(hint);
                         if center.clicked() {
                             self.following = !self.following;
+                        }
+                        ui.separator();
+                        // 3D (orbiting) or flat, straight down, like a chart.
+                        if ui.selectable_label(!self.top_down, "3D").on_hover_text("The map in 3D - right-drag to orbit").clicked() {
+                            self.top_down = false;
+                        }
+                        if ui.selectable_label(self.top_down, "Chart").on_hover_text("The game world seen straight down, flat, like a chart - with the map's markers over it. Right-drag turns it").clicked() {
+                            self.top_down = true;
                         }
                         ui.separator();
                         match &self.plan {

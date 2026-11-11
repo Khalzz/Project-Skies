@@ -2,7 +2,6 @@ use nalgebra::Vector3;
 
 use pankarta_software::prelude::*;
 
-use crate::game::models;
 
 pub struct GameLogic;
 
@@ -15,7 +14,7 @@ impl GameLogic {
             .with_property(CameraLens::new(80.0));
         let f16 = Node::new("f16")
             .with_property(Transform3D { position: Vector3::new(0.0, 0.0, 0.0), ..Default::default() })
-            .with_property(models::model(models::F16));
+            .with_property(Model::file("planes/f16/model/f16.glb").double_sided(DoubleSidedMeshes::Meshes(vec!["Afterburner".to_owned()])));
         for node in [camera, f16] {
             if let Err(error) = scene.spawn_node(app, node) {
                 eprintln!("{error}");

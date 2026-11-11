@@ -7,16 +7,21 @@
 //! from, and the waves are worked out around exactly that point (in f64 -
 //! see `waves`), so they don't swim against the mesh.
 
+mod ripples;
 mod waves;
 
 use std::collections::VecDeque;
 
 use nalgebra::Vector3;
 
+use pankarta_software::prelude::{Mesh, MeshShape};
 use pankarta_software::scene_manager::node::properties::Material;
 use pankarta_software::scene_manager::scene::Scene;
 
-pub use waves::{OceanSettings, OceanWaves, MAX_WAKE_POINTS, MAX_WAVES, WAKE_NOISE_PERIOD};
+use crate::game::ext::mesh_data;
+
+pub use ripples::RIPPLE_MAP;
+pub use waves::{OceanQuality, OceanSettings, OceanWaves, MAX_WAKE_POINTS, MAX_WAVES, WAKE_NOISE_PERIOD};
 
 /// The sea's shader (assets/shaders/ocean.wgsl).
 pub const OCEAN_SHADER: &str = "ocean";
@@ -32,9 +37,10 @@ const WAKE_MIN_SPEED: f32 = 40.0;
 const WAKE_FULL_SPEED: f32 = 150.0;
 const WAKE_SAMPLE_SECONDS: f32 = 0.1;
 const WAKE_TRAIL_SECONDS: f32 = WAKE_SAMPLE_SECONDS * MAX_WAKE_POINTS as f32;
-// How far past the trail's own points the wake can draw (its widest foam
-// plus the ripples around the plane) - for the shader's early-out circle.
-const WAKE_REACH: f32 = 120.0;
+// How far past the trail's own points the foam can draw (its widest, at the
+// trail's end: ocean.wgsl's WAKE_TRAIL_WIDTH + WAKE_TRAIL_SPREAD * 3.2 s, ~25
+// m, with room) - for the shader's early-out circle.
+const WAKE_REACH: f32 = 30.0;
 
 /// Something flying low over the water, stirring it up - see
 /// `Ocean::set_wake_source`. True world position and velocity.
@@ -54,8 +60,25 @@ struct WakePoint {
     intensity: f32,
 }
 
+/// How high above the sea the camera can go before it starts taking detail
+/// away (see OceanSettings::altitude_detail), m.
+pub const ALTITUDE_DETAIL_START: f32 = 50.0;
+
+/// What the ocean shader draws - the sea, or a debug view of what it costs
+/// (see the ocean lab, game::scenes::ocean_lab).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OceanDebugView {
+    #[default]
+    Normal = 0,
+    /// Each pixel colored by how many waves it summed - blue few, red all.
+    WaveCost = 1,
+    /// The mesh: each ring tinted by its cell size, cell edges drawn.
+    MeshCells = 2,
+}
+
 pub struct Ocean {
     waves: OceanWaves,
+    debug_view: OceanDebugView,
     // The low-flying plane's wake - see `set_wake_source`/`update_wake`.
     wake_source: Option<WakeSource>,
     wake_trail: VecDeque<WakePoint>,
@@ -73,13 +96,37 @@ impl Default for Ocean {
 
 impl Ocean {
     pub fn new(settings: OceanSettings) -> Self {
-        Self { waves: OceanWaves::new(settings), wake_source: None, wake_trail: VecDeque::new(), wake_sample_timer: 0.0, flow: (0.0, 0.0) }
+        Self { waves: OceanWaves::new(settings), debug_view: OceanDebugView::Normal, wake_source: None, wake_trail: VecDeque::new(), wake_sample_timer: 0.0, flow: (0.0, 0.0) }
     }
 
     /// What the sea's node is drawn with - the ocean shader, its values
     /// filled in every frame by `update`.
     pub fn material() -> Material {
         Material::shader(OCEAN_SHADER)
+    }
+
+    /// The sea's mesh for an eye at `altitude` - see
+    /// game::ext::mesh_data::register_ocean - drawn with `material`.
+    pub fn surface(altitude: f32) -> Mesh {
+        let tier = mesh_data::ocean_tier_for(crate::OCEAN_TIERS, altitude);
+        Mesh::custom(mesh_data::ocean_tier_mesh(crate::OCEAN_SURFACE_MODEL, tier))
+            .material(Self::material())
+            .casts_shadows(false)
+    }
+
+    /// Keeps the sea node `node` on the tier for an eye at `altitude` - its
+    /// material (and the params `update` set on it) kept.
+    pub fn update_tier(scene: &mut Scene, node: &str, altitude: f32) {
+        let tier = mesh_data::ocean_tier_for(crate::OCEAN_TIERS, altitude);
+        let name = mesh_data::ocean_tier_mesh(crate::OCEAN_SURFACE_MODEL, tier);
+        let Some(mesh) = scene.get_node_mut(node).and_then(|node| node.get_property_mut::<Mesh>()) else {
+            return;
+        };
+        if let MeshShape::Custom(current) = &mesh.shape {
+            if *current != name {
+                mesh.shape = MeshShape::Custom(name);
+            }
+        }
     }
 
     /// The sea's rest level (world Y) - see OceanWaves::sea_level.
@@ -89,6 +136,25 @@ impl Ocean {
 
     pub fn settings(&self) -> &OceanSettings {
         self.waves.settings()
+    }
+
+    /// See OceanWaves::geometry_wavelengths.
+    pub fn geometry_wavelengths(&self) -> impl Iterator<Item = f32> + '_ {
+        self.waves.geometry_wavelengths()
+    }
+
+    /// See OceanWaves::reach.
+    pub fn wave_reach(&self) -> (f32, f32) {
+        self.waves.reach()
+    }
+
+    /// See OceanWaves::set_settings - the wake is kept.
+    pub fn set_settings(&mut self, settings: OceanSettings) {
+        self.waves.set_settings(settings);
+    }
+
+    pub fn set_debug_view(&mut self, view: OceanDebugView) {
+        self.debug_view = view;
     }
 
     /// The wind over it - toward where it blows, m/s.
@@ -139,6 +205,12 @@ impl Ocean {
     /// `material`), worked out around where the camera is now. From the
     /// scene's `after_cameras`, every frame (see the module doc).
     pub fn update(&mut self, scene: &mut Scene, node: &str, delta_time: f32) {
+        self.update_nodes(scene, &[node], delta_time);
+    }
+
+    /// `update` for a sea drawn by several nodes (pieces of one mesh - see
+    /// the ocean lab's culling): the same values into each one's material.
+    pub fn update_nodes(&mut self, scene: &mut Scene, nodes: &[&str], delta_time: f32) {
         let camera_position = scene.cameras.active().camera.position().coords;
         self.waves.advance(delta_time);
         let intensity = self.update_wake(delta_time);
@@ -146,10 +218,91 @@ impl Ocean {
         self.flow = (0.0, 0.0);
         let mut params = self.waves.params(camera_position.x + flow_x, camera_position.z + flow_z);
         self.write_wake(&mut params, camera_position, intensity);
-        let Some(material) = scene.content.nodes.get_mut(node).and_then(|node| node.get_property_mut::<pankarta_software::prelude::Mesh>()).and_then(|mesh| mesh.material.as_mut()) else { return };
-        for (name, values) in params {
-            material.set(&name, values);
+        self.write_tuning(&mut params);
+        self.write_detail(&mut params, camera_position.y);
+        self.write_ripples(&mut params, (camera_position.x + flow_x) as f64, (camera_position.z + flow_z) as f64);
+        for node in nodes {
+            let Some(material) = scene.content.nodes.get_mut(node).and_then(|node| node.get_property_mut::<pankarta_software::prelude::Mesh>()).and_then(|mesh| mesh.material.as_mut()) else { continue };
+            for (name, values) in &params {
+                material.set(name, values.clone());
+            }
         }
+    }
+
+    /// The shortest wave drawn with the camera at world height
+    /// `camera_y` - see OceanSettings::altitude_detail.
+    pub fn shortest_wave_at(&self, camera_y: f32) -> f32 {
+        (camera_y - self.sea_level() - ALTITUDE_DETAIL_START).max(0.0) * self.settings().altitude_detail.max(0.0)
+    }
+
+    // Detail by the camera's altitude (ocean.wgsl's `detail`).
+    fn write_detail(&self, params: &mut std::collections::BTreeMap<String, Vec<f32>>, camera_y: f32) {
+        let settings = self.settings();
+        params.insert("detail".to_owned(), vec![
+            self.shortest_wave_at(camera_y),
+            settings.ripple_layers.clamp(1, 2) as f32,
+            if settings.ripple_stochastic { 1.0 } else { 0.0 },
+            settings.far_variation.max(0.0),
+        ]);
+    }
+
+    // The per-pixel cost knobs, the debug view and the ripples' source (see
+    // ocean.wgsl's `tuning`).
+    fn write_tuning(&self, params: &mut std::collections::BTreeMap<String, Vec<f32>>) {
+        let settings = self.settings();
+        params.insert("tuning".to_owned(), vec![
+            settings.pixel_full_pixels,
+            settings.pixel_wave_cap.min(MAX_WAVES) as f32,
+            self.debug_view as u32 as f32,
+            if settings.textured_ripples && !settings.flat { 1.0 } else { 0.0 },
+        ]);
+    }
+
+    // Where the ripple map's layers are this frame (see ripples and
+    // ocean.wgsl's ripple_layer): each one's place on the map under the
+    // camera - true world XZ (`x`, `z`), in f64 and wrapped to one tile like
+    // the waves' phases, so it stays precise anywhere - and its axes.
+    fn write_ripples(&self, params: &mut std::collections::BTreeMap<String, Vec<f32>>, x: f64, z: f64) {
+        let map = ripples::ripple_map();
+        let settings = self.settings();
+        let time = self.waves.time();
+        let strength = settings.detail_strength as f64;
+        let mut cells = Vec::with_capacity(6);
+        // The near layers at `ripple_scale` - bigger, and drifting as much
+        // faster (longer waves travel faster).
+        let scale = settings.ripple_scale.max(0.1) as f64;
+        let tile_of = |index: usize| if index < 2 { ripples::LAYERS[index].tile * scale } else { ripples::FAR_LAYER.tile };
+        for (index, (name, layer)) in ["ripple_a", "ripple_b", "ripple_far"].into_iter().zip(ripples::LAYERS.iter().chain([&ripples::FAR_LAYER])).enumerate() {
+            let angle = settings.wind_direction as f64 + layer.angle;
+            let (cos, sin) = (angle.cos(), angle.sin());
+            let tile = tile_of(index);
+            let drift = if index < 2 { layer.drift * scale.sqrt() } else { layer.drift };
+            let u = (cos * x + sin * z - drift * time) / tile;
+            let v = (-sin * x + cos * z) / tile;
+            params.insert(name.to_owned(), vec![u.rem_euclid(1.0) as f32, v.rem_euclid(1.0) as f32, cos as f32, sin as f32]);
+            // Its stochastic grid (ocean.wgsl's ripple_layer) moves with it -
+            // the same skew as the shader's, wrapped to where its random
+            // places repeat.
+            let (grid_u, grid_v) = (u * ripples::HEX_SCALE, v * ripples::HEX_SCALE);
+            let period = ripples::HEX_PERIOD as f64;
+            cells.push((grid_u - 0.577_350_27 * grid_v).rem_euclid(period) as f32);
+            cells.push((1.154_700_54 * grid_v).rem_euclid(period) as f32);
+        }
+        // The far layer's grid, and 1 / its tile size.
+        let far_cells = vec![cells[4], cells[5], (1.0 / ripples::FAR_LAYER.tile) as f32, 0.0];
+        cells.truncate(4);
+        params.insert("ripple_cells".to_owned(), cells);
+        params.insert("ripple_far_cells".to_owned(), far_cells);
+        // One layer's slope variance, at full detail.
+        let layer_variance = ripples::LAYER_WEIGHT.powi(2) * map.variance * strength * strength;
+        params.insert("ripple_info".to_owned(), vec![
+            (1.0 / tile_of(0)) as f32,
+            (1.0 / tile_of(1)) as f32,
+            (2.0 * map.range * ripples::LAYER_WEIGHT * strength) as f32,
+            (self.waves.geometry_slope_variance() + 2.0 * layer_variance) as f32,
+        ]);
+        params.insert("ripple_bias".to_owned(), vec![map.mip_bias[0] as f32, map.mip_bias[1] as f32, layer_variance as f32, 0.0]);
+        params.insert("look".to_owned(), vec![settings.far_start.max(0.0), settings.far_end.max(settings.far_start + 1.0), settings.depth_tint.clamp(0.0, 2.0), 0.0]);
     }
 
     // Ages the trail, drops points older than WAKE_TRAIL_SECONDS, and adds a
@@ -212,14 +365,15 @@ impl Ocean {
             let center = [(min[0] + max[0]) * 0.5, (min[1] + max[1]) * 0.5];
             let radius = 0.5 * ((max[0] - min[0]).powi(2) + (max[1] - min[1]).powi(2)).sqrt() + WAKE_REACH;
             bounds = [center[0], center[1], radius, WAKE_TRAIL_SECONDS];
-            // Which way it's flying, flattened onto the water - shapes the
-            // blast patch and the V of ripples behind it. Straight ahead (+Z)
-            // if it's barely moving (there's no wake then anyway).
+            // Which way it's flying, flattened onto the water (ocean.wgsl's
+            // wake_info.yz - the trail doesn't use it now). Straight ahead
+            // (+Z) if it's barely moving (there's no wake then anyway).
             let heading = Vector3::new(source.velocity.x, 0.0, source.velocity.z).try_normalize(1e-3).unwrap_or(Vector3::z());
             info = [self.wake_trail.len() as f32, heading.x, heading.z, 0.0];
-            // Where the camera is on the (repeating) foam noise.
-            anchor = [(camera_position.x as f64).rem_euclid(WAKE_NOISE_PERIOD) as f32, (camera_position.z as f64).rem_euclid(WAKE_NOISE_PERIOD) as f32, 0.0, 0.0];
         }
+        // Where the camera is on the (repeating) foam noise - always, the
+        // ripples' gusts are on it too.
+        anchor = [(camera_position.x as f64).rem_euclid(WAKE_NOISE_PERIOD) as f32, (camera_position.z as f64).rem_euclid(WAKE_NOISE_PERIOD) as f32, 0.0, 0.0];
         params.insert("wake_head".to_owned(), head.to_vec());
         params.insert("wake_bounds".to_owned(), bounds.to_vec());
         params.insert("wake_info".to_owned(), info.to_vec());
@@ -239,9 +393,12 @@ mod tests {
         let ocean = Ocean::default();
         let mut params = ocean.waves.params(0.0, 0.0);
         ocean.write_wake(&mut params, Vector3::zeros(), 0.0);
+        ocean.write_tuning(&mut params);
+        ocean.write_detail(&mut params, 0.0);
+        ocean.write_ripples(&mut params, 0.0, 0.0);
         let mut names: Vec<&str> = params.keys().map(String::as_str).collect();
         names.sort_unstable();
-        let mut expected = ["params", "shading", "waves", "wake_head", "wake_bounds", "wake_info", "wake_points", "wake_anchor"];
+        let mut expected = ["params", "shading", "waves", "wake_head", "wake_bounds", "wake_info", "wake_points", "wake_anchor", "tuning", "ripple_a", "ripple_b", "ripple_info", "ripple_bias", "ripple_cells", "detail", "ripple_far", "ripple_far_cells", "look"];
         expected.sort_unstable();
         assert_eq!(names, expected);
         assert_eq!(params["waves"].len(), MAX_WAVES * 2 * 4);

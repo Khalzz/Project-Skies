@@ -130,9 +130,6 @@ pub struct Plane {
     /// The engine's afterburner gate - military power, and where the
     /// autopilot holds the lever when the speed is right (1: no afterburner).
     military: f32,
-    // The afterburner mesh's own scale from the model, captured the first
-    // frame - its length is stretched by `afterburner.value` on top of it.
-    afterburner_base_scale: Option<Vector3<f32>>,
     /// Internal tanks - see `fuel`.
     fuel: Fuel,
     /// Fuel left at which the aircraft-data box marks bingo (kg). None: no
@@ -232,7 +229,6 @@ impl Plane {
             control_surfaces: Self::default_control_surfaces(),
             afterburner: Afterburner::new(),
             military: 1.0,
-            afterburner_base_scale: None,
             fuel: Fuel::default(),
             bingo_kg: None,
             radar_warn_m: crate::game::scenes::play::map::DEFAULT_RADAR_WARN_M,
@@ -445,12 +441,12 @@ impl Plane {
     fn default_control_surfaces() -> Vec<ControlSurface> {
         let rudder_base = UnitQuaternion::from_axis_angle(&Vector3::x_axis(), -28.4493_f32.to_radians());
         vec![
-            ControlSurface::new("opaque", "left_elevator", *Vector3::x_axis(), 0.15, 7.0, SurfaceBase::None, ControlInput::Elevator),
-            ControlSurface::new("opaque", "right_elevator", *Vector3::x_axis(), 0.15, 7.0, SurfaceBase::None, ControlInput::Elevator),
-            ControlSurface::new("opaque", "left_aleron", *Vector3::x_axis(), -0.5, 7.0, SurfaceBase::Captured(None), ControlInput::Aileron),
-            ControlSurface::new("opaque", "right_aleron", *Vector3::x_axis(), 0.5, 7.0, SurfaceBase::Captured(None), ControlInput::Aileron),
-            ControlSurface::new("opaque", "rudder_0", *Vector3::y_axis(), 0.5, 7.0, SurfaceBase::Fixed(rudder_base), ControlInput::Rudder),
-            ControlSurface::new("opaque", "rudder_1", *Vector3::y_axis(), 0.5, 7.0, SurfaceBase::Fixed(rudder_base), ControlInput::Rudder),
+            ControlSurface::new("left_elevator", *Vector3::x_axis(), 0.15, 7.0, SurfaceBase::None, ControlInput::Elevator),
+            ControlSurface::new("right_elevator", *Vector3::x_axis(), 0.15, 7.0, SurfaceBase::None, ControlInput::Elevator),
+            ControlSurface::new("left_aleron", *Vector3::x_axis(), -0.5, 7.0, SurfaceBase::Captured(None), ControlInput::Aileron),
+            ControlSurface::new("right_aleron", *Vector3::x_axis(), 0.5, 7.0, SurfaceBase::Captured(None), ControlInput::Aileron),
+            ControlSurface::new("rudder_0", *Vector3::y_axis(), 0.5, 7.0, SurfaceBase::Fixed(rudder_base), ControlInput::Rudder),
+            ControlSurface::new("rudder_1", *Vector3::y_axis(), 0.5, 7.0, SurfaceBase::Fixed(rudder_base), ControlInput::Rudder),
         ]
     }
 
@@ -888,15 +884,27 @@ impl Behavior for Plane {
             self.afterburner.update(state.as_ref().map(|state| state.afterburner).unwrap_or(0.0), delta_time);
         }
 
-        // ENGINE GAP: the afterburner flame's length, the control surfaces'
-        // deflection and the landing gear's travel used to be drawn by
-        // moving those meshes inside the loaded F-16 model. The engine keeps
-        // a file model's meshes on its shared loaded copy, out of the game's
-        // reach ("moving or hiding the file's own meshes per node isn't
-        // supported" - its docs/meshes_and_models.md), so they're computed
-        // (`self.afterburner`, `self.controls`, the gear state) but not
-        // shown until the engine has per-node mesh transforms.
-        let _ = (&self.control_surfaces, &self.gear_meshes, &self.afterburner_base_scale);
+        // The model's moving meshes, on this plane alone (see
+        // Model::mesh_mut) - nothing until its file has loaded.
+        let node_scale = node.get_property::<Transform3D>().map(|transform| transform.scale).unwrap_or(Vector3::new(1.0, 1.0, 1.0));
+        if let Some(model) = node.get_property_mut::<Model>() {
+            // What maps model space to the world - node x model scale.
+            let scale = node_scale.component_mul(&model.transform.scale);
+            if let Some(afterburner) = model.mesh_mut("Afterburner") {
+                let base = afterburner.original_transform().scale;
+                afterburner.transform.scale = Vector3::new(base.x, base.y, base.z * self.afterburner.value);
+            }
+            let simulated_elevator = state.as_ref().map(|state| state.elevator_control_input);
+            for surface in &mut self.control_surfaces {
+                surface.apply(model, &self.controls, simulated_elevator, delta_time);
+            }
+            if self.gear_meshes.armed_deploy().is_some() {
+                self.gear_meshes.show_armed(model, scale);
+            }
+            if let Some(state) = &state {
+                self.gear_meshes.place(model, &state.wheels, state.gear_deploy, scale);
+            }
+        }
 
         if let Some(state) = state {
             self.gear_meshes.disarm();

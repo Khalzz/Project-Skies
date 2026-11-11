@@ -7,4 +7,6 @@
     cull: Back,
     depth_write: true,
     reads: [Depth],         // the depth so far, at group 0 bindings 16/17 - for shore foam
+    // The ripple map (game::ocean::ripples) - group 0 bindings 3/4.
+    textures: { "ripples": "assets/textures/ocean_ripples.png" },
 )

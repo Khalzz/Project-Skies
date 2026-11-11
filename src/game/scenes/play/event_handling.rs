@@ -126,7 +126,7 @@ impl EventSystem {
             // run once for each element
             // The clip is "<folder>/audio.ogg" - a path inside the assets folder
             // for the engine.
-            app.play_sound(&format!("{}/audio.ogg", crate::game::models::asset_relative(&audio_file.file_name)));
+            app.play_sound(&format!("{}/audio.ogg", crate::game::asset_relative(&audio_file.file_name)));
         } else {
             // run from now untill the end
             audio_file.timer += app.time.delta_time as f64;

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use nalgebra::{UnitQuaternion, Vector3};
 
-use pankarta_software::rendering::models::model::Model as LoadedModel;
+use pankarta_software::prelude::{Model, ModelMesh};
 use pankarta_software::utils::lerps::lerp_vector3;
 use crate::game::scenes::play::plane::physics::wheels::wheel::WheelData;
 
@@ -146,40 +146,39 @@ impl GearMeshes {
     }
 
     /// Puts the armed pose on the wheels. Physics replaces it.
-    pub fn show_armed(&mut self, model: &mut LoadedModel, instance_scale: Vector3<f32>, queue: &wgpu::Queue) {
+    pub fn show_armed(&mut self, model: &mut Model, instance_scale: Vector3<f32>) {
         let Some((wheels, deploy)) = self.armed.clone() else { return };
         let to_model = |point: Vector3<f32>| point.component_div(&instance_scale);
         for (name, position) in wheels {
             self.mounts.insert(name, to_model(position));
         }
-        self.place(model, &HashMap::new(), deploy, instance_scale, queue);
+        self.place(model, &HashMap::new(), deploy, instance_scale);
     }
 
-    /// Positions every wheel mesh (all its materials), for `deploy` (0 =
-    /// up, 1 = down). `instance_scale` maps model space to the world.
+    /// Positions every wheel mesh (moved on this plane's node alone - see
+    /// `Model::mesh_mut`), for `deploy` (0 = up, 1 = down). `instance_scale`
+    /// maps model space to the world.
     pub fn place(
         &mut self,
-        model: &mut LoadedModel,
+        model: &mut Model,
         wheel_data: &HashMap<String, WheelData>,
         deploy: f32,
         instance_scale: Vector3<f32>,
-        queue: &wgpu::Queue,
     ) {
         let to_model = |world: Vector3<f32>| world.component_div(&instance_scale);
         for (name, data) in wheel_data {
             self.mounts.insert(name.clone(), to_model(data.mount));
         }
         for (name, mount) in self.mounts.iter() {
-            let mut meshes: Vec<_> = model.meshes_named_mut("opaque", name).collect();
-            let Some(first) = meshes.first() else { continue };
+            let Some(mesh) = model.mesh_mut(name) else { continue };
+            let original = mesh.original_transform();
             // Where the wheel was modelled (its geometry's middle) - only
-            // until the first suspension data arrives - and its radius, the
-            // biggest of its materials (the tyre).
-            let modelled = first.base_transform.position + first.center_offset();
+            // until the first suspension data arrives.
+            let modelled = original.position + center_offset(mesh);
             // Measured straight down in the model, whichever way the wheel
             // mesh is turned - so the tyre's bottom sits exactly on the
             // ground, with nothing to set by hand.
-            let radius = meshes.iter().map(|mesh| mesh.depth_below_center()).fold(0.0f32, f32::max);
+            let radius = depth_below_center(mesh);
 
             let (stowed_at, stowed_turn) = self.stowed.get(name).copied().unwrap_or((None, UnitQuaternion::identity()));
             let retracted = stowed_at.map_or(*mount, to_model);
@@ -196,12 +195,35 @@ impl GearMeshes {
             // relative to its origin.
             let center = lerp_vector3(retracted, deployed, deploy);
             let turn = UnitQuaternion::identity().slerp(&stowed_turn, (1.0 - deploy).clamp(0.0, 1.0));
-            for mesh in meshes.iter_mut() {
-                let modelled_rotation = mesh.base_transform.rotation;
-                mesh.transform.rotation = turn * modelled_rotation;
-                mesh.transform.position = center - turn * mesh.center_offset();
-                mesh.update_transform(queue);
-            }
+            let offset = center_offset(mesh);
+            mesh.transform.rotation = turn * original.rotation;
+            mesh.transform.position = center - turn * offset;
         }
     }
+}
+
+/// Where the middle of `mesh`'s geometry sits from its origin, as the file
+/// placed it (turned and scaled).
+fn center_offset(mesh: &ModelMesh) -> Vector3<f32> {
+    let (low, high) = mesh.local_bounds();
+    let original = mesh.original_transform();
+    original.rotation * original.scale.component_mul(&((low + high) * 0.5))
+}
+
+/// How far below the middle of `mesh`'s geometry its lowest point is, as
+/// the file placed it - a wheel's radius, straight down.
+fn depth_below_center(mesh: &ModelMesh) -> f32 {
+    let (low, high) = mesh.local_bounds();
+    let original = mesh.original_transform();
+    let lowest = (0..8)
+        .map(|corner| {
+            let local = Vector3::new(
+                if corner & 1 == 0 { low.x } else { high.x },
+                if corner & 2 == 0 { low.y } else { high.y },
+                if corner & 4 == 0 { low.z } else { high.z },
+            );
+            (original.rotation * original.scale.component_mul(&local)).y
+        })
+        .fold(f32::MAX, f32::min);
+    center_offset(mesh).y - lowest
 }

@@ -87,7 +87,7 @@ fn build_node(spec: &NodeSpec, scene: &Scene) -> Node {
         node.set_property(parent);
     }
     if let Some(camera) = spec.camera {
-        node.set_property(CameraLens { fovy: camera.fov, znear: camera.near, viewport: None });
+        node.set_property(CameraLens { znear: camera.near, ..CameraLens::new(camera.fov) });
     }
     if let Some(target) = &spec.look_at {
         node.set_property(LookAt { target: target.clone() });
@@ -114,7 +114,7 @@ fn apply_spec(scene: &mut Scene, spec: &NodeSpec) {
     match spec.camera {
         Some(camera) => {
             let viewport = node.get_property::<CameraLens>().and_then(|lens| lens.viewport);
-            node.set_property(CameraLens { fovy: camera.fov, znear: camera.near, viewport });
+            node.set_property(CameraLens { znear: camera.near, viewport, ..CameraLens::new(camera.fov) });
         }
         None => {
             // No lens, no camera - the engine keeps the camera it made

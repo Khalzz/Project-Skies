@@ -3,11 +3,9 @@
 //! left behind it (from a node of its own, kept a few seconds after the
 //! missile's gone so they fade out) and its plume lit while the motor burns.
 //!
-//! The plume is the model's `fire` mesh. A mesh's size is shared by every
-//! node drawing that model, so two copies are kept: the plain one - weapons
-//! hanging on pylons, and missiles whose motor has burnt out - with the
-//! plume shrunk to nothing, and `FLYING_VARIANT`, the burning one, with it
-//! lit and flickering. A missile switches over to the plain copy at burnout.
+//! The plume is the model's `fire` mesh, set on each node on its own (see
+//! `Model::mesh_mut`): hidden on weapons hanging on pylons and on missiles
+//! whose motor has burnt out, lit and flickering while it burns.
 
 use nalgebra::{UnitQuaternion, Vector3};
 
@@ -23,9 +21,6 @@ use super::missile::{MissileFlight, Outcome, Surroundings, TargetTrack};
 use crate::game::scenes::play::world_collision::WorldCollision;
 use super::weapon_spec::{Seeker, WeaponSpec};
 
-/// The copy of a missile's model drawn while its motor burns - see the
-/// module doc.
-pub const FLYING_VARIANT: &str = "flying";
 /// The plume's mesh in a missile's model.
 const PLUME_MESH: &str = "fire";
 /// How long (s) a puff of smoke hangs in the air, at most - long enough that
@@ -47,8 +42,6 @@ struct FlyingMissile {
     smoke_id: String,
     spec: WeaponSpec,
     flight: MissileFlight,
-    /// Still drawn with the burning copy (see the module doc).
-    burning_model: bool,
     /// The aircraft that fired it, by name.
     shooter: String,
     /// Where it's been, a point every TRAIL_STEP meters or so (at most
@@ -119,9 +112,6 @@ pub struct Missiles {
     launched: u32,
     /// For the plume's flicker.
     clock: f32,
-    /// Each model's plume size as the file has it, by model key - what it's
-    /// scaled from.
-    plume_sizes: std::collections::HashMap<String, Vector3<f32>>,
 }
 
 impl Missiles {
@@ -185,7 +175,7 @@ impl Missiles {
         let flight = MissileFlight::launch(position, velocity, rotation, target);
         let pose = pose(&spec, &flight);
 
-        if let Err(error) = scene.spawn_node(app, missile_node(&node_id, &spec, pose, true)) {
+        if let Err(error) = scene.spawn_node(app, missile_node(&node_id, &spec, pose)) {
             eprintln!("Couldn't launch {}: {error}", spec.id);
             return;
         }
@@ -196,7 +186,7 @@ impl Missiles {
         );
         println!("Fox 2 - {} away{}", spec.id, flight.target_aircraft().map(|target| format!(" at {target}")).unwrap_or_default());
         let trail = vec![flight.position];
-        self.flying.push(FlyingMissile { node_id, smoke_id, spec, flight, burning_model: true, shooter: shooter.to_owned(), trail });
+        self.flying.push(FlyingMissile { node_id, smoke_id, spec, flight, shooter: shooter.to_owned(), trail });
     }
 
     /// Flies every missile `delta_time` seconds - `aircraft`: every aircraft
@@ -212,13 +202,6 @@ impl Missiles {
             let shooter = missile.shooter.clone();
             let surroundings = Surroundings { aircraft, ground: Some(ground), sea_level, sun, shooter: &shooter };
             let outcome = missile.flight.step(&missile.spec, delta_time, &surroundings);
-
-            // Burnt out: over to the plain copy, plume gone.
-            if missile.burning_model && !missile.flight.burning(&missile.spec) {
-                missile.burning_model = false;
-                scene.despawn_node(app, &missile.node_id);
-                let _ = scene.spawn_node(app, missile_node(&missile.node_id, &missile.spec, pose(&missile.spec, &missile.flight), false));
-            }
 
             if missile.trail.last().is_none_or(|last| (missile.flight.position - last).magnitude() >= TRAIL_STEP) {
                 missile.trail.push(missile.flight.position);
@@ -309,26 +292,30 @@ impl Missiles {
         events
     }
 
-    /// Sizes every missile model's plume - nothing on the plain copies
-    /// (`models`: weapons' model keys), lit and flickering on the burning
-    /// ones. Every frame, paused or not.
-    pub fn update_plumes(&mut self, app: &mut App, models: &[String], delta_time: f32) {
+    /// Every weapon's plume (`models`: the weapons' model files) - hidden,
+    /// but lit and flickering on the missiles whose motor is burning. Every
+    /// frame, paused or not.
+    pub fn update_plumes(&mut self, scene: &mut Scene, models: &[String], delta_time: f32) {
         self.clock += delta_time;
         // A quick, uneven flicker - two waves out of step.
         let flicker = 1.0 + 0.08 * (self.clock * 47.0).sin() + 0.05 * (self.clock * 83.0).sin();
-        for model_key in models {
-            let flying_key = format!("{model_key}#{FLYING_VARIANT}");
-            self.size_plume(app, model_key, 0.0);
-            self.size_plume(app, &flying_key, flicker);
+        let burning: Vec<&str> = self.flying.iter()
+            .filter(|missile| missile.flight.burning(&missile.spec))
+            .map(|missile| missile.node_id.as_str())
+            .collect();
+        for node in scene.content.nodes.iter_mut() {
+            let lit = burning.contains(&node.id.as_str());
+            let Some(model) = node.get_property_mut::<Model>() else { continue };
+            if !model.file_path().is_some_and(|path| models.iter().any(|model| model == path)) {
+                continue;
+            }
+            let Some(plume) = model.mesh_mut(PLUME_MESH) else { continue };
+            plume.visible = lit;
+            if lit {
+                plume.transform.scale = plume.original_transform().scale * flicker;
+            }
         }
     }
-
-    /// The model `model_key`'s plume at `scale` times its own size.
-    ///
-    /// ENGINE GAP: this resized the plume mesh inside the missile's loaded
-    /// model; the engine keeps loaded models out of the game's reach (a file
-    /// model's own meshes can't be moved per node), so the plume isn't sized.
-    fn size_plume(&mut self, _app: &mut App, _model_key: &str, _scale: f32) {}
 }
 
 /// Where a missile's model goes - its position, turned along its flight
@@ -348,15 +335,12 @@ fn tail(spec: &WeaponSpec, flight: &MissileFlight) -> Vector3<f32> {
     flight.position - flight.heading() * length * 0.5
 }
 
-/// A missile's model node - the burning copy or the plain one.
-fn missile_node(node_id: &str, spec: &WeaponSpec, (position, rotation): (Vector3<f32>, UnitQuaternion<f32>), burning: bool) -> Node {
-    // The burning copy was a variant whose plume mesh was sized up (see
-    // size_plume) - nothing the engine lets the game do, so one model.
-    let _ = burning;
-    let model = Model::file(crate::game::models::asset_relative(&spec.model.model)).double_sided(DoubleSidedMeshes::Meshes(spec.model.double_sided.clone()));
+/// A missile's model node.
+fn missile_node(node_id: &str, spec: &WeaponSpec, (position, rotation): (Vector3<f32>, UnitQuaternion<f32>)) -> Node {
+    let model = Model::file(crate::game::asset_relative(&spec.model.model)).double_sided(DoubleSidedMeshes::Meshes(spec.model.double_sided.clone()));
     Node::new(node_id)
         .with_property(Transform3D { position, rotation, scale: Vector3::new(1.0, 1.0, 1.0) })
-        .with_property(crate::game::models::scaled(model, spec.model.scale))
+        .with_property(model.transform(Transform3D { scale: Vector3::repeat(spec.model.scale), ..Default::default() }))
 }
 
 /// The white smoke a rocket motor leaves. Puffs are spaced on the order of

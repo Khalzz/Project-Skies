@@ -1,6 +1,6 @@
 //! The level's solid ground - land and runway - as triangles on the main
 //! thread, for things that aren't physics bodies (missiles) to hit. The
-//! physics thread has its own copy for the aircraft (see play::scene::
+//! physics thread has its own copy for the aircraft (see play::
 //! spawn_world); this one is built from the same meshes.
 //!
 //! Triangles are sorted into a grid of square cells across the map (seen

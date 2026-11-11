@@ -55,6 +55,22 @@ pub fn tactical_map() -> FramePlan {
         .ui(UiPass::All)
 }
 
+/// The M map's Chart view: the world itself, seen straight down through the
+/// map's orthographic camera (see play::camera::camera's chart), with the
+/// map's lines - aircraft, trails, flight plans, the grid - over it, the UI
+/// over those.
+pub fn tactical_chart() -> FramePlan {
+    FramePlan::new()
+        .scene("opaque")
+        .copy_depth()
+        .scene("water")
+        .scene("transparent")
+        .particles()
+        .fullscreen(pankarta_software::rendering::shader_library::BLIT)
+        .lines("tactical_lines")
+        .ui(UiPass::All)
+}
+
 /// The sets the play scene's plans draw - registered when it starts.
 pub fn register_flight_sets(app: &mut App) {
     // In the world.

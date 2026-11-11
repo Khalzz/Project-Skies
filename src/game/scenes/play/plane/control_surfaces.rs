@@ -1,8 +1,7 @@
 use nalgebra::{Quaternion, Unit, UnitQuaternion, Vector3};
 
-use pankarta_software::rendering::models::model::Model as LoadedModel;
+use pankarta_software::prelude::Model;
 use pankarta_software::utils::lerps::lerp_quaternion;
-use pankarta_software::prelude::Transform3D;
 
 use super::controls::PlaneControls;
 
@@ -57,14 +56,14 @@ pub enum SurfaceBase {
     Captured(Option<Quaternion<f32>>),
 }
 
-/// One animated part of the plane's model - a named mesh, which axis/how far
+/// One animated part of the plane's model - a mesh of its file (by its name
+/// there, moved on this plane's node alone - see `Model::mesh_mut`), which axis/how far
 /// it swings per unit of control input, how fast it eases toward that target,
 /// and what it's relative to (see `SurfaceBase`). `Plane` holds a `Vec` of
 /// these (see `Plane::default_control_surfaces`) and drives all of them
 /// through the same `apply` each frame, instead of a hand-written block per
 /// mesh repeating the same lerp-and-write.
 pub struct ControlSurface {
-    mesh_list: &'static str,
     mesh_name: &'static str,
     axis: Vector3<f32>,
     scale: f32,
@@ -74,30 +73,24 @@ pub struct ControlSurface {
 }
 
 impl ControlSurface {
-    pub fn new(mesh_list: &'static str, mesh_name: &'static str, axis: Vector3<f32>, scale: f32, lerp_speed: f32, base: SurfaceBase, input: ControlInput) -> Self {
-        Self { mesh_list, mesh_name, axis, scale, lerp_speed, base, input }
+    pub fn new(mesh_name: &'static str, axis: Vector3<f32>, scale: f32, lerp_speed: f32, base: SurfaceBase, input: ControlInput) -> Self {
+        Self { mesh_name, axis, scale, lerp_speed, base, input }
     }
 
-    pub fn apply(&mut self, model: &mut LoadedModel, controls: &PlaneControls, simulated_elevator: Option<f32>, delta_time: f32, queue: &wgpu::Queue) {
-        // Every material of the surface (see Model::meshes_named_mut) - they
-        // share one node transform, so the first one's rotation is the
-        // reference and all of them get the same new one.
-        let mut meshes: Vec<_> = model.meshes_named_mut(self.mesh_list, self.mesh_name).collect();
-        let Some(reference) = meshes.first() else { return };
-        let current_rotation = reference.transform.rotation;
+    /// Swings the surface toward where `controls` put it. Nothing until the
+    /// model's file is loaded (its meshes aren't known before).
+    pub fn apply(&mut self, model: &mut Model, controls: &PlaneControls, simulated_elevator: Option<f32>, delta_time: f32) {
+        let Some(mesh) = model.mesh_mut(self.mesh_name) else { return };
+        let current_rotation = mesh.transform.rotation;
 
         let base = match &mut self.base {
             SurfaceBase::None => UnitQuaternion::identity(),
             SurfaceBase::Fixed(rotation) => *rotation,
-            SurfaceBase::Captured(captured) => UnitQuaternion::from_quaternion(*captured.get_or_insert(*current_rotation.quaternion())),
+            SurfaceBase::Captured(captured) => UnitQuaternion::from_quaternion(*captured.get_or_insert(*mesh.original_transform().rotation.quaternion())),
         };
 
         let control_value = self.input.value(controls, simulated_elevator);
         let target = base * UnitQuaternion::from_axis_angle(&Unit::new_normalize(self.axis), self.scale * control_value);
-        let new_rotation = UnitQuaternion::from_quaternion(lerp_quaternion(*current_rotation.quaternion(), *target.quaternion(), delta_time * self.lerp_speed));
-        for mesh in meshes.iter_mut() {
-            let new_transform = Transform3D { position: mesh.transform.position, rotation: new_rotation, scale: mesh.transform.scale };
-            mesh.change_transform(queue, new_transform);
-        }
+        mesh.transform.rotation = UnitQuaternion::from_quaternion(lerp_quaternion(*current_rotation.quaternion(), *target.quaternion(), delta_time * self.lerp_speed));
     }
 }

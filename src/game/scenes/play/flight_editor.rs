@@ -10,7 +10,7 @@
 //!
 //! It only edits its own copy of the map (`map`) and lists what else it was
 //! asked to do (`requests`); the play scene applies both every frame (see
-//! play::scene::GameLogic::update_flight_editor and flight_manager::sync), so
+//! play::Play::update_flight_editor and flight_manager::sync), so
 //! a change shows up in the world right away. Drawn by the egui overlay pass
 //! (see render_pass.rs), which is why it lives on `App`.
 
@@ -521,7 +521,7 @@ impl FlightEditor {
     }
 
     /// The aircraft selected in the hierarchy, by name - the one the camera
-    /// follows (see play::scene::GameLogic::update).
+    /// follows (see play::Play::update).
     pub fn selected_aircraft(&self) -> Option<&str> {
         match &self.selection {
             Selection::Aircraft(name) => Some(name),

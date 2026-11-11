@@ -30,9 +30,9 @@ use std::f64::consts::TAU;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-const GRAVITY: f64 = 9.81;
+pub(super) const GRAVITY: f64 = 9.81;
 /// Phillips constant of the Pierson-Moskowitz spectrum.
-const PM_ALPHA: f64 = 0.0081;
+pub(super) const PM_ALPHA: f64 = 0.0081;
 
 /// Must match `MAX_WAVES` in ocean.wgsl.
 pub const MAX_WAVES: usize = 80;
@@ -59,9 +59,15 @@ pub struct OceanSettings {
     pub amplitude_scale: f32,
     /// Multiplies time - 1.0 is physical wave speed.
     pub time_scale: f32,
-    /// Geometry waves: count and wavelength band (world units). The shortest
-    /// must stay several mesh cells long - the play scene's water mesh has
-    /// ~2-unit cells, so ~10 is the floor there.
+    /// Geometry waves: count and wavelength band (world units). The mesh only
+    /// moves the ones at least ~3 of its cells long (its finest ring has
+    /// 4-unit cells - see main.rs's OCEAN_TIERS); shorter ones still shade
+    /// every pixel.
+    ///
+    /// Every pixel near the camera sums every wave (geometry and detail) -
+    /// the count is most of what the sea costs to draw. The total energy
+    /// doesn't depend on it (each wave carries its band's share), only how
+    /// busy the surface looks.
     pub geometry_waves: usize,
     pub geometry_min_wavelength: f32,
     /// Normal-only detail waves: count and wavelength band.
@@ -71,27 +77,200 @@ pub struct OceanSettings {
     pub detail_strength: f32,
     /// 0..1 - how strongly whitecaps show on the sharpest crests.
     pub whitecap_strength: f32,
+    /// At most this many waves summed per pixel - the longest; the rest
+    /// count as faded out there (ocean.wgsl's surface_waves). MAX_WAVES = no
+    /// cap. Caps the cost of the water right under the camera.
+    pub pixel_wave_cap: usize,
+    /// A wave fully shows on a pixel once its wavelength spans this many
+    /// pixels, and is gone by half that - higher drops short waves sooner
+    /// (cheaper, softer), lower keeps them longer (sharper, may shimmer).
+    pub pixel_full_pixels: f32,
+    /// Draw the detail waves from the ripple map (game::ocean::ripples) -
+    /// two texture reads a pixel - instead of summing them one by one
+    /// (`detail_waves` of them). The geometry waves are summed either way.
+    pub textured_ripples: bool,
+    /// Draw the sea as a flat plane: no wave moves the mesh or shades a
+    /// pixel - only the water's color, sky reflection and sun glint (and
+    /// the wake). The waves are still made, so the sea level is the same.
+    pub flat: bool,
+    /// How much detail the camera's altitude takes away: above
+    /// ALTITUDE_DETAIL_START, waves shorter than this many meters per meter
+    /// of height are dropped (and ones up to twice that faded) - 0.02: the
+    /// ripples are gone by ~450 m up, only the longest swell is left at
+    /// ~3 km, and the default sea is flat from ~4 km. 0 = off.
+    pub altitude_detail: f32,
+    /// How the ripple map is drawn (with `textured_ripples`): two layers
+    /// (6 texture reads) or one (half that); stochastically tiled (each
+    /// layer 3 reads, no visible repeat) or plainly (1 read, tiles show from
+    /// a few hundred meters up).
+    pub ripple_layers: u32,
+    pub ripple_stochastic: bool,
+    /// How strongly the far sea is shaped by the ripple map drawn 64x larger
+    /// (30-500 m patterns), fading in as the near ripples fade out - so the
+    /// open sea isn't one smooth plane. 0 = off (one layer less to read).
+    pub far_variation: f32,
+    /// How much bigger than the map's own size (ripple::TILE) the near
+    /// ripples are drawn - bigger is broader, less skin-like ripples (their
+    /// steepness doesn't change). The far layer keeps its own size.
+    pub ripple_scale: f32,
+    /// Where the far look takes over (m from the camera): the near ripples
+    /// fade out and the far layer in between these two.
+    pub far_start: f32,
+    pub far_end: f32,
+    /// 0..2 - how strongly the water's color drifts between its deep and
+    /// light blues in broad patches pinned to the sea (tens to hundreds of
+    /// meters), as if its depth changed - the color the swell used to give.
+    pub depth_tint: f32,
     /// Same settings + same seed = the exact same ocean.
     pub seed: u64,
 }
 
 impl Default for OceanSettings {
     fn default() -> Self {
+        // OceanQuality::Ultra - tuned in the ocean lab: a calm sea, no
+        // summed swell at all, broad ripples from the ripple map (no far
+        // layer - they reach 2-5 km before fading), soft depth patches.
         Self {
-            wind_speed: 6.0,
+            wind_speed: 2.0,
             wind_direction: 0.35,
             directional_spread: 2.0,
             choppiness: 0.6,
             amplitude_scale: 1.0,
             time_scale: 1.0,
-            geometry_waves: 40,
+            geometry_waves: 0,
             geometry_min_wavelength: 10.0,
-            detail_waves: 32,
+            detail_waves: 24,
             detail_min_wavelength: 0.5,
-            detail_strength: 1.0,
+            detail_strength: 1.5,
             whitecap_strength: 0.6,
+            pixel_wave_cap: MAX_WAVES,
+            pixel_full_pixels: 13.5,
+            textured_ripples: true,
+            flat: false,
+            altitude_detail: 0.0,
+            ripple_layers: 2,
+            ripple_stochastic: true,
+            far_variation: 0.0,
+            ripple_scale: 4.9,
+            far_start: 2_000.0,
+            far_end: 5_000.0,
+            depth_tint: 0.62,
             seed: 0x5EA5_1DE5,
         }
+    }
+}
+
+/// How much the sea may cost to draw - presets for what OceanSettings has
+/// on that (how the ripple map is read, flat water, shore foam); the rest of
+/// the settings is the sea state, which they leave alone. The top one,
+/// `Ultra`, is the default - the look the sea is tuned for - and each one
+/// below it gives up a little more of it for speed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OceanQuality {
+    /// For the weakest GPUs: the sea as a flat plane - no waves at all,
+    /// only its color, sky reflection and sun glint - and no shore foam.
+    VeryLow,
+    /// One plain ripple layer (1 texture read - its tiling can show from
+    /// high up), no shore foam.
+    Low,
+    /// One stochastic ripple layer (3 reads), no shore foam.
+    Medium,
+    /// One stochastic ripple layer (3 reads), shore foam.
+    High,
+    /// The default and the most detail: two stochastic ripple layers (6
+    /// reads), shore foam.
+    Ultra,
+}
+
+/// What a preset sets - see OceanQuality.
+struct QualityValues {
+    ripple_layers: u32,
+    ripple_stochastic: bool,
+    flat: bool,
+    shore_foam: bool,
+}
+
+impl OceanQuality {
+    pub const ALL: [OceanQuality; 5] = [OceanQuality::VeryLow, OceanQuality::Low, OceanQuality::Medium, OceanQuality::High, OceanQuality::Ultra];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            OceanQuality::VeryLow => "Very low",
+            OceanQuality::Low => "Low",
+            OceanQuality::Medium => "Medium",
+            OceanQuality::High => "High",
+            OceanQuality::Ultra => "Ultra",
+        }
+    }
+
+    /// One line on what it trades - for menus.
+    pub fn description(self) -> &'static str {
+        match self {
+            OceanQuality::VeryLow => "flat water - no waves, no shore foam",
+            OceanQuality::Low => "1 plain ripple layer (1 read), no shore foam",
+            OceanQuality::Medium => "1 ripple layer (3 reads), no shore foam",
+            OceanQuality::High => "1 ripple layer (3 reads), shore foam",
+            OceanQuality::Ultra => "2 ripple layers (6 reads), shore foam (the default)",
+        }
+    }
+
+    fn values(self) -> QualityValues {
+        let (ripple_layers, ripple_stochastic, flat, shore_foam) = match self {
+            OceanQuality::VeryLow => (1, false, true, false),
+            OceanQuality::Low => (1, false, false, false),
+            OceanQuality::Medium => (1, true, false, false),
+            OceanQuality::High => (1, true, false, true),
+            OceanQuality::Ultra => (2, true, false, true),
+        };
+        QualityValues { ripple_layers, ripple_stochastic, flat, shore_foam }
+    }
+
+    /// `settings` at this quality - the sea state kept. The waves
+    /// themselves are the default's (Ultra's) at every level: only how
+    /// they're drawn changes.
+    pub fn apply(self, settings: &mut OceanSettings) {
+        let defaults = OceanSettings::default();
+        let values = self.values();
+        settings.geometry_waves = defaults.geometry_waves;
+        settings.detail_waves = defaults.detail_waves;
+        settings.pixel_wave_cap = defaults.pixel_wave_cap;
+        settings.pixel_full_pixels = defaults.pixel_full_pixels;
+        settings.textured_ripples = true;
+        settings.ripple_layers = values.ripple_layers;
+        settings.ripple_stochastic = values.ripple_stochastic;
+        settings.flat = values.flat;
+    }
+
+    /// The preset `settings` are at, if any - the first one, when two only
+    /// differ by their shore foam (High and Medium; see `matches`).
+    pub fn of(settings: &OceanSettings) -> Option<Self> {
+        Self::ALL.into_iter().find(|quality| quality.matches(settings))
+    }
+
+    /// Whether `settings` are at this preset (its shore foam is the frame
+    /// plan's, not theirs - see `shore_foam`).
+    pub fn matches(self, settings: &OceanSettings) -> bool {
+        let defaults = OceanSettings::default();
+        let values = self.values();
+        settings.geometry_waves == defaults.geometry_waves
+                && settings.detail_waves == defaults.detail_waves
+                && settings.pixel_wave_cap == defaults.pixel_wave_cap
+                && settings.pixel_full_pixels == defaults.pixel_full_pixels
+                && settings.textured_ripples
+                && settings.ripple_layers == values.ripple_layers
+                && settings.ripple_stochastic == values.ripple_stochastic
+                && settings.flat == values.flat
+    }
+
+    /// Whether the sea is drawn flat at this quality (OceanSettings::flat).
+    pub fn flat(self) -> bool {
+        self.values().flat
+    }
+
+    /// Whether the shore foam - and the depth copy it reads every frame
+    /// (frame_plans::standard's CopyDepth) - is drawn at this quality.
+    pub fn shore_foam(self) -> bool {
+        self.values().shore_foam
     }
 }
 
@@ -190,6 +369,10 @@ impl OceanWaves {
     /// bins, one wave per bin at a random point inside it (so no two
     /// wavelengths line up), direction spread around the wind, random phase,
     /// amplitude carrying its bin's share of the spectrum's energy.
+    ///
+    /// Shortest to longest - the shader relies on it: it walks them longest
+    /// first and stops at the first one too short to show (ocean.wgsl's
+    /// gerstner and surface_waves).
     fn generate(rng: &mut StdRng, settings: &OceanSettings, peak_omega: f64, min_wavelength: f64, max_wavelength: f64, count: usize) -> Vec<Wave> {
         if count == 0 || max_wavelength <= min_wavelength {
             return Vec::new();
@@ -224,7 +407,7 @@ impl OceanWaves {
 
     /// Angle off the wind, drawn with density ~ cos(angle)^spread over
     /// -90..90 degrees (rejection sampling).
-    fn spread_angle(rng: &mut StdRng, spread: f64) -> f64 {
+    pub(super) fn spread_angle(rng: &mut StdRng, spread: f64) -> f64 {
         loop {
             let angle = rng.gen_range(-std::f64::consts::FRAC_PI_2..std::f64::consts::FRAC_PI_2);
             if rng.gen::<f64>() <= angle.cos().max(0.0).powf(spread) {
@@ -235,6 +418,15 @@ impl OceanWaves {
 
     pub fn settings(&self) -> &OceanSettings {
         &self.settings
+    }
+
+    /// The waves made again from `settings`, on the same clock - same
+    /// settings and seed give the very same waves, so only what changed
+    /// does.
+    pub fn set_settings(&mut self, settings: OceanSettings) {
+        let time = self.time;
+        *self = Self::new(settings);
+        self.time = time;
     }
 
     /// Advances the ocean's clock - once per frame.
@@ -248,6 +440,45 @@ impl OceanWaves {
     /// on the CPU.
     pub fn sea_level(&self) -> f32 {
         self.base_height as f32
+    }
+
+    /// The geometry waves' wavelengths, shortest first - the ones a mesh
+    /// ring can move (see ocean.wgsl's geometry_share).
+    pub fn geometry_wavelengths(&self) -> impl Iterator<Item = f32> + '_ {
+        self.geometry.iter().map(|wave| wave.wavelength() as f32)
+    }
+
+    /// How far the geometry waves can move a point of the water at most:
+    /// sideways (every wave's Gerstner push together) and up/down from the
+    /// sea level (every amplitude together) - for culling the mesh.
+    pub fn reach(&self) -> (f32, f32) {
+        let sideways = self.geometry.iter().map(|wave| wave.steepness * wave.amplitude).sum::<f64>();
+        let vertical = self.geometry.iter().map(|wave| wave.amplitude).sum::<f64>();
+        (sideways as f32, vertical as f32)
+    }
+
+    /// The slope variance of every wave together - each one's (k * a)^2 / 2,
+    /// the detail waves' scaled by `detail_strength` like the shader does.
+    /// The shader compares what still shows at a pixel against it (see
+    /// ocean.wgsl's surface_waves) - it's the same every pixel, so it's
+    /// summed once here instead.
+    fn total_slope_variance(&self) -> f64 {
+        let strength = self.settings.detail_strength as f64;
+        let variance = |wave: &Wave, scale: f64| 0.5 * (wave.k * wave.amplitude * scale).powi(2);
+        self.geometry_slope_variance() + self.detail.iter().map(|wave| variance(wave, strength)).sum::<f64>()
+    }
+
+    /// The geometry waves' share of `total_slope_variance` - what the
+    /// ripple map's variance is added to when it stands in for the detail
+    /// waves (see game::ocean::ripples).
+    pub fn geometry_slope_variance(&self) -> f64 {
+        self.geometry.iter().map(|wave| 0.5 * (wave.k * wave.amplitude).powi(2)).sum()
+    }
+
+    /// The ocean's clock (seconds, time-scaled) - what the waves and the
+    /// ripple map's drift run on.
+    pub fn time(&self) -> f64 {
+        self.time
     }
 
     /// This frame's waves for the ocean shader's `Ocean` params - `params`,
@@ -265,9 +496,44 @@ impl OceanWaves {
             ]);
         }
         BTreeMap::from([
-            ("params".to_owned(), vec![self.geometry.len() as f32, self.detail.len() as f32, self.base_height as f32, self.color_height_scale as f32]),
-            ("shading".to_owned(), vec![self.settings.choppiness, self.settings.whitecap_strength, self.settings.detail_strength, self.settings.wind_direction]),
+            // Flat: no waves for the shader to walk, in the mesh or per pixel.
+            ("params".to_owned(), if self.settings.flat {
+                vec![0.0, 0.0, self.base_height as f32, self.color_height_scale as f32]
+            } else {
+                vec![self.geometry.len() as f32, self.detail.len() as f32, self.base_height as f32, self.color_height_scale as f32]
+            }),
+            ("shading".to_owned(), vec![self.settings.choppiness, self.settings.whitecap_strength, self.settings.detail_strength, self.total_slope_variance() as f32]),
             ("waves".to_owned(), waves),
         ])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_default_settings_are_the_top_quality() {
+        assert_eq!(OceanQuality::of(&OceanSettings::default()), Some(OceanQuality::Ultra));
+        for quality in OceanQuality::ALL {
+            let mut settings = OceanSettings::default();
+            quality.apply(&mut settings);
+            assert!(quality.matches(&settings), "{quality:?}");
+            assert!(settings.geometry_waves + settings.detail_waves <= MAX_WAVES);
+        }
+    }
+
+    #[test]
+    fn each_wave_group_is_sorted_shortest_to_longest() {
+        // ocean.wgsl stops at the first wave too short to show, walking each
+        // group longest first - out of order, it would drop visible waves.
+        // (The default sea has no geometry waves - give it some.)
+        let waves = OceanWaves::new(OceanSettings { geometry_waves: 28, wind_speed: 6.0, ..OceanSettings::default() });
+        for group in [&waves.geometry, &waves.detail] {
+            assert!(group.windows(2).all(|pair| pair[0].wavelength() < pair[1].wavelength()));
+        }
+        // And every detail wave is shorter than every geometry wave.
+        let longest_detail = waves.detail.last().unwrap().wavelength();
+        assert!(longest_detail < waves.geometry[0].wavelength());
     }
 }

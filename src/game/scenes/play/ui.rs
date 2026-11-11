@@ -371,7 +371,7 @@ fn show_pause_panel(ui: &mut impl GameUi, app: &mut App, id: &str) {
 pub fn open_pause_menu(ui: &mut impl GameUi, app: &mut App) {
     app.time.time_scale = 0.0;
     // Frees the cursor so the pause buttons are actually clickable -
-    // relative mode (see play::scene::GameLogic::finish, which turns it
+    // relative mode (see play::Play::finish, which turns it
     // back on for flight) captures/hides it for mouse-look otherwise.
     app.window.set_cursor_locked(false);
     if let Some(backdrop) = ui.ui_node("PauseBackdrop") {
@@ -495,13 +495,13 @@ pub fn build_pause_menu(scene: &mut Scene, app: &mut App) {
     scene.ui_on_top("Settings");
 }
 
-/// Shows the death screen - see `play::scene::GameLogic::check_water_death`'s
+/// Shows the death screen - see `play::Play::check_water_death`'s
 /// own doc comment for what actually triggers this. Sets DeathBackdrop/
 /// DeathPanel active immediately, no fade-in (the black screen should read as
 /// "quite instantly", per the request this came out of) - unlike the pause
 /// menu's own gradient backdrop, which is meant to be a translucent overlay,
 /// not a hard cut.
-#[allow(dead_code)] // not shown for now - see play::scene::GameLogic::check_crash
+#[allow(dead_code)] // not shown for now - see play::Play::check_crash
 pub fn open_death_screen(ui: &mut impl GameUi, app: &mut App) {
     // Frees the cursor so Restart/Back to Main Menu are actually clickable -
     // same reasoning as open_pause_menu's own doc comment.

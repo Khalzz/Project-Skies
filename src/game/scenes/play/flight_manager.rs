@@ -11,7 +11,6 @@ use pankarta_software::app::App;
 use crate::game::ext::game_object::{Camera as GameObjectCamera, Cameras};
 use crate::game::ext::emitters::ParticleEmitters;
 use crate::game::ext::physics_behavior::PhysicsNodeExt;
-use crate::game::models;
 use pankarta_software::prelude::DoubleSidedMeshes;
 use crate::game::ext::water_contact::WaterContact;
 use pankarta_software::scene_manager::node::Node;
@@ -535,8 +534,9 @@ impl flight_manager {
         let plane = if placement.player { plane } else { plane.bot() };
 
         let material = plane_material(&aircraft_spec, Some(placement));
-        let mut model = models::scaled(Model::file(models::asset_relative(&aircraft_spec.model.model))
-            .double_sided(DoubleSidedMeshes::Meshes(aircraft_spec.model.double_sided.clone())), aircraft_spec.model.scale);
+        let mut model = Model::file(crate::game::asset_relative(&aircraft_spec.model.model))
+            .double_sided(DoubleSidedMeshes::Meshes(aircraft_spec.model.double_sided.clone()))
+            .transform(Transform3D { scale: Vector3::repeat(aircraft_spec.model.scale), ..Default::default() });
         model.material = material;
         scene.spawn_node(app,
             Node::new(&placement.name)
@@ -613,8 +613,9 @@ impl flight_manager {
                 Node::new(&node_id)
                     .with_property(local)
                     .with_property(Parent { id: placement.name.clone(), space: Space::Local, local, local_2d: Default::default(), inherit_rotation: true })
-                    .with_property(models::scaled(Model::file(models::asset_relative(&weapon.model.model))
-                        .double_sided(DoubleSidedMeshes::Meshes(weapon.model.double_sided.clone())), weapon.model.scale)),
+                    .with_property(Model::file(crate::game::asset_relative(&weapon.model.model))
+                        .double_sided(DoubleSidedMeshes::Meshes(weapon.model.double_sided.clone()))
+                        .transform(Transform3D { scale: Vector3::repeat(weapon.model.scale), ..Default::default() })),
             );
             match spawned {
                 Ok(()) => stores.push(Store { node_id, pylon: pylon.name.clone(), weapon: weapon.id.clone(), offset: pylon.position }),

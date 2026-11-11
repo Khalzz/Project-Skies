@@ -163,6 +163,9 @@ pub fn build_water_rings_mesh(rings: &[WaterRing]) -> (Vec<ModelVertex>, Vec<u32
         assert!(half > inner, "water ring {level}: must reach further than the one inside it");
         let next_cell = rings.get(level + 1).map(|next| next.cell).unwrap_or(cell * 2.0);
         assert!((next_cell / cell).fract() == 0.0, "water ring {}: cell must be a whole multiple of ring {level}'s", level + 1);
+        // Its outer edge slides onto the next ring's grid (ocean.wgsl's ring
+        // morph) - so it must be on it.
+        assert!((ring.outer_half_extent / next_cell).fract() == 0.0, "water ring {level}: outer edge isn't on the next ring's grid");
         let side = (half * 2 + 1) as usize;
 
         // Grid vertex index -> mesh vertex index, only for vertices a kept
@@ -218,4 +221,22 @@ pub fn load_trimesh_geometry(path: &str) -> anyhow::Result<(Vec<Vector3<f32>>, V
         }
     }
     Ok((vertices, indices))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_ocean_tier_builds_and_stays_light() {
+        // build_water_rings_mesh panics on a ring layout the shader's ring
+        // morph can't join up. The vertex budget: every vertex sums the
+        // geometry waves each frame (see ocean.wgsl's gerstner) - the old
+        // 2 m-cells-to-2 km layout was ~7.9M and is what made the sea slow.
+        for (index, tier) in crate::OCEAN_TIERS.iter().enumerate() {
+            let (vertices, indices) = build_water_rings_mesh(tier.rings);
+            println!("ocean tier {index}: {} vertices, {} triangles", vertices.len(), indices.len() / 3);
+            assert!(vertices.len() < 1_000_000, "ocean tier {index} has {} vertices", vertices.len());
+        }
+    }
 }

@@ -116,6 +116,11 @@ const TACTICAL_ZOOM_STEP: f32 = 1.15;
 const TACTICAL_START_PITCH_DEG: f32 = 35.0;
 const TACTICAL_FOV: f32 = 50.0;
 const TACTICAL_TURN_PER_PIXEL_DEG: f32 = 0.25;
+/// The tactical map's chart view (straight down, orthographic): how high the
+/// camera sits (m) - above anything on the map - and how far below the sea
+/// it still draws.
+const TACTICAL_CHART_HEIGHT: f32 = 60_000.0;
+const TACTICAL_CHART_BELOW_SEA: f32 = 2_000.0;
 
 /// F10's editor camera (see `Camera::update_editor`): its field of view,
 /// how far mouse look turns it per pixel (rad), how fast it flies to start
@@ -165,6 +170,26 @@ struct TacticalOrbit {
     pitch: f32,
     /// From the target (m).
     distance: f32,
+    /// Seen straight down through an orthographic lens - a flat chart, the
+    /// same scale everywhere - instead of the 3D orbit. `distance` is its
+    /// zoom then (it sees as much as the 3D view would at the pivot), and
+    /// `yaw` which way is up on it; `pitch` waits for the 3D view.
+    top_down: bool,
+}
+
+impl TacticalOrbit {
+    /// Half the height of what the view sees at the pivot (m) - the 3D
+    /// view's at its distance, and the chart's whole height.
+    fn half_height(&self) -> f32 {
+        self.distance * (TACTICAL_FOV.to_radians() * 0.5).tan()
+    }
+
+    /// Flat on the map: away from the camera (the 3D view's) - up on the
+    /// chart.
+    fn ahead(&self) -> Vector3<f32> {
+        let yaw = self.yaw.to_radians();
+        -Vector3::new(yaw.cos(), 0.0, yaw.sin())
+    }
 }
 
 /// The right stick, as look input - both axes -1..1, `x` positive = look
@@ -441,7 +466,7 @@ impl Camera {
             }
             editor.looking = false;
             let (position, forward) = (editor.position, editor.forward());
-            set_pose(node, position, position + forward, Vector3::y(), CameraLens { fovy: EDITOR_FOV, znear: 0.5, viewport: None });
+            set_pose(node, position, position + forward, Vector3::y(), CameraLens { znear: 0.5, ..CameraLens::new(EDITOR_FOV) });
             return;
         }
         let was_looking = editor.looking;
@@ -479,7 +504,7 @@ impl Camera {
             editor.position += editor.forward() * scroll * editor.speed * EDITOR_DOLLY_SECONDS;
         }
         let (position, forward) = (editor.position, editor.forward());
-        set_pose(node, position, position + forward, Vector3::y(), CameraLens { fovy: EDITOR_FOV, znear: 0.5, viewport: None });
+        set_pose(node, position, position + forward, Vector3::y(), CameraLens { znear: 0.5, ..CameraLens::new(EDITOR_FOV) });
     }
 
     /// Moves the editor camera by `delta` (m) - keeping up with what it
@@ -583,7 +608,7 @@ impl Camera {
             // Behind it: the orbit's offset points the other way.
             (-forward.z).atan2(-forward.x).to_degrees()
         }).unwrap_or(0.0);
-        self.tactical = Some(TacticalOrbit { pivot: None, follow: false, yaw, pitch: TACTICAL_START_PITCH_DEG, distance: TACTICAL_START_DISTANCE });
+        self.tactical = Some(TacticalOrbit { pivot: None, follow: false, yaw, pitch: TACTICAL_START_PITCH_DEG, distance: TACTICAL_START_DISTANCE, top_down: false });
     }
 
     /// The tactical view kept on the target (the map's center button) - or
@@ -594,21 +619,32 @@ impl Camera {
         }
     }
 
+    /// The tactical view as a flat chart, seen straight down (the map's
+    /// "Chart" button) - or the 3D orbit.
+    pub fn set_tactical_top_down(&mut self, top_down: bool) {
+        if let Some(orbit) = &mut self.tactical {
+            orbit.top_down = top_down;
+        }
+    }
+
     /// Drags the tactical view across the map by `delta` screen pixels (x
     /// right, y down) on a screen `screen_height` pixels tall - the map moves
     /// with the pointer, like dragging a sheet of paper. Stops following.
     pub fn pan_tactical(&mut self, delta: (f32, f32), screen_height: f32) {
         let Some(orbit) = &mut self.tactical else { return };
-        let Some(pivot) = &mut orbit.pivot else { return };
+        if orbit.pivot.is_none() {
+            return;
+        }
         orbit.follow = false;
         // How far a pixel is at the pivot.
-        let meters_per_pixel = 2.0 * orbit.distance * (TACTICAL_FOV.to_radians() * 0.5).tan() / screen_height.max(1.0);
-        let yaw = orbit.yaw.to_radians();
+        let meters_per_pixel = 2.0 * orbit.half_height() / screen_height.max(1.0);
         // Flat on the map: away from the camera, and to its right.
-        let forward = -Vector3::new(yaw.cos(), 0.0, yaw.sin());
+        let forward = orbit.ahead();
         let right = forward.cross(&Vector3::y());
-        // Looking along the ground, a pixel up the screen covers more of it.
-        let foreshortening = orbit.pitch.to_radians().sin().abs().max(0.3);
+        // Looking along the ground, a pixel up the screen covers more of it
+        // - not on the chart, seen straight down.
+        let foreshortening = if orbit.top_down { 1.0 } else { orbit.pitch.to_radians().sin().abs().max(0.3) };
+        let Some(pivot) = &mut orbit.pivot else { return };
         *pivot -= right * delta.0 * meters_per_pixel;
         *pivot += forward * delta.1 * meters_per_pixel / foreshortening;
     }
@@ -629,7 +665,10 @@ impl Camera {
         let turning = !app.time.is_paused() && (!mouse_free || (app.input.mouse_right_button_down() && !over_ui));
         if turning {
             orbit.yaw += app.input.mouse_rel_x() as f32 * TACTICAL_TURN_PER_PIXEL_DEG;
-            orbit.pitch = (orbit.pitch + app.input.mouse_rel_y() as f32 * TACTICAL_TURN_PER_PIXEL_DEG).clamp(-85.0, 89.0);
+            // The chart only turns round - it's always seen straight down.
+            if !orbit.top_down {
+                orbit.pitch = (orbit.pitch + app.input.mouse_rel_y() as f32 * TACTICAL_TURN_PER_PIXEL_DEG).clamp(-85.0, 89.0);
+            }
         }
         let scroll = app.input.mouse_scroll_y();
         if scroll != 0.0 && !app.time.is_paused() && !over_ui {
@@ -649,8 +688,17 @@ impl Camera {
         let (width, height) = crate::game::frame_plans::tactical_viewport()
             .map(|[_, _, width, height]| (width, height))
             .unwrap_or((app.window.size.width as f32, app.window.size.height as f32));
-        let lens = CameraLens { fovy: TACTICAL_FOV, znear: 1.0, viewport: Some((width.max(1.0) as u32, height.max(1.0) as u32)) };
-        set_pose(node, pivot + offset, pivot, Vector3::y(), lens);
+        let viewport = Some((width.max(1.0) as u32, height.max(1.0) as u32));
+        if orbit.top_down {
+            // Straight down from high above the pivot, `ahead` up the screen,
+            // seeing as much as the 3D view would at the pivot.
+            let above = Vector3::new(pivot.x, TACTICAL_CHART_HEIGHT, pivot.z);
+            let lens = CameraLens { znear: 1.0, viewport, ..CameraLens::orthographic(orbit.half_height()).far(TACTICAL_CHART_HEIGHT + TACTICAL_CHART_BELOW_SEA) };
+            set_pose(node, above, Vector3::new(pivot.x, 0.0, pivot.z), orbit.ahead(), lens);
+        } else {
+            let lens = CameraLens { znear: 1.0, viewport, ..CameraLens::new(TACTICAL_FOV) };
+            set_pose(node, pivot + offset, pivot, Vector3::y(), lens);
+        }
         self.target = Some(target);
     }
 
@@ -1067,8 +1115,22 @@ mod tests {
     /// -Z (so looking toward +Z, where +X is to the left).
     fn camera_looking_along_plus_z() -> Camera {
         let mut camera = Camera::new();
-        camera.tactical = Some(TacticalOrbit { pivot: Some(Vector3::zeros()), follow: true, yaw: -90.0, pitch: 45.0, distance: 1000.0 });
+        camera.tactical = Some(TacticalOrbit { pivot: Some(Vector3::zeros()), follow: true, yaw: -90.0, pitch: 45.0, distance: 1000.0, top_down: false });
         camera
+    }
+
+    #[test]
+    fn dragging_the_chart_moves_it_the_same_amount_everywhere() {
+        // Straight down, a pixel is as far up the screen as across it - no
+        // foreshortening, however the 3D view was pitched.
+        let mut camera = camera_looking_along_plus_z();
+        let orbit = camera.tactical.as_mut().unwrap();
+        orbit.top_down = true;
+        orbit.pitch = 10.0;
+        let meters_per_pixel = 2.0 * orbit.half_height() / 720.0;
+        camera.pan_tactical((0.0, 100.0), 720.0);
+        let moved = camera.tactical.as_ref().unwrap().pivot.unwrap().magnitude();
+        assert!((moved - 100.0 * meters_per_pixel).abs() < 1e-3, "moved {moved}, expected {}", 100.0 * meters_per_pixel);
     }
 
     #[test]

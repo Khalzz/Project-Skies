@@ -11,11 +11,18 @@ pub mod screen_effects;
 /// What the game needs that the engine doesn't have - kept game-side (see
 /// each module).
 pub mod ext;
-/// The models scenes use, by name.
-pub mod models;
 
 use pankarta_software::prelude::Environment;
 use pankarta_software::rendering::enviroment::environment::SkyboxFaces;
+
+/// `path` (as the game's data files write it: "assets/planes/f16/...",
+/// relative to where the game runs) inside the assets folder - which is
+/// what the engine loads files relative to.
+pub fn asset_relative(path: &str) -> String {
+    let path = path.replace('\\', "/");
+    let path = path.trim_start_matches("./");
+    path.strip_prefix("assets/").unwrap_or(path).to_owned()
+}
 
 /// The cubemap sky (assets/skybox) - the sandbox's.
 pub fn skybox() -> Environment {

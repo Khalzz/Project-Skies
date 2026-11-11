@@ -131,7 +131,7 @@ impl Instrumentation {
         const SPEED_OF_SOUND_SEA_LEVEL_MS: f32 = 340.29;
         self.flight_data.mach = speed_ms / SPEED_OF_SOUND_SEA_LEVEL_MS;
         // Raw world Y - this game's own "sea level" is Y=0 (see e.g.
-        // play::scene::spawn_world's "world"/water node), so this doubles as
+        // play::spawn_world's "world"/water node), so this doubles as
         // height above water without needing the wave-surface's own current
         // height subtracted out; a HUD altimeter reads the nominal/rest sea
         // level, not the instantaneous wave crest/trough under the plane.

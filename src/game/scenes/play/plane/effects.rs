@@ -1,5 +1,5 @@
 //! The plane's particle effects - attached as the node's `ParticleEmitters`
-//! (see play::scene::spawn_world) and driven by `Plane` (see
+//! (see play::spawn_world) and driven by `Plane` (see
 //! `Plane::update_effects`) - plus the spray it kicks up off the water,
 //! which lives on its own node on the sea (see `spray_emitters`).
 
@@ -141,7 +141,7 @@ pub fn spray_curtain() -> TrailEffect {
 }
 
 /// For the "water_spray" node - kept on the sea under the plane and turned
-/// to its heading (see play::scene::update_water_wake), off until it's low
+/// to its heading (see play::update_water_wake), off until it's low
 /// and fast enough to stir the water: the two curtains along the V.
 pub fn spray_emitters() -> ParticleEmitters {
     ParticleEmitters::new()

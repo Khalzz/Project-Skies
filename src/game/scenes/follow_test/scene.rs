@@ -3,7 +3,7 @@ use nalgebra::{UnitQuaternion, Vector3};
 use pankarta_software::prelude::*;
 
 use crate::game::camera::camera::{looking_along, Camera, CameraConfig, Fov, Speed};
-use crate::game::models;
+use crate::game::ocean::Ocean;
 
 /// Testbed for the upcoming "follow point" camera system. For now it just
 /// stands up the world (island + water + sky) with the MQ-9 drone parked in
@@ -41,14 +41,14 @@ impl GameLogic {
             sun_node([0.7, 0.7, 0.8]),
             // The island at the origin (same model/scale/height as play's
             // "runway" island).
-            Node::new("island").with_property(at(Vector3::new(0.0, 100.0, 0.0), 60.0)).with_property(models::model(models::RUNWAY)),
+            Node::new("island").with_property(at(Vector3::new(0.0, 100.0, 0.0), 60.0)).with_property(Model::file("models/Runway/Runway.glb").double_sided(DoubleSidedMeshes::All)),
             // Distant landmass for the horizon (matches play's "ground").
-            Node::new("ground").with_property(at(Vector3::new(0.0, 0.0, 50_000.0), 30_000.0)).with_property(models::model(models::GROUND)),
+            Node::new("ground").with_property(at(Vector3::new(0.0, 0.0, 50_000.0), 30_000.0)).with_property(Model::file("models/ground/ground.glb")),
             // The sea, recentred under the camera every frame in `update` so
             // a fast free-fly can't outrun it.
-            Node::new("world").with_property(at(Vector3::zeros(), 1.0)).with_property(models::ocean_surface(0.0)),
+            Node::new("world").with_property(at(Vector3::zeros(), 1.0)).with_property(Ocean::surface(0.0)),
             // The MQ-9 drone - the node the follow camera will track.
-            Node::new("mq9").with_property(at(Vector3::new(0.0, 180.0, 0.0), 11.0)).with_property(models::model(models::MQ9)),
+            Node::new("mq9").with_property(at(Vector3::new(0.0, 180.0, 0.0), 11.0)).with_property(Model::file("models/MQ-9/mq-9.glb")),
             // Camera - the reusable `Camera` behavior with `free: true`.
             // Starts as free-fly (mouse-look + WASD / Space / Left Ctrl, Left
             // Shift to sprint, scroll to zoom); "follow_cam_toggle" (no key
@@ -99,7 +99,7 @@ impl SceneBehaviour for GameLogic {
             water.position.x = camera.x;
             water.position.z = camera.z;
         }
-        models::update_ocean_tier(scene, "world", camera.y);
+        Ocean::update_tier(scene, "world", camera.y);
         // The sea's waves, around where the camera is drawn from.
         self.ocean.update(scene, "world", app.time.delta_time);
     }
