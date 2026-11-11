@@ -2,7 +2,7 @@
 // engine::rendering::shader_library for what a Raw shader gets). Groups
 // 1/2/3 are the camera, the mesh's transform and the light, as for every
 // model. Group 0 is the material's: its params - the wave field and the
-// wake, `Ocean` below, filled every frame by game::ocean - at binding 2, and
+// wake, `Ocean` below, filled every frame by prefabs::ocean - at binding 2, and
 // (it `reads: [Depth]`) a snapshot of the depth buffer taken right after the
 // solid world finished drawing (the frame plan's CopyDepth) at 16/17 - used
 // for shore-intersection foam, see fs_main's own comment on that. Bindings
@@ -69,7 +69,7 @@ const SEA_HAZE_START: f32 = 3000.0;
 const SEA_HAZE_END: f32 = 80000.0;
 
 // The water mesh is one set of nested square rings around the camera (see
-// resources::build_water_rings_mesh / main.rs's OCEAN_TIERS): coarser the
+// prefabs::ocean::mesh): coarser the
 // further out, and every vertex knows its ring's cell size and outer
 // half-extent (tex_coords) and the next ring's cell size (normal.x). A ring
 // only MOVES the waves it's fine enough to draw - a wave needs a few cells
@@ -101,7 +101,7 @@ const NEXT_RING_FADE_START: f32 = 0.9;
 
 
 // The waves themselves come from `ocean` (group 0, binding 2) - generated on
-// the CPU from a wind-sea spectrum by game::ocean
+// the CPU from a wind-sea spectrum by prefabs::ocean
 // (see that module's doc comment), which is also what gameplay asks for the
 // surface height, so both always agree. Two groups, in that order in
 // `ocean.waves`:
@@ -118,13 +118,13 @@ const NEXT_RING_FADE_START: f32 = 0.9;
 // the camera-relative positions it already works in. That keeps every
 // number small, so waves stay crisp arbitrarily far from the world origin.
 
-// Must match game::ocean::MAX_WAVES.
+// Must match prefabs::ocean::waves::MAX_WAVES.
 const MAX_WAVES: u32 = 80u;
-// Must match game::ocean::MAX_WAKE_POINTS.
+// Must match prefabs::ocean::wake::MAX_WAKE_POINTS.
 const MAX_WAKE_POINTS: u32 = 32u;
 
 // A plane flying fast and low leaves a foam streak on the water along its
-// trail (see water_wake, and game::ocean's wake for when/how strongly),
+// trail (see water_wake, and prefabs::ocean::wake for when/how strongly),
 // WAKE_TRAIL_WIDTH wide when fresh and WAKE_TRAIL_SPREAD wider per second
 // of age, fading out; WAKE_TRAIL_FOAM is its strength.
 const WAKE_TRAIL_WIDTH: f32 = 5.0;
@@ -133,7 +133,7 @@ const WAKE_TRAIL_FOAM: f32 = 0.8;
 // The trail's foam is broken up by noise pinned to the water: dense when
 // fresh, thinning to patches as it ages - WAKE_FOAM_COVERAGE_FRESH/_OLD are
 // how much of it survives (0..1) at those two ends. The noise repeats every
-// WAKE_NOISE_PERIOD meters (game::ocean's WAKE_NOISE_PERIOD, keep in sync).
+// WAKE_NOISE_PERIOD meters (prefabs::ocean::wake's WAKE_NOISE_PERIOD, keep in sync).
 const WAKE_FOAM_COVERAGE_FRESH: f32 = 0.85;
 const WAKE_FOAM_COVERAGE_OLD: f32 = 0.35;
 const WAKE_NOISE_PERIOD: f32 = 4096.0;
@@ -204,7 +204,7 @@ var t_scene_depth: texture_2d<f32>;
 @group(0) @binding(17)
 var s_scene_depth: sampler;
 
-// The ripple map (ocean.ron's `ripples` - see game::ocean::ripples): the
+// The ripple map (ocean.ron's `ripples` - see prefabs::ocean::ripples): the
 // sea's shortest waves baked into one tiling texture of slopes - red along
 // the map's u, green along v, 0.5 flat (ripple_info.z turns it back into a
 // slope). Read by ripple_layer when the detail waves come from it
@@ -214,7 +214,7 @@ var ripples: texture_2d<f32>;
 @group(0) @binding(4)
 var ripples_sampler: sampler;
 // The ripples on the map, shortest and longest, in map tiles -
-// game::ocean::ripples' SHORTEST and LONGEST over its TILE (keep in sync).
+// prefabs::ocean::ripples' SHORTEST and LONGEST over its TILE (keep in sync).
 const RIPPLE_SHORTEST: f32 = 0.015625;
 const RIPPLE_LONGEST: f32 = 0.25;
 // The ripple map isn't laid down tile after tile (that repeats plainly
@@ -222,7 +222,7 @@ const RIPPLE_LONGEST: f32 = 0.25;
 // each grid point showing the map from a random place, every point on the
 // sea blending the three around it (see ripple_layer). RIPPLE_HEX_SCALE
 // grid points per tile, the random places repeating every
-// RIPPLE_HEX_PERIOD grid points - game::ocean::ripples' HEX_SCALE and
+// RIPPLE_HEX_PERIOD grid points - prefabs::ocean::ripples' HEX_SCALE and
 // HEX_PERIOD (keep in sync).
 const RIPPLE_HEX_SCALE: f32 = 1.5;
 const RIPPLE_HEX_PERIOD: i32 = 256;
@@ -234,7 +234,7 @@ const RIPPLE_GUST_MIN: f32 = 0.6;
 const RIPPLE_GUST_MAX: f32 = 1.4;
 const RIPPLE_GUST_SIZE: f32 = 512.0;
 
-// See game::ocean (OceanWaves::params, Ocean::write_wake) - each wave is two
+// See prefabs::ocean (OceanWaves::params, Wake::write) - each wave is two
 // vec4s: (dir.x, dir.z, k, amplitude), (steepness, phase at camera,
 // wavelength, unused).
 struct Ocean {
@@ -246,7 +246,7 @@ struct Ocean {
     // see surface_waves
     shading: vec4<f32>,
     waves: array<vec4<f32>, 160>,
-    // The low-flying plane's wake - see game::ocean. All zero when there's none.
+    // The low-flying plane's wake - see prefabs::ocean. All zero when there's none.
     // plane: camera-relative x, z, height above the water, intensity 0..1
     wake_head: vec4<f32>,
     // circle around the whole wake (camera-relative x, z, radius), trail max age
@@ -257,12 +257,10 @@ struct Ocean {
     wake_points: array<vec4<f32>, 32>,
     // camera world x, z wrapped to WAKE_NOISE_PERIOD, unused x2
     wake_anchor: vec4<f32>,
-    // Per-pixel cost knobs and debug views (see OceanSettings::pixel_* and
-    // game::ocean::OceanDebugView): how many pixels a wave must span to
-    // fully show (DETAIL_FULL_PIXELS when 0), at most how many waves a pixel
-    // sums, the debug view (0 normal, 1 waves summed per pixel, 2 mesh
-    // cells), whether the detail waves come from the ripple map (1) or
-    // are summed (0).
+    // Per-pixel cost knobs (see OceanSettings::pixel_*): how many pixels a
+    // wave must span to fully show (DETAIL_FULL_PIXELS when 0), at most how
+    // many waves a pixel sums, unused, whether the detail waves come from
+    // the ripple map (1) or are summed (0).
     tuning: vec4<f32>,
     // The ripple map's two layers (see ripple_layer): where the camera is
     // on each (u, v, wrapped to one tile), and which way its u points (the
@@ -317,8 +315,7 @@ var<uniform> light: Light;
 // Written as near*far / (near + raw*(far - near)) - the same thing as
 // 2nf / (f + n - z_ndc*(f - n)) with z_ndc = 1 - 2*raw, but without that
 // form's (f + n) - (f - n): with f = 4e6 and n = 0.1 those two round to the
-// same f32, so a raw 0 (the far plane - the sky, or the ocean lab's
-// variant without the depth copy) divided by exactly zero. On Metal (fast
+// same f32, so a raw 0 (the far plane - the sky) divided by exactly zero. On Metal (fast
 // math) that came out as nonsense, and the shore foam covered the sea.
 // An orthographic lens spreads depth evenly from near to far instead.
 fn linearize_depth(raw: f32, near: f32, far: f32) -> f32 {
@@ -351,10 +348,6 @@ struct VertexOutput {
     // evaluates every wave's shading here, per pixel (see surface_waves).
     @location(1) rest_position: vec2<f32>,
     @location(2) world_position: vec3<f32>,
-    // The vertex's place in the mesh before the ring morph, and its ring's
-    // cell size - only for the mesh-cells debug view.
-    @location(3) mesh_local: vec2<f32>,
-    @location(4) @interpolate(flat) cell: f32,
 };
 
 // How much of a wave of `wavelength` a mesh of `cell`-sized cells moves -
@@ -372,7 +365,7 @@ fn geometry_share(wavelength: f32, cell: f32) -> f32 {
 // them out per pixel (see surface_waves).
 //
 // Walks the waves longest first: they arrive sorted shortest to longest
-// (see game::ocean's OceanWaves::new), so once one is too short for this
+// (see prefabs::ocean::waves' OceanWaves::new), so once one is too short for this
 // cell size every one after it is too - and a coarse ring stops right away.
 fn gerstner(p: vec2<f32>, amp: f32, cell: f32) -> vec3<f32> {
     var offset = vec3<f32>(0.0);
@@ -414,8 +407,6 @@ struct SurfaceSample {
     // The slope variance of the waves it summed (faded ones partly) - what
     // fs_main compares with the total for `lost_slope`.
     shown_variance: f32,
-    // How many waves this pixel summed - the wave-cost debug view.
-    summed: f32,
 };
 
 fn surface_waves(p: vec2<f32>, pixel_size: f32) -> SurfaceSample {
@@ -490,7 +481,6 @@ fn surface_waves(p: vec2<f32>, pixel_size: f32) -> SurfaceSample {
     }
 
     out.shown_variance = shown_variance;
-    out.summed = f32(summed);
     return out;
 }
 
@@ -579,9 +569,8 @@ fn ripple_layer(p: vec2<f32>, layer: vec4<f32>, cells: vec2<f32>, inv_tile: f32,
 }
 
 // The depth so far at framebuffer pixel `pixel` (the frame plan's
-// CopyDepth) - the only place this shader reads it, so the ocean lab's
-// variant without the depth copy (game::scenes::ocean_lab) swaps out just
-// this line. Raw reversed-Z: 0 is the far plane.
+// CopyDepth) - the only place this shader reads it. Raw reversed-Z: 0 is the
+// far plane.
 fn scene_depth(pixel: vec2<i32>) -> f32 {
     return textureLoad(t_scene_depth, pixel, 0).x;
 }
@@ -598,22 +587,6 @@ fn depth_tint(p: vec2<f32>, pixel_size: f32) -> f32 {
     tint += (wake_value_noise(q, 128.0) - 0.5) * 0.3 * (1.0 - smoothstep(16.0, 64.0, pixel_size));
     tint += (wake_value_noise(q, 32.0) - 0.5) * 0.1 * (1.0 - smoothstep(4.0, 16.0, pixel_size));
     return tint * 2.0;
-}
-
-// A color per wave count for the wave-cost view: dark blue (none) through
-// green and yellow to red (MAX_WAVES).
-fn cost_color(summed: f32) -> vec3<f32> {
-    let t = clamp(summed / f32(MAX_WAVES), 0.0, 1.0);
-    let cold = mix(vec3<f32>(0.02, 0.05, 0.35), vec3<f32>(0.1, 0.8, 0.3), smoothstep(0.0, 0.35, t));
-    let warm = mix(vec3<f32>(1.0, 0.85, 0.1), vec3<f32>(1.0, 0.1, 0.05), smoothstep(0.6, 1.0, t));
-    return mix(cold, warm, smoothstep(0.3, 0.65, t));
-}
-
-// A color per ring for the mesh-cells view - by its cell size (each ring's
-// is a power of two).
-fn ring_color(cell: f32) -> vec3<f32> {
-    let level = log2(max(cell, 1.0));
-    return 0.5 + 0.5 * cos(6.2831853 * (level * 0.13 + vec3<f32>(0.0, 0.33, 0.67)));
 }
 
 // Random 0..1 per integer lattice point, repeating every `period` points.
@@ -715,7 +688,7 @@ fn vs_main(model: VertexInput, instance: InstanceInput) -> VertexOutput {
     // outer circle, odd grid vertices slide onto the next ring's coarser
     // grid (every other vertex), so the ring's edge matches the next ring's
     // exactly. `cell`/`outer` are this ring's cell size and half-extent, and
-    // `next_cell` the next ring's (see resources::build_water_rings_mesh) -
+    // `next_cell` the next ring's (see prefabs::ocean::mesh) -
     // a whole multiple of `cell`; positions are exact multiples of `cell`, so
     // `snap` is exactly how far each vertex is past the next ring's grid.
     let cell = model.tex_coords.x;
@@ -731,7 +704,7 @@ fn vs_main(model: VertexInput, instance: InstanceInput) -> VertexOutput {
     // same fraction, and neighbors never pass each other: no triangle folds
     // over, however much coarser the next ring is. (A ring's inner corners
     // must stay unmorphed even so: its half-extent must be at least ~2x the
-    // next ring's cell - see main.rs's OCEAN_TIERS.)
+    // next ring's cell - see prefabs::ocean::mesh's RINGS.)
     let morph = smoothstep(RING_MORPH_START, 1.0, length(anchor) / outer);
     let morphed = local - snap * morph;
     // The cell size this vertex effectively samples at - grows smoothly to
@@ -763,8 +736,6 @@ fn vs_main(model: VertexInput, instance: InstanceInput) -> VertexOutput {
     out.rest_position = rest_position;
     out.world_position = world_position.xyz;
     out.clip_position = camera.view_proj * world_position;
-    out.mesh_local = local;
-    out.cell = cell;
     return out;
 }
 
@@ -777,10 +748,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let footprint_x = length(dpdx(in.world_position.xz));
     let footprint_y = length(dpdy(in.world_position.xz));
     let pixel_size = max(max(footprint_x, footprint_y), 0.0001);
-    // How wide a mesh cell's edge line is on screen - for the mesh-cells
-    // debug view, here with the other derivatives for the same reason.
-    let grid = in.mesh_local / in.cell;
-    let grid_width = max(fwidth(grid), vec2<f32>(1e-5));
     // Distance to the eye, per pixel: the far rings' cells are kilometers
     // wide, too big to interpolate a distance across.
     // With an orthographic lens (a chart, looking down) there's no "far
@@ -791,7 +758,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         view_depth = 0.0;
     }
     // The ripples from the ripple map, when it stands in for the detail
-    // waves - its two layers (see game::ocean::ripples), sampled here while
+    // waves - its two layers (see prefabs::ocean::ripples), sampled here while
     // control flow is still uniform (a texture read needs its derivatives).
     let textured_ripples = ocean.tuning.w > 0.5;
     var ripple_slope = vec2<f32>(0.0);
@@ -971,7 +938,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // paler haze band - a soft but clear horizon line, like the photos.
     //
     // The ocean mesh reaches ~2,100 km and re-centres on the camera every
-    // frame (GameLogic::update_water_plane), so there's room for a genuinely
+    // frame (Ocean::update), so there's room for a genuinely
     // gradual fade: fully blue for tens of km, then hazing over hundreds
     // more, reaching fog_color well inside the mesh edge so it blends into
     // the sky with no visible boundary.
@@ -995,20 +962,5 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let fog_end = 1400000.0;
     let fog_factor = smoothstep(fog_start, fog_end, horizon_dist);
     let fogged_color = mix(hazed, SEA_HORIZON_COLOR, fog_factor);
-
-    // Debug views (ocean.tuning.z - see game::ocean::OceanDebugView).
-    let view = u32(ocean.tuning.z);
-    if (view == 1u) {
-        // How many waves this pixel summed - what its shading cost.
-        // The ripple map's two reads count about as two waves.
-        return vec4<f32>(cost_color(surface.summed + select(0.0, 2.0, textured_ripples)), 1.0);
-    }
-    if (view == 2u) {
-        // The mesh: each ring tinted by its cell size, its cell edges dark.
-        let to_edge = abs(fract(grid - 0.5) - 0.5) / grid_width;
-        let edge = 1.0 - clamp(min(to_edge.x, to_edge.y), 0.0, 1.0);
-        let tinted = mix(fogged_color, ring_color(in.cell), 0.45);
-        return vec4<f32>(mix(tinted, vec3<f32>(0.02), edge * 0.8), 1.0);
-    }
     return vec4<f32>(fogged_color, 1.0);
 }
