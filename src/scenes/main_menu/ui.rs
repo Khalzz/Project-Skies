@@ -697,8 +697,8 @@ pub fn controller_chip_nodes(app: &mut App, action: &str) -> Vec<(String, UiNode
 /// (registered in `main.rs`) - not necessarily the same string as `id`,
 /// which is purely this list's own stable key (RON authoring convenience,
 /// UI node paths, `SELECTED_LEVEL`). `mission_title`/`location`/
-/// `mission_date` are for the in-scene mission-intro card (see `play::
-/// GameLogic`, the only other reader - via `SELECTED_LEVEL`), not this list's
+/// `mission_date` are for the in-scene mission-intro card (see
+/// `play::Play`, the only other reader - via `SELECTED_LEVEL`), not this list's
 /// own `name`/`description` - see `assets/levels.ron`'s own doc comment.
 #[derive(Deserialize, Clone)]
 struct LevelInfo {

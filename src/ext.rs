@@ -18,7 +18,7 @@ pub mod water_contact;
 pub mod emitters;
 /// Input helpers the engine's `Input` doesn't have.
 pub mod input;
-/// The game's screen UI, as one engine UiLayer node per top-level key.
+/// The game's screen UI, as one engine UiLayer node per UI element.
 pub mod ui_layers;
 /// Where a node is drawn - what the game read off render instances.
 pub mod drawn;

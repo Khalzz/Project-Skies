@@ -24,7 +24,7 @@ use pankarta_software::scene_manager::node::Node;
 use pankarta_software::scene_manager::node::properties::Transform3D;
 use pankarta_software::scene_manager::scene::Scene;
 
-use super::missile::TargetTrack;
+use crate::prefabs::missile::TargetTrack;
 
 /// The program: how many releases, how far apart (s).
 pub const BURST_COUNT: u32 = 6;

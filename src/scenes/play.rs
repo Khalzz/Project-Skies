@@ -2,26 +2,21 @@
 //! the player's jet and its HUD, weapons, the editor and the tactical map.
 //! `Play` is the scene's behaviour (SceneBehaviour); what has a life of its
 //! own lives in its own module below - the cameras in prefabs::camera, the
-//! aircraft in flight_manager, the missiles in weapon::missiles...
+//! aircraft in flight_manager, the missiles in prefabs::missile...
 
-pub mod ai_defense;
 pub mod animation_tracks;
 pub mod animations;
 mod armament;
 pub mod crash_effects;
+pub mod debug_tools;
 mod editor;
-pub mod editor_gizmos;
 pub mod event_handling;
-pub mod flight_editor;
 pub mod flight_manager;
 mod hud;
-mod kill_feed;
 pub mod map;
 pub mod map_nodes;
 pub mod path_follow;
-pub mod pilot_skill;
 mod pilot_view;
-pub mod plane;
 mod tactical;
 pub mod tactical_map;
 pub mod tactical_ui;
@@ -34,7 +29,6 @@ use self::armament::*;
 use self::editor::*;
 use self::hud::*;
 pub use self::hud::{draw_hud_layout, HudLayout};
-use self::kill_feed::*;
 use self::pilot_view::*;
 use self::tactical::*;
 use crate::ext::ui_layers::{self, GameUi};
@@ -44,26 +38,19 @@ use std::{
     time::{Duration, Instant},
 };
 
-use self::ai_defense::AiDefense;
 use self::animations::Animations;
-use crate::prefabs::camera::{
-    self, facing_with_up, CameraControl, Followable, ViewRequest, ANIMATION_CAMERA, COCKPIT_CAMERA,
-    PLAYER_CAMERA,
-};
 use self::crash_effects::{Crash, CrashEffects};
-use self::flight_editor::next_path_point;
-use self::flight_editor::FlightEditor;
-use self::flight_editor::{
+use self::debug_tools::DebugTools;
+use self::editor::flight_editor::next_path_point;
+use self::editor::flight_editor::FlightEditor;
+use self::editor::flight_editor::{
     EditorRequest, NodeKind, Playback, SceneNodeInfo, Telemetry, TimelineRequest,
 };
-use self::flight_manager::{cruise_speed, flight_manager as FlightManager, LiveAircraft};
+use self::flight_manager::{flight_manager as FlightManager, LiveAircraft};
 use self::map::AnimAction;
 use self::map::Difficulty;
 use self::map::MapSpec;
 use self::map_nodes::MapNodes;
-use self::plane::aircraft_spec::AircraftSpec;
-use self::plane::autopilot::Speed;
-use self::plane::messages::ProfileSwitch;
 use self::tactical_map::{contour_lines, TacticalMap, View as TacticalView};
 use self::tactical_ui::TacticalUi;
 use self::tactical_ui::{AircraftStatus, FlightPlan, PlanTarget, RosterCoalition, RosterEntry};
@@ -71,8 +58,6 @@ use self::weapon::countermeasures::{Countermeasures, Release};
 use self::weapon::fire_control::{self, Contact, FireControl, OwnShip};
 use self::weapon::fuze::{self, FuzeCollider};
 use self::weapon::heat;
-use self::weapon::missile::TargetTrack;
-use self::weapon::missiles::{BlastEvent, Missiles};
 use self::weapon::weapon_spec::{Seeker, WeaponCategory, WeaponSpec};
 use self::world_collision::WorldCollision;
 use self::{
@@ -80,22 +65,29 @@ use self::{
     plane::{
         messages::{AircraftEvent, AircraftState},
         plane::Plane,
-        quick_list,
     },
 };
-use crate::debug_overlay::DebugWindows;
-use crate::ext::emitters::ParticleEmitters;
 use crate::ext::game_object::ColliderType;
 use crate::ext::input::InputExt;
 use crate::ext::physics_behavior::PhysicsNodeExt;
 use crate::ext::subtitles::Subtitle;
 use crate::game_settings::GAME_SETTINGS;
-use crate::prefabs::ocean::{self, Ocean, WakeSource};
+use crate::prefabs::camera::{
+    self, facing_with_up, CameraControl, Followable, ViewRequest, ANIMATION_CAMERA, COCKPIT_CAMERA,
+    PLAYER_CAMERA,
+};
+use crate::prefabs::island;
+use crate::prefabs::missile::{self, Airspace, Missile, TargetTrack};
+use crate::prefabs::ocean::{self, Ocean};
+use crate::prefabs::plane;
+use crate::prefabs::plane::ai::autopilot::Speed;
+use crate::prefabs::plane::ai::defense::AiDefense;
+use crate::prefabs::plane::aircraft_spec::AircraftSpec;
+use crate::prefabs::plane::cruise_speed;
+use crate::prefabs::plane::messages::ProfileSwitch;
 use crate::scenes::main_menu::ui as main_menu_ui;
 use crate::scenes::play::ui as play_ui;
 use crate::screen_effects::{ScreenEffects, G_VISION};
-use crate::selected_level::SELECTED_LEVEL;
-use crate::ui::label;
 use crate::ui::HUD_FONT;
 use nalgebra::{vector, Point3, UnitQuaternion, Vector3};
 use pankarta_software::prelude::*;
@@ -104,9 +96,8 @@ use pankarta_software::rendering::thick_lines::{convex_mask, LineInstance};
 use pankarta_software::scene_manager::node::properties::degrees_from_rotation;
 use pankarta_software::scene_manager::node::properties::{Parent, Space, SpawnedLive};
 use pankarta_software::tooling::debug_console;
-use pankarta_software::ui::components::label::text_width;
 use pankarta_software::ui::ui_node::{UiNode, UiNodeContent};
-use pankarta_software::ui::ui_transform::{Anchor, Orientation, PositionValue, SizeValue};
+use std::sync::Arc;
 
 pub struct BlinkingAlert {
     alert_state: bool,
@@ -127,8 +118,8 @@ pub struct Play {
     pilot_view: PilotView,
     // See play::hud.
     hud: HudState,
-    // The kill feed's lines, oldest first - see update_kill_feed.
-    kill_feed: Vec<KillFeedEntry>,
+    // Who downed whom, top right - see play::ui::kill_feed.
+    kill_feed: play_ui::KillFeed,
     // Every plane in the scene - see flight_manager.
     flight_manager: FlightManager,
     // See play::editor.
@@ -140,8 +131,6 @@ pub struct Play {
     tactical: TacticalState,
     // See play::armament.
     weapons: Armament,
-    // Every missile in flight.
-    missiles: Missiles,
     // Aircraft blowing up on the ground and splashing into the sea.
     crash_effects: CrashEffects,
     // Every flare and chaff in the air.
@@ -149,22 +138,19 @@ pub struct Play {
     // The bots' reactions to missiles fired at them - see
     // update_ai_countermeasures.
     ai_defense: AiDefense,
-    // The sea - its waves, and the player's wake on it (see crate::prefabs::ocean).
+    // The sea - its waves (see crate::prefabs::ocean).
     ocean: Ocean,
-    // The land and runway, for missiles to fly into - see spawn_world.
-    world_collision: WorldCollision,
+    // The land and runway - for the radar altimeter, and for the missiles
+    // to fly into (shared with the airspace) - see spawn_world.
+    world_collision: Arc<WorldCollision>,
     // The map's own nodes and every node's tracks, kept in the scene - see
     // play::map_nodes.
     map_nodes: MapNodes,
     // Every node's animations running (map.ron's animations) and the paths
     // followed meanwhile - see late_update.
     animations: Animations,
-    // F7 - frees the mouse for the debug windows.
-    debug_mouse_free: bool,
-    // The F7 aero overlay is up.
-    show_aero_debug_overlay: bool,
-    // Which of the debug windows are open.
-    debug_windows: DebugWindows,
+    // See play::debug_tools.
+    debug: DebugTools,
 }
 
 /// The level's folder - its level_planning.ron (see EventSystem) and
@@ -190,14 +176,7 @@ impl Play {
             );
                     (vec![], vec![])
                 });
-        let runway_trimesh =
-            crate::ext::mesh_data::load_trimesh_geometry("models/Runway/Runway.glb")
-                .unwrap_or_else(|error| {
-                    eprintln!(
-                "play: runway trimesh from 'models/Runway/Runway.glb' couldn't be loaded: {error}"
-            );
-                    (vec![], vec![])
-                });
+        let runway_trimesh = island::trimesh();
 
         let mut flight_manager = FlightManager::new();
         let mut world_collision = WorldCollision::default();
@@ -209,6 +188,10 @@ impl Play {
             ground_trimesh,
             runway_trimesh,
         );
+        // What the missiles fly through - that land, and (every frame, see
+        // publish_airspace) what's in the air.
+        let world_collision = Arc::new(world_collision);
+        Airspace::spawn(scene, app, world_collision.clone());
         // The map's own nodes (cameras...) and its timeline's tracks.
         let mut map_nodes = MapNodes::default();
         map_nodes.sync(scene, app, flight_manager.map());
@@ -224,120 +207,9 @@ impl Play {
 
         app.time.time_scale = 1.0;
 
-        let screen_width = app.window.size.width as f32;
-        let screen_height = app.window.size.height as f32;
-
-        let mut game_ui = play_ui::build_game_ui(app);
-        game_ui.resolve(screen_width, screen_height);
-        ui_layers::add(scene, app, "game_ui".to_owned(), game_ui);
-        for (key, text, font_size, width) in play_ui::HUD_READOUTS {
-            let mut readout = play_ui::build_hud_readout(app, text, font_size, width);
-            if key == "hud_radar_altitude" {
-                readout = readout.set_align(glyphon::cosmic_text::Align::Left);
-            }
-            if key == "hud_corner_fuel" {
-                readout = readout.set_align(glyphon::cosmic_text::Align::Right);
-            }
-            if key == "hud_altitude_warning" {
-                readout = readout.set_font(play_ui::HUD_WARN_FACE);
-            }
-            readout.resolve(screen_width, screen_height);
-            ui_layers::add(scene, app, key.to_owned(), readout);
-        }
-        let pitch_keys = (0..play_ui::HUD_PITCH_LABELS).map(play_ui::hud_pitch_label_key);
-        let heading_keys = (0..play_ui::HUD_HEADING_LABELS).map(play_ui::hud_heading_label_key);
-        for key in pitch_keys.chain(heading_keys) {
-            let mut small_label = play_ui::build_hud_small_label(app);
-            small_label.resolve(screen_width, screen_height);
-            ui_layers::add(scene, app, key, small_label);
-        }
-        for index in 0..play_ui::HEAT_LABELS {
-            let mut heat_label = play_ui::build_heat_label(app);
-            heat_label.resolve(screen_width, screen_height);
-            let key = play_ui::heat_label_key(index);
-            ui_layers::add(scene, app, key.clone(), heat_label);
-            // Over the grey heat-view grade, so the labels stay white.
-            scene.ui_on_top(key);
-        }
-        for row in 0..play_ui::KILL_FEED_ROWS {
-            let mut kill_feed_box = play_ui::build_kill_feed_box(app);
-            kill_feed_box.resolve(screen_width, screen_height);
-            ui_layers::add(scene, app, play_ui::kill_feed_key(row), kill_feed_box);
-            for piece in 0..play_ui::KILL_FEED_PIECES {
-                let mut kill_feed_piece = play_ui::build_kill_feed_piece(app);
-                kill_feed_piece.resolve(screen_width, screen_height);
-                ui_layers::add(
-                    scene,
-                    app,
-                    play_ui::kill_feed_piece_key(row, piece),
-                    kill_feed_piece,
-                );
-            }
-        }
-        let mut velocity_marker = play_ui::build_velocity_marker(app);
-        velocity_marker.resolve(screen_width, screen_height);
-        ui_layers::add(scene, app, "velocity_marker".to_owned(), velocity_marker);
-        let mut subtitles = play_ui::build_subtitles(app);
-        subtitles.resolve(screen_width, screen_height);
-        ui_layers::add(scene, app, "subtitles".to_owned(), subtitles);
-        let mut skip_prompt = play_ui::build_skip_prompt(app);
-        skip_prompt.resolve(screen_width, screen_height);
-        ui_layers::add(scene, app, "skip_prompt".to_owned(), skip_prompt);
-        let mut quick_menu = quick_list::build_quick_list_ui();
-        quick_menu.resolve(screen_width, screen_height);
-        ui_layers::add(scene, app, quick_list::QUICK_LIST_UI.to_owned(), quick_menu);
-        let mut debug_panel = play_ui::build_debug_panel(app);
-        debug_panel.resolve(screen_width, screen_height);
-        ui_layers::add(scene, app, "debug_panel".to_owned(), debug_panel);
-
-        play_ui::build_pause_menu(scene, app);
-        play_ui::build_death_screen(scene, app);
-
-        let selected = SELECTED_LEVEL.lock().unwrap().clone();
-        let (mission_title, location, mission_date) = match selected {
-            Some(level) => (level.mission_title, level.location, level.mission_date),
-            None => ("Unknown Mission".to_owned(), String::new(), String::new()),
-        };
-
-        let mut backdrop = UiNode::container()
-            .set_size(SizeValue::Percent(100.0), SizeValue::Percent(100.0))
-            .set_position(PositionValue::Start(0.0), PositionValue::Start(0.0))
-            .set_background_color(UiColor::Rgba(0, 0, 0, 255));
-
-        backdrop.resolve(screen_width, screen_height);
-
-        ui_layers::add(scene, app, "mission_intro_backdrop".to_owned(), backdrop);
-        scene.ui_on_top("mission_intro_backdrop".to_owned());
-        scene.ui_on_top("mission_intro".to_owned());
-        scene.ui_on_top("subtitles".to_owned());
-
-        let mission_intro_line = |app: &mut App, text: &str, size: f32, color: UiColor| {
-            label(text)
-                .set_font_size(size)
-                .set_text_color(color.with_alpha(0.0))
-        };
-
-        let mut mission_intro = UiNode::container()
-            .set_orientation(Orientation::Vertical)
-            .set_size(SizeValue::Fit, SizeValue::Fit)
-            .set_position(PositionValue::Start(60.0), PositionValue::Center(0.0))
-            .set_background_color(UiColor::TRANSPARENT)
-            .set_child_anchor(Anchor::Start, Anchor::Start)
-            .set_gap(8.0)
-            .set_child(
-                "title",
-                mission_intro_line(app, &mission_title, 34.0, UiColor::WHITE),
-            )
-            .set_child(
-                "location",
-                mission_intro_line(app, &location, 20.0, UiColor::Rgb(210, 210, 210)),
-            )
-            .set_child(
-                "date",
-                mission_intro_line(app, &mission_date, 16.0, UiColor::Rgb(170, 170, 170)),
-            );
-        mission_intro.resolve(screen_width, screen_height);
-        ui_layers::add(scene, app, "mission_intro".to_owned(), mission_intro);
+        // The scene's screen UI - the HUD, the menus, the intro (see play::ui).
+        play_ui::spawn(scene, app);
+        debug_tools::spawn(scene, app);
 
         let subtitle_data = Subtitle::new();
 
@@ -381,7 +253,6 @@ impl Play {
                 hud_hidden_by_g: false,
                 crash_time: 0.0,
                 crash_seen_from_cockpit: false,
-                heat_view: false,
                 screen_effects: ScreenEffects::default(),
             },
             hud: HudState {
@@ -392,10 +263,9 @@ impl Play {
                 hud_boot: None,
                 hud_opacity: 1.0,
                 hud_layout: HudLayout::default(),
-                paused_hud_visibility: None,
                 last_ui_update: Instant::now(),
             },
-            kill_feed: Vec::new(),
+            kill_feed: play_ui::KillFeed::default(),
             flight_manager,
             editor: EditorState {
                 flight_editor_was_open: false,
@@ -434,7 +304,6 @@ impl Play {
                 selected_weapon: None,
                 weapon_list: Vec::new(),
             },
-            missiles: Missiles::default(),
             crash_effects: CrashEffects::default(),
             countermeasures: Countermeasures::default(),
             ai_defense: AiDefense::default(),
@@ -442,9 +311,7 @@ impl Play {
             world_collision,
             map_nodes,
             animations,
-            debug_mouse_free: false,
-            show_aero_debug_overlay: false,
-            debug_windows: DebugWindows::default(),
+            debug: DebugTools::default(),
         }
     }
 
@@ -470,8 +337,8 @@ impl Play {
         // position, so nothing else needs adjusting.
         let ground_position = Vector3::new(0.0, 0.0, 50_000.0);
         let ground_scale = Vector3::new(30_000.0, 30_000.0, 30_000.0);
-        let runway_position = Vector3::new(0.0, 100.0, 0.0);
-        let runway_scale = Vector3::new(60.0, 60.0, 60.0);
+        let runway_position = island::POSITION;
+        let runway_scale = Vector3::repeat(island::SCALE);
         let sea_level = app.particles.sea_level().unwrap_or(0.0);
         // F10's tactical map: the same land as height contours, uploaded once.
         let contours = [
@@ -516,53 +383,15 @@ impl Play {
             .clear();
 
         // Runway island at the origin (the old "ground" island moved out to
-        // ground_position above to make room). Trimesh collider built from the
-        // model's own geometry - same pattern as "ground" - with the vertices
-        // pre-scaled by the node's scale, since the collider is authored in
-        // world units.
+        // ground_position above to make room) - solid, its own triangles its
+        // collider (see prefabs::island).
         scene
-            .spawn_node(
-                app,
-                Node::new("runway")
-                    .with_property(Transform3D {
-                        position: runway_position,
-                        rotation: UnitQuaternion::identity(),
-                        scale: runway_scale,
-                    })
-                    .with_property(
-                        Model::file("models/Runway/Runway.glb")
-                            .double_sided(DoubleSidedMeshes::All),
-                    )
-                    .with_property(Physics {
-                        rigidbody: RigidBodyData::fixed(),
-                        colliders: vec![Collider::new(ColliderShape::Trimesh {
-                            vertices: runway_trimesh
-                                .0
-                                .iter()
-                                .map(|v| v.component_mul(&runway_scale))
-                                .collect(),
-                            indices: runway_trimesh.1,
-                        })],
-                    }),
-            )
+            .spawn_node(app, island::island("runway", Some(runway_trimesh)))
             .expect("play should only spawn 'runway' once");
 
         // Every aircraft in the level's map.ron, the player's included -
         // see flight_manager::spawn_map.
         flight_manager.spawn_map(scene, app, LEVEL_FOLDER);
-
-        // The spray the plane kicks up off the water when flying low and
-        // fast - its own node, kept on the sea under the plane (see
-        // update_water_wake), not on the plane itself: the spray comes off
-        // the water, wherever the plane is and however it's banked.
-        scene
-            .spawn_node(
-                app,
-                Node::new("water_spray")
-                    .with_property(Transform3D::default())
-                    .with_property(self::plane::effects::spray_emitters()),
-            )
-            .expect("play should only spawn 'water_spray' once");
 
         // The player's camera and the animations' - see prefabs::camera.
         CameraControl::spawn(scene, app);
@@ -602,95 +431,18 @@ impl Play {
             .expect("play should only spawn 'world' once");
     }
 
-    // Tells the sea where the player's plane is and how fast it's going,
-    // so it can stir up a wake when flying fast and low (see
-    // Ocean::set_wake_source - how strongly is decided there) -
-    // and moves the "water_spray" node onto the sea right under it, turned
-    // to its heading, spraying as hard as the wake is strong.
-    fn update_water_wake(ocean: &mut Ocean, scene: &mut Scene, app: &mut App, player_id: &str) {
-        let source = crate::ext::drawn::get(scene, player_id).map(|player| WakeSource {
-            position: player.instance.transform.position,
-            velocity: scene
-                .content
-                .nodes
-                .get(player_id)
-                .and_then(|node| node.physics_state::<AircraftState>())
-                .map(|state| state.flight_data.velocity)
-                .unwrap_or_else(Vector3::zeros),
-        });
-        ocean.set_wake_source(source);
-
-        let Some(source) = source else { return };
-        let strength = ocean.wake_strength(&source);
-        let sea_level = app.particles.sea_level().unwrap_or(0.0);
-        let Some(spray) = scene.content.nodes.get_mut("water_spray") else {
-            return;
-        };
-        if let Some(transform) = spray.get_property_mut::<Transform3D>() {
-            transform.position = Vector3::new(source.position.x, sea_level, source.position.z);
-            let heading = Vector3::new(source.velocity.x, 0.0, source.velocity.z);
-            if heading.magnitude() > 1.0 {
-                transform.rotation =
-                    UnitQuaternion::from_axis_angle(&Vector3::y_axis(), heading.x.atan2(heading.z));
-            }
-        }
-        if let Some(emitters) = spray.get_property_mut::<ParticleEmitters>() {
-            let plane_speed = Vector3::new(source.velocity.x, 0.0, source.velocity.z).magnitude();
-            self::plane::effects::update_spray(emitters, strength, plane_speed);
-        }
-    }
-
     // The flight HUD: timer, FPS, G, power, altitude, speed, compass (all
     // under "game_ui") and the flight path marker.
-    const FLIGHT_HUD: [&'static str; 2] = ["game_ui", "velocity_marker"];
+    const FLIGHT_HUD: [&'static str; 2] = ["hud/game_ui", "hud/velocity_marker"];
 
     /// Whether the mouse is a pointer for clicking debug windows (F7, F10's
     /// flight editor, the M tactical map, or F11's HUD layout) instead of
     /// looking around.
     fn mouse_free(&self) -> bool {
-        self.debug_mouse_free
+        self.debug.mouse_free
             || self.tactical.tactical_map_active
             || self.editor.editor_active
             || self.hud.hud_layout.open
-    }
-
-    /// Whether the F7 debug overlay is up.
-    fn debug_overlay_visible(&self) -> bool {
-        self.show_aero_debug_overlay || self.debug_mouse_free
-    }
-
-    /// Whether any egui window is up - F7's, F10's editor or map, F11's HUD
-    /// layout, the spectating telemetry. The engine's debug UI is shown (and
-    /// `debug_ui` run) only while one is.
-    fn any_debug_window(&self) -> bool {
-        self.debug_overlay_visible()
-            || self.tactical.tactical_map_active
-            || self.editor.editor_active
-            || self.editor.spectate_telemetry.is_some()
-            || self.hud.hud_layout.open
-    }
-
-    /// The scene's egui windows - see crate::debug_overlay.
-    fn draw_debug_ui(&mut self, ctx: &egui::Context, scene: &mut Scene, app: &mut App) {
-        let was_hud_panel_open = self.hud.hud_layout.open;
-        let player = self.flight_manager.player_id().to_owned();
-        let view = crate::debug_overlay::DebugView {
-            show_debug: self.debug_overlay_visible(),
-            mouse_free: self.debug_mouse_free,
-            player: &player,
-            windows: &mut self.debug_windows,
-            flight_editor: &mut self.editor.flight_editor,
-            tactical_ui: &mut self.tactical.tactical_ui,
-            hud_layout: &mut self.hud.hud_layout,
-            editor_active: self.editor.editor_active,
-            tactical_map_active: self.tactical.tactical_map_active,
-            spectate_telemetry: self.editor.spectate_telemetry.clone(),
-        };
-        crate::debug_overlay::draw(ctx, view, scene, app);
-        // The HUD layout panel closed from its own button: mouse-look back.
-        if was_hud_panel_open && !self.hud.hud_layout.open && !app.time.is_paused() {
-            app.window.set_cursor_locked(!self.mouse_free());
-        }
     }
 
     // How long ESC has to be held during an EventSystem::input_lock_end
@@ -776,7 +528,7 @@ impl Play {
     /// the right camera on screen.
     fn run_animations(&mut self, scene: &mut Scene, app: &mut App) {
         // After Plane::update has read this frame's physics state.
-        self.collect_pilot_kills(scene, app);
+        self.collect_pilot_kills(scene);
         if app.time.is_paused() {
             return;
         }
@@ -803,15 +555,11 @@ impl Play {
         for event in frame.events {
             match event {
                 AnimAction::PlayAudio(folder) => {
-                    app.play_sound(&format!(
-                        "{}/audio.ogg",
-                        crate::asset_relative(&folder)
-                    ));
+                    app.play_sound(&format!("{}/audio.ogg", crate::asset_relative(&folder)));
                 }
                 AnimAction::Subtitle { text, seconds } => {
                     let width = app.ui.size().0;
-                    if let Some(layer) = scene.ui_layer(crate::ext::subtitles::SUBTITLES_PATH)
-                    {
+                    if let Some(layer) = scene.ui_layer(crate::ext::subtitles::SUBTITLES_PATH) {
                         self.subtitle_data
                             .add_text(&text, (seconds * 1000.0) as u64, layer, width);
                     }
@@ -869,10 +617,6 @@ impl SceneBehaviour for Play {
     /// player's camera...) run: input, the editor and the map, what the
     /// camera follows, weapons, the HUD's state.
     fn update(&mut self, scene: &mut Scene, app: &mut App, _ctx: &mut FrameContext) {
-        // F5 - the physics debug view (colliders, forces).
-        if app.input.is_action_just_pressed("toggle_debug") {
-            app.renderer.debug.physics = !app.renderer.debug.physics;
-        }
         // The velocity and the rotation of one physics step, together: turned
         // into the jet's frame, it can be carried by the jet's drawn rotation
         // (moved on to this frame) without stepping at the physics' rate.
@@ -901,9 +645,10 @@ impl SceneBehaviour for Play {
         // never reads a target one frame stale relative to whatever physics
         // just wrote into "player"'s own renderable transform this frame.
         //
-        // The missiles move first - see fly_missiles.
+        // What the missiles fly through this frame, before they fly
+        // (their own behaviors, after this) - see publish_airspace.
         if !app.time.is_paused() {
-            self.fly_missiles(scene, app);
+            self.publish_airspace(scene, app);
             self.update_ai_countermeasures(scene, app);
             self.show_crashes(scene, app);
         }
@@ -921,7 +666,6 @@ impl SceneBehaviour for Play {
             &Followable {
                 player_id,
                 aircraft,
-                missiles: &self.missiles,
                 editor_selection: self.editor.flight_editor.selected_aircraft(),
                 editor_active: self.editor.editor_active,
                 editor_typing: self.editor.flight_editor.typing,
@@ -935,24 +679,8 @@ impl SceneBehaviour for Play {
         // Paused, it holds whatever brightness it had.
         self.tick_hud_boot(app, !app.time.is_paused());
 
-        // F3 debug view - shows/hides in lockstep with the console toggle,
-        // same "set_active every frame, no separate dirty-tracking" idiom
-        // skip_prompt below already uses (its own text is updated inside
-        // ui_control, right alongside compass/speed/etc. - not from a
-        // function of its own).
-        if let Some(node) = scene.ui_node("debug_panel") {
-            node.set_active(debug_console::is_console_visible());
-        }
-
-        // F7 - the debug windows, with the mouse freed to click them (see App::
-        // debug_mouse_free). The pause menu owns the cursor while it's up -
-        // close_pause_menu puts back whichever mode this left.
-        if app.input.is_action_just_pressed("toggle_debug_mouse") {
-            self.debug_mouse_free = !self.debug_mouse_free;
-            if !app.time.is_paused() {
-                app.window.set_cursor_locked(!self.mouse_free());
-            }
-        }
+        // F3, F5, F7 - see play::debug_tools.
+        self.update_debug_tools(scene, app);
 
         // Whether player input is locked out right now (see EventSystem::
         // input_lock_end's own doc comment) - checked against this frame's
@@ -962,7 +690,7 @@ impl SceneBehaviour for Play {
             .event_system
             .as_ref()
             .and_then(|es| es.input_lock_end(self.game_time));
-        if let Some(node) = scene.ui_node("skip_prompt") {
+        if let Some(node) = scene.ui_node(play_ui::SKIP_PROMPT) {
             node.set_active(input_lock_end.is_some());
         }
         // Locked (the intro, an animation playing - from its first frame):
@@ -1107,7 +835,6 @@ impl SceneBehaviour for Play {
                 || editor_flying;
         }
 
-        Self::update_water_wake(&mut self.ocean, scene, app, player_id);
         self.check_crash(scene, app);
         let has_control = input_lock_end.is_none()
             && !self.editor.flight_editor.typing
@@ -1146,7 +873,15 @@ impl SceneBehaviour for Play {
         }
         self.update_lock_arrow(scene, app);
         self.update_heat_view(scene, app);
-        self.update_kill_feed(scene, app);
+        // Not over F10's map or the editor.
+        let delta_time = if app.time.is_paused() {
+            0.0
+        } else {
+            app.time.delta_time
+        };
+        let shown = !(self.tactical.tactical_map_active || self.editor.editor_active);
+        self.kill_feed
+            .update(scene, delta_time, app.window.size.width as f32, shown);
         self.hide_hud(scene, app);
     }
 
@@ -1163,7 +898,7 @@ impl SceneBehaviour for Play {
         let camera = scene.cameras.active().camera.position().coords;
         // The map's lines are drawn relative to its camera.
         crate::frame_plans::set_tactical_camera_position(camera);
-        // The sea's waves and wake, around where the camera is drawn from.
+        // The sea's waves, around where the camera is drawn from.
         self.ocean.update(scene, "world", app.time.delta_time);
         // The G-effects and the HUD's brightness, into the flight plan's
         // Fullscreen step - this frame's effects used up (see update_g_vision).

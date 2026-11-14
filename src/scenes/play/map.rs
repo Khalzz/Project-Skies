@@ -10,7 +10,7 @@ use pankarta_software::scene_manager::node::properties::Space;
 /// aircraft in each, where each one starts and whether the player flies it.
 /// Read each time the level opens (a restart included), so edits to it apply
 /// on the next restart - or right away from the flight editor (F10's editor view) (see
-/// play::flight_editor), which can also write it back (`save`).
+/// play::editor::flight_editor), which can also write it back (`save`).
 #[derive(Deserialize, Serialize, Clone, PartialEq, Default)]
 pub struct MapSpec {
     pub coalitions: Vec<Coalition>,
@@ -261,7 +261,7 @@ pub enum Pace {
     /// start (once round, for a looped one) - "start here at its start, be
     /// at the end this long after", placed by time whatever the physics.
     Duration(f32),
-    /// As fast as the pilot's skill flies (see play::pilot_skill) - an Ace
+    /// As fast as the pilot's skill flies (see prefabs::plane::ai::pilot_skill) - an Ace
     /// at full power.
     #[default]
     BySkill,
@@ -397,7 +397,7 @@ pub struct AircraftPlacement {
     #[serde(default, skip_serializing_if = "is_zero")]
     pub throttle: f32,
     /// Points it's meant to fly through, in order - meters in the world.
-    /// Optional. A bot flies it (see plane::autopilot). Its own path - see
+    /// Optional. A bot flies it (see prefabs::plane::ai::autopilot). Its own path - see
     /// `follow` for flying one of the map's paths instead.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub path: Vec<(f32, f32, f32)>,
@@ -429,7 +429,7 @@ pub struct AircraftPlacement {
     #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "plain_some")]
     pub radar_warn_m: Option<f32>,
     /// How good a pilot a bot is - how quickly it reacts (see
-    /// play::ai_defense). Optional: Medium when left out. Nothing for the
+    /// prefabs::plane::ai::defense). Optional: Medium when left out. Nothing for the
     /// player's.
     #[serde(default, skip_serializing_if = "is_default_difficulty")]
     pub difficulty: Difficulty,
@@ -802,7 +802,7 @@ mod tests {
     fn the_test_chamber_map_loads() {
         let map = MapSpec::load("assets/scenes/test_chamber").expect("assets/scenes/test_chamber/map.ron should load");
         for (_, aircraft) in map.aircraft() {
-            crate::scenes::play::plane::aircraft_spec::AircraftSpec::load(&aircraft.plane)
+            crate::prefabs::plane::aircraft_spec::AircraftSpec::load(&aircraft.plane)
                 .unwrap_or_else(|error| panic!("map aircraft '{}': {error}", aircraft.name));
         }
     }

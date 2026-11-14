@@ -1,22 +1,24 @@
 //! The game's screen UI as engine `UiLayer`s.
 //!
-//! The game's own engine kept one global UI: top-level nodes by key
-//! ("game_ui", "pause_menu", "subtitles"...), each placed on its own and
-//! reached by path ("game_ui/hud_stores/weapons"). The engine has no global
-//! UI for a game - UI is a node's `UiLayer`, living and dying with its
-//! scene. So every one of those top-level keys is a node of its own,
-//! `ui:<key>`, whose layer's root is that UI tree, and a path's first part
-//! picks the layer:
+//! The engine's way: a piece of UI is a node with a `UiLayer` property,
+//! living and dying with it. The game makes one node per UI *element* - the
+//! flight HUD, the pause menu, the mission intro... - `ui:<key>`, whose
+//! layer holds that element's whole tree. A path's first part picks the
+//! element, the rest is the path inside its layer:
 //!
-//!     ui_layers::add(scene, app, "pause_menu", menu);
-//!     if let Some(title) = scene.ui_node("pause_menu/title") { .. }
+//!     ui_layers::add(scene, app, "hud", hud);
+//!     if let Some(timer) = scene.ui_node("hud/game_ui/data_box/timer") { .. }
 //!
-//! Layers stack by z index: `ON_TOP` for what the old UI drew always on top
-//! (menus, the mission intro), `ON_BOTTOM` for what it drew under the rest.
+//! A part of an element that moves every frame (a HUD readout following
+//! the jet) is a child its parent places - see `place`.
+//!
+//! Layers stack by z index: `ON_TOP` for menus and the mission intro,
+//! `ON_BOTTOM` for what's drawn under the rest.
 
 use pankarta_software::prelude::*;
 use pankarta_software::scene_manager::scene_access::SceneAccess;
 use pankarta_software::ui::ui_node::UiNode;
+use pankarta_software::ui::ui_transform::{PositionValue, SizeValue};
 
 /// The z index of a layer the old UI drew always on top.
 pub const ON_TOP: i32 = 100;
@@ -91,6 +93,38 @@ pub trait GameUi {
             root.set_active(active);
         }
     }
+
+    /// Shows or hides the whole element `key` - its layer, whatever its
+    /// nodes' own `is_active` (which tracks and the game keep setting).
+    fn set_ui_visible(&mut self, key: &str, visible: bool) {
+        if let Some(layer) = self.ui_layer(key) {
+            layer.set_visible(visible);
+        }
+    }
+}
+
+/// Puts `node` - a child in an element's layer - `width` x `height` at
+/// (`x`, `y`) from its parent's top left (the screen's, for a child of a
+/// full-screen root), from this frame's layout on. A parent lays its
+/// children out every frame, so a child's rect written by hand is undone;
+/// its position (`set_position`) is what the layout keeps.
+pub fn place(node: &mut UiNode, x: f32, y: f32, width: f32, height: f32) {
+    node.transform.width = width;
+    node.transform.height = height;
+    // set_position is a builder - the node is taken out for it and put back.
+    let taken = std::mem::replace(node, UiNode::container());
+    *node = taken.set_position(PositionValue::Start(x), PositionValue::Start(y));
+    // Its rect right away too, for what reads it before the layout runs.
+    node.move_to(x, y);
+}
+
+/// A full-screen container at the screen's top left - the root of an
+/// element whose parts are placed on their own (see `place`).
+pub fn screen_root() -> UiNode {
+    UiNode::container()
+        .set_size(SizeValue::Percent(100.0), SizeValue::Percent(100.0))
+        .set_position(PositionValue::Start(0.0), PositionValue::Start(0.0))
+        .set_background_color(UiColor::TRANSPARENT)
 }
 
 impl GameUi for Scene {

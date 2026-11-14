@@ -273,7 +273,7 @@ impl Play {
             );
         }
         // The missiles in the air, in their shooter's colors.
-        for missile in self.missiles.in_flight() {
+        for missile in missile::in_flight(scene).into_iter().map(|(_, missile)| missile.track()) {
             let rgb = match self.flight_manager.map().find(&missile.shooter) {
                 Some((_, placement)) if placement.player => [1.0, 0.82, 0.30],
                 Some((coalition, _)) => [coalition.color.0, coalition.color.1, coalition.color.2]

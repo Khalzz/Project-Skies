@@ -1,7 +1,8 @@
 //! The sea's side of the ocean shader (assets/shaders/ocean.wgsl, settings
-//! in ocean.ron): its material, and the params that aren't the waves' or the
-//! wake's - per-pixel cost, detail by altitude, the ripple map's layers and
-//! the far look - written into the sea node's material every frame.
+//! in ocean.ron): its material, and the params that aren't the waves' -
+//! where the sea's noise is, per-pixel cost, detail by altitude, the ripple
+//! map's layers and the far look - written into the sea node's material
+//! every frame.
 
 use std::collections::BTreeMap;
 
@@ -35,6 +36,20 @@ pub(super) fn set_on(scene: &mut Scene, node: &str, params: &Params) {
     for (name, values) in params {
         material.set(name, values.clone());
     }
+}
+
+/// The sea's noise (the depth tint, the ripples' gusts) repeats every this
+/// many meters (too far apart to notice) - ocean.wgsl's NOISE_PERIOD, keep
+/// in sync.
+const NOISE_PERIOD: f64 = 4096.0;
+
+/// Where the camera (true world `x`, `z`) is on the sea's repeating noise
+/// (ocean.wgsl's `noise_anchor`) - in f64, so it stays precise anywhere.
+pub(super) fn write_noise_anchor(params: &mut Params, x: f64, z: f64) {
+    params.insert(
+        "noise_anchor".to_owned(),
+        vec![x.rem_euclid(NOISE_PERIOD) as f32, z.rem_euclid(NOISE_PERIOD) as f32, 0.0, 0.0],
+    );
 }
 
 /// The shortest wave drawn with the camera `height` above the sea - see

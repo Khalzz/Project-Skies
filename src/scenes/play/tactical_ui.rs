@@ -14,7 +14,7 @@
 //!   height; up and down with Shift).
 //!
 //! The play scene fills in where everything is on screen and what's in the
-//! map every frame (GameLogic::update_tactical_map), and applies a changed
+//! map every frame (Play::update_tactical_map), and applies a changed
 //! path (`path_edit`); this only draws and reports. Drawn by the egui overlay
 //! pass (see render_pass.rs), which is why it lives on `App`.
 

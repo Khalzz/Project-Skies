@@ -8,7 +8,7 @@
 //!   turned along it - its body (if it has one) held still meanwhile, and
 //!   let go at the speed it was going when the follow ends;
 //! - flown: an aircraft's autopilot flies the path for real (see
-//!   plane::autopilot), as well as its pilot's skill flies - when it ends,
+//!   prefabs::plane::ai::autopilot), as well as its pilot's skill flies - when it ends,
 //!   back to the aircraft's own flight plan.
 
 use std::collections::HashMap;
@@ -20,11 +20,11 @@ use pankarta_software::physics::PhysicsWorld;
 use pankarta_software::scene_manager::scene::Scene;
 use pankarta_software::scene_manager::scene_nodes::facing;
 
-use super::flight_manager::cruise_speed;
+use crate::prefabs::plane::cruise_speed;
 use super::map::{Difficulty, FollowMode, MapSpec, Pace, PathSpec};
-use super::pilot_skill::PilotSkill;
-use super::plane::autopilot::Speed;
-use super::plane::plane::Plane;
+use crate::prefabs::plane::ai::pilot_skill::PilotSkill;
+use crate::prefabs::plane::ai::autopilot::Speed;
+use crate::prefabs::plane::plane::Plane;
 
 /// Knots to m/s.
 const KT_TO_MS: f32 = 0.514_444;

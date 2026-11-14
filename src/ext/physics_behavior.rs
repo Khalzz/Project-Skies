@@ -271,7 +271,7 @@ impl PhysicsInput {
 
 /// A node's physics half run on a Rapier world of its own, without a scene
 /// or an App - for tests that fly an aircraft's physics alone (see
-/// play::plane::flight_tests). Steps exactly as `PhysicsHost` does.
+/// prefabs::plane::flight_tests). Steps exactly as `PhysicsHost` does.
 pub struct PhysicsNode {
     pub id: String,
     body: RigidBodyHandle,

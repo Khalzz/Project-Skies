@@ -5,7 +5,7 @@
 //!
 //! An IR missile homes on the brightest thing in its field of view - so a
 //! hotter source near its target (the sun behind it, an afterburner beside
-//! it, one day a flare) can pull it off (see play::weapon::missile).
+//! it, one day a flare) can pull it off (see prefabs::missile::flight).
 
 /// A jet's engine heat: at idle, at full dry power (military), and at full
 /// afterburner - its exhaust plume is far hotter, and far bigger.

@@ -1,8 +1,9 @@
 //! The player's weapons - the master mode, radar and seeker
 //! (`fire_control`), the weapon picked, locking, firing and the launch
-//! hold, the countermeasures and bingo cues (`update_weapons`) - and the
-//! missiles' flight and blasts, the bots' defenses against them. Its state
-//! is `Armament`, the scene's `weapons`.
+//! hold, the countermeasures and bingo cues (`update_weapons`) - and what
+//! the missiles fly through (they fly themselves - see prefabs::missile),
+//! the bots' defenses against them. Its state is `Armament`, the scene's
+//! `weapons`.
 
 use super::*;
 
@@ -56,7 +57,7 @@ pub(super) struct Armament {
     // armed. See update_weapons.
     pub(super) selected_weapon: Option<String>,
     // The HUD's weapon list as it should read: each entry's text, and
-    // whether it's the selected one - see play_ui::build_weapon_list.
+    // whether it's the selected one - see play_ui::update_weapon_list.
     pub(super) weapon_list: Vec<(String, bool)>,
 }
 
@@ -70,8 +71,8 @@ impl Play {
     /// The weapons, every frame the game runs: the master mode keys (1 NAV,
     /// 2 air-to-air - again for DOGFIGHT/BVR - 3 air-to-ground), the seeker
     /// and its lock key (see play::weapon::fire_control), the trigger, the
-    /// missiles' plumes (they're flown by fly_missiles), and the HUD's symbols and
-    /// weapons line. `has_control`: the player can fly (not in a scripted
+    /// plumes of the weapons still on their pylons, and the HUD's symbols
+    /// and weapons line. `has_control`: the player can fly (not in a scripted
     /// sequence, not typing in the editor).
     pub(super) fn update_weapons(&mut self, scene: &mut Scene, app: &mut App, has_control: bool) {
         let delta_time = app.time.delta_time;
@@ -89,7 +90,7 @@ impl Play {
             }
         }
 
-        // Plumes: off on the pylons, lit on the missiles burning.
+        // Plumes: off on the pylons (a missile in flight lights its own).
         let mut model_files: Vec<String> = self
             .weapons
             .weapon_specs
@@ -98,7 +99,18 @@ impl Play {
             .collect();
         model_files.sort_unstable();
         model_files.dedup();
-        self.missiles.update_plumes(scene, &model_files, delta_time);
+        for node in scene.content.nodes.iter_mut() {
+            if node.get_behavior::<Missile>().is_some() {
+                continue;
+            }
+            let Some(model) = node.get_property_mut::<Model>() else { continue };
+            if !model.file_path().is_some_and(|path| model_files.iter().any(|model| model == path)) {
+                continue;
+            }
+            if let Some(plume) = model.mesh_mut(missile::PLUME_MESH) {
+                plume.visible = false;
+            }
+        }
 
         // The player's jet.
         let player_alive = scene
@@ -406,9 +418,7 @@ impl Play {
                                 )
                             })
                         });
-                        self.missiles.launch(
-                            scene,
-                            app,
+                        let fired = missile::missile(
                             &player_id,
                             spec.clone(),
                             position,
@@ -416,6 +426,9 @@ impl Play {
                             own.velocity,
                             target,
                         );
+                        if let Err(error) = scene.spawn_node(app, fired) {
+                            eprintln!("Couldn't launch {}: {error}", spec.id);
+                        }
                     }
                 }
                 (_, Some((_, spec))) => println!(
@@ -645,11 +658,15 @@ impl Play {
 
     /// The bots defending themselves: each one with flares bursts them once
     /// it's noticed a heat seeker homing on it - how quickly, and how often
-    /// again, its pilot's difficulty says (see play::ai_defense) - and its
+    /// again, its pilot's difficulty says (see prefabs::plane::ai::defense) - and its
     /// bursts in progress go on. Once a frame the game runs.
     pub(super) fn update_ai_countermeasures(&mut self, scene: &mut Scene, app: &mut App) {
         let delta_time = app.time.delta_time;
-        let homing = self.missiles.heat_seekers_homing();
+        // Every heat seeker homing on an aircraft: its id, and the aircraft.
+        let homing: Vec<(String, String)> = missile::in_flight(scene)
+            .into_iter()
+            .filter_map(|(id, missile)| Some((id.to_owned(), missile.heat_seeker_target()?.to_owned())))
+            .collect();
         let bots: Vec<(String, Difficulty)> = self
             .flight_manager
             .map()
@@ -713,58 +730,79 @@ impl Play {
         }
     }
 
-    /// Flies every missile one frame and wrecks what they hit - early in
-    /// the frame, before the camera reads where they are (see `update`), so
-    /// a camera riding one moves with it, not a frame behind.
-    pub(super) fn fly_missiles(&mut self, scene: &mut Scene, app: &mut App) {
-        // Falling wrecks too: a missile chasing one keeps on its heat. And
-        // the flares burning - heat sources it can be pulled onto.
+    /// What the missiles fly through this frame (see prefabs::missile::
+    /// Airspace) - the flares moved on first. Falling wrecks count too: a
+    /// missile chasing one keeps on its heat. Early in the frame, before the
+    /// missiles fly themselves (their behaviors run after the scene's
+    /// update).
+    pub(super) fn publish_airspace(&mut self, scene: &mut Scene, app: &mut App) {
         self.countermeasures.update(scene, app, app.time.delta_time);
         let mut aircraft = self.aircraft_tracks(scene, true);
         aircraft.extend(self.countermeasures.heat_tracks());
         let sun = Self::sun_direction(scene);
-        let events = self.missiles.update(
-            scene,
-            app,
-            &aircraft,
-            &self.world_collision,
-            sun,
-            app.time.delta_time,
-        );
-        self.deliver_blasts(scene, &events.blasts);
+        Airspace::publish(scene, aircraft, sun);
     }
+}
 
-    /// Every blast onto every aircraft still flying. The physics half spends
-    /// wing HP and notices a seat inside the sphere; a wing hit does not
-    /// shot-down the jet.
-    pub(super) fn deliver_blasts(&mut self, scene: &mut Scene, blasts: &[BlastEvent]) {
+impl Play {
+    /// What the missiles did this frame - each part damaged and each pilot
+    /// killed - onto the kill feed (see play_ui::KillFeed).
+    pub(super) fn collect_pilot_kills(&mut self, scene: &mut Scene) {
         let names: Vec<String> = self
             .flight_manager
             .map()
             .aircraft()
             .map(|(_, placement)| placement.name.clone())
             .collect();
-        for blast in blasts {
-            for name in &names {
-                let Some(node) = scene.content.nodes.get_mut(name) else {
-                    continue;
+        const PLAIN: UiColor = UiColor::Rgb(230, 230, 230);
+        for name in names {
+            let Some(plane) = scene
+                .content
+                .nodes
+                .get_mut(&name)
+                .and_then(|node| node.get_behavior_mut::<Plane>())
+            else {
+                continue;
+            };
+            let hits = plane.take_part_hits();
+            let kill = plane.take_kill_report();
+            for hit in hits {
+                let damage = if hit.destroyed {
+                    format!("{} -{:.0} destroyed", hit.part, hit.dealt)
+                } else {
+                    format!("{} -{:.0}", hit.part, hit.dealt)
                 };
-                if node
-                    .get_behavior::<Plane>()
-                    .is_some_and(|plane| plane.wrecked)
-                {
-                    continue;
-                }
-                if let Some(plane) = node.get_behavior_mut::<Plane>() {
-                    plane.note_blast(&blast.shooter, &blast.weapon);
-                }
-                node.push_physics_event(AircraftEvent::Blast {
-                    at: blast.at,
-                    radius: blast.radius,
-                    damage: blast.damage,
-                    impulse: blast.impulse,
-                });
+                println!(
+                    "Hit - {name}'s {} took {:.0} from {}'s {}",
+                    hit.part, hit.dealt, hit.shooter, hit.weapon
+                );
+                self.kill_feed.push([
+                    (hit.shooter.clone(), self.team_color(&hit.shooter)),
+                    ("damaged".to_owned(), PLAIN),
+                    (name.clone(), self.team_color(&name)),
+                    (damage, PLAIN),
+                ]);
             }
+            if let Some((shooter, weapon)) = kill {
+                println!("Splash - {name} killed by {shooter}'s {weapon}");
+                self.kill_feed.push([
+                    (shooter.clone(), self.team_color(&shooter)),
+                    ("killed".to_owned(), PLAIN),
+                    (name.clone(), self.team_color(&name)),
+                    (format!("with {}", weapon_label(&weapon)), PLAIN),
+                ]);
+            }
+        }
+    }
+
+    /// The aircraft `name`'s coalition's color - grey when it isn't in the
+    /// map.
+    pub(super) fn team_color(&self, name: &str) -> UiColor {
+        match self.flight_manager.map().find(name) {
+            Some((coalition, _)) => {
+                UiColor::Rgb(coalition.color.0, coalition.color.1, coalition.color.2)
+            }
+            None => UiColor::Rgb(180, 180, 180),
         }
     }
 }

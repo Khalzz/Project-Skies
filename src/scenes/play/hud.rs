@@ -22,9 +22,6 @@ pub(super) struct HudState {
     // The player's velocity in its own frame (x left, y up, z forward), from
     // the latest physics pose - see update_hud's velocity marker.
     pub(super) player_body_velocity: Option<Vector3<f32>>,
-    // (game_ui_was_active, velocity_marker_was_active) - remembered by the
-    // pause menu, put back when it closes.
-    pub(super) paused_hud_visibility: Option<(bool, bool)>,
     // When the HUD's text was last rewritten - it's throttled (see ui_control).
     pub(super) last_ui_update: Instant,
     // A running animation has the HUD hidden (as of last frame) - see
@@ -783,7 +780,7 @@ impl Play {
         let line_top = frame_y;
         let line_bottom = frame_y + frame_height;
 
-        let game_ui_shown = scene.ui_node("game_ui").is_some_and(|node| node.is_active);
+        let game_ui_shown = scene.ui_node("hud/game_ui").is_some_and(|node| node.is_active);
         // Only from the cockpit of the player's own jet - it's the pilot's
         // HUD, not the camera's.
         let in_cockpit = self.in_own_cockpit(scene);
@@ -808,7 +805,7 @@ impl Play {
             .and_then(|node| node.physics_state::<AircraftState>())
             .map(|state| state.flight_data.g_meter)
             .unwrap_or(1.0);
-        if let Some(label) = scene.ui_node("hud_g").and_then(|node| node.as_label_mut()) {
+        if let Some(label) = scene.ui_node("hud/hud_g").and_then(|node| node.as_label_mut()) {
             label.set_text(&format!("{g:.1}G"));
         }
         // Speed on the left, altitude on the right. No captions.
@@ -1037,7 +1034,7 @@ impl Play {
         // (and the plate on it) is moved on to now, so it would jitter
         // against the plate at the physics' rate.
         let marker_shown = scene
-            .ui_node("velocity_marker")
+            .ui_node("hud/velocity_marker")
             .is_some_and(|node| node.is_active);
         if let (Some(map), Some(body_velocity), true) = (
             &fixed_map,
@@ -1139,7 +1136,7 @@ impl Play {
             ),
         ];
         for (key, x, y, visible, width, height) in placed {
-            let Some(node) = scene.ui_node(key) else {
+            let Some(node) = scene.ui_node(&play_ui::in_hud(key)) else {
                 continue;
             };
             // On the plate the readout is drawn on it (below), not as the
@@ -1190,14 +1187,7 @@ impl Play {
                     }
                 }
             }
-            node.transform.x = x - width / 2.0;
-            node.transform.y = y - height / 2.0;
-            node.transform.width = width;
-            node.transform.height = height;
-            node.transform.rect.left = node.transform.x;
-            node.transform.rect.top = node.transform.y;
-            node.transform.rect.right = node.transform.x + width;
-            node.transform.rect.bottom = node.transform.y + height;
+            ui_layers::place(node, x - width / 2.0, y - height / 2.0, width, height);
             // On the plate: lying on it at the readout's own point, so it
             // turns, grows and shrinks with the plate.
             if let (Some(map), true) = (&fixed_map, visible) {
@@ -1218,9 +1208,9 @@ impl Play {
             }
         }
         for (key, visible) in [
-            ("game_ui/hud_stores", shown),
+            ("hud/game_ui/hud_stores", shown),
             (
-                "game_ui/hud_stores/weapons",
+                "hud/game_ui/hud_stores/weapons",
                 shown && !self.weapons.weapon_list.is_empty(),
             ),
         ] {
@@ -1233,7 +1223,7 @@ impl Play {
         let pitch_keys = (0..play_ui::HUD_PITCH_LABELS).map(play_ui::hud_pitch_label_key);
         let heading_keys = (0..play_ui::HUD_HEADING_LABELS).map(play_ui::hud_heading_label_key);
         for key in pitch_keys.chain(heading_keys) {
-            if let Some(node) = scene.ui_node(&key) {
+            if let Some(node) = scene.ui_node(&play_ui::in_hud(&key)) {
                 node.set_active(false);
             }
         }
@@ -1542,7 +1532,7 @@ impl Play {
         let per_degree = horizon_half_length / HEADING_SPAN_DEG;
         let heading = (-toward.x).atan2(toward.z).to_degrees().rem_euclid(360.0);
         if let Some(label) = scene
-            .ui_node("hud_heading")
+            .ui_node("hud/hud_heading")
             .and_then(|node| node.as_label_mut())
         {
             label.set_text(&((heading.round() as i32) % 360).to_string());
@@ -1595,7 +1585,7 @@ impl Play {
         // with the other readouts.
         if !hud_fixed {
             if let Some(hud) = &collimated {
-                if let Some(node) = scene.ui_node("hud_heading") {
+                if let Some(node) = scene.ui_node("hud/hud_heading") {
                     node.set_active(false);
                     let color = node
                         .style
@@ -1615,7 +1605,7 @@ impl Play {
                         );
                     }
                 }
-            } else if let Some(node) = scene.ui_node("hud_heading") {
+            } else if let Some(node) = scene.ui_node("hud/hud_heading") {
                 node.style.font_size = Some(16.0 * scale);
             }
         }
@@ -1809,19 +1799,18 @@ impl Play {
             .enumerate()
             .map(|(index, label)| (play_ui::hud_heading_label_key(index), label));
         for (key, (x, y, text)) in pitch_placed.chain(heading_placed) {
-            let Some(node) = scene.ui_node(&key) else {
+            let Some(node) = scene.ui_node(&play_ui::in_hud(&key)) else {
                 continue;
             };
             node.set_active(true);
             node.style.font_size = Some(SMALL_LABEL_FONT * hud_font_scale(scale, 1.0));
-            node.transform.x = x - label_width / 2.0;
-            node.transform.y = y - label_height / 2.0;
-            node.transform.width = label_width;
-            node.transform.height = label_height;
-            node.transform.rect.left = node.transform.x;
-            node.transform.rect.top = node.transform.y;
-            node.transform.rect.right = node.transform.x + label_width;
-            node.transform.rect.bottom = node.transform.y + label_height;
+            ui_layers::place(
+                node,
+                x - label_width / 2.0,
+                y - label_height / 2.0,
+                label_width,
+                label_height,
+            );
             if let Some(label) = node.as_label_mut() {
                 label.set_text(&text);
             }
@@ -2018,7 +2007,7 @@ impl Play {
         let local = map.aircraft_rot.inverse() * look;
         let azimuth = local.x.atan2(local.z).to_degrees();
         let elevation = local.y.clamp(-1.0, 1.0).asin().to_degrees();
-        let over_sill_deg = crate::scenes::play::plane::aircraft_spec::sill_elevation(
+        let over_sill_deg = crate::prefabs::plane::aircraft_spec::sill_elevation(
             self.flight_manager.cockpit_sill(player_id),
             azimuth,
         )
@@ -2234,7 +2223,10 @@ impl Play {
                     .to_string()
             });
         for (key, x, y) in readouts {
-            let Some(label) = scene.ui_node(key).and_then(|node| node.as_label_mut()) else {
+            let Some(label) = scene
+                .ui_node(&play_ui::in_hud(key))
+                .and_then(|node| node.as_label_mut())
+            else {
                 continue;
             };
             let text = match (key, &head_bearing) {
@@ -2412,34 +2404,34 @@ impl Play {
                 .unwrap_or((0.0, 0.0));
 
             if let Some(label) = scene
-                .ui_node("game_ui/data_box/framerate")
+                .ui_node("hud/game_ui/data_box/framerate")
                 .and_then(|n| n.as_label_mut())
             {
                 label.set_text(&format!("FPS: {}", app.time.fps()));
             }
 
             if let Some(label) = scene
-                .ui_node("game_ui/data_box/g")
+                .ui_node("hud/game_ui/data_box/g")
                 .and_then(|n| n.as_label_mut())
             {
                 label.set_text(&format!("G: {:.0}", g_meter));
             }
 
             if let Some(label) = scene
-                .ui_node("game_ui/data_box/timer")
+                .ui_node("hud/game_ui/data_box/timer")
                 .and_then(|n| n.as_label_mut())
             {
                 label.set_text(&Self::format_duration(self.game_time));
             }
 
             if let Some(label) = scene
-                .ui_node("game_ui/data_box/power")
+                .ui_node("hud/game_ui/data_box/power")
                 .and_then(|n| n.as_label_mut())
             {
                 label.set_text(&format!("Power: {}%", (throttle * 100.0).round()));
             }
             if let Some(label) = scene
-                .ui_node("game_ui/data_box/fuel")
+                .ui_node("hud/game_ui/data_box/fuel")
                 .and_then(|n| n.as_label_mut())
             {
                 let text = if fuel_capacity > 0.0 {
@@ -2451,13 +2443,13 @@ impl Play {
             }
 
             if let Some(label) = scene
-                .ui_node("game_ui/data_box/weapons")
+                .ui_node("hud/game_ui/data_box/weapons")
                 .and_then(|n| n.as_label_mut())
             {
                 label.set_text(&self.weapons.weapons_status);
             }
             if let Some(label) = scene
-                .ui_node("game_ui/data_box/countermeasures")
+                .ui_node("hud/game_ui/data_box/countermeasures")
                 .and_then(|n| n.as_label_mut())
             {
                 label.set_text(&self.weapons.countermeasures_status);
@@ -2466,64 +2458,20 @@ impl Play {
 
             // The speed, in knots (FlightData::speedometer already is).
             if let Some(label) = scene
-                .ui_node("hud_speed")
+                .ui_node("hud/hud_speed")
                 .and_then(|node| node.as_label_mut())
             {
                 label.set_text(&format!("{:.0}", speedometer));
             }
             if let Some(label) = scene
-                .ui_node("hud_altitude")
+                .ui_node("hud/hud_altitude")
                 .and_then(|node| node.as_label_mut())
             {
                 label.set_text(&format!("{:.0}", altimeter));
             }
 
-            // F3 debug view - two separate single-line labels (see
-            // play::ui::build_debug_panel's own doc comment on why not one
-            // multi-line label), each updated the same way as every other
-            // label in this block.
-            if let Some(label) = scene
-                .ui_node("debug_panel/stats_box/fps")
-                .and_then(|n| n.as_label_mut())
-            {
-                label.set_text(&format!("{:.0} FPS", app.time.fps()));
-            }
-            if let Some(pos) = crate::ext::drawn::get(scene, player_id)
-                .map(|i| i.instance.transform.position)
-            {
-                if let Some(label) = scene
-                    .ui_node("debug_panel/stats_box/position")
-                    .and_then(|n| n.as_label_mut())
-                {
-                    label.set_text(&format!(
-                        "Player position: ({:.1}, {:.1}, {:.1})",
-                        pos.x, pos.y, pos.z
-                    ));
-                }
-            }
-            if let Some(rotation) = crate::ext::drawn::get(scene, player_id)
-                .map(|i| i.instance.transform.rotation)
-            {
-                let text = match bank_angle(&rotation) {
-                    Some(bank) => format!(
-                        "Bank: {bank:.1}° ({})",
-                        if bank.abs() < 0.5 {
-                            "level"
-                        } else if bank > 0.0 {
-                            "right wing down"
-                        } else {
-                            "left wing down"
-                        }
-                    ),
-                    None => "Bank: - (nose straight up/down)".to_owned(),
-                };
-                if let Some(label) = scene
-                    .ui_node("debug_panel/stats_box/bank")
-                    .and_then(|n| n.as_label_mut())
-                {
-                    label.set_text(&text);
-                }
-            }
+            // F3's debug panel - see play::debug_tools.
+            self.update_debug_panel(scene, app);
 
             // Every aircraft's name over it - see flight_manager::update_name_tags.
             self.flight_manager

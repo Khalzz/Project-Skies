@@ -4,7 +4,7 @@ use pankarta_software::prelude::*;
 use pankarta_software::rendering::camera::camera::yaw_pitch_rotation;
 
 use crate::camera::camera::looking_along;
-use crate::prefabs::ocean::{self, Ocean, WakeSource};
+use crate::prefabs::ocean::{self, Ocean};
 use crate::scenes::follow_test::scene::sun_node;
 
 use super::rebind_modal;
@@ -13,7 +13,7 @@ use super::ui;
 /// The menu's camera node.
 const CAMERA: &str = "main_menu";
 
-// Resting pose the camera drifts around (see GameLogic::drift_camera).
+// Resting pose the camera drifts around (see MainMenu::drift_camera).
 const BASE_POSITION: Vector3<f32> = Vector3::new(2.20, 0.90, -3.60);
 const BASE_YAW_DEG: f32 = 98.2;
 const BASE_PITCH_DEG: f32 = -10.5;
@@ -57,20 +57,20 @@ impl Default for MenuShot {
     }
 }
 
-pub struct GameLogic {
+pub struct MainMenu {
     // Seconds of drift_camera runtime so far - drives the sin/cos wobble
     // below, not real elapsed scene time (same idea as its own delta_time
     // accumulation).
     elapsed: f32,
     /// How far the sea has streamed, metres.
     flown: f32,
-    /// The sea - streaming past, with the jet's wake on it.
+    /// The sea - streaming past.
     ocean: Ocean,
     /// The title shot, edited from the F10 panel.
     menu_shot: MenuShot,
 }
 
-impl GameLogic {
+impl MainMenu {
     pub fn new(scene: &mut Scene, app: &mut App, environment: Environment) -> Self {
         app.renderer.set_environment(environment);
         app.window.set_cursor_locked(false);
@@ -120,14 +120,6 @@ impl GameLogic {
         // The wave field shifts opposite the heading, so the sea travels
         // along the heading itself.
         self.ocean.set_flow(-heading.x * self.flown, -heading.z * self.flown);
-        // The same foam wake the player's jet leaves when it's fast and low.
-        // The jet stays put, so the trail is carried along with the sea.
-        let speed = self.menu_shot.speed;
-        self.ocean.set_wake_source(Some(WakeSource {
-            position: self.menu_shot.plane,
-            velocity: -heading * speed,
-        }));
-        self.ocean.scroll_wake(heading.x * speed * delta_time, heading.z * speed * delta_time);
 
         if let Some(plane) = scene.get_node_mut("plane").and_then(|node| node.transform_3d_mut()) {
             plane.position = self.menu_shot.plane;
@@ -266,14 +258,14 @@ fn horizontal_from_yaw(yaw_deg: f32) -> Vector3<f32> {
     Vector3::new(forward.x, 0.0, forward.z).try_normalize(1e-6).unwrap_or_else(Vector3::x)
 }
 
-impl SceneBehaviour for GameLogic {
+impl SceneBehaviour for MainMenu {
     fn update(&mut self, scene: &mut Scene, app: &mut App, ctx: &mut FrameContext) {
         let _ = ctx;
         self.update(scene, app, app.time.delta_time);
     }
 
     fn after_cameras(&mut self, scene: &mut Scene, app: &mut App) {
-        // The sea's waves and wake, around where the camera is drawn from.
+        // The sea's waves, around where the camera is drawn from.
         self.ocean.update(scene, "world", app.time.delta_time);
     }
 

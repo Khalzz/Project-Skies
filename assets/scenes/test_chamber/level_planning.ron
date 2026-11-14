@@ -22,7 +22,7 @@ EventSystem (
     ],
     ui_tracks: [
         Alpha(
-            target: "mission_intro/title",
+            target: "mission_intro/card/title",
             keyframes: [
                 (time: 0,    value: 0.0),
                 (time: 800,  value: 0.0),
@@ -32,7 +32,7 @@ EventSystem (
             ],
         ),
         Alpha(
-            target: "mission_intro/location",
+            target: "mission_intro/card/location",
             keyframes: [
                 (time: 0,    value: 0.0),
                 (time: 800,  value: 0.0),
@@ -42,7 +42,7 @@ EventSystem (
             ],
         ),
         Alpha(
-            target: "mission_intro/date",
+            target: "mission_intro/card/date",
             keyframes: [
                 (time: 0,    value: 0.0),
                 (time: 800,  value: 0.0),
@@ -52,7 +52,7 @@ EventSystem (
             ],
         ),
         Color(
-            target: "mission_intro_backdrop",
+            target: "mission_intro/backdrop",
             keyframes: [
                 (time: 0,    value: (r: 0, g: 0, b: 0, a: 255)),
                 (time: 3600, value: (r: 0, g: 0, b: 0, a: 255)),
@@ -60,21 +60,20 @@ EventSystem (
             ],
         ),
         Active(target: "mission_intro", start_time: 4400, keyframes: [ (time: 0, value: false) ]),
-        Active(target: "mission_intro_backdrop", start_time: 4400, keyframes: [ (time: 0, value: false) ]),
 
-        Active(target: "game_ui", start_time: 4400, keyframes: [ (time: 0, value: true) ]),
-        Active(target: "velocity_marker", start_time: 4400, keyframes: [ (time: 0, value: true) ]),
+        Active(target: "hud/game_ui", start_time: 4400, keyframes: [ (time: 0, value: true) ]),
+        Active(target: "hud/velocity_marker", start_time: 4400, keyframes: [ (time: 0, value: true) ]),
 
-        Alpha(target: "game_ui/data_box/timer", start_time: 4400, keyframes: [ (time: 0, value: 0.0), (time: 600, value: 1.0) ]),
-        Alpha(target: "game_ui/data_box/framerate", start_time: 4400, keyframes: [ (time: 0, value: 0.0), (time: 600, value: 1.0) ]),
-        Alpha(target: "game_ui/data_box/g", start_time: 4400, keyframes: [ (time: 0, value: 0.0), (time: 600, value: 1.0) ]),
-        Alpha(target: "game_ui/data_box/power", start_time: 4400, keyframes: [ (time: 0, value: 0.0), (time: 600, value: 1.0) ]),
-        Alpha(target: "game_ui/compass", start_time: 4400, keyframes: [ (time: 0, value: 0.0), (time: 600, value: 1.0) ]),
-        Alpha(target: "game_ui/speed", start_time: 4400, keyframes: [ (time: 0, value: 0.0), (time: 600, value: 1.0) ]),
-        Alpha(target: "velocity_marker", start_time: 4400, keyframes: [ (time: 0, value: 0.0), (time: 600, value: 1.0) ]),
+        Alpha(target: "hud/game_ui/data_box/timer", start_time: 4400, keyframes: [ (time: 0, value: 0.0), (time: 600, value: 1.0) ]),
+        Alpha(target: "hud/game_ui/data_box/framerate", start_time: 4400, keyframes: [ (time: 0, value: 0.0), (time: 600, value: 1.0) ]),
+        Alpha(target: "hud/game_ui/data_box/g", start_time: 4400, keyframes: [ (time: 0, value: 0.0), (time: 600, value: 1.0) ]),
+        Alpha(target: "hud/game_ui/data_box/power", start_time: 4400, keyframes: [ (time: 0, value: 0.0), (time: 600, value: 1.0) ]),
+        Alpha(target: "hud/game_ui/compass", start_time: 4400, keyframes: [ (time: 0, value: 0.0), (time: 600, value: 1.0) ]),
+        Alpha(target: "hud/game_ui/speed", start_time: 4400, keyframes: [ (time: 0, value: 0.0), (time: 600, value: 1.0) ]),
+        Alpha(target: "hud/velocity_marker", start_time: 4400, keyframes: [ (time: 0, value: 0.0), (time: 600, value: 1.0) ]),
 
         Color(
-            target: "game_ui/data_box",
+            target: "hud/game_ui/data_box",
             start_time: 4400,
             keyframes: [
                 (time: 0,   value: (r: 0, g: 0, b: 0, a: 0)),

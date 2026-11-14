@@ -1,8 +1,8 @@
 // The ocean - the game's Raw shader for the sea (settings in ocean.ron; see
 // engine::rendering::shader_library for what a Raw shader gets). Groups
 // 1/2/3 are the camera, the mesh's transform and the light, as for every
-// model. Group 0 is the material's: its params - the wave field and the
-// wake, `Ocean` below, filled every frame by prefabs::ocean - at binding 2, and
+// model. Group 0 is the material's: its params - the wave field, `Ocean`
+// below, filled every frame by prefabs::ocean - at binding 2, and
 // (it `reads: [Depth]`) a snapshot of the depth buffer taken right after the
 // solid world finished drawing (the frame plan's CopyDepth) at 16/17 - used
 // for shore-intersection foam, see fs_main's own comment on that. Bindings
@@ -120,24 +120,10 @@ const NEXT_RING_FADE_START: f32 = 0.9;
 
 // Must match prefabs::ocean::waves::MAX_WAVES.
 const MAX_WAVES: u32 = 80u;
-// Must match prefabs::ocean::wake::MAX_WAKE_POINTS.
-const MAX_WAKE_POINTS: u32 = 32u;
-
-// A plane flying fast and low leaves a foam streak on the water along its
-// trail (see water_wake, and prefabs::ocean::wake for when/how strongly),
-// WAKE_TRAIL_WIDTH wide when fresh and WAKE_TRAIL_SPREAD wider per second
-// of age, fading out; WAKE_TRAIL_FOAM is its strength.
-const WAKE_TRAIL_WIDTH: f32 = 5.0;
-const WAKE_TRAIL_SPREAD: f32 = 6.0;
-const WAKE_TRAIL_FOAM: f32 = 0.8;
-// The trail's foam is broken up by noise pinned to the water: dense when
-// fresh, thinning to patches as it ages - WAKE_FOAM_COVERAGE_FRESH/_OLD are
-// how much of it survives (0..1) at those two ends. The noise repeats every
-// WAKE_NOISE_PERIOD meters (prefabs::ocean::wake's WAKE_NOISE_PERIOD, keep in sync).
-const WAKE_FOAM_COVERAGE_FRESH: f32 = 0.85;
-const WAKE_FOAM_COVERAGE_OLD: f32 = 0.35;
-const WAKE_NOISE_PERIOD: f32 = 4096.0;
-const WAKE_FOAM_COLOR: vec3<f32> = vec3<f32>(0.85, 0.9, 0.95);
+// The noise pinned to the sea (the depth tint's patches, the ripples'
+// gusts) repeats every NOISE_PERIOD meters - prefabs::ocean::shader's
+// NOISE_PERIOD, keep in sync.
+const NOISE_PERIOD: f32 = 4096.0;
 // A detail wave fully shows once its wavelength spans this many pixels, and
 // fades to nothing by half that - shorter than that it would only shimmer.
 const DETAIL_FULL_PIXELS: f32 = 8.0;
@@ -234,7 +220,7 @@ const RIPPLE_GUST_MIN: f32 = 0.6;
 const RIPPLE_GUST_MAX: f32 = 1.4;
 const RIPPLE_GUST_SIZE: f32 = 512.0;
 
-// See prefabs::ocean (OceanWaves::params, Wake::write) - each wave is two
+// See prefabs::ocean (OceanWaves::params) - each wave is two
 // vec4s: (dir.x, dir.z, k, amplitude), (steepness, phase at camera,
 // wavelength, unused).
 struct Ocean {
@@ -246,17 +232,8 @@ struct Ocean {
     // see surface_waves
     shading: vec4<f32>,
     waves: array<vec4<f32>, 160>,
-    // The low-flying plane's wake - see prefabs::ocean. All zero when there's none.
-    // plane: camera-relative x, z, height above the water, intensity 0..1
-    wake_head: vec4<f32>,
-    // circle around the whole wake (camera-relative x, z, radius), trail max age
-    wake_bounds: vec4<f32>,
-    // trail point count
-    wake_info: vec4<f32>,
-    // trail, newest first: camera-relative x, z, age, intensity
-    wake_points: array<vec4<f32>, 32>,
-    // camera world x, z wrapped to WAKE_NOISE_PERIOD, unused x2
-    wake_anchor: vec4<f32>,
+    // camera world x, z wrapped to NOISE_PERIOD, unused x2
+    noise_anchor: vec4<f32>,
     // Per-pixel cost knobs (see OceanSettings::pixel_*): how many pixels a
     // wave must span to fully show (DETAIL_FULL_PIXELS when 0), at most how
     // many waves a pixel sums, unused, whether the detail waves come from
@@ -488,7 +465,7 @@ fn surface_waves(p: vec2<f32>, pixel_size: f32) -> SurfaceSample {
 // `point` (whole numbers).
 fn ripple_offset(point: vec2<f32>) -> vec2<f32> {
     let id = vec2<i32>(point);
-    return vec2<f32>(wake_hash(id, RIPPLE_HEX_PERIOD), wake_hash(id + vec2<i32>(101, 57), RIPPLE_HEX_PERIOD));
+    return vec2<f32>(sea_hash(id, RIPPLE_HEX_PERIOD), sea_hash(id + vec2<i32>(101, 57), RIPPLE_HEX_PERIOD));
 }
 
 // One layer of the ripple map at camera-relative rest point `p`: its slope
@@ -576,21 +553,20 @@ fn scene_depth(pixel: vec2<i32>) -> f32 {
 }
 
 // Broad patches of deeper and shallower-looking water at camera-relative
-// rest point `p`, -1..1 - noise pinned to the sea (the wake foam's, on its
-// wrap) at ~512, 128 and 32 m - broad, soft patches - the finer ones
+// rest point `p`, -1..1 - noise pinned to the sea (on its wrap) at ~512, 128 and 32 m - broad, soft patches - the finer ones
 // fading out once they're too fine for the pixel (`pixel_size`, m) so they
 // never shimmer. Shades the water's color like the swell's height does
 // (fs_main's height_01).
 fn depth_tint(p: vec2<f32>, pixel_size: f32) -> f32 {
-    let q = ocean.wake_anchor.xy + p;
-    var tint = (wake_value_noise(q, 512.0) - 0.5) * 0.6;
-    tint += (wake_value_noise(q, 128.0) - 0.5) * 0.3 * (1.0 - smoothstep(16.0, 64.0, pixel_size));
-    tint += (wake_value_noise(q, 32.0) - 0.5) * 0.1 * (1.0 - smoothstep(4.0, 16.0, pixel_size));
+    let q = ocean.noise_anchor.xy + p;
+    var tint = (sea_value_noise(q, 512.0) - 0.5) * 0.6;
+    tint += (sea_value_noise(q, 128.0) - 0.5) * 0.3 * (1.0 - smoothstep(16.0, 64.0, pixel_size));
+    tint += (sea_value_noise(q, 32.0) - 0.5) * 0.1 * (1.0 - smoothstep(4.0, 16.0, pixel_size));
     return tint * 2.0;
 }
 
 // Random 0..1 per integer lattice point, repeating every `period` points.
-fn wake_hash(cell: vec2<i32>, period: i32) -> f32 {
+fn sea_hash(cell: vec2<i32>, period: i32) -> f32 {
     let wrapped = bitcast<vec2<u32>>(((cell % period) + period) % period);
     var h = (wrapped.x * 1597334677u) ^ (wrapped.y * 3812015801u);
     h = h * 747796405u + 2891336453u;
@@ -600,79 +576,19 @@ fn wake_hash(cell: vec2<i32>, period: i32) -> f32 {
 }
 
 // Smooth value noise 0..1 with blobs about `cell` meters across, at noise
-// position `q` - repeats every WAKE_NOISE_PERIOD, so it lines up across the
-// wrap in wake_anchor.
-fn wake_value_noise(q: vec2<f32>, cell: f32) -> f32 {
-    let period = i32(WAKE_NOISE_PERIOD / cell);
+// position `q` - repeats every NOISE_PERIOD, so it lines up across the
+// wrap in noise_anchor.
+fn sea_value_noise(q: vec2<f32>, cell: f32) -> f32 {
+    let period = i32(NOISE_PERIOD / cell);
     let x = q / cell;
     let i = vec2<i32>(floor(x));
     let f = fract(x);
     let s = f * f * (3.0 - 2.0 * f);
-    let a = wake_hash(i, period);
-    let b = wake_hash(i + vec2<i32>(1, 0), period);
-    let c = wake_hash(i + vec2<i32>(0, 1), period);
-    let d = wake_hash(i + vec2<i32>(1, 1), period);
+    let a = sea_hash(i, period);
+    let b = sea_hash(i + vec2<i32>(1, 0), period);
+    let c = sea_hash(i + vec2<i32>(0, 1), period);
+    let d = sea_hash(i + vec2<i32>(1, 1), period);
     return mix(mix(a, b, s.x), mix(c, d, s.x), s.y);
-}
-
-// Churned-foam pattern at noise position `q`: big clumps with finer
-// breakup inside them. Roughly 0..1, around 0.5 on average.
-fn wake_foam_noise(q: vec2<f32>) -> f32 {
-    return wake_value_noise(q, 16.0) * 0.5 + wake_value_noise(q, 4.0) * 0.3 + wake_value_noise(q, 1.0) * 0.2;
-}
-
-// The low-flying plane's foam trail at camera-relative point `p` - see the
-// WAKE_* constants. `foam` 0..1 whitens the water.
-struct WakeSample {
-    foam: f32,
-};
-
-fn water_wake(p: vec2<f32>) -> WakeSample {
-    var out: WakeSample;
-    out.foam = 0.0;
-    let bounds = ocean.wake_bounds;
-    if (bounds.z <= 0.0 || distance(p, bounds.xy) > bounds.z) {
-        return out;
-    }
-    // The trail starts at the plane.
-    let head = ocean.wake_head;
-    let intensity = head.w;
-
-    // A foam streak along the trail, widening and fading with age.
-    let max_age = bounds.w;
-    let count = min(u32(ocean.wake_info.x), MAX_WAKE_POINTS);
-    var trail = 0.0;
-    // How old the foam is where `trail` came from, 0 (fresh) .. 1 (max age).
-    var trail_age = 0.0;
-    var previous = vec4<f32>(head.x, head.y, 0.0, intensity);
-    for (var i = 0u; i < count; i++) {
-        let point = ocean.wake_points[i];
-        // Closest spot on the segment previous -> point.
-        let segment = point.xy - previous.xy;
-        let along = clamp(dot(p - previous.xy, segment) / max(dot(segment, segment), 0.0001), 0.0, 1.0);
-        let distance_to_trail = length(p - (previous.xy + segment * along));
-        let age = mix(previous.z, point.z, along);
-        let strength = mix(previous.w, point.w, along) * (1.0 - smoothstep(0.0, max_age, age));
-        let width = WAKE_TRAIL_WIDTH + age * WAKE_TRAIL_SPREAD;
-        let here = strength * (1.0 - smoothstep(width * 0.3, width, distance_to_trail));
-        if (here > trail) {
-            trail = here;
-            trail_age = clamp(age / max(max_age, 0.001), 0.0, 1.0);
-        }
-        previous = point;
-    }
-    // Broken up by noise pinned to the water (not the camera - the trail
-    // stays put as the plane flies on), so it reads as churned foam, not a
-    // painted stripe: nearly solid when fresh, clumps and holes as it ages.
-    if (trail > 0.0) {
-        let noise = wake_foam_noise(ocean.wake_anchor.xy + p);
-        let coverage = mix(WAKE_FOAM_COVERAGE_FRESH, WAKE_FOAM_COVERAGE_OLD, trail_age);
-        // Noise above (1 - coverage) is foam, with a soft edge.
-        let threshold = 1.0 - coverage;
-        let breakup = smoothstep(threshold - 0.12, threshold + 0.12, noise);
-        out.foam = max(out.foam, trail * WAKE_TRAIL_FOAM * breakup);
-    }
-    return out;
 }
 
 @vertex
@@ -779,9 +695,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             shown *= 2.0;
         }
         // Gusts: the ripples' strength drifting across the sea (pinned to
-        // it - the same noise as the wake's foam, on its wrap).
-        let gust_at = ocean.wake_anchor.xy + in.rest_position;
-        let gust_noise = wake_value_noise(gust_at, RIPPLE_GUST_SIZE) * 0.65 + wake_value_noise(gust_at, RIPPLE_GUST_SIZE * 0.25) * 0.35;
+        // it - the same noise as the depth tint's, on its wrap).
+        let gust_at = ocean.noise_anchor.xy + in.rest_position;
+        let gust_noise = sea_value_noise(gust_at, RIPPLE_GUST_SIZE) * 0.65 + sea_value_noise(gust_at, RIPPLE_GUST_SIZE * 0.25) * 0.35;
         let gust = mix(RIPPLE_GUST_MIN, RIPPLE_GUST_MAX, gust_noise);
         // Near to far (ocean.look): the near ripples fade out with distance
         // and the far layer takes over - sooner than the mipmaps alone would
@@ -825,8 +741,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // pixel (see surface_waves). The same everywhere, so nothing changes
     // where the moving rings end.
     let surface = surface_waves(in.rest_position, pixel_size);
-    // The plane's foam trail, if any.
-    let wake = water_wake(in.rest_position);
     let slope = surface.slope + ripple_slope;
     let normal = normalize(vec3<f32>(-slope.x, 1.0 - surface.crest, -slope.y));
     // How much of the waves' total slope has faded out at this pixel, 0..1 -
@@ -921,7 +835,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // visibility envelope as everything else wave-related.
     let crest_01 = surface.crest / max(ocean.shading.x, 0.0001);
     let whitecap = smoothstep(WHITECAP_START, WHITECAP_FULL, crest_01) * ocean.shading.y * wave_visibility;
-    let capped = mix(mix(shore_tinted, WHITECAP_COLOR, whitecap), WAKE_FOAM_COLOR, wake.foam);
+    let capped = mix(shore_tinted, WHITECAP_COLOR, whitecap);
 
     // Final composition: light the water (and its foam) first, THEN blend in
     // the sky reflection - unlit, since reflected sky is already light. (It
@@ -930,7 +844,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // view.) Foam isn't a mirror, so it takes no reflection; the sun glint
     // goes on top of everything.
     let lit_water = (ambient_color + diffuse_color) * capped;
-    let reflection = fresnel_amount * (1.0 - max(max(shore_foam, whitecap), wake.foam));
+    let reflection = fresnel_amount * (1.0 - max(shore_foam, whitecap));
     let result = mix(lit_water, SKY_REFLECTION_COLOR, reflection) + specular_color * 1.4;
 
     // Long-distance atmospheric haze - fades the water toward the sea's own

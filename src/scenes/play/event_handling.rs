@@ -30,7 +30,7 @@ pub struct Event {
 /// A `[start_time, end_time)` window (ms, same convention as every other
 /// track's own start/end) during which the player has no input at all -
 /// flight controls, and specifically the pause menu itself (see
-/// `GameLogic::update`'s own use of `EventSystem::input_lock_end`) - only a
+/// `Play::update`'s own use of `EventSystem::input_lock_end`) - only a
 /// "hold ESC to skip" affordance still works. The mission intro's black
 /// screen uses it.
 #[derive(Debug, Deserialize)]
@@ -91,7 +91,7 @@ impl EventSystem {
     /// The end time (ms) of whichever `input_locks` window currently contains
     /// `seconds`, if any - `None` means input isn't locked right now. Returns
     /// the *latest* end among any that overlap, in the unusual case more than
-    /// one does, so a "hold ESC to skip" (see `GameLogic::update`) always
+    /// one does, so a "hold ESC to skip" (see `Play::update`) always
     /// jumps past all of them at once rather than into a gap between two.
     pub fn input_lock_end(&self, seconds: f64) -> Option<u64> {
         let game_time_ms = Duration::from_secs_f64(seconds).as_millis() as u64;

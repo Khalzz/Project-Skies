@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use crate::ext::ui_layers::{self, GameUi};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -8,61 +7,30 @@ use glyphon::cosmic_text::Align;
 use nalgebra::{Point3, UnitQuaternion, Vector3};
 
 use pankarta_software::app::App;
-use crate::ext::game_object::{Camera as GameObjectCamera, Cameras};
 use crate::ext::emitters::ParticleEmitters;
 use crate::ext::physics_behavior::PhysicsNodeExt;
 use pankarta_software::prelude::DoubleSidedMeshes;
-use crate::ext::water_contact::WaterContact;
 use pankarta_software::scene_manager::node::Node;
 use pankarta_software::scene_manager::node::properties::{Model, Parent, Space, Transform3D};
+use pankarta_software::prelude::UiLayer;
 use pankarta_software::ui::color::UiColor;
+use pankarta_software::ui::ui_node::UiNode;
 use pankarta_software::ui::ui_transform::SizeValue;
 use pankarta_software::scene_manager::scene::Scene;
 use crate::game_settings::GAME_SETTINGS;
 use crate::ui::label;
-use crate::prefabs::camera;
 use crate::scenes::play::map::{AircraftPlacement, Coalition, MapSpec};
-use crate::scenes::play::plane::aircraft_spec::AircraftSpec;
+use crate::prefabs::plane::aircraft_spec::AircraftSpec;
 use crate::scenes::play::weapon::weapon_spec::WeaponSpec;
 use crate::scenes::play::weapon::countermeasures::CountermeasureSet;
-use crate::scenes::play::plane::pylon_spec::PylonSpec;
 use std::collections::{BTreeMap, BTreeSet};
-use crate::scenes::play::plane::autopilot::Speed;
-use crate::scenes::play::plane::{aircraft_physics::AircraftPhysics, effects, messages::{AircraftReload, AircraftState}, plane::Plane};
+use crate::prefabs::plane::ai::autopilot::Speed;
+use crate::prefabs::plane::{self, cruise_speed, loaded_mass, loaded_stores};
+use crate::prefabs::plane::{messages::{AircraftReload, AircraftState}, plane::Plane};
 
-// After crashing into the water: how long the wreck floats, then how long it
-// takes to flood and go under - see WaterContact::sinks.
-const WRECK_FLOAT_SECONDS: f32 = 2.0;
-const WRECK_SINK_SECONDS: f32 = 6.0;
 
 /// The level's map.ron, or - when it's missing or broken (reported) - just
 /// the player in an F-16 on the runway, so the level still opens.
-/// A plane's views as its data.ron places them - the cockpit at the pilot's
-/// seat (`aero.pilot_position`) unless `cameras` says otherwise; the rest,
-/// the camera's own defaults (see prefabs::camera). The cockpit gets
-/// the plane's `head_limits`, when it has them.
-fn plane_cameras(spec: &AircraftSpec) -> Cameras {
-    let mut cameras: Cameras = spec.cameras.clone();
-    let cockpit = cameras.entry(camera::COCKPIT_CAMERA.to_owned())
-        .or_insert(GameObjectCamera { position: spec.aero.pilot_position, fov: 70.0, head_limits: None });
-    if spec.head_limits.is_some() {
-        cockpit.head_limits = spec.head_limits;
-    }
-    cameras
-}
-
-/// What an aircraft is drawn with: its map placement's material (else
-/// engine/standard), with its plane's mesh materials under the placement's
-/// own - None when that's just engine/standard.
-fn plane_material(spec: &AircraftSpec, placement: Option<&AircraftPlacement>) -> Option<pankarta_software::scene_manager::node::properties::Material> {
-    use pankarta_software::scene_manager::node::properties::Material;
-    let mut material = placement.and_then(|placement| placement.material.clone()).unwrap_or_else(|| Material::shader(pankarta_software::rendering::shader_library::STANDARD));
-    for (mesh, mesh_material) in &spec.materials {
-        material.meshes.entry(mesh.clone()).or_insert_with(|| mesh_material.clone());
-    }
-    (!material.is_standard()).then_some(material)
-}
-
 /// The flares and chaff `placement` is loaded with - as many as the map
 /// says, or as its plane's data.ron does - none without dispensers.
 fn loaded_countermeasures(spec: &AircraftSpec, placement: &AircraftPlacement) -> Option<CountermeasureSet> {
@@ -103,31 +71,6 @@ fn load_map(scene_folder: &str) -> MapSpec {
             ..Default::default()
         }
     })
-}
-
-/// A plane's mass and center of mass with a loadout on (kg, the jet's frame)
-/// - its own, plus every weapon hung on it at its pylon. Weapons the loadout
-/// can't hang (see `loadout_problems`) don't count.
-pub fn loaded_mass(spec: &AircraftSpec, loadout: &BTreeMap<String, String>) -> (f32, Vector3<f32>) {
-    let mut mass = spec.physics.rigidbody.mass;
-    let mut moment = spec.physics.rigidbody.center_of_mass * mass;
-    for (pylon, weapon) in loaded_stores(spec, loadout) {
-        let weapon_mass = weapon.physics.rigidbody.mass;
-        mass += weapon_mass;
-        moment += pylon.position * weapon_mass;
-    }
-    (mass, moment / mass)
-}
-
-/// The weapons a loadout hangs on a plane: each with the pylon it's on -
-/// only the ones that can be (the pylon's there, takes its kind, the weapon
-/// loads).
-fn loaded_stores<'a>(spec: &'a AircraftSpec, loadout: &BTreeMap<String, String>) -> Vec<(&'a PylonSpec, WeaponSpec)> {
-    loadout.iter().filter_map(|(pylon_name, weapon)| {
-        let pylon = spec.pylons.iter().find(|pylon| pylon.name == *pylon_name)?;
-        let weapon = WeaponSpec::read(weapon).ok()?;
-        pylon.accepts(weapon.category).then_some((pylon, weapon))
-    }).collect()
 }
 
 /// The event that gives a running jet its plane's data (`spec`) - with its
@@ -173,10 +116,20 @@ fn modified_time(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|metadata| metadata.modified()).ok()
 }
 
-/// The UI element holding the name tag over the aircraft `node_id` - one
-/// top-level element per aircraft (see `update_name_tags`).
-fn name_tag_key(node_id: &str) -> String {
-    format!("aircraft_name:{node_id}")
+/// The name tag over the aircraft `node_id` - its node's own UI layer, so
+/// it lives and dies with the aircraft (see `update_name_tags`).
+fn name_tag<'a>(scene: &'a mut Scene, node_id: &str) -> Option<&'a mut UiNode> {
+    scene.get_node_mut(node_id)?.get_property_mut::<UiLayer>()?.get_mut("")
+}
+
+/// A name tag reading `name`, in `coalition`'s color - built hidden.
+fn build_name_tag(name: &str, coalition: &Coalition) -> UiNode {
+    label(name)
+        .set_size(SizeValue::Pixels(NAME_TAG_WIDTH), SizeValue::Pixels(NAME_TAG_HEIGHT))
+        .set_font_size(14.0)
+        .set_text_color(coalition_color(coalition))
+        .set_align(Align::Center)
+        .active(false)
 }
 
 // A name tag's box (px) - the text is centered in it.
@@ -315,14 +268,14 @@ impl flight_manager {
             // Its views - the cockpit at the pilot's seat - where the file
             // now puts them.
             let Some(node) = scene.content.nodes.get_mut(&plane.node_id) else { continue };
-            node.set_property(plane_cameras(&spec));
+            node.set_property(plane::cameras(&spec));
             // Its emitters, rebuilt where the file now puts them (the plane
             // switches them on again as needed next frame).
             if let Some(emitters) = node.get_property_mut::<ParticleEmitters>() {
-                emitters.replace(effects::plane_emitters(&spec.effects, &spec.gear, &spec.aero.wings));
+                emitters.replace(plane::effects::plane_emitters(&spec.effects, &spec.gear, &spec.aero.wings));
             }
             // What it's drawn with - its mesh materials as the file now has them.
-            let material = plane_material(&spec, self.applied.find(&plane.node_id).map(|(_, placement)| placement));
+            let material = plane::material(&spec, self.applied.find(&plane.node_id).map(|(_, placement)| placement));
             if let Some(model) = node.get_property_mut::<Model>() {
                 model.material = material;
             }
@@ -355,6 +308,23 @@ impl flight_manager {
             }
         }
         self.applied = map;
+    }
+
+    /// Spawns just the aircraft `name` from the level's map.ron in
+    /// `scene_folder` - the same way spawn_map spawns each one (its name tag
+    /// in its coalition's color, its loadout, its countermeasures, its
+    /// data.ron watched) - for a scene that wants one of a level's aircraft,
+    /// not the whole level (the sandbox). The rest of the map is known (see
+    /// `map`, `coalition_of`) but not spawned.
+    pub fn spawn_one(&mut self, scene: &mut Scene, app: &mut App, scene_folder: &str, name: &str) -> Result<(), String> {
+        let map = MapSpec::load(scene_folder)?;
+        let (coalition, placement) = map
+            .find(name)
+            .map(|(coalition, placement)| (coalition.clone(), placement.clone()))
+            .ok_or_else(|| format!("map: no aircraft '{name}' in {scene_folder}"))?;
+        self.add_plane(scene, app, &coalition, &placement, map.flight_plan(&placement))?;
+        self.applied = map;
+        Ok(())
     }
 
     /// Brings the scene in line with `edited` (the flight editor (F10's editor view)'s copy of
@@ -510,64 +480,16 @@ impl flight_manager {
             eprintln!("map aircraft '{}': loadout - {problem}", placement.name);
         }
 
-        let rotation = placement.rotation();
-        let mut physics = aircraft_spec.physics.clone();
-        // Its loadout's weight on, where it hangs.
-        let (mass, center_of_mass) = loaded_mass(&aircraft_spec, &placement.loadout);
-        physics.rigidbody.mass = mass;
-        physics.rigidbody.center_of_mass = center_of_mass;
-        let colliders = physics.colliders.clone();
-        let data_initial_velocity = physics.rigidbody.initial_velocity;
-        if let Some(speed) = placement.speed {
-            physics.rigidbody.initial_velocity = rotation * Vector3::new(0.0, 0.0, speed);
-        }
-        let mut plane = Plane::new().with_effects(&aircraft_spec.effects).with_throttle(placement.throttle).with_military(aircraft_spec.engine.afterburner_gate).with_fuel(&aircraft_spec.fuel);
-        plane.set_surface_max(&aircraft_spec.aero.wings);
-        if let Some(kg) = placement.fuel_kg {
-            plane.set_fuel_kg(kg);
-        }
-        plane.bingo_kg = placement.bingo_kg.filter(|kg| *kg > 0.0);
-        plane.radar_warn_m = placement.radar_warn_m.unwrap_or(super::map::DEFAULT_RADAR_WARN_M).max(0.0);
-        plane.set_colliders(colliders.clone());
-        plane.arm_gear(&aircraft_spec.gear, placement.start.gear_down());
-        plane.set_path(&flight_plan.0, Speed::Hold(cruise_speed(placement)), placement.difficulty, flight_plan.1);
-        let plane = if placement.player { plane } else { plane.bot() };
-
-        let material = plane_material(&aircraft_spec, Some(placement));
-        let mut model = Model::file(crate::asset_relative(&aircraft_spec.model.model))
-            .double_sided(DoubleSidedMeshes::Meshes(aircraft_spec.model.double_sided.clone()))
-            .transform(Transform3D { scale: Vector3::repeat(aircraft_spec.model.scale), ..Default::default() });
-        model.material = material;
+        let data_initial_velocity = aircraft_spec.physics.rigidbody.initial_velocity;
+        let sea_level = app.particles.sea_level().unwrap_or(0.0);
         scene.spawn_node(app,
-            Node::new(&placement.name)
-                .with_behavior(plane)
-                .with_property(Transform3D {
-                    position: placement.position(),
-                    rotation,
-                    scale: Vector3::new(1.0, 1.0, 1.0),
-                })
-                // One shared load of the plane's model (the engine can't move
-                // a file model's meshes per node, so there's nothing for a
-                // copy of its own to keep apart - see plane::Plane::update).
-                .with_property(model)
-                // Its views - the cockpit at the pilot's seat.
-                .with_property(plane_cameras(&aircraft_spec))
-                .with_property(effects::plane_emitters(&aircraft_spec.effects, &aircraft_spec.gear, &aircraft_spec.aero.wings))
-                .with_property(physics.to_engine())
-                .add_physics_behavior(AircraftPhysics::new(&aircraft_spec.aero, &aircraft_spec.engine, &aircraft_spec.gear, &aircraft_spec.effects, center_of_mass, colliders, mass, placement.start.gear_down()))
-                .add_physics_behavior(WaterContact::new(app.particles.sea_level().unwrap_or(0.0)).sinks(WRECK_FLOAT_SECONDS, WRECK_SINK_SECONDS)),
+            plane::aircraft(&aircraft_spec, placement, flight_plan, sea_level)
+                // Its name over it - placed every frame by update_name_tags
+                // (which leaves the player's hidden).
+                .with_property(UiLayer::new(build_name_tag(&placement.name, coalition)))
+                // What it answers a radar's IFF with.
+                .with_property(crate::prefabs::plane::transponder::Transponder { coalition: coalition.name.clone() }),
         ).map_err(|error| format!("map aircraft '{}': {error}", placement.name))?;
-
-        // Its name over it - placed every frame by update_name_tags (which
-        // leaves the player's hidden).
-        let mut tag = label(&placement.name)
-            .set_size(SizeValue::Pixels(NAME_TAG_WIDTH), SizeValue::Pixels(NAME_TAG_HEIGHT))
-            .set_font_size(14.0)
-            .set_text_color(coalition_color(coalition))
-            .set_align(Align::Center)
-            .active(false);
-        tag.resolve(app.window.size.width as f32, app.window.size.height as f32);
-        ui_layers::add(scene, app, name_tag_key(&placement.name), tag);
 
         // Its HUD glass, from its model - sized like the model's drawn.
         let hud_glass = aircraft_spec.model.hud_glass.as_ref().and_then(|mesh| {
@@ -664,12 +586,11 @@ impl flight_manager {
         }
     }
 
-    /// Takes the aircraft `name` out of the scene - node, body, name tag,
-    /// the weapons hung on it.
+    /// Takes the aircraft `name` out of the scene - node (its name tag with
+    /// it), body, the weapons hung on it.
     fn remove_plane(&mut self, scene: &mut Scene, app: &mut App, name: &str) {
         self.remove_stores(scene, app, name);
         scene.despawn_node(app, name);
-        ui_layers::remove(scene, app, &name_tag_key(name));
         self.watched.retain(|plane| plane.node_id != name);
         self.spawned.remove(name);
         self.fired.remove(name);
@@ -749,7 +670,7 @@ impl flight_manager {
     }
 
     fn color_name_tag(scene: &mut Scene, name: &str, coalition: &Coalition) {
-        if let Some(tag) = scene.ui_node(&name_tag_key(name)) {
+        if let Some(tag) = name_tag(scene, name) {
             let color = coalition_color(coalition);
             tag.update_style(|style| style.set_text_color(color));
         }
@@ -770,7 +691,7 @@ impl flight_manager {
             } else {
                 None
             };
-            let Some(tag) = scene.ui_node(&name_tag_key(node_id)) else { continue };
+            let Some(tag) = name_tag(scene, node_id) else { continue };
             let Some(screen_position) = screen_position else {
                 tag.set_active(false);
                 continue;
@@ -811,15 +732,6 @@ pub fn loadout_problems(placement: &AircraftPlacement, spec: &AircraftSpec) -> V
         }
     }).collect()
 }
-
-/// The airspeed a bot holds flying its path (m/s) - its map `speed`, or
-/// DEFAULT_CRUISE_SPEED without one.
-pub fn cruise_speed(placement: &AircraftPlacement) -> f32 {
-    placement.speed.filter(|speed| *speed > 1.0).unwrap_or(DEFAULT_CRUISE_SPEED)
-}
-
-/// See `cruise_speed`.
-const DEFAULT_CRUISE_SPEED: f32 = 150.0;
 
 fn coalition_color(coalition: &Coalition) -> UiColor {
     UiColor::Rgb(coalition.color.0, coalition.color.1, coalition.color.2)

@@ -146,7 +146,7 @@ pub struct Guidance {
     pub guidance_delay: f32,
     /// How well its seeker tells a flare from a jet (0..1) - the chance it
     /// ignores each flare that would otherwise pull it off: 0 falls for every
-    /// one, 1 for none (see play::weapon::missile). Optional: 0.
+    /// one, 1 for none (see prefabs::missile::flight). Optional: 0.
     #[serde(default)]
     pub flare_resistance: f32,
 }

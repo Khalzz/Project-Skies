@@ -175,7 +175,7 @@
             wave_on: Objective,
           ),
           (
-            time: 5.19,
+            time: 5.12,
             transition: Smooth,
             position: (0.0, 30.0, -9314.0),
             rotation: (0.0, -0.0000068301883, -0.0),
@@ -186,7 +186,7 @@
             wave_on: Objective,
           ),
           (
-            time: 5.72,
+            time: 5.94,
             position: (0.37301472, 30.0, -9314.0),
             rotation: (0.0, -0.0000068301883, 0.0),
             fov: 100.0,

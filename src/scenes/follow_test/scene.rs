@@ -12,7 +12,7 @@ use crate::prefabs::ocean::{self, Ocean};
 /// flown around by hand while the follow system is built on top.
 ///
 /// Everything here is static - no physics.
-pub struct GameLogic {
+pub struct FollowTest {
     /// The sea.
     ocean: Ocean,
 }
@@ -28,7 +28,7 @@ pub fn sun_node(color: [f32; 3]) -> Node {
         .with_property(Light::directional(color))
 }
 
-impl GameLogic {
+impl FollowTest {
     pub fn new(scene: &mut Scene, app: &mut App, environment: Environment) -> Self {
         app.renderer.set_environment(environment);
         Self::spawn_world(scene, app);
@@ -39,9 +39,8 @@ impl GameLogic {
         let at = |position: Vector3<f32>, scale: f32| Transform3D { position, rotation: UnitQuaternion::identity(), scale: Vector3::new(scale, scale, scale) };
         let nodes = [
             sun_node([0.7, 0.7, 0.8]),
-            // The island at the origin (same model/scale/height as play's
-            // "runway" island).
-            Node::new("island").with_property(at(Vector3::new(0.0, 100.0, 0.0), 60.0)).with_property(Model::file("models/Runway/Runway.glb").double_sided(DoubleSidedMeshes::All)),
+            // Play's runway island, at the origin - only drawn.
+            crate::prefabs::island::island("island", None),
             // Distant landmass for the horizon (matches play's "ground").
             Node::new("ground").with_property(at(Vector3::new(0.0, 0.0, 50_000.0), 30_000.0)).with_property(Model::file("models/ground/ground.glb")),
             // The sea, recentred under the camera every frame (Ocean::update) so
@@ -77,7 +76,7 @@ impl GameLogic {
     }
 }
 
-impl SceneBehaviour for GameLogic {
+impl SceneBehaviour for FollowTest {
     fn update(&mut self, scene: &mut Scene, _app: &mut App, _ctx: &mut FrameContext) {
         // Feed the camera the MQ-9's position so its orbit mode has a pivot
         // to swing around - before the camera node's own behavior runs (the

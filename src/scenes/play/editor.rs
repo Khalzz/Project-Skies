@@ -3,6 +3,14 @@
 //! (`fill_editor_scene`), the telemetry of what the camera's on and the
 //! editor's lines over the world. Its state is `EditorState`, the scene's
 //! `editor`.
+//!
+//! Everything of the editor's is under it:
+//! - `flight_editor`: the editor's panels - the hierarchy, the inspector,
+//!   the timeline, the flight plans;
+//! - `gizmos`: what it draws over the world (camera views, paths, axes).
+
+pub mod flight_editor;
+pub mod gizmos;
 
 use super::*;
 
@@ -28,7 +36,7 @@ pub(super) struct EditorState {
 }
 
 impl Play {
-    /// The flight editor (see play::flight_editor), docked in F10's editor
+    /// The flight editor (see play::editor::flight_editor), docked in F10's editor
     /// view: starts it from the world as it is when that opens, carries out
     /// what it was asked to (save, reload, respawn...), and applies its map
     /// to the world - every frame it's up (see flight_manager::sync).
@@ -353,7 +361,7 @@ impl Play {
         let heading =
             |velocity: Vector3<f32>| (velocity.x.atan2(velocity.z).to_degrees() + 360.0) % 360.0;
 
-        if let Some(missile) = self.missiles.telemetry(&focus) {
+        if let Some(missile) = missile::get(scene, &focus).map(Missile::telemetry) {
             // Its G: how its velocity changed since last frame, gravity out.
             let g = match &self.editor.telemetry_last {
                 Some((id, last)) if *id == focus && delta_time > 1e-4 => {
@@ -491,8 +499,8 @@ impl Play {
         })
     }
 
-    /// F10's editor's lines over the world - see play::editor_gizmos.
-    /// F10's editor's lines over the world (see play::editor_gizmos) - and,
+    /// F10's editor's lines over the world - see play::editor::gizmos.
+    /// F10's editor's lines over the world (see play::editor::gizmos) - and,
     /// in the editor or the debug view (F5/F9) while spectating, the path
     /// of what's followed.
     pub(super) fn update_editor_gizmos(&self, scene: &Scene, app: &mut App) {
@@ -522,7 +530,7 @@ impl Play {
             highlighted.push(preview);
         }
         let mut lines = if self.editor.editor_active {
-            self::editor_gizmos::lines(
+            self::gizmos::lines(
                 scene,
                 self.flight_manager.map(),
                 scene.cameras.active_name(),
@@ -540,7 +548,7 @@ impl Play {
         // a missile's trail and a line to its target.
         if spectating && !self.camera.focus().is_empty() {
             let sea_level = app.particles.sea_level().unwrap_or(0.0);
-            if let Some(missile) = self.missiles.telemetry(self.camera.focus()) {
+            if let Some(missile) = missile::get(scene, self.camera.focus()).map(Missile::telemetry) {
                 for pair in missile.trail.windows(2).chain(std::iter::once(
                     [
                         *missile.trail.last().unwrap_or(&missile.position),
@@ -614,7 +622,7 @@ impl Play {
             let picked = editor.picked_camera_key();
             for (index, key) in animation.camera.iter().enumerate() {
                 if let Some(pose) = animations::key_pose(key, scene) {
-                    self::editor_gizmos::camera_key(
+                    self::gizmos::camera_key(
                         &mut lines,
                         pose.position,
                         pose.rotation,

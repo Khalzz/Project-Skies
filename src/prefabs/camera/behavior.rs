@@ -1,4 +1,4 @@
-use nalgebra::{UnitQuaternion, Vector3};
+use nalgebra::{UnitQuaternion, Vector2, Vector3};
 
 use pankarta_software::app::App;
 use pankarta_software::prelude::{Input, SceneAccess};
@@ -9,9 +9,10 @@ use pankarta_software::scene_manager::behavior::Behavior;
 use pankarta_software::scene_manager::node::Node;
 use pankarta_software::scene_manager::node::properties::{CameraLens, Transform3D};
 use pankarta_software::scene_manager::scene_nodes::facing;
-use pankarta_software::utils::lerps::{lerp, lerp_quaternion, smoothstep};
+use pankarta_software::utils::lerps::{lerp, smoothstep};
 use crate::game_settings::GAME_SETTINGS;
 
+use super::free_fly::FreeFly;
 use super::head_motion::{HeadInput, HeadMotion};
 
 pub const NORMAL_CAMERA_FOV: f32 = 45.0;
@@ -122,39 +123,49 @@ const TACTICAL_TURN_PER_PIXEL_DEG: f32 = 0.25;
 const TACTICAL_CHART_HEIGHT: f32 = 60_000.0;
 const TACTICAL_CHART_BELOW_SEA: f32 = 2_000.0;
 
-/// F10's editor camera (see `Camera::update_editor`): its field of view,
-/// how far mouse look turns it per pixel (rad), how fast it flies to start
-/// with and the most and least (m/s), how much faster with the sprint key,
-/// how much one wheel notch changes its speed, and how far a wheel notch
-/// moves it while not looking (in seconds of its speed).
+/// F10's editor camera's field of view (see `Camera::update_editor`) - how
+/// it flies is `FreeFly`'s.
 const EDITOR_FOV: f32 = 60.0;
-const EDITOR_TURN_PER_PIXEL: f32 = 0.0035;
-const EDITOR_START_SPEED: f32 = 60.0;
-const EDITOR_MIN_SPEED: f32 = 2.0;
-const EDITOR_MAX_SPEED: f32 = 20_000.0;
-const EDITOR_SPRINT: f32 = 4.0;
-const EDITOR_SPEED_STEP: f32 = 1.25;
-const EDITOR_DOLLY_SECONDS: f32 = 0.6;
 /// How fast a locked view eases back to center (per second).
 const LOOK_CENTER_RATE: f32 = 6.0;
 
-/// F10's editor camera - free, like a game engine editor's: where it is,
-/// which way it looks, how fast it flies.
+// How the cockpit and Free views turn - the engine's walking/free camera
+// examples' way: the mouse's movement this frame (`Input::mouse_look`, the
+// player's sensitivity in it) adds to a yaw and a pitch, and the view's
+// rotation is built straight from those two every frame - yaw about the
+// vertical, then pitch about the turned sideways axis - with nothing
+// chasing it behind. What smoothing there is comes before that (the
+// mouse's counts, the stick's position), and every ease is the same at any
+// frame rate (see `ease`).
+/// What one count of mouse movement turns the view (degrees), before the
+/// player's sensitivity - 1: the sensitivity setting is degrees per count,
+/// as it's always been here.
+const DEGREES_PER_COUNT: f32 = 1.0;
+/// Seconds the mouse's movement is smoothed over - like the engine's free
+/// camera example: a little hides the mouse's uneven counts when it moves
+/// slowly, at a few milliseconds of lag. 0: off, the view turns exactly as
+/// the mouse moves.
+const MOUSE_SMOOTHING_SECONDS: f32 = 0.015;
+/// How fast the cockpit's look follows the right stick's position (per
+/// second) - it maps straight to an angle, so without this a stick let go
+/// would snap the view back.
+const STICK_LOOK_RATE: f32 = 12.0;
+/// How fast the zoom eases to the field of view asked for (per second).
+const ZOOM_EASE_RATE: f32 = 8.0;
+
+/// How much of what's left to go to close this frame, easing at `rate` per
+/// second - the same at any frame rate, unlike `delta_time * rate`.
+fn ease(rate: f32, delta_time: f32) -> f32 {
+    1.0 - (-rate * delta_time.max(0.0)).exp()
+}
+
+/// F10's editor camera - free, like a game engine editor's (see
+/// prefabs::camera::free_fly).
 struct EditorCamera {
-    position: Vector3<f32>,
-    /// Round the vertical (rad, 0 looking along +Z) and up from level.
-    yaw: f32,
-    pitch: f32,
-    speed: f32,
+    fly: FreeFly,
     /// The right button went down off the editor's panels - looking and
     /// flying until it's let go, even over a panel.
     looking: bool,
-}
-
-impl EditorCamera {
-    fn forward(&self) -> Vector3<f32> {
-        Vector3::new(self.pitch.cos() * self.yaw.sin(), self.pitch.sin(), self.pitch.cos() * self.yaw.cos())
-    }
 }
 
 /// F10's tactical map view - an orbit round a point on the map: the
@@ -222,19 +233,19 @@ impl LookInput {
 }
 
 /// This frame's mouse look and wheel - all zero while the mouse is freed
-/// for the debug overlay (F7).
+/// for the debug overlay (F7). `look` is in counts with the player's
+/// sensitivity on (`Input::mouse_look`) - right and down positive.
 struct MouseLook {
-    rel_x: f32,
-    rel_y: f32,
+    look: Vector2<f32>,
     scroll: f32,
 }
 
 impl MouseLook {
     fn read(input: &Input, freed: bool) -> Self {
         if freed {
-            return Self { rel_x: 0.0, rel_y: 0.0, scroll: 0.0 };
+            return Self { look: Vector2::zeros(), scroll: 0.0 };
         }
-        Self { rel_x: input.mouse_rel_x() as f32, rel_y: input.mouse_rel_y() as f32, scroll: input.mouse_scroll_y() }
+        Self { look: input.mouse_look(), scroll: input.mouse_scroll_y() }
     }
 }
 
@@ -284,7 +295,7 @@ pub enum CameraState {
 }
 
 /// Each view's place on the aircraft - its name among the aircraft's
-/// cameras (`data.ron`'s `cameras`, see play::plane::aircraft_spec), and
+/// cameras (`data.ron`'s `cameras`, see prefabs::plane::aircraft_spec), and
 /// where it is when the aircraft doesn't say (m, in its frame; fov).
 pub const COCKPIT_CAMERA: &str = "cockpit";
 pub const THIRD_PERSON_CAMERA: &str = "third_person";
@@ -303,7 +314,7 @@ pub struct CameraTarget {
 
 pub struct Camera {
     /// The mouse is a pointer for the debug windows, not looking round -
-    /// set by the play scene every frame (see GameLogic::mouse_free).
+    /// set by the play scene every frame (see Play::mouse_free).
     pub mouse_free: bool,
     /// An egui window (F7's, the map's) is up over the view - set by the
     /// play scene every frame.
@@ -359,6 +370,12 @@ pub struct Camera {
     pub look_locked: bool,
     // Where the zoom lever was the last time it set the zoom - see `ZoomInput`.
     zoom_lever: Option<f32>,
+    // The mouse's movement so far smoothed (see MOUSE_SMOOTHING_SECONDS), in
+    // counts.
+    smoothed_mouse: Vector2<f32>,
+    // The cockpit's right-stick look so far (deg, yaw and pitch), following
+    // the stick at STICK_LOOK_RATE.
+    cockpit_stick: Vector2<f32>,
 }
 
 impl Camera {
@@ -400,6 +417,8 @@ impl Camera {
             editor: None,
             look_locked: false,
             zoom_lever: None,
+            smoothed_mouse: Vector2::zeros(),
+            cockpit_stick: Vector2::zeros(),
         }
     }
 
@@ -414,21 +433,14 @@ impl Camera {
             return;
         }
         let (position, forward) = from;
-        let forward = forward.try_normalize(1e-6).unwrap_or_else(Vector3::z);
-        self.editor = Some(EditorCamera {
-            position,
-            yaw: forward.x.atan2(forward.z),
-            pitch: forward.y.clamp(-1.0, 1.0).asin(),
-            speed: EDITOR_START_SPEED,
-            looking: false,
-        });
+        self.editor = Some(EditorCamera { fly: FreeFly::new(position, forward), looking: false });
     }
 
     /// The editor camera looking at `target` from `distance` away, the way
     /// it already faces.
     pub fn editor_focus(&mut self, target: Vector3<f32>, distance: f32) {
         if let Some(editor) = &mut self.editor {
-            editor.position = target - editor.forward() * distance;
+            editor.fly.position = target - editor.fly.forward() * distance;
         }
     }
 
@@ -441,15 +453,14 @@ impl Camera {
     /// While the animation camera is on screen the view stays there: the
     /// editor camera is parked on it, and the mouse and WASD don't drift it.
     /// Holding the right button takes that view over and flies from it at once.
-    fn update_editor(&mut self, node: &mut Node, cameras: &SceneCameras, app: &mut App, delta_time: f32) {
+    fn update_editor(&mut self, node: &mut Node, cameras: &SceneCameras, app: &mut App) {
         let cinematic = cameras.active_name() == "animation_camera";
         if cinematic {
             if let Some(instance) = cameras.get("animation_camera") {
                 let forward = instance.camera.calc_forward_direction().try_normalize(1e-6).unwrap_or_else(Vector3::z);
                 if let Some(editor) = self.editor.as_mut() {
-                    editor.position = instance.camera.position().coords;
-                    editor.yaw = forward.x.atan2(forward.z);
-                    editor.pitch = forward.y.clamp(-1.0, 1.0).asin();
+                    editor.fly.position = instance.camera.position().coords;
+                    editor.fly.look_along(forward);
                 }
             }
         }
@@ -465,8 +476,7 @@ impl Camera {
                 app.window.set_cursor_locked(false);
             }
             editor.looking = false;
-            let (position, forward) = (editor.position, editor.forward());
-            set_pose(node, position, position + forward, Vector3::y(), CameraLens { znear: 0.5, ..CameraLens::new(EDITOR_FOV) });
+            editor.fly.place(node, CameraLens { znear: 0.5, ..CameraLens::new(EDITOR_FOV) });
             return;
         }
         let was_looking = editor.looking;
@@ -480,38 +490,23 @@ impl Camera {
         if editor.looking != was_looking && !app.time.is_paused() {
             app.window.set_cursor_locked(editor.looking);
         }
-        let scroll = app.input.mouse_scroll_y();
         if editor.looking && !app.time.is_paused() {
-            editor.yaw -= app.input.mouse_rel_x() as f32 * EDITOR_TURN_PER_PIXEL;
-            editor.pitch = (editor.pitch - app.input.mouse_rel_y() as f32 * EDITOR_TURN_PER_PIXEL).clamp(-1.55, 1.55);
-            if scroll != 0.0 {
-                editor.speed = (editor.speed * EDITOR_SPEED_STEP.powf(scroll)).clamp(EDITOR_MIN_SPEED, EDITOR_MAX_SPEED);
+            editor.fly.steer(&app.input, app.time.unscaled_delta_time);
+        } else {
+            editor.fly.rest();
+            let scroll = app.input.mouse_scroll_y();
+            if scroll != 0.0 && !over_ui && !app.time.is_paused() {
+                editor.fly.dolly(scroll);
             }
-            let forward = editor.forward();
-            let right_dir = forward.cross(&Vector3::y()).try_normalize(1e-6).unwrap_or_else(Vector3::x);
-            let mut direction = Vector3::zeros();
-            if app.input.is_action_pressed("debug_cam_forward") { direction += forward; }
-            if app.input.is_action_pressed("debug_cam_back") { direction -= forward; }
-            if app.input.is_action_pressed("debug_cam_right") { direction += right_dir; }
-            if app.input.is_action_pressed("debug_cam_left") { direction -= right_dir; }
-            if app.input.is_action_pressed("debug_cam_up") { direction += Vector3::y(); }
-            if app.input.is_action_pressed("debug_cam_down") { direction -= Vector3::y(); }
-            let sprint = if app.input.is_action_pressed("debug_cam_sprint") { EDITOR_SPRINT } else { 1.0 };
-            if let Some(direction) = direction.try_normalize(1e-6) {
-                editor.position += direction * editor.speed * sprint * delta_time;
-            }
-        } else if scroll != 0.0 && !over_ui && !app.time.is_paused() {
-            editor.position += editor.forward() * scroll * editor.speed * EDITOR_DOLLY_SECONDS;
         }
-        let (position, forward) = (editor.position, editor.forward());
-        set_pose(node, position, position + forward, Vector3::y(), CameraLens { znear: 0.5, ..CameraLens::new(EDITOR_FOV) });
+        editor.fly.place(node, CameraLens { znear: 0.5, ..CameraLens::new(EDITOR_FOV) });
     }
 
     /// Moves the editor camera by `delta` (m) - keeping up with what it
     /// follows.
     pub fn editor_shift(&mut self, delta: Vector3<f32>) {
         if let Some(editor) = &mut self.editor {
-            editor.position += delta;
+            editor.fly.position += delta;
         }
     }
 
@@ -735,16 +730,16 @@ impl Camera {
         // same conventions as the mouse look in Cockpit/Free.
         let released = look_x == 0.0 && look_y == 0.0;
         let angle_rate = if released { LOOK_RETURN_RATE } else { LOOK_FOLLOW_RATE };
-        let t = (delta_time * angle_rate).clamp(0.0, 1.0);
+        let t = ease(angle_rate, delta_time);
         self.look_yaw = lerp(self.look_yaw, -look_x * LOOK_MAX_YAW_DEG, t);
         self.look_pitch = lerp(self.look_pitch, -look_y * LOOK_MAX_PITCH_DEG, t);
 
         // Eases out to the moving distance/height while the stick is past the
         // dead zone, and back to the static one (quicker) once released.
         if !released {
-            self.look_moving = lerp(self.look_moving, 1.0, (delta_time * LOOK_STATE_RATE).clamp(0.0, 1.0));
+            self.look_moving = lerp(self.look_moving, 1.0, ease(LOOK_STATE_RATE, delta_time));
         } else {
-            self.look_moving = lerp(self.look_moving, 0.0, (delta_time * LOOK_RETURN_RATE).clamp(0.0, 1.0));
+            self.look_moving = lerp(self.look_moving, 0.0, ease(LOOK_RETURN_RATE, delta_time));
             if self.look_moving < 0.001 {
                 self.look_moving = 0.0;
             }
@@ -799,7 +794,7 @@ impl Behavior for Camera {
         crate::head_tracking::poll(app);
         // F10 - the editor camera takes over while it's up.
         if self.editor.is_some() {
-            self.update_editor(node, _cameras, app, delta_time);
+            self.update_editor(node, _cameras, app);
             return;
         }
         // M - the map view takes over while it's up.
@@ -827,10 +822,21 @@ impl Behavior for Camera {
         // view meanwhile, so the player's own look stays put.
         let mouse = MouseLook::read(&app.input, self.mouse_free || locked || cinematic);
         let zoom = if locked || cinematic { ZoomInput::none() } else { ZoomInput::read(&app.input, &mut self.zoom_lever) };
+        // Looking round goes at the player's pace, not the game's (a slowed
+        // game doesn't slow the head) - the real time the frame took.
+        let look_dt = app.time.unscaled_delta_time;
+        // The mouse's movement, smoothed (see MOUSE_SMOOTHING_SECONDS) - in
+        // degrees: how far it turns the view this frame.
+        self.smoothed_mouse = if MOUSE_SMOOTHING_SECONDS > 0.0 {
+            self.smoothed_mouse + (mouse.look - self.smoothed_mouse) * ease(1.0 / MOUSE_SMOOTHING_SECONDS, look_dt)
+        } else {
+            mouse.look
+        };
+        let mouse_turn = self.smoothed_mouse * DEGREES_PER_COUNT;
         if locked {
-            let ease = (delta_time * LOOK_CENTER_RATE).clamp(0.0, 1.0);
-            self.cockpit_yaw += (0.0 - self.cockpit_yaw) * ease;
-            self.cockpit_pitch += (0.0 - self.cockpit_pitch) * ease;
+            let center = ease(LOOK_CENTER_RATE, look_dt);
+            self.cockpit_yaw += (0.0 - self.cockpit_yaw) * center;
+            self.cockpit_pitch += (0.0 - self.cockpit_pitch) * center;
         }
         // Runs in every mode, so switching into the cockpit picks the head
         // up wherever the G has it rather than snapping from rest.
@@ -856,9 +862,8 @@ impl Behavior for Camera {
                     // TrackIR is delivering frames, the mouse is not a cockpit
                     // camera input.
                     let scroll = if trackir_look { 0.0 } else { mouse.scroll };
-                    self.cockpit_target_fov = zoom.apply(self.cockpit_target_fov, scroll, delta_time);
-                    // Lerp current FOV toward target
-                    self.cockpit_current_fov = lerp(self.cockpit_current_fov, self.cockpit_target_fov, delta_time * 8.0);
+                    self.cockpit_target_fov = zoom.apply(self.cockpit_target_fov, scroll, look_dt);
+                    self.cockpit_current_fov = lerp(self.cockpit_current_fov, self.cockpit_target_fov, ease(ZOOM_EASE_RATE, look_dt));
                     let head = self.head_motion.pose(GAME_SETTINGS.lock().unwrap().head_g_reaction);
                     let tracked = crate::head_tracking::tracked_pose();
                     // The tracker's axes are the pilot's: right, up, toward
@@ -884,42 +889,39 @@ impl Behavior for Camera {
 
                     let max_yaw: f32 = 170.0;
                     let max_pitch: f32 = 70.0;
-                    let sens = app.input.mouse_sensitivity();
 
                     // While TrackIR is delivering frames, it owns the cockpit look.
                     // A leftover mouse offset eases back to center.
                     if trackir_look {
-                        let ease = (delta_time * LOOK_CENTER_RATE).clamp(0.0, 1.0);
-                        self.cockpit_yaw += (0.0 - self.cockpit_yaw) * ease;
-                        self.cockpit_pitch += (0.0 - self.cockpit_pitch) * ease;
+                        let center = ease(LOOK_CENTER_RATE, look_dt);
+                        self.cockpit_yaw += (0.0 - self.cockpit_yaw) * center;
+                        self.cockpit_pitch += (0.0 - self.cockpit_pitch) * center;
                     } else {
-                        self.cockpit_yaw = (self.cockpit_yaw - mouse.rel_x * sens.0).clamp(-max_yaw, max_yaw);
-                        self.cockpit_pitch = (self.cockpit_pitch + mouse.rel_y * sens.1).clamp(-max_pitch, max_pitch);
+                        // Right is a negative turn about the vertical, down
+                        // a positive one about the sideways axis.
+                        self.cockpit_yaw = (self.cockpit_yaw - mouse_turn.x).clamp(-max_yaw, max_yaw);
+                        self.cockpit_pitch = (self.cockpit_pitch + mouse_turn.y).clamp(-max_pitch, max_pitch);
                     }
 
                     // Right stick: same absolute mapping as the fixed
-                    // modes' orbit, added on top of the mouse look and kept
-                    // inside the same head-turn limits. Up is negative pitch
-                    // here (mouse down = positive = look down).
-                    let yaw = (self.cockpit_yaw - look.x * max_yaw).clamp(-max_yaw, max_yaw);
-                    let pitch = (self.cockpit_pitch - look.y * max_pitch).clamp(-max_pitch, max_pitch);
+                    // modes' orbit (followed at STICK_LOOK_RATE), added on
+                    // top of the mouse look and kept inside the same
+                    // head-turn limits. Up is negative pitch here (mouse
+                    // down = positive = look down).
+                    let stick = Vector2::new(look.x * max_yaw, look.y * max_pitch);
+                    self.cockpit_stick += (stick - self.cockpit_stick) * ease(STICK_LOOK_RATE, look_dt);
+                    let yaw = (self.cockpit_yaw - self.cockpit_stick.x).clamp(-max_yaw, max_yaw);
+                    let pitch = (self.cockpit_pitch - self.cockpit_stick.y).clamp(-max_pitch, max_pitch);
                     // The resting view angle from Settings, on top of the
                     // look - positive looks up, and up is negative pitch here.
                     let view_pitch_target = GAME_SETTINGS.lock().unwrap().cockpit_view_pitch_deg;
-                    self.cockpit_view_pitch += (view_pitch_target - self.cockpit_view_pitch) * (1.0 - (-delta_time * COCKPIT_VIEW_PITCH_EASE_RATE).exp());
+                    self.cockpit_view_pitch += (view_pitch_target - self.cockpit_view_pitch) * ease(COCKPIT_VIEW_PITCH_EASE_RATE, look_dt);
                     let pitch = pitch - self.cockpit_view_pitch;
 
-                    // Target rotation from mouse
-                    let rotation_y = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), yaw.to_radians());
-                    let rotation_x = UnitQuaternion::from_axis_angle(&Vector3::x_axis(), pitch.to_radians());
-                    let target_rotation = rotation_y * rotation_x;
-
-                    // Lerp the rotation for smooth feel
-                    self.cockpit_current_rotation = UnitQuaternion::new_normalize(lerp_quaternion(
-                        self.cockpit_current_rotation.into_inner(),
-                        target_rotation.into_inner(),
-                        delta_time * 12.0,
-                    ));
+                    // The look, straight from its yaw and pitch (see
+                    // DEGREES_PER_COUNT): turned, then tilted.
+                    self.cockpit_current_rotation = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), yaw.to_radians())
+                        * UnitQuaternion::from_axis_angle(&Vector3::x_axis(), pitch.to_radians());
 
                     // Over the shoulder (see COCKPIT_LOOK_BEHIND) - from
                     // where the view actually points right now, so the head
@@ -964,29 +966,22 @@ impl Behavior for Camera {
                     lens.znear = 0.1;
 
                     // Mouse wheel and the zoom bindings adjust target FOV
-                    self.free_target_fov = zoom.apply(self.free_target_fov, mouse.scroll, delta_time);
-                    self.free_current_fov = lerp(self.free_current_fov, self.free_target_fov, delta_time * 8.0);
+                    self.free_target_fov = zoom.apply(self.free_target_fov, mouse.scroll, look_dt);
+                    self.free_current_fov = lerp(self.free_current_fov, self.free_target_fov, ease(ZOOM_EASE_RATE, look_dt));
                     lens.fovy = self.free_current_fov;
 
-                    let sens = app.input.mouse_sensitivity();
-                    self.free_yaw = self.free_yaw - mouse.rel_x * sens.0;
-                    self.free_pitch = (self.free_pitch + mouse.rel_y * sens.1).clamp(-89.0, 89.0);
+                    self.free_yaw -= mouse_turn.x;
+                    self.free_pitch = (self.free_pitch + mouse_turn.y).clamp(-89.0, 89.0);
 
                     // Right stick turns the view like the mouse, at a
                     // steady rate - stick up matches mouse up.
-                    let stick_step = FREE_LOOK_STICK_RATE_DEG_S * delta_time;
+                    let stick_step = FREE_LOOK_STICK_RATE_DEG_S * look_dt;
                     self.free_yaw -= look.x * stick_step;
                     self.free_pitch = (self.free_pitch - look.y * stick_step).clamp(-89.0, 89.0);
 
-                    let rotation_y = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), self.free_yaw.to_radians());
-                    let rotation_x = UnitQuaternion::from_axis_angle(&Vector3::x_axis(), self.free_pitch.to_radians());
-                    let target_rotation = rotation_y * rotation_x;
-
-                    self.free_current_rotation = UnitQuaternion::new_normalize(lerp_quaternion(
-                        self.free_current_rotation.into_inner(),
-                        target_rotation.into_inner(),
-                        delta_time * 12.0,
-                    ));
+                    // The orbit, straight from its yaw and pitch.
+                    self.free_current_rotation = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), self.free_yaw.to_radians())
+                        * UnitQuaternion::from_axis_angle(&Vector3::x_axis(), self.free_pitch.to_radians());
 
                     // The orbit (yaw/pitch above) is measured in some frame:
                     // - Video setting "follows plane" on: the plane's own frame,
@@ -1003,7 +998,7 @@ impl Behavior for Camera {
                     let orbit = frame * self.free_current_rotation;
 
                     let distance_target = if self.wreck_sea_level.is_some() { WRECK_DISTANCE } else { FREE_DISTANCE };
-                    self.free_distance = lerp(self.free_distance, distance_target, (delta_time * FREE_DISTANCE_RATE).clamp(0.0, 1.0));
+                    self.free_distance = lerp(self.free_distance, distance_target, ease(FREE_DISTANCE_RATE, look_dt));
 
                     // Round the aircraft's free camera point.
                     let mut look_at = target.position + target.rotation * Self::named(&target, FREE_CAMERA, DEFAULT_FREE).0;
@@ -1072,7 +1067,7 @@ impl Behavior for Camera {
             };
 
             let (final_position, target_look_at, target_up) = if orbits {
-                self.orbit_look(&look, &target, final_position, target_look_at, target_up, delta_time)
+                self.orbit_look(&look, &target, final_position, target_look_at, target_up, look_dt)
             } else {
                 self.look_yaw = 0.0;
                 self.look_pitch = 0.0;

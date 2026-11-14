@@ -29,9 +29,9 @@ use crate::ext::physics_behavior::PhysicsNodeExt;
 use crate::scenes::play::animations::CameraPose;
 use super::behavior::{Camera, CameraState};
 use super::head_motion::HeadInput;
-use crate::scenes::play::plane::messages::AircraftState;
-use crate::scenes::play::plane::plane::Plane;
-use crate::scenes::play::weapon::missiles::Missiles;
+use crate::prefabs::plane::messages::AircraftState;
+use crate::prefabs::plane::plane::Plane;
+use crate::prefabs::missile;
 
 /// The player's view - a camera node driven by prefabs::camera::Camera.
 pub const PLAYER_CAMERA: &str = "camera";
@@ -49,9 +49,6 @@ pub struct Followable<'a> {
     pub player_id: &'a str,
     /// Every aircraft on the map, in its order.
     pub aircraft: Vec<&'a str>,
-    /// The missiles in flight - followed along their flight, not turned like
-    /// their models.
-    pub missiles: &'a Missiles,
     /// The aircraft picked in the flight editor's hierarchy, if any - picking
     /// a new one points the camera at it.
     pub editor_selection: Option<&'a str>,
@@ -186,7 +183,7 @@ impl CameraControl {
             }
         }
         self.update_editor_follow(scene, app, world);
-        self.follow(scene, app, world.missiles);
+        self.follow(scene, app);
     }
 
     /// Which node the camera follows, and the view to switch it to - F1:
@@ -233,7 +230,7 @@ impl CameraControl {
             println!("Camera: no ground units to follow yet");
         }
         if app.input.is_action_just_pressed("camera_next_missile") {
-            let missiles: Vec<&str> = world.missiles.node_ids().collect();
+            let missiles: Vec<&str> = missile::in_flight(scene).into_iter().map(|(id, _)| id).collect();
             let current = missiles.iter().position(|id| *id == self.focus);
             match missiles.get(current.map(|index| index + 1).unwrap_or(0) % missiles.len().max(1)) {
                 Some(id) => self.focus = (*id).to_owned(),
@@ -284,16 +281,23 @@ impl CameraControl {
     }
 
     /// Hands the player's camera where the followed node is: a missile along
-    /// its flight, a wreck in the sea where it went in (on the surface - not
-    /// following it down as it sinks), anything else as it's drawn - with
+    /// its flight (not turned like its model) where it'll be this frame, a wreck in the sea where it went in (on the surface - not
+    /// following it down as it sinks; the cockpit view does ride it in),
+    /// anything else as it's drawn - with
     /// its named view points and, for an aircraft, the G its pilot's head
     /// feels.
-    fn follow(&mut self, scene: &mut Scene, app: &App, missiles: &Missiles) {
+    fn follow(&mut self, scene: &mut Scene, app: &App) {
         let focus = self.focus.clone();
         let Some(followed) = scene.get_node(&focus).and_then(|node| node.transform_3d()).copied() else { return };
-        let (position, rotation) = missiles.camera_pose(&focus).unwrap_or((followed.position, followed.rotation));
+        let (position, rotation) = missile::get(scene, &focus)
+            .map(|missile| missile.camera_pose(app.time.delta_time))
+            .unwrap_or((followed.position, followed.rotation));
         let in_water = scene.content.nodes.get(&focus).and_then(|node| node.get_behavior::<Plane>()).is_some_and(Plane::in_water);
-        let (position, rotation) = if in_water {
+        // From the cockpit the pilot rides the jet into the water - the head
+        // thrown forward as it slams to a stop - until the wreck view takes
+        // over; only a view from outside stays where it went in.
+        let in_cockpit = Self::player_camera(scene).is_some_and(Camera::is_cockpit);
+        let (position, rotation) = if in_water && !in_cockpit {
             let sea_level = app.particles.sea_level().unwrap_or(0.0);
             *self.went_in_at.entry(focus.clone()).or_insert_with(|| {
                 let forward = rotation * Vector3::z();

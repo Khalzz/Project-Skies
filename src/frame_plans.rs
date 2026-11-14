@@ -20,6 +20,23 @@ pub fn standard() -> FramePlan {
         .insert_after_scene("opaque", |steps| steps.copy_depth().scene("water"))
 }
 
+/// The sandbox: the standard plan, with the radars' contact lines over the world. The lines
+/// go after the blit - the world is drawn into its own image and copied onto the screen there,
+/// so anything drawn before it is drawn over.
+pub fn sandbox() -> FramePlan {
+    FramePlan::new()
+        .scene("opaque")
+        .copy_depth()
+        .scene("water")
+        .scene("transparent")
+        .particles()
+        .fullscreen(pankarta_software::rendering::shader_library::BLIT)
+        .lines(crate::prefabs::ground_unit::air_defense::radar::RADAR_LINES)
+        .nodes_3d()
+        .nodes_2d()
+        .ui(UiPass::All)
+}
+
 /// Flying: the world, then the flight HUD into its own image, then the
 /// composite copying the world and that HUD onto the screen with the G-force
 /// effects over both; menus after, so a blackout doesn't cover them.

@@ -10,7 +10,6 @@ pub mod game_settings;
 pub mod head_tracking;
 pub mod ui;
 pub mod camera;
-pub mod debug_overlay;
 pub mod frame_plans;
 pub mod prefabs;
 pub mod screen_effects;
@@ -88,13 +87,33 @@ async fn main() {
     prefabs::ocean::register(&mut app);
 
     app.scene_manager.create_scene("splash", ext::splash_screen::Splash::new);
-    app.scene_manager.create_scene("main_menu", |scene, app| main_menu::scene::GameLogic::new(scene, app, Environment::ProceduralSky { sun: true }));
+    app.scene_manager.create_scene("main_menu", |scene, app| main_menu::scene::MainMenu::new(scene, app, Environment::ProceduralSky { sun: true }));
     app.scene_manager.create_scene("playing", play::Play::new);
-    app.scene_manager.create_scene("sandbox", |scene, app| sandbox::scene::GameLogic::new(scene, app, skybox()));
+    app.scene_manager.create_scene("sandbox", |scene, app| sandbox::scene::Sandbox::new(scene, app, Environment::ProceduralSky { sun: true }));
     // Follow-point camera testbed - island/water/sky + a static MQ-9 and the
     // free-fly camera. Uses the procedural sea sky like play.
-    app.scene_manager.create_scene("follow_test", |scene, app| follow_test::scene::GameLogic::new(scene, app, Environment::ProceduralSky { sun: true }));
+    app.scene_manager.create_scene("follow_test", |scene, app| follow_test::scene::FollowTest::new(scene, app, Environment::ProceduralSky { sun: true }));
 
-    app.scene_manager.open_scene("splash");
+    app.scene_manager.open_scene(first_scene());
     app.run();
+}
+
+/// The scenes registered above, by name - what `cargo run -- <scene>` can
+/// start in.
+const SCENES: [&str; 5] = ["splash", "main_menu", "playing", "sandbox", "follow_test"];
+/// The scene the game starts in when none is asked for.
+const DEFAULT_SCENE: &str = "splash";
+
+/// The scene to start in: the first argument (`cargo run -- sandbox`), or
+/// DEFAULT_SCENE without one - or with one that isn't a scene, after saying
+/// which there are.
+fn first_scene() -> &'static str {
+    let Some(asked) = std::env::args().nth(1) else { return DEFAULT_SCENE };
+    match SCENES.iter().find(|name| **name == asked) {
+        Some(name) => name,
+        None => {
+            eprintln!("No scene named '{asked}' - the scenes are: {}. Starting in {DEFAULT_SCENE}.", SCENES.join(", "));
+            DEFAULT_SCENE
+        }
+    }
 }

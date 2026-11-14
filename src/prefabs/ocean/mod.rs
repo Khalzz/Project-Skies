@@ -1,5 +1,4 @@
-//! The sea - its waves, and the wake a jet leaves on it flying fast and low -
-//! drawn with the game's ocean shader (assets/shaders/ocean.wgsl).
+//! The sea - its waves - drawn with the game's ocean shader (assets/shaders/ocean.wgsl).
 //!
 //! Using it:
 //! - `register` once at startup (main.rs) - the mesh, and the sea level and
@@ -11,15 +10,13 @@
 //!   see `waves`), so they don't swim against the mesh.
 //!
 //! The parts: `settings` (what the sea looks like), `waves` (the wave
-//! field), `ripples` (the ripple map's numbers), `wake` (the foam trail),
-//! `mesh` (the ring mesh) and `shader` (the material and the rest of its
+//! field), `ripples` (the ripple map's numbers), `mesh` (the ring mesh) and `shader` (the material and the rest of its
 //! params).
 
 mod mesh;
 mod ripples;
 mod settings;
 mod shader;
-mod wake;
 mod waves;
 
 use nalgebra::Vector3;
@@ -28,10 +25,8 @@ use pankarta_software::prelude::{App, Mesh};
 use pankarta_software::scene_manager::scene::Scene;
 
 pub use settings::OceanSettings;
-pub use wake::WakeSource;
 
 use shader::Params;
-use wake::Wake;
 use waves::OceanWaves;
 
 /// Adds the sea's mesh to the engine, and gives the particles the default
@@ -51,7 +46,6 @@ pub fn surface() -> Mesh {
 
 pub struct Ocean {
     waves: OceanWaves,
-    wake: Wake,
     // Extra XZ added to the camera when phasing the waves, then cleared.
     // The title uses it so the sea streams past a camera that stays put.
     flow: (f32, f32),
@@ -65,7 +59,7 @@ impl Default for Ocean {
 
 impl Ocean {
     pub fn new(settings: OceanSettings) -> Self {
-        Self { waves: OceanWaves::new(settings), wake: Wake::default(), flow: (0.0, 0.0) }
+        Self { waves: OceanWaves::new(settings), flow: (0.0, 0.0) }
     }
 
     /// The sea's rest level (world Y) - gameplay treats the water as this
@@ -87,28 +81,8 @@ impl Ocean {
         self.flow = (x, z);
     }
 
-    /// Slides the foam trail already laid by `x`/`z` (world units). The title
-    /// jet doesn't move, so its wake is carried along with the sea instead.
-    pub fn scroll_wake(&mut self, x: f32, z: f32) {
-        self.wake.scroll(x, z);
-    }
-
-    /// What's stirring up the water this frame (`None` when nothing is) -
-    /// set every frame, before `update`. How strongly it shows depends on
-    /// its speed and how close it is to the water (see `wake_strength`).
-    pub fn set_wake_source(&mut self, source: Option<WakeSource>) {
-        self.wake.source = source;
-    }
-
-    /// How hard `source` stirs the water, 0..1 - stronger the lower and
-    /// faster it goes. The same strength the wake is drawn with, for
-    /// anything that should match it (e.g. spray particles).
-    pub fn wake_strength(&self, source: &WakeSource) -> f32 {
-        wake::strength(source, self.sea_level())
-    }
-
     /// Advances the waves by `delta_time`, keeps the sea node `node` centred
-    /// under the camera (only XZ), and puts this frame's waves and wake into
+    /// under the camera (only XZ), and puts this frame's waves into
     /// its material - worked out around where the camera is now. From the
     /// scene's `after_cameras`, every frame (see the module doc).
     pub fn update(&mut self, scene: &mut Scene, node: &str, delta_time: f32) {
@@ -121,19 +95,18 @@ impl Ocean {
             transform.position.z = camera.z;
         }
         self.waves.advance(delta_time);
-        let intensity = self.wake.update(delta_time, self.sea_level());
-        let params = self.params(camera, intensity);
+        let params = self.params(camera);
         self.flow = (0.0, 0.0);
         shader::set_on(scene, node, &params);
     }
 
     /// Every param the shader reads, for a camera at `camera` (true world
-    /// position) and a wake source stirring the water `intensity` hard now.
-    fn params(&self, camera: Vector3<f32>, intensity: f32) -> Params {
+    /// position).
+    fn params(&self, camera: Vector3<f32>) -> Params {
         let (x, z) = (camera.x + self.flow.0, camera.z + self.flow.1);
         let settings = self.waves.settings();
         let mut params = self.waves.params(x, z);
-        self.wake.write(&mut params, camera, intensity, self.sea_level());
+        shader::write_noise_anchor(&mut params, camera.x as f64, camera.z as f64);
         shader::write_tuning(&mut params, settings);
         shader::write_detail(&mut params, settings, camera.y - self.sea_level());
         shader::write_ripples(&mut params, &self.waves, x as f64, z as f64);
@@ -147,18 +120,14 @@ mod tests {
 
     #[test]
     fn it_writes_every_param_the_ocean_shader_reads() {
-        let params = Ocean::default().params(Vector3::zeros(), 0.0);
+        let params = Ocean::default().params(Vector3::zeros());
         let mut names: Vec<&str> = params.keys().map(String::as_str).collect();
         names.sort_unstable();
         let mut expected = [
             "params",
             "shading",
             "waves",
-            "wake_head",
-            "wake_bounds",
-            "wake_info",
-            "wake_points",
-            "wake_anchor",
+            "noise_anchor",
             "tuning",
             "ripple_a",
             "ripple_b",
@@ -173,6 +142,5 @@ mod tests {
         expected.sort_unstable();
         assert_eq!(names, expected);
         assert_eq!(params["waves"].len(), waves::MAX_WAVES * 2 * 4);
-        assert_eq!(params["wake_points"].len(), wake::MAX_WAKE_POINTS * 4);
     }
 }
