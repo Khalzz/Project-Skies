@@ -1,3 +1,4 @@
+use crate::prefabs::aircraft::aircraft::Aircraft;
 use crate::prefabs::camera::FreeCamera;
 use crate::prefabs::ground_unit::{
     self,
@@ -110,6 +111,8 @@ impl Sandbox {
                 ),
             )
             .unwrap();
+
+        scene.spawn_node(app, Aircraft::new().prefab("test_plane".to_owned()));
 
         // edit this, prioritize the battleground system where we define to what aliation each bot gooes, and
         // the flight manager only as a property to a bot to define his flight animation/path

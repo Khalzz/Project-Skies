@@ -90,7 +90,15 @@ pub struct Missile {
 impl Missile {
     pub(super) fn new(number: u32, shooter: &str, spec: WeaponSpec, flight: MissileFlight) -> Self {
         let trail = vec![flight.position];
-        Self { number, spec, flight, shooter: shooter.to_owned(), trail, clock: 0.0, ended: false }
+        Self {
+            number,
+            spec,
+            flight,
+            shooter: shooter.to_owned(),
+            trail,
+            clock: 0.0,
+            ended: false,
+        }
     }
 
     /// Its node's id.
@@ -116,7 +124,10 @@ impl Missile {
     /// Where its model goes - its position, turned along its flight (its
     /// model's own rotation on top).
     pub(super) fn pose(&self) -> (Vector3<f32>, UnitQuaternion<f32>) {
-        (self.flight.position, self.flight.attitude * self.spec.model.rotation())
+        (
+            self.flight.position,
+            self.flight.attitude * self.spec.model.rotation(),
+        )
     }
 
     /// Where its smoke comes out - its tail.
@@ -130,7 +141,10 @@ impl Missile {
     /// before the missile has flown (see the module doc). A frame's straight
     /// line is within centimeters of the curve it flies.
     pub fn camera_pose(&self, delta_time: f32) -> (Vector3<f32>, UnitQuaternion<f32>) {
-        (self.flight.position + self.flight.velocity * delta_time, self.flight.attitude)
+        (
+            self.flight.position + self.flight.velocity * delta_time,
+            self.flight.attitude,
+        )
     }
 
     /// For the editor's telemetry.
@@ -149,13 +163,19 @@ impl Missile {
 
     /// Where it is, how it's moving, who fired it.
     pub fn track(&self) -> MissileTrack {
-        MissileTrack { position: self.flight.position, velocity: self.flight.velocity, shooter: self.shooter.clone() }
+        MissileTrack {
+            position: self.flight.position,
+            velocity: self.flight.velocity,
+            shooter: self.shooter.clone(),
+        }
     }
 
     /// The aircraft it's homing on, by name, if it's a heat seeker - for
     /// the bots to react to.
     pub fn heat_seeker_target(&self) -> Option<&str> {
-        (self.spec.guidance.seeker == Seeker::InfraRed).then(|| self.flight.target_aircraft()).flatten()
+        (self.spec.guidance.seeker == Seeker::InfraRed)
+            .then(|| self.flight.target_aircraft())
+            .flatten()
     }
 
     /// Flies `delta_time` through the airspace, and moves its model and
@@ -163,7 +183,9 @@ impl Missile {
     fn fly(&mut self, node: &mut Node, scene: &mut SceneAccess, app: &mut App, delta_time: f32) {
         let sea_level = app.particles.sea_level().unwrap_or(0.0);
         let outcome = {
-            let airspace = scene.get_node(AIRSPACE).and_then(|node| node.get_property::<Airspace>());
+            let airspace = scene
+                .get_node(AIRSPACE)
+                .and_then(|node| node.get_property::<Airspace>());
             let surroundings = match airspace {
                 Some(airspace) => Surroundings {
                     aircraft: &airspace.aircraft,
@@ -172,12 +194,19 @@ impl Missile {
                     sun: airspace.sun,
                     shooter: &self.shooter,
                 },
-                None => Surroundings { shooter: &self.shooter, ..Surroundings::open(&[], sea_level) },
+                None => Surroundings {
+                    shooter: &self.shooter,
+                    ..Surroundings::open(&[], sea_level)
+                },
             };
             self.flight.step(&self.spec, delta_time, &surroundings)
         };
 
-        if self.trail.last().is_none_or(|last| (self.flight.position - last).magnitude() >= TRAIL_STEP) {
+        if self
+            .trail
+            .last()
+            .is_none_or(|last| (self.flight.position - last).magnitude() >= TRAIL_STEP)
+        {
             self.trail.push(self.flight.position);
             if self.trail.len() > TRAIL_POINTS {
                 self.trail.remove(0);
@@ -196,7 +225,10 @@ impl Missile {
                 transform.rotation = rotation;
             }
             // Smoke only while the motor's burning.
-            if let Some(emitter) = smoke.get_property_mut::<ParticleEmitters>().and_then(|emitters| emitters.get_mut(SMOKE)) {
+            if let Some(emitter) = smoke
+                .get_property_mut::<ParticleEmitters>()
+                .and_then(|emitters| emitters.get_mut(SMOKE))
+            {
                 emitter.enabled = burning;
             }
         }
@@ -252,7 +284,12 @@ impl Missile {
         let burning = self.flight.burning(&self.spec);
         // A quick, uneven flicker - two waves out of step.
         let flicker = 1.0 + 0.08 * (self.clock * 47.0).sin() + 0.05 * (self.clock * 83.0).sin();
-        let Some(plume) = node.get_property_mut::<Model>().and_then(|model| model.mesh_mut(PLUME_MESH)) else { return };
+        let Some(plume) = node
+            .get_property_mut::<Model>()
+            .and_then(|model| model.mesh_mut(PLUME_MESH))
+        else {
+            return;
+        };
         plume.visible = burning;
         if burning {
             plume.transform.scale = plume.original_transform().scale * flicker;
@@ -266,11 +303,16 @@ impl Missile {
 fn deliver(scene: &mut SceneAccess, blast: &BlastEvent) {
     let flying: Vec<String> = scene
         .nodes()
-        .filter(|node| node.get_behavior::<Plane>().is_some_and(|plane| !plane.wrecked))
+        .filter(|node| {
+            node.get_behavior::<Plane>()
+                .is_some_and(|plane| !plane.wrecked)
+        })
         .map(|node| node.id.clone())
         .collect();
     for id in flying {
-        let Some(node) = scene.get_node_mut(&id) else { continue };
+        let Some(node) = scene.get_node_mut(&id) else {
+            continue;
+        };
         if let Some(plane) = node.get_behavior_mut::<Plane>() {
             plane.note_blast(&blast.shooter, &blast.weapon);
         }
@@ -287,11 +329,19 @@ impl Behavior for Missile {
     /// Its smoke trail, at its tail.
     fn on_spawn(&mut self, node: &mut Node, scene: &mut SceneAccess, _app: &mut App) {
         let (_, rotation) = self.pose();
-        scene.spawn(effects::smoke_trail(&self.smoke_id(), &node.id, self.tail(), rotation));
+        scene.spawn(effects::smoke_trail(
+            &self.smoke_id(),
+            &node.id,
+            self.tail(),
+            rotation,
+        ));
         println!(
             "Fox 2 - {} away{}",
             self.spec.id,
-            self.flight.target_aircraft().map(|target| format!(" at {target}")).unwrap_or_default()
+            self.flight
+                .target_aircraft()
+                .map(|target| format!(" at {target}"))
+                .unwrap_or_default()
         );
     }
 

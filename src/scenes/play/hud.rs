@@ -780,7 +780,9 @@ impl Play {
         let line_top = frame_y;
         let line_bottom = frame_y + frame_height;
 
-        let game_ui_shown = scene.ui_node("hud/game_ui").is_some_and(|node| node.is_active);
+        let game_ui_shown = scene
+            .ui_node("hud/game_ui")
+            .is_some_and(|node| node.is_active);
         // Only from the cockpit of the player's own jet - it's the pilot's
         // HUD, not the camera's.
         let in_cockpit = self.in_own_cockpit(scene);
@@ -805,7 +807,10 @@ impl Play {
             .and_then(|node| node.physics_state::<AircraftState>())
             .map(|state| state.flight_data.g_meter)
             .unwrap_or(1.0);
-        if let Some(label) = scene.ui_node("hud/hud_g").and_then(|node| node.as_label_mut()) {
+        if let Some(label) = scene
+            .ui_node("hud/hud_g")
+            .and_then(|node| node.as_label_mut())
+        {
             label.set_text(&format!("{g:.1}G"));
         }
         // Speed on the left, altitude on the right. No captions.

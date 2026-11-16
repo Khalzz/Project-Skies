@@ -1,3 +1,7 @@
+use crate::prefabs::aircraft::airframe::landing_gear::{GearLever, LandingGear};
+
+pub mod landing_gear;
+
 /*
     Airframe references all sections related to the "physics of the plane" mostly the aerodynamic ones
     for example the wings contain:
@@ -34,11 +38,17 @@ pub struct Wing {
 */
 
 pub struct Airframe {
-    //landing_gear: LandingGear,
+    landing_gear: LandingGear,
 }
 
 impl Airframe {
     pub fn new() -> Airframe {
-        Airframe {}
+        Airframe {
+            landing_gear: LandingGear::new(GearLever::Down),
+        }
+    }
+
+    pub fn step(&mut self) {
+        self.landing_gear.update();
     }
 }

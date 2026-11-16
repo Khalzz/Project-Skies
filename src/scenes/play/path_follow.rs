@@ -20,10 +20,10 @@ use pankarta_software::physics::PhysicsWorld;
 use pankarta_software::scene_manager::scene::Scene;
 use pankarta_software::scene_manager::scene_nodes::facing;
 
-use crate::prefabs::plane::cruise_speed;
 use super::map::{Difficulty, FollowMode, MapSpec, Pace, PathSpec};
-use crate::prefabs::plane::ai::pilot_skill::PilotSkill;
 use crate::prefabs::plane::ai::autopilot::Speed;
+use crate::prefabs::plane::ai::pilot_skill::PilotSkill;
+use crate::prefabs::plane::cruise_speed;
 use crate::prefabs::plane::plane::Plane;
 
 /// Knots to m/s.
@@ -43,7 +43,11 @@ pub struct SampledPath {
 impl SampledPath {
     /// `None` for a path with no points.
     pub fn new(path: &PathSpec) -> Option<SampledPath> {
-        let mut corners: Vec<Vector3<f32>> = path.points.iter().map(|&(x, y, z)| Vector3::new(x, y, z)).collect();
+        let mut corners: Vec<Vector3<f32>> = path
+            .points
+            .iter()
+            .map(|&(x, y, z)| Vector3::new(x, y, z))
+            .collect();
         if corners.is_empty() {
             return None;
         }
@@ -66,7 +70,11 @@ impl SampledPath {
                     points.push(catmull_rom(a, b, c, d, t));
                 }
             }
-            points.push(if looped { corners[0] } else { corners[count - 1] });
+            points.push(if looped {
+                corners[0]
+            } else {
+                corners[count - 1]
+            });
             points
         } else {
             if looped {
@@ -82,7 +90,12 @@ impl SampledPath {
             }
             distances.push(length);
         }
-        Some(SampledPath { points, distances, length, looped })
+        Some(SampledPath {
+            points,
+            distances,
+            length,
+            looped,
+        })
     }
 
     pub fn length(&self) -> f32 {
@@ -96,8 +109,15 @@ impl SampledPath {
         if self.points.len() == 1 || self.length <= 1e-3 {
             return (self.points[0], None);
         }
-        let distance = if self.looped { distance.rem_euclid(self.length) } else { distance.clamp(0.0, self.length) };
-        let index = self.distances.partition_point(|&along| along <= distance).clamp(1, self.points.len() - 1);
+        let distance = if self.looped {
+            distance.rem_euclid(self.length)
+        } else {
+            distance.clamp(0.0, self.length)
+        };
+        let index = self
+            .distances
+            .partition_point(|&along| along <= distance)
+            .clamp(1, self.points.len() - 1);
         let (a, b) = (self.points[index - 1], self.points[index]);
         let piece = (self.distances[index] - self.distances[index - 1]).max(1e-6);
         let t = ((distance - self.distances[index - 1]) / piece).clamp(0.0, 1.0);
@@ -111,10 +131,20 @@ impl SampledPath {
     }
 }
 
-fn catmull_rom(a: Vector3<f32>, b: Vector3<f32>, c: Vector3<f32>, d: Vector3<f32>, t: f32) -> Vector3<f32> {
+fn catmull_rom(
+    a: Vector3<f32>,
+    b: Vector3<f32>,
+    c: Vector3<f32>,
+    d: Vector3<f32>,
+    t: f32,
+) -> Vector3<f32> {
     let t2 = t * t;
     let t3 = t2 * t;
-    (b * 2.0 + (c - a) * t + (a * 2.0 - b * 5.0 + c * 4.0 - d) * t2 + (b * 3.0 - a - c * 3.0 + d) * t3) * 0.5
+    (b * 2.0
+        + (c - a) * t
+        + (a * 2.0 - b * 5.0 + c * 4.0 - d) * t2
+        + (b * 3.0 - a - c * 3.0 + d) * t3)
+        * 0.5
 }
 
 /// How fast `pace` goes along a path `length` long, flown with `skill`
@@ -158,9 +188,17 @@ pub fn corner_distances(points: &[(f32, f32, f32)], looped: bool) -> (Vec<f32>, 
 /// the next one.
 fn points_ahead(points: &[(f32, f32, f32)], looped: bool, distance: f32) -> Vec<(f32, f32, f32)> {
     let (distances, total) = corner_distances(points, looped);
-    let distance = if looped && total > 0.0 { distance.rem_euclid(total) } else { distance };
+    let distance = if looped && total > 0.0 {
+        distance.rem_euclid(total)
+    } else {
+        distance
+    };
     match distances.iter().position(|&along| along > distance + 1.0) {
-        Some(next) if looped => points[next..].iter().chain(points[..next].iter()).copied().collect(),
+        Some(next) if looped => points[next..]
+            .iter()
+            .chain(points[..next].iter())
+            .copied()
+            .collect(),
         Some(next) => points[next..].to_vec(),
         None if looped => points.to_vec(),
         None => Vec::new(),
@@ -176,7 +214,9 @@ pub struct Held;
 /// Holds node `id` still for something else to move: its body (if it has
 /// one) goes kinematic and follows the node.
 fn hold_node(scene: &mut Scene, id: &str, physics: &mut PhysicsWorld) {
-    let Some(node) = scene.get_node_mut(id) else { return };
+    let Some(node) = scene.get_node_mut(id) else {
+        return;
+    };
     node.set_property(Held);
     if node.get_property::<Physics>().is_some() {
         physics.set_kinematic(id, true);
@@ -187,9 +227,20 @@ fn hold_node(scene: &mut Scene, id: &str, physics: &mut PhysicsWorld) {
 /// it is now at `velocity`. True when it has a body (it stays off the
 /// physics' pose RELEASE_GRACE_SECONDS longer); without one it's out
 /// already.
-fn release_node(scene: &mut Scene, id: &str, velocity: Vector3<f32>, physics: &mut PhysicsWorld) -> bool {
-    let has_body = scene.get_node(id).is_some_and(|node| node.get_property::<Physics>().is_some());
-    let velocity = if velocity.magnitude() > MAX_RELEASE_SPEED { velocity.normalize() * MAX_RELEASE_SPEED } else { velocity };
+fn release_node(
+    scene: &mut Scene,
+    id: &str,
+    velocity: Vector3<f32>,
+    physics: &mut PhysicsWorld,
+) -> bool {
+    let has_body = scene
+        .get_node(id)
+        .is_some_and(|node| node.get_property::<Physics>().is_some());
+    let velocity = if velocity.magnitude() > MAX_RELEASE_SPEED {
+        velocity.normalize() * MAX_RELEASE_SPEED
+    } else {
+        velocity
+    };
     match (has_body, scene.world_transform(id)) {
         (true, Some(world)) => {
             physics.set_kinematic(id, false);
@@ -217,7 +268,12 @@ fn unhold(scene: &mut Scene, id: &str) {
 /// node; the body follows (kinematic, so nothing else moves it). After the
 /// animations, every frame.
 pub fn sync_held_bodies(scene: &Scene, physics: &mut PhysicsWorld) {
-    for node in scene.content.nodes.iter().filter(|node| node.get_property::<Held>().is_some()) {
+    for node in scene
+        .content
+        .nodes
+        .iter()
+        .filter(|node| node.get_property::<Held>().is_some())
+    {
         if let Some(world) = scene.world_transform(&node.id) {
             if physics.body(&node.id).is_some() {
                 physics.teleport(&node.id, world.position, world.rotation);
@@ -261,7 +317,14 @@ impl PathFollower {
     /// One frame: `requests` - what each node follows now (the running
     /// animations') - and, for map nodes nothing else has on a path, their
     /// own (`NodeSpec::follow`); places, flies or lets go of each.
-    pub fn update(&mut self, delta_time: f32, scene: &mut Scene, map: &MapSpec, requests: Vec<(String, FollowRequest)>, physics: &mut PhysicsWorld) {
+    pub fn update(
+        &mut self,
+        delta_time: f32,
+        scene: &mut Scene,
+        map: &MapSpec,
+        requests: Vec<(String, FollowRequest)>,
+        physics: &mut PhysicsWorld,
+    ) {
         self.level_time += delta_time;
         self.releasing.retain(|id, remaining| {
             *remaining -= delta_time;
@@ -275,31 +338,43 @@ impl PathFollower {
         let mut active: HashMap<String, FollowRequest> = requests.into_iter().collect();
         for node in &map.nodes {
             let Some(follow) = &node.follow else { continue };
-            active.entry(node.id.clone()).or_insert_with(|| FollowRequest {
-                path: follow.path.clone(),
-                mode: FollowMode::Positioned,
-                pace: follow.pace,
-                skill: None,
-                orient: follow.orient,
-                elapsed: self.level_time,
-                key: (String::new(), 0.0),
-                held: false,
-            });
+            active
+                .entry(node.id.clone())
+                .or_insert_with(|| FollowRequest {
+                    path: follow.path.clone(),
+                    mode: FollowMode::Positioned,
+                    pace: follow.pace,
+                    skill: None,
+                    orient: follow.orient,
+                    elapsed: self.level_time,
+                    key: (String::new(), 0.0),
+                    held: false,
+                });
         }
 
         let mut still_animated = HashMap::new();
         let mut still_flown = HashMap::new();
         for (id, follow) in &active {
-            let Some(path) = map.named_path(&follow.path) else { continue };
-            let difficulty = follow.skill
+            let Some(path) = map.named_path(&follow.path) else {
+                continue;
+            };
+            let difficulty = follow
+                .skill
                 .or_else(|| map.find(id).map(|(_, placement)| placement.difficulty))
                 .unwrap_or_default();
             let skill = difficulty.skill();
-            let is_plane = scene.content.nodes.get(id).is_some_and(|node| node.get_behavior::<Plane>().is_some());
+            let is_plane = scene
+                .content
+                .nodes
+                .get(id)
+                .is_some_and(|node| node.get_behavior::<Plane>().is_some());
 
             // A flown path is flown as straight legs between its points.
             let flown = follow.mode == FollowMode::Flown && is_plane;
-            let straight = PathSpec { smooth: false, ..path.clone() };
+            let straight = PathSpec {
+                smooth: false,
+                ..path.clone()
+            };
             let followed = if flown { &straight } else { path };
 
             if flown && !follow.held {
@@ -320,7 +395,11 @@ impl PathFollower {
                     if let Some(sampled) = SampledPath::new(&straight) {
                         let (start, heading) = sampled.at(distance);
                         let heading = heading
-                            .or_else(|| scene.world_transform(id).map(|world| world.rotation * Vector3::z()))
+                            .or_else(|| {
+                                scene
+                                    .world_transform(id)
+                                    .map(|world| world.rotation * Vector3::z())
+                            })
                             .unwrap_or_else(Vector3::z);
                         if let Some(mut world) = scene.world_transform(id) {
                             world.position = start;
@@ -333,7 +412,12 @@ impl PathFollower {
                         }
                     }
                     let ahead = points_ahead(&path.points, path.looped, distance);
-                    if let Some(plane) = scene.content.nodes.get_mut(id).and_then(|node| node.get_behavior_mut::<Plane>()) {
+                    if let Some(plane) = scene
+                        .content
+                        .nodes
+                        .get_mut(id)
+                        .and_then(|node| node.get_behavior_mut::<Plane>())
+                    {
                         plane.set_path(&ahead, speed, difficulty, path.looped);
                         plane.scripted = true;
                     }
@@ -344,7 +428,9 @@ impl PathFollower {
 
             // Positioned - or a flown path held at a moment: where along it
             // the plane would be by then, at its flying speed.
-            let Some(sampled) = SampledPath::new(followed) else { continue };
+            let Some(sampled) = SampledPath::new(followed) else {
+                continue;
+            };
             let speed = pace_speed(follow.pace, sampled.length(), &skill);
             let distance = speed * follow.elapsed;
             let (position, heading) = sampled.at(distance);
@@ -352,7 +438,9 @@ impl PathFollower {
                 self.releasing.remove(id);
                 hold_node(scene, id, physics);
             }
-            let Some(mut world) = scene.world_transform(id) else { continue };
+            let Some(mut world) = scene.world_transform(id) else {
+                continue;
+            };
             world.position = position;
             if follow.orient {
                 if let Some(rotation) = heading.and_then(facing) {
@@ -378,10 +466,22 @@ impl PathFollower {
                 continue;
             }
             // Back to its own flight plan.
-            let Some((_, placement)) = map.find(&id) else { continue };
+            let Some((_, placement)) = map.find(&id) else {
+                continue;
+            };
             let (points, looped) = map.flight_plan(placement);
-            if let Some(plane) = scene.content.nodes.get_mut(&id).and_then(|node| node.get_behavior_mut::<Plane>()) {
-                plane.set_path(&points, Speed::Hold(cruise_speed(placement)), placement.difficulty, looped);
+            if let Some(plane) = scene
+                .content
+                .nodes
+                .get_mut(&id)
+                .and_then(|node| node.get_behavior_mut::<Plane>())
+            {
+                plane.set_path(
+                    &points,
+                    Speed::Hold(cruise_speed(placement)),
+                    placement.difficulty,
+                    looped,
+                );
                 plane.scripted = false;
             }
         }
@@ -394,12 +494,22 @@ mod tests {
     use super::*;
 
     fn path(points: &[(f32, f32, f32)], looped: bool, smooth: bool) -> PathSpec {
-        PathSpec { name: "test".to_owned(), points: points.to_vec(), looped, smooth }
+        PathSpec {
+            name: "test".to_owned(),
+            points: points.to_vec(),
+            looped,
+            smooth,
+        }
     }
 
     #[test]
     fn it_goes_along_at_its_distance_and_holds_the_end() {
-        let sampled = SampledPath::new(&path(&[(0.0, 0.0, 0.0), (100.0, 0.0, 0.0), (100.0, 0.0, 100.0)], false, false)).unwrap();
+        let sampled = SampledPath::new(&path(
+            &[(0.0, 0.0, 0.0), (100.0, 0.0, 0.0), (100.0, 0.0, 100.0)],
+            false,
+            false,
+        ))
+        .unwrap();
         assert!((sampled.length() - 200.0).abs() < 1e-3);
         let (halfway, heading) = sampled.at(50.0);
         assert!((halfway - Vector3::new(50.0, 0.0, 0.0)).magnitude() < 1e-3);
@@ -413,7 +523,8 @@ mod tests {
 
     #[test]
     fn a_looped_path_comes_round_again() {
-        let sampled = SampledPath::new(&path(&[(0.0, 0.0, 0.0), (100.0, 0.0, 0.0)], true, false)).unwrap();
+        let sampled =
+            SampledPath::new(&path(&[(0.0, 0.0, 0.0), (100.0, 0.0, 0.0)], true, false)).unwrap();
         // There and back: 200 m round.
         assert!((sampled.length() - 200.0).abs() < 1e-3);
         let (again, _) = sampled.at(250.0);
@@ -423,26 +534,46 @@ mod tests {
 
     #[test]
     fn a_smooth_path_still_passes_through_its_points() {
-        let points = [(0.0, 0.0, 0.0), (100.0, 0.0, 0.0), (100.0, 0.0, 100.0), (0.0, 0.0, 100.0)];
+        let points = [
+            (0.0, 0.0, 0.0),
+            (100.0, 0.0, 0.0),
+            (100.0, 0.0, 100.0),
+            (0.0, 0.0, 100.0),
+        ];
         let sampled = SampledPath::new(&path(&points, false, true)).unwrap();
         for corner in points {
             let corner = Vector3::new(corner.0, corner.1, corner.2);
-            let closest = (0..=400).map(|step| (sampled.at(sampled.length() * step as f32 / 400.0).0 - corner).magnitude()).fold(f32::MAX, f32::min);
+            let closest = (0..=400)
+                .map(|step| {
+                    (sampled.at(sampled.length() * step as f32 / 400.0).0 - corner).magnitude()
+                })
+                .fold(f32::MAX, f32::min);
             assert!(closest < 2.0, "{corner:?}: {closest}");
         }
     }
 
     #[test]
     fn flown_from_the_middle_goes_on_to_the_points_ahead() {
-        let points = [(0.0, 0.0, 0.0), (100.0, 0.0, 0.0), (100.0, 0.0, 100.0), (0.0, 0.0, 100.0)];
+        let points = [
+            (0.0, 0.0, 0.0),
+            (100.0, 0.0, 0.0),
+            (100.0, 0.0, 100.0),
+            (0.0, 0.0, 100.0),
+        ];
         let (distances, total) = corner_distances(&points, true);
         assert_eq!(distances, vec![0.0, 100.0, 200.0, 300.0]);
         assert!((total - 400.0).abs() < 1e-3);
         // Halfway down the second leg: the third point's next.
         assert_eq!(points_ahead(&points, false, 150.0), points[2..].to_vec());
         // Looped, past the last: round to the first again, the rest after.
-        assert_eq!(points_ahead(&points, true, 350.0), vec![points[0], points[1], points[2], points[3]]);
-        assert_eq!(points_ahead(&points, true, 150.0), vec![points[2], points[3], points[0], points[1]]);
+        assert_eq!(
+            points_ahead(&points, true, 350.0),
+            vec![points[0], points[1], points[2], points[3]]
+        );
+        assert_eq!(
+            points_ahead(&points, true, 150.0),
+            vec![points[2], points[3], points[0], points[1]]
+        );
         // Once through and past the end: nothing left.
         assert!(points_ahead(&points, false, 1000.0).is_empty());
     }
@@ -452,6 +583,16 @@ mod tests {
         let skill = PilotSkill::default_for(Difficulty::Medium);
         assert!((pace_speed(Pace::Duration(10.0), 500.0, &skill) - 50.0).abs() < 1e-4);
         assert!((pace_speed(Pace::Speed(100.0), 0.0, &skill) - 51.4444).abs() < 1e-3);
-        assert!(pace_speed(Pace::BySkill, 0.0, &PilotSkill::default_for(Difficulty::Ace)) > pace_speed(Pace::BySkill, 0.0, &PilotSkill::default_for(Difficulty::Beginner)));
+        assert!(
+            pace_speed(
+                Pace::BySkill,
+                0.0,
+                &PilotSkill::default_for(Difficulty::Ace)
+            ) > pace_speed(
+                Pace::BySkill,
+                0.0,
+                &PilotSkill::default_for(Difficulty::Beginner)
+            )
+        );
     }
 }

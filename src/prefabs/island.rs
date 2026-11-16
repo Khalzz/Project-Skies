@@ -27,14 +27,23 @@ pub fn trimesh() -> (Vec<Vector3<f32>>, Vec<[u32; 3]>) {
 pub fn island(name: &str, trimesh: Option<(Vec<Vector3<f32>>, Vec<[u32; 3]>)>) -> Node {
     let scale = Vector3::repeat(SCALE);
     let node = Node::new(name)
-        .with_property(Transform3D { position: POSITION, rotation: UnitQuaternion::identity(), scale })
-        .with_property(Model::file(MODEL).double_sided(DoubleSidedMeshes::All));
-    let Some((vertices, indices)) = trimesh else { return node };
+        .with_property(Transform3D {
+            position: POSITION,
+            rotation: UnitQuaternion::identity(),
+            scale,
+        })
+        .with_property(Model::file(MODEL));
+    let Some((vertices, indices)) = trimesh else {
+        return node;
+    };
     // The collider is in world units: its vertices scaled as the node is.
     node.with_property(Physics {
         rigidbody: RigidBodyData::fixed(),
         colliders: vec![Collider::new(ColliderShape::Trimesh {
-            vertices: vertices.iter().map(|vertex| vertex.component_mul(&scale)).collect(),
+            vertices: vertices
+                .iter()
+                .map(|vertex| vertex.component_mul(&scale))
+                .collect(),
             indices,
         })],
     })

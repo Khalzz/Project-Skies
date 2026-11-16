@@ -16,7 +16,7 @@ use crate::prefabs::aircraft::airframe::Airframe;
     Flight plan: a definition of points in a map defining the "path" a plane should follow.
 */
 
-struct Aircraft {
+pub struct Aircraft {
     airframe: Airframe,
 }
 
@@ -25,6 +25,33 @@ impl Aircraft {
         Aircraft {
             airframe: Airframe::new(),
         }
+    }
+
+    pub fn prefab(self, id: String) -> Node {
+        Node::new(id)
+            .with_property(Transform3D {
+                position: Vector3::new(40.0, 110.0, 40.0),
+                ..Default::default()
+            })
+            .with_property(
+                Model::file("planes/f16/model/f16.glb").transform(Transform3D {
+                    scale: Vector3::repeat(14.0),
+                    ..Default::default()
+                }),
+            )
+            .with_property(Physics {
+                rigidbody: RigidBodyData {
+                    center_of_mass: Vector3::new(0.0, 0.8, 0.0),
+                    ..RigidBodyData::dynamic(3_000.0)
+                },
+                colliders: vec![Collider::new(ColliderShape::Cylinder_with {
+                    half_height: 6.8,
+                    radius: 0.95,
+                })
+                .offset(Vector3::new(0.0, 0.0, 3.0))
+                .friction(0.8)],
+            })
+            .with_property(self)
     }
 }
 

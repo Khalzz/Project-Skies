@@ -89,7 +89,17 @@ fn default_length() -> f32 {
 
 impl AnimationDef {
     pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into(), length: default_length(), on_start: false, looped: false, lock_input: true, hide_hud: true, paths: Vec::new(), camera: Vec::new(), events: Vec::new() }
+        Self {
+            name: name.into(),
+            length: default_length(),
+            on_start: false,
+            looped: false,
+            lock_input: true,
+            hide_hud: true,
+            paths: Vec::new(),
+            camera: Vec::new(),
+            events: Vec::new(),
+        }
     }
 
     /// Paths, camera keys and events in time order.
@@ -113,11 +123,19 @@ pub struct PathClip {
     pub mode: FollowMode,
     /// Flown: the airspeed it holds, knots - left out, as fast as its
     /// pilot's skill flies (an Ace at full power).
-    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "plain_some")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "plain_some"
+    )]
     pub speed_kt: Option<f32>,
     /// Flown: the pilot's skill it's flown with. Optional - an aircraft's own
     /// `difficulty` when left out.
-    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "plain_some")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "plain_some"
+    )]
     pub skill: Option<Difficulty>,
     /// Positioned: nose first along the path. Optional, true when left out.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
@@ -152,7 +170,11 @@ pub struct CameraKey {
     /// Vertical field of view, degrees.
     pub fov: f32,
     /// A node it moves with. Optional.
-    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "plain_some")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "plain_some"
+    )]
     pub follow: Option<String>,
     /// The offset turns with `follow` - a camera on top stays on top when
     /// that node rolls. Off: it follows the position only and keeps its own
@@ -160,16 +182,26 @@ pub struct CameraKey {
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub follow_rotation: bool,
     /// A node it keeps looking at. Optional.
-    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "plain_some")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "plain_some"
+    )]
     pub look_at: Option<String>,
     /// Drifts while it holds, instead of sitting locked.
     #[serde(default, skip_serializing_if = "is_false")]
     pub wave: bool,
     /// How far the wave travels (m).
-    #[serde(default = "default_wave_amount", skip_serializing_if = "is_default_wave_amount")]
+    #[serde(
+        default = "default_wave_amount",
+        skip_serializing_if = "is_default_wave_amount"
+    )]
     pub wave_amount: f32,
     /// How fast the wave travels - 1 is a slow swing, higher is quicker.
-    #[serde(default = "default_wave_speed", skip_serializing_if = "is_default_wave_speed")]
+    #[serde(
+        default = "default_wave_speed",
+        skip_serializing_if = "is_default_wave_speed"
+    )]
     pub wave_speed: f32,
     /// What the wave moves: the camera itself, or the point it looks at.
     #[serde(default, skip_serializing_if = "WaveOn::is_position")]
@@ -295,7 +327,11 @@ pub struct NodeSpec {
     pub id: String,
     /// The node it's a child of (an aircraft, another of these, or any node
     /// the level spawns). Optional - at the top when left out.
-    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "plain_some")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "plain_some"
+    )]
     pub parent: Option<String>,
     /// With a parent: `Local` (an offset from the parent's origin, moving
     /// with it - the default) or `Global` (a place in the world,
@@ -313,14 +349,26 @@ pub struct NodeSpec {
     #[serde(default, skip_serializing_if = "is_zero_rotation")]
     pub rotation: (f32, f32, f32),
     /// Makes it a camera. Optional.
-    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "plain_some")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "plain_some"
+    )]
     pub camera: Option<CameraSpec>,
     /// Keeps it turned to face this node. Optional.
-    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "plain_some")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "plain_some"
+    )]
     pub look_at: Option<String>,
     /// A path it follows from the level's start (animated), whenever no
     /// sequence has it following another. Optional.
-    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "plain_some")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "plain_some"
+    )]
     pub follow: Option<DefaultFollow>,
 }
 
@@ -391,7 +439,11 @@ pub struct AircraftPlacement {
     pub rotation: (f32, f32, f32),
     /// Starting airspeed along its nose, m/s. Optional - when left out, the
     /// plane's own data.ron `initial_velocity` is used.
-    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "plain_some")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "plain_some"
+    )]
     pub speed: Option<f32>,
     /// Starting throttle, 0..1. Optional - 0 (idle) when left out.
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -403,7 +455,11 @@ pub struct AircraftPlacement {
     pub path: Vec<(f32, f32, f32)>,
     /// The map path it flies (one of `MapSpec::paths`, by name) instead of
     /// its own `path`. Optional.
-    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "plain_some")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "plain_some"
+    )]
     pub follow: Option<String>,
     /// What it carries: a weapon on each of its plane's pylons, by pylon
     /// name - `{ "1 Left wingtip": "missiles/aim-9x" }`. Optional: nothing
@@ -413,20 +469,40 @@ pub struct AircraftPlacement {
     pub loadout: BTreeMap<String, String>,
     /// How many flares and chaff it's loaded with. Optional: as many as its
     /// plane's data.ron `countermeasures` says when left out.
-    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "plain_some")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "plain_some"
+    )]
     pub flares: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "plain_some")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "plain_some"
+    )]
     pub chaff: Option<u32>,
     /// Fuel in the tanks at spawn (kg). Optional: full when left out.
-    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "plain_some")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "plain_some"
+    )]
     pub fuel_kg: Option<f32>,
     /// Bingo fuel (kg). Optional: none when left out. The aircraft-data box
     /// marks the fuel line once what's left is at or under this.
-    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "plain_some")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "plain_some"
+    )]
     pub bingo_kg: Option<f32>,
     /// Radar altitude (m, straight down) that starts the HUD's low-altitude
     /// warning. Optional: `DEFAULT_RADAR_WARN_M` when left out.
-    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "plain_some")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "plain_some"
+    )]
     pub radar_warn_m: Option<f32>,
     /// How good a pilot a bot is - how quickly it reacts (see
     /// prefabs::plane::ai::defense). Optional: Medium when left out. Nothing for the
@@ -440,7 +516,11 @@ pub struct AircraftPlacement {
     /// What it's drawn with - a shader and its values, and mesh materials of
     /// its own on top of its plane's (see `Material`). Optional - its
     /// plane's look when left out.
-    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "plain_some")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "plain_some"
+    )]
     pub material: Option<pankarta_software::scene_manager::node::properties::Material>,
 }
 
@@ -539,7 +619,10 @@ fn is_zero_rotation(value: &(f32, f32, f32)) -> bool {
 
 /// An optional field written plainly (`speed: 120.0`), the way the file is
 /// read - without RON's `Some( ... )` around it.
-fn plain_some<T: Serialize, S: serde::Serializer>(value: &Option<T>, serializer: S) -> Result<S::Ok, S::Error> {
+fn plain_some<T: Serialize, S: serde::Serializer>(
+    value: &Option<T>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
     match value {
         Some(value) => value.serialize(serializer),
         None => serializer.serialize_none(),
@@ -642,10 +725,13 @@ impl MapSpec {
         let path = Self::path(scene_folder);
         let text = std::fs::read_to_string(&path)
             .map_err(|error| format!("map: couldn't read {}: {error}", path.display()))?;
-        let ron_options = ron::Options::default().with_default_extension(ron::extensions::Extensions::IMPLICIT_SOME);
-        let map: MapSpec = ron_options.from_str(&text)
+        let ron_options = ron::Options::default()
+            .with_default_extension(ron::extensions::Extensions::IMPLICIT_SOME);
+        let map: MapSpec = ron_options
+            .from_str(&text)
             .map_err(|error| format!("map: {} isn't valid: {error}", path.display()))?;
-        map.validate().map_err(|error| format!("map: {} - {error}", path.display()))?;
+        map.validate()
+            .map_err(|error| format!("map: {} - {error}", path.display()))?;
         Ok(map)
     }
 
@@ -656,7 +742,8 @@ impl MapSpec {
         self.validate()?;
         let path = Self::path(scene_folder);
         let config = ron::ser::PrettyConfig::new().indentor("  ");
-        let body = ron::ser::to_string_pretty(self, config).map_err(|error| format!("map: couldn't write it out: {error}"))?;
+        let body = ron::ser::to_string_pretty(self, config)
+            .map_err(|error| format!("map: couldn't write it out: {error}"))?;
         std::fs::write(&path, format!("{FILE_HEADER}{body}\n"))
             .map_err(|error| format!("map: couldn't write {}: {error}", path.display()))
     }
@@ -668,7 +755,10 @@ impl MapSpec {
         let mut coalition_names = HashSet::new();
         for coalition in &self.coalitions {
             if coalition.name.is_empty() || !coalition_names.insert(coalition.name.as_str()) {
-                return Err(format!("coalition name '{}' is empty or used twice", coalition.name));
+                return Err(format!(
+                    "coalition name '{}' is empty or used twice",
+                    coalition.name
+                ));
             }
         }
 
@@ -676,7 +766,10 @@ impl MapSpec {
         for (_, aircraft) in self.aircraft() {
             // `/` separates UI paths - the name tag couldn't be found.
             if aircraft.name.is_empty() || aircraft.name.contains('/') {
-                return Err(format!("aircraft name '{}' can't be empty or have a '/' in it", aircraft.name));
+                return Err(format!(
+                    "aircraft name '{}' can't be empty or have a '/' in it",
+                    aircraft.name
+                ));
             }
             if !names.insert(aircraft.name.as_str()) {
                 return Err(format!("two aircraft are named '{}'", aircraft.name));
@@ -684,10 +777,16 @@ impl MapSpec {
         }
         for node in &self.nodes {
             if node.id.is_empty() || node.id.contains('/') {
-                return Err(format!("node id '{}' can't be empty or have a '/' in it", node.id));
+                return Err(format!(
+                    "node id '{}' can't be empty or have a '/' in it",
+                    node.id
+                ));
             }
             if !names.insert(node.id.as_str()) {
-                return Err(format!("the name '{}' is used twice (nodes and aircraft share names)", node.id));
+                return Err(format!(
+                    "the name '{}' is used twice (nodes and aircraft share names)",
+                    node.id
+                ));
             }
             if node.parent.as_deref() == Some(node.id.as_str()) {
                 return Err(format!("node '{}' can't be its own parent", node.id));
@@ -700,28 +799,48 @@ impl MapSpec {
             }
         }
         for (_, aircraft) in self.aircraft() {
-            if let Some(follow) = aircraft.follow.as_deref().filter(|follow| !path_names.contains(follow)) {
-                return Err(format!("aircraft '{}' follows the path '{follow}', which isn't in the map", aircraft.name));
+            if let Some(follow) = aircraft
+                .follow
+                .as_deref()
+                .filter(|follow| !path_names.contains(follow))
+            {
+                return Err(format!(
+                    "aircraft '{}' follows the path '{follow}', which isn't in the map",
+                    aircraft.name
+                ));
             }
         }
         for (node, animations) in &self.animations {
             let mut animation_names = HashSet::new();
             for animation in animations {
                 if animation.name.is_empty() || !animation_names.insert(animation.name.as_str()) {
-                    return Err(format!("'{node}' has an animation named '{}' - empty or used twice", animation.name));
+                    return Err(format!(
+                        "'{node}' has an animation named '{}' - empty or used twice",
+                        animation.name
+                    ));
                 }
             }
         }
-        let players = self.aircraft().filter(|(_, aircraft)| aircraft.player).count();
+        let players = self
+            .aircraft()
+            .filter(|(_, aircraft)| aircraft.player)
+            .count();
         if players != 1 {
-            return Err(format!("{players} aircraft have `player: true`, there should be exactly one"));
+            return Err(format!(
+                "{players} aircraft have `player: true`, there should be exactly one"
+            ));
         }
         Ok(())
     }
 
     /// Every aircraft in the map, with the coalition it's in - in file order.
     pub fn aircraft(&self) -> impl Iterator<Item = (&Coalition, &AircraftPlacement)> {
-        self.coalitions.iter().flat_map(|coalition| coalition.aircraft.iter().map(move |aircraft| (coalition, aircraft)))
+        self.coalitions.iter().flat_map(|coalition| {
+            coalition
+                .aircraft
+                .iter()
+                .map(move |aircraft| (coalition, aircraft))
+        })
     }
 
     /// The aircraft named `name`, with its coalition.
@@ -731,7 +850,10 @@ impl MapSpec {
 
     /// The aircraft named `name`, to change it.
     pub fn find_mut(&mut self, name: &str) -> Option<&mut AircraftPlacement> {
-        self.coalitions.iter_mut().flat_map(|coalition| coalition.aircraft.iter_mut()).find(|aircraft| aircraft.name == name)
+        self.coalitions
+            .iter_mut()
+            .flat_map(|coalition| coalition.aircraft.iter_mut())
+            .find(|aircraft| aircraft.name == name)
     }
 
     /// The path named `name`.
@@ -745,17 +867,27 @@ impl MapSpec {
 
     /// Node `node`'s animation `name`.
     pub fn animation(&self, node: &str, name: &str) -> Option<&AnimationDef> {
-        self.animations.get(node)?.iter().find(|animation| animation.name == name)
+        self.animations
+            .get(node)?
+            .iter()
+            .find(|animation| animation.name == name)
     }
 
     pub fn animation_mut(&mut self, node: &str, name: &str) -> Option<&mut AnimationDef> {
-        self.animations.get_mut(node)?.iter_mut().find(|animation| animation.name == name)
+        self.animations
+            .get_mut(node)?
+            .iter_mut()
+            .find(|animation| animation.name == name)
     }
 
     /// The points `placement` flies by default, and whether round and round
     /// - the map path it follows, or its own path.
     pub fn flight_plan(&self, placement: &AircraftPlacement) -> (Vec<(f32, f32, f32)>, bool) {
-        match placement.follow.as_deref().and_then(|name| self.named_path(name)) {
+        match placement
+            .follow
+            .as_deref()
+            .and_then(|name| self.named_path(name))
+        {
             Some(path) => (path.points.clone(), path.looped),
             None => (placement.path.clone(), true),
         }
@@ -764,8 +896,13 @@ impl MapSpec {
     /// Changes the points the aircraft `name` flies by default - the map
     /// path it follows (every aircraft on it changes too), or its own.
     pub fn set_flight_plan(&mut self, name: &str, points: Vec<(f32, f32, f32)>) {
-        let follow = self.find(name).and_then(|(_, placement)| placement.follow.clone());
-        if let Some(path) = follow.as_deref().and_then(|follow| self.named_path_mut(follow)) {
+        let follow = self
+            .find(name)
+            .and_then(|(_, placement)| placement.follow.clone());
+        if let Some(path) = follow
+            .as_deref()
+            .and_then(|follow| self.named_path_mut(follow))
+        {
             path.points = points;
             return;
         }
@@ -790,7 +927,10 @@ impl MapSpec {
 
     /// The aircraft the player flies - `validate` makes sure there's one.
     pub fn player(&self) -> &AircraftPlacement {
-        self.aircraft().map(|(_, aircraft)| aircraft).find(|aircraft| aircraft.player).expect("MapSpec::validate checks there's a player")
+        self.aircraft()
+            .map(|(_, aircraft)| aircraft)
+            .find(|aircraft| aircraft.player)
+            .expect("MapSpec::validate checks there's a player")
     }
 }
 
@@ -800,7 +940,8 @@ mod tests {
 
     #[test]
     fn the_test_chamber_map_loads() {
-        let map = MapSpec::load("assets/scenes/test_chamber").expect("assets/scenes/test_chamber/map.ron should load");
+        let map = MapSpec::load("assets/scenes/test_chamber")
+            .expect("assets/scenes/test_chamber/map.ron should load");
         for (_, aircraft) in map.aircraft() {
             crate::prefabs::plane::aircraft_spec::AircraftSpec::load(&aircraft.plane)
                 .unwrap_or_else(|error| panic!("map aircraft '{}': {error}", aircraft.name));
@@ -829,31 +970,99 @@ mod tests {
             follow_rotation: false,
             position: (1.0, 2.0, 3.0),
             rotation: (0.0, 45.0, 0.0),
-            camera: Some(CameraSpec { fov: 55.0, near: 0.2 }),
+            camera: Some(CameraSpec {
+                fov: 55.0,
+                near: 0.2,
+            }),
             look_at: Some(player.clone()),
-            follow: Some(DefaultFollow { path: "patrol".to_owned(), pace: Pace::Speed(80.0), orient: false }),
+            follow: Some(DefaultFollow {
+                path: "patrol".to_owned(),
+                pace: Pace::Speed(80.0),
+                orient: false,
+            }),
         });
-        map.paths.push(PathSpec { name: "patrol".to_owned(), points: vec![(0.0, 900.0, 0.0), (5000.0, 1100.0, 3000.0)], looped: false, smooth: true });
+        map.paths.push(PathSpec {
+            name: "patrol".to_owned(),
+            points: vec![(0.0, 900.0, 0.0), (5000.0, 1100.0, 3000.0)],
+            looped: false,
+            smooth: true,
+        });
         map.coalitions[0].aircraft[0].follow = Some("patrol".to_owned());
         let mut intro = AnimationDef::new("intro");
         intro.length = 12.0;
         intro.on_start = true;
         intro.looped = true;
         intro.hide_hud = false;
-        intro.paths.push(PathClip { start: 0.5, end: 9.0, path: "patrol".to_owned(), mode: FollowMode::Flown, speed_kt: Some(350.0), skill: Some(Difficulty::Ace), orient: true });
-        intro.paths.push(PathClip { start: 9.0, end: 11.0, path: "patrol".to_owned(), mode: FollowMode::Positioned, speed_kt: None, skill: None, orient: false });
-        intro.camera.push(CameraKey { time: 0.0, transition: Transition::Cut, position: (0.0, 4.0, -25.0), rotation: (0.0, 0.0, 0.0), fov: 60.0, follow: Some(player.clone()), follow_rotation: true, look_at: None, wave: false, wave_amount: 5.0, wave_speed: 1.0, wave_on: WaveOn::Position });
-        intro.camera.push(CameraKey { time: 4.0, transition: Transition::Smooth, position: (100.0, 1200.0, 50.0), rotation: (5.0, 90.0, 0.0), fov: 35.0, follow: None, follow_rotation: true, look_at: Some(player.clone()), wave: false, wave_amount: 5.0, wave_speed: 1.0, wave_on: WaveOn::Position });
-        intro.events.push(AnimEvent { time: 2.0, action: AnimAction::PlayAudio("./assets/audio/ReasonToFight".to_owned()) });
-        intro.events.push(AnimEvent { time: 3.0, action: AnimAction::StartAnimation { node: "chase_cam".to_owned(), animation: "then".to_owned() } });
+        intro.paths.push(PathClip {
+            start: 0.5,
+            end: 9.0,
+            path: "patrol".to_owned(),
+            mode: FollowMode::Flown,
+            speed_kt: Some(350.0),
+            skill: Some(Difficulty::Ace),
+            orient: true,
+        });
+        intro.paths.push(PathClip {
+            start: 9.0,
+            end: 11.0,
+            path: "patrol".to_owned(),
+            mode: FollowMode::Positioned,
+            speed_kt: None,
+            skill: None,
+            orient: false,
+        });
+        intro.camera.push(CameraKey {
+            time: 0.0,
+            transition: Transition::Cut,
+            position: (0.0, 4.0, -25.0),
+            rotation: (0.0, 0.0, 0.0),
+            fov: 60.0,
+            follow: Some(player.clone()),
+            follow_rotation: true,
+            look_at: None,
+            wave: false,
+            wave_amount: 5.0,
+            wave_speed: 1.0,
+            wave_on: WaveOn::Position,
+        });
+        intro.camera.push(CameraKey {
+            time: 4.0,
+            transition: Transition::Smooth,
+            position: (100.0, 1200.0, 50.0),
+            rotation: (5.0, 90.0, 0.0),
+            fov: 35.0,
+            follow: None,
+            follow_rotation: true,
+            look_at: Some(player.clone()),
+            wave: false,
+            wave_amount: 5.0,
+            wave_speed: 1.0,
+            wave_on: WaveOn::Position,
+        });
+        intro.events.push(AnimEvent {
+            time: 2.0,
+            action: AnimAction::PlayAudio("./assets/audio/ReasonToFight".to_owned()),
+        });
+        intro.events.push(AnimEvent {
+            time: 3.0,
+            action: AnimAction::StartAnimation {
+                node: "chase_cam".to_owned(),
+                animation: "then".to_owned(),
+            },
+        });
         map.animations.insert(player.clone(), vec![intro]);
-        map.animations.insert("chase_cam".to_owned(), vec![AnimationDef::new("then")]);
+        map.animations
+            .insert("chase_cam".to_owned(), vec![AnimationDef::new("then")]);
 
         let folder = std::env::temp_dir().join("project_skies_map_round_trip");
         std::fs::create_dir_all(&folder).unwrap();
         let folder = folder.to_string_lossy().into_owned();
         map.save(&folder).unwrap();
         let read_back = MapSpec::load(&folder).unwrap();
-        assert!(read_back == map, "{}", std::fs::read_to_string(MapSpec::path(&folder)).unwrap());
+        assert!(
+            read_back == map,
+            "{}",
+            std::fs::read_to_string(MapSpec::path(&folder)).unwrap()
+        );
     }
 }

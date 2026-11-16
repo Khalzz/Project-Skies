@@ -40,7 +40,12 @@ pub fn spawn(scene: &mut Scene, app: &mut App) {
     hud::spawn(scene, app);
     kill_feed::spawn(scene, app);
     captions::spawn(scene, app);
-    ui_layers::add(scene, app, quick_list::QUICK_LIST_UI, quick_list::build_quick_list_ui());
+    ui_layers::add(
+        scene,
+        app,
+        quick_list::QUICK_LIST_UI,
+        quick_list::build_quick_list_ui(),
+    );
     pause_menu::spawn(scene, app);
     death_screen::spawn(scene, app);
     mission_intro::spawn(scene, app);

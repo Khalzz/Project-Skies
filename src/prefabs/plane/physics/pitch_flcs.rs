@@ -1,8 +1,8 @@
 use nalgebra::Vector3;
 use rapier3d::prelude::RigidBody;
 
-use pankarta_software::utils::lerps::lerp;
 use crate::prefabs::plane::controls::PlaneControls;
+use pankarta_software::utils::lerps::lerp;
 
 use super::wings::wing::AIR_DENSITY;
 
@@ -193,8 +193,12 @@ impl PitchFlcs {
     /// Returns the elevator `control_input` (-1..1) for both elevator wings
     /// this tick. Call every physics tick while FBW pitch is engaged - `dt`
     /// is the fixed physics step (see `AircraftPhysics::fixed_update`).
-    pub fn update(&mut self, rigidbody: &RigidBody, plane_controls: &PlaneControls, dt: f32) -> f32 {
-
+    pub fn update(
+        &mut self,
+        rigidbody: &RigidBody,
+        plane_controls: &PlaneControls,
+        dt: f32,
+    ) -> f32 {
         let rotation = *rigidbody.rotation();
         let linvel = *rigidbody.linvel();
         let airspeed = linvel.magnitude();

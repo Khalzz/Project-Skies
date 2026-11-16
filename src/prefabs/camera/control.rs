@@ -24,14 +24,14 @@ use std::collections::HashMap;
 use nalgebra::{UnitQuaternion, Vector3};
 use pankarta_software::prelude::*;
 
-use crate::ext::game_object::{Camera as GameObjectCamera, Cameras};
-use crate::ext::physics_behavior::PhysicsNodeExt;
-use crate::scenes::play::animations::CameraPose;
 use super::behavior::{Camera, CameraState};
 use super::head_motion::HeadInput;
+use crate::ext::game_object::{Camera as GameObjectCamera, Cameras};
+use crate::ext::physics_behavior::PhysicsNodeExt;
+use crate::prefabs::missile;
 use crate::prefabs::plane::messages::AircraftState;
 use crate::prefabs::plane::plane::Plane;
-use crate::prefabs::missile;
+use crate::scenes::play::animations::CameraPose;
 
 /// The player's view - a camera node driven by prefabs::camera::Camera.
 pub const PLAYER_CAMERA: &str = "camera";
@@ -101,33 +101,53 @@ impl Default for CameraControl {
 
 impl CameraControl {
     pub fn new() -> Self {
-        Self { focus: String::new(), editor_selection: None, editor_follow: None, went_in_at: HashMap::new(), on_screen: PLAYER_CAMERA.to_owned() }
+        Self {
+            focus: String::new(),
+            editor_selection: None,
+            editor_follow: None,
+            went_in_at: HashMap::new(),
+            on_screen: PLAYER_CAMERA.to_owned(),
+        }
     }
 
     /// The scene's two camera nodes: the player's view (its Camera behavior
     /// places it every frame, fed its target by `update`) and the one the
     /// animations' camera keys move.
     pub fn spawn(scene: &mut Scene, app: &mut App) {
-        scene.spawn_node(app,
-            Node::new(PLAYER_CAMERA)
-                .with_property(Transform3D::default())
-                .with_property(CameraLens::new(45.0))
-                .with_behavior(Camera::new())
-        ).expect("play should only spawn 'camera' once");
-        scene.spawn_node(app,
-            Node::new(ANIMATION_CAMERA)
-                .with_property(Transform3D::default())
-                .with_property(CameraLens::new(60.0))
-        ).expect("play should only spawn the animation camera once");
+        scene
+            .spawn_node(
+                app,
+                Node::new(PLAYER_CAMERA)
+                    .with_property(Transform3D::default())
+                    .with_property(CameraLens::new(45.0))
+                    .with_behavior(Camera::new()),
+            )
+            .expect("play should only spawn 'camera' once");
+        scene
+            .spawn_node(
+                app,
+                Node::new(ANIMATION_CAMERA)
+                    .with_property(Transform3D::default())
+                    .with_property(CameraLens::new(60.0)),
+            )
+            .expect("play should only spawn the animation camera once");
     }
 
     /// The player's camera behavior.
     pub fn player_camera(scene: &Scene) -> Option<&Camera> {
-        scene.content.nodes.get(PLAYER_CAMERA).and_then(|node| node.get_behavior::<Camera>())
+        scene
+            .content
+            .nodes
+            .get(PLAYER_CAMERA)
+            .and_then(|node| node.get_behavior::<Camera>())
     }
 
     pub fn player_camera_mut(scene: &mut Scene) -> Option<&mut Camera> {
-        scene.content.nodes.get_mut(PLAYER_CAMERA).and_then(|node| node.get_behavior_mut::<Camera>())
+        scene
+            .content
+            .nodes
+            .get_mut(PLAYER_CAMERA)
+            .and_then(|node| node.get_behavior_mut::<Camera>())
     }
 
     /// The node the player's camera follows (empty before the first frame).
@@ -153,7 +173,8 @@ impl CameraControl {
     /// The player's camera is on screen, in a cockpit - the view the HUD
     /// belongs to.
     pub fn cockpit_on_screen(&self, scene: &Scene) -> bool {
-        self.on_screen == PLAYER_CAMERA && Self::player_camera(scene).is_some_and(Camera::is_cockpit)
+        self.on_screen == PLAYER_CAMERA
+            && Self::player_camera(scene).is_some_and(Camera::is_cockpit)
     }
 
     /// F10's editor: flies the editor camera to `id`, `distance` off (a
@@ -193,7 +214,12 @@ impl CameraControl {
     /// ground unit / launched missile (there are no ground units yet); or an
     /// aircraft picked in the flight editor's hierarchy. Back to the player
     /// when the one it followed is gone.
-    fn update_focus(&mut self, scene: &Scene, app: &App, world: &Followable) -> Option<CameraSwitch> {
+    fn update_focus(
+        &mut self,
+        scene: &Scene,
+        app: &App,
+        world: &Followable,
+    ) -> Option<CameraSwitch> {
         let mut switch = None;
         let selection = world.editor_selection.map(str::to_owned);
         if selection != self.editor_selection {
@@ -214,7 +240,10 @@ impl CameraControl {
         if app.input.is_action_just_pressed("camera_next_aircraft") {
             // Every aircraft but the player's, in the map's order - the one
             // after whichever it's on now.
-            let others: Vec<&str> = world.aircraft.iter().copied()
+            let others: Vec<&str> = world
+                .aircraft
+                .iter()
+                .copied()
                 .filter(|name| *name != world.player_id && crate::ext::drawn::exists(scene, name))
                 .collect();
             let current = others.iter().position(|name| *name == self.focus);
@@ -230,9 +259,13 @@ impl CameraControl {
             println!("Camera: no ground units to follow yet");
         }
         if app.input.is_action_just_pressed("camera_next_missile") {
-            let missiles: Vec<&str> = missile::in_flight(scene).into_iter().map(|(id, _)| id).collect();
+            let missiles: Vec<&str> = missile::in_flight(scene)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
             let current = missiles.iter().position(|id| *id == self.focus);
-            match missiles.get(current.map(|index| index + 1).unwrap_or(0) % missiles.len().max(1)) {
+            match missiles.get(current.map(|index| index + 1).unwrap_or(0) % missiles.len().max(1))
+            {
                 Some(id) => self.focus = (*id).to_owned(),
                 None => println!("Camera: no missiles in the air"),
             }
@@ -254,15 +287,29 @@ impl CameraControl {
             self.editor_follow = None;
             return;
         }
-        let picked = ["camera_player", "camera_next_aircraft", "camera_next_ground_unit", "camera_next_missile"]
-            .iter()
-            .any(|action| app.input.is_action_just_pressed(action)) && !world.editor_typing;
+        let picked = [
+            "camera_player",
+            "camera_next_aircraft",
+            "camera_next_ground_unit",
+            "camera_next_missile",
+        ]
+        .iter()
+        .any(|action| app.input.is_action_just_pressed(action))
+            && !world.editor_typing;
         let focus = self.focus.clone();
-        let at = scene.world_transform(&focus).map(|transform| transform.position);
-        let Some(camera) = Self::player_camera_mut(scene) else { return };
+        let at = scene
+            .world_transform(&focus)
+            .map(|transform| transform.position);
+        let Some(camera) = Self::player_camera_mut(scene) else {
+            return;
+        };
         if picked {
             if let Some(at) = at {
-                let distance = if world.aircraft.contains(&focus.as_str()) { EDITOR_FOCUS_AIRCRAFT } else { EDITOR_FOCUS_MISSILE };
+                let distance = if world.aircraft.contains(&focus.as_str()) {
+                    EDITOR_FOCUS_AIRCRAFT
+                } else {
+                    EDITOR_FOCUS_MISSILE
+                };
                 camera.editor_focus(at, distance);
                 self.editor_follow = Some((focus, at));
             }
@@ -288,11 +335,22 @@ impl CameraControl {
     /// feels.
     fn follow(&mut self, scene: &mut Scene, app: &App) {
         let focus = self.focus.clone();
-        let Some(followed) = scene.get_node(&focus).and_then(|node| node.transform_3d()).copied() else { return };
+        let Some(followed) = scene
+            .get_node(&focus)
+            .and_then(|node| node.transform_3d())
+            .copied()
+        else {
+            return;
+        };
         let (position, rotation) = missile::get(scene, &focus)
             .map(|missile| missile.camera_pose(app.time.delta_time))
             .unwrap_or((followed.position, followed.rotation));
-        let in_water = scene.content.nodes.get(&focus).and_then(|node| node.get_behavior::<Plane>()).is_some_and(Plane::in_water);
+        let in_water = scene
+            .content
+            .nodes
+            .get(&focus)
+            .and_then(|node| node.get_behavior::<Plane>())
+            .is_some_and(Plane::in_water);
         // From the cockpit the pilot rides the jet into the water - the head
         // thrown forward as it slams to a stop - until the wreck view takes
         // over; only a view from outside stays where it went in.
@@ -301,15 +359,26 @@ impl CameraControl {
             let sea_level = app.particles.sea_level().unwrap_or(0.0);
             *self.went_in_at.entry(focus.clone()).or_insert_with(|| {
                 let forward = rotation * Vector3::z();
-                let heading = Vector3::new(forward.x, 0.0, forward.z).try_normalize(1e-4).unwrap_or_else(Vector3::z);
-                (Vector3::new(position.x, sea_level, position.z), UnitQuaternion::face_towards(&heading, &Vector3::y()))
+                let heading = Vector3::new(forward.x, 0.0, forward.z)
+                    .try_normalize(1e-4)
+                    .unwrap_or_else(Vector3::z);
+                (
+                    Vector3::new(position.x, sea_level, position.z),
+                    UnitQuaternion::face_towards(&heading, &Vector3::y()),
+                )
             })
         } else {
             self.went_in_at.remove(&focus);
             (position, rotation)
         };
-        let named_cameras = scene.get_node(&focus).and_then(|node| node.get_property::<Cameras>()).cloned();
-        let head_input = scene.content.nodes.get(&focus)
+        let named_cameras = scene
+            .get_node(&focus)
+            .and_then(|node| node.get_property::<Cameras>())
+            .cloned();
+        let head_input = scene
+            .content
+            .nodes
+            .get(&focus)
             .and_then(|node| node.physics_state::<AircraftState>())
             .map(|state| HeadInput {
                 lateral: state.flight_data.lateral_g,
@@ -327,7 +396,11 @@ impl CameraControl {
     /// The animation camera where a running animation's keys put it.
     pub fn set_animation_pose(scene: &mut Scene, pose: &CameraPose) {
         if let Some(node) = scene.content.nodes.get_mut(ANIMATION_CAMERA) {
-            node.set_property(Transform3D { position: pose.position, rotation: pose.rotation, scale: Vector3::new(1.0, 1.0, 1.0) });
+            node.set_property(Transform3D {
+                position: pose.position,
+                rotation: pose.rotation,
+                scale: Vector3::new(1.0, 1.0, 1.0),
+            });
             node.set_property(CameraLens::new(pose.fovy));
         }
     }
@@ -345,15 +418,23 @@ impl CameraControl {
         let wanted = if request.tactical_map {
             PLAYER_CAMERA.to_owned()
         } else if request.editor {
-            request.preview_camera
-                .or_else(|| (request.timeline_preview && request.animating).then(|| ANIMATION_CAMERA.to_owned()))
+            request
+                .preview_camera
+                .or_else(|| {
+                    (request.timeline_preview && request.animating)
+                        .then(|| ANIMATION_CAMERA.to_owned())
+                })
                 .unwrap_or_else(|| PLAYER_CAMERA.to_owned())
         } else if request.animating {
             ANIMATION_CAMERA.to_owned()
         } else {
             PLAYER_CAMERA.to_owned()
         };
-        let wanted = if scene.cameras.get(&wanted).is_some() { wanted } else { PLAYER_CAMERA.to_owned() };
+        let wanted = if scene.cameras.get(&wanted).is_some() {
+            wanted
+        } else {
+            PLAYER_CAMERA.to_owned()
+        };
 
         // Every camera drawn the whole screen's size (the player's sizes
         // itself).
@@ -380,8 +461,11 @@ impl CameraControl {
 /// a camera's pose as a node rotation.
 pub fn facing_with_up(forward: Vector3<f32>, up: Vector3<f32>) -> UnitQuaternion<f32> {
     match (forward.try_normalize(1e-6), up.try_normalize(1e-6)) {
-        (Some(forward), Some(up)) if forward.cross(&up).norm() > 1e-4 => UnitQuaternion::face_towards(&forward, &up),
-        (Some(forward), _) => pankarta_software::scene_manager::scene_nodes::facing(forward).unwrap_or_else(UnitQuaternion::identity),
+        (Some(forward), Some(up)) if forward.cross(&up).norm() > 1e-4 => {
+            UnitQuaternion::face_towards(&forward, &up)
+        }
+        (Some(forward), _) => pankarta_software::scene_manager::scene_nodes::facing(forward)
+            .unwrap_or_else(UnitQuaternion::identity),
         _ => UnitQuaternion::identity(),
     }
 }
@@ -390,7 +474,21 @@ pub fn facing_with_up(forward: Vector3<f32>, up: Vector3<f32>) -> UnitQuaternion
 /// on while it follows it.
 pub fn fellow_aviator_cameras() -> Cameras {
     let mut cameras: Cameras = HashMap::new();
-    cameras.insert("cockpit".to_owned(), GameObjectCamera { position: Vector3::new(0.0, 2.3, 14.3), fov: 60.0, head_limits: None });
-    cameras.insert("front".to_owned(), GameObjectCamera { position: Vector3::new(0.0, 6.0, 26.0), fov: 60.0, head_limits: None });
+    cameras.insert(
+        "cockpit".to_owned(),
+        GameObjectCamera {
+            position: Vector3::new(0.0, 2.3, 14.3),
+            fov: 60.0,
+            head_limits: None,
+        },
+    );
+    cameras.insert(
+        "front".to_owned(),
+        GameObjectCamera {
+            position: Vector3::new(0.0, 6.0, 26.0),
+            fov: 60.0,
+            head_limits: None,
+        },
+    );
     cameras
 }
