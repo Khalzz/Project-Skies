@@ -71,26 +71,24 @@ impl Radar {
     }
 
     pub fn prefab(self, node: Node) -> Node {
-        node.with_property(Physics {
-            rigidbody: RigidBodyData {
+        node.with_property(
+            Physics::new(RigidBodyData {
                 center_of_mass: Vector3::new(0.0, 0.8, 0.0),
                 ..RigidBodyData::dynamic(3_000.0)
-            },
-            colliders: vec![
-                // Trailer, from the wheels' bottom to the frame
-                Collider::new(ColliderShape::Cuboid {
-                    half_extents: (1.1, 0.45, 1.8),
-                })
-                .offset(Vector3::new(0.0, 0.45, 0.0))
-                .friction(0.8),
-                // Electronics shelter
-                Collider::new(ColliderShape::Cuboid {
-                    half_extents: (0.9, 0.4, 1.1),
-                })
-                .offset(Vector3::new(0.0, 1.25, -0.2))
-                .friction(0.8),
-            ],
-        })
+            })
+            // Trailer, from the wheels' bottom to the frame
+            .collider(
+                ColliderBuilder::cuboid(1.1, 0.45, 1.8)
+                    .translation(Vector3::new(0.0, 0.45, 0.0))
+                    .friction(0.8),
+            )
+            // Electronics shelter
+            .collider(
+                ColliderBuilder::cuboid(0.9, 0.4, 1.1)
+                    .translation(Vector3::new(0.0, 1.25, -0.2))
+                    .friction(0.8),
+            ),
+        )
         .with_property(trailer())
         .with_child(antenna())
         .with_child(utils::sensor(self.detection_range))

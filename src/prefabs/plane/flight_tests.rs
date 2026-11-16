@@ -92,9 +92,9 @@ impl Sim {
             &spec.engine,
             &spec.gear,
             &spec.effects,
-            def.physics.rigidbody.center_of_mass,
+            def.physics.rigidbody().center_of_mass,
             described_colliders,
-            def.physics.rigidbody.mass,
+            def.physics.rigidbody().mass,
             true,
         ))];
         let mut node = PhysicsNode::new("f16".to_owned(), handle, behaviors);

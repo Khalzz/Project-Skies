@@ -19,5 +19,5 @@ pub fn wheel(at: Vector3<f32>) -> Mesh {
 pub fn sensor(range: f32) -> Node {
     Node::new("sensor")
         .with_property(Transform3D { position: Vector3::new(0.0, 3.0, 0.0), ..Default::default() })
-        .with_property(Sensor::sphere(range))
+        .with_property(Sensor::from(ColliderBuilder::ball(range)))
 }

@@ -2,7 +2,7 @@
 //! The same island wherever it's put up: play (solid, to land on), the
 //! sandbox and the follow test (to look at).
 
-use nalgebra::{UnitQuaternion, Vector3};
+use nalgebra::{Point3, UnitQuaternion, Vector3};
 
 use pankarta_software::prelude::*;
 
@@ -37,14 +37,15 @@ pub fn island(name: &str, trimesh: Option<(Vec<Vector3<f32>>, Vec<[u32; 3]>)>) -
         return node;
     };
     // The collider is in world units: its vertices scaled as the node is.
-    node.with_property(Physics {
-        rigidbody: RigidBodyData::fixed(),
-        colliders: vec![Collider::new(ColliderShape::Trimesh {
-            vertices: vertices
-                .iter()
-                .map(|vertex| vertex.component_mul(&scale))
-                .collect(),
-            indices,
-        })],
-    })
+    let points: Vec<Point3<f32>> = vertices
+        .iter()
+        .map(|vertex| Point3::from(vertex.component_mul(&scale)))
+        .collect();
+    match ColliderBuilder::trimesh(points, indices) {
+        Ok(collider) => node.with_property(Physics::fixed().collider(collider)),
+        Err(error) => {
+            eprintln!("island: its trimesh collider couldn't be built: {error}");
+            node
+        }
+    }
 }

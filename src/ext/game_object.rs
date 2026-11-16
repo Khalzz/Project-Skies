@@ -4,9 +4,11 @@
 
 use std::collections::HashMap;
 
-use nalgebra::Vector3;
-use pankarta_software::physics::{Collider, ColliderShape, Physics as EnginePhysics, RigidBodyData as EngineRigidBodyData};
-use rapier3d::prelude::{ColliderSet, RigidBodyHandle, RigidBodySet};
+use nalgebra::{Point3, Unit, Vector3};
+use pankarta_software::asset_manager::Meshes;
+use pankarta_software::physics::{Collider, ModelShape, Physics as EnginePhysics, RigidBodyData as EngineRigidBodyData};
+use pankarta_software::scene_manager::node::properties::Model;
+use rapier3d::prelude::{ColliderBuilder, ColliderSet, RigidBodyHandle, RigidBodySet};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -46,20 +48,37 @@ fn default_wing_thickness() -> f32 {
 }
 
 impl ColliderType {
-    /// The engine's collider for this one - None for the shapes the engine
-    /// doesn't build (an unresolved `Wing`, a height field).
-    pub fn to_engine(&self) -> Option<Collider> {
-        Some(match self {
-            ColliderType::Cuboid { half_extents, position } => Collider::new(ColliderShape::Cuboid { half_extents: *half_extents })
-                .offset(Vector3::new(position.0, position.1, position.2)),
-            ColliderType::Ball { radius } => Collider::new(ColliderShape::Ball { radius: *radius }),
-            ColliderType::Cylinder { half_height, radius } => Collider::new(ColliderShape::Cylinder { half_height: *half_height, radius: *radius }),
-            ColliderType::HalfSpace { normal } => Collider::new(ColliderShape::HalfSpace { normal: *normal }),
-            ColliderType::TrimeshFromModel { model_path } => Collider::new(ColliderShape::TrimeshFromModel { model_path: model_path.clone() }),
-            ColliderType::Trimesh { vertices, indices } => Collider::new(ColliderShape::Trimesh { vertices: vertices.clone(), indices: indices.clone() }),
-            ColliderType::ConvexHull { points, .. } => Collider::new(ColliderShape::ConvexHull { points: points.clone() }),
-            ColliderType::HeightField { .. } | ColliderType::Wing { .. } => return None,
-        })
+    /// The engine's collider for this one (Rapier's own `ColliderBuilder`) -
+    /// None for the shapes that can't be built (an unresolved `Wing`, a
+    /// height field, a hull or trimesh whose points make no shape).
+    pub fn to_engine(&self) -> Option<ColliderBuilder> {
+        match self {
+            ColliderType::Cuboid { half_extents, position } => Some(
+                ColliderBuilder::cuboid(half_extents.0, half_extents.1, half_extents.2)
+                    .translation(Vector3::new(position.0, position.1, position.2)),
+            ),
+            ColliderType::Ball { radius } => Some(ColliderBuilder::ball(*radius)),
+            ColliderType::Cylinder { half_height, radius } => Some(ColliderBuilder::cylinder(*half_height, *radius)),
+            ColliderType::HalfSpace { normal } => Some(ColliderBuilder::halfspace(Unit::new_normalize(*normal))),
+            ColliderType::TrimeshFromModel { model_path } => {
+                Some(Collider::from_model(&Model::file(model_path.as_str()), Meshes::all(), ModelShape::Trimesh))
+            }
+            ColliderType::Trimesh { vertices, indices } => {
+                let points: Vec<Point3<f32>> = vertices.iter().map(|vertex| Point3::from(*vertex)).collect();
+                ColliderBuilder::trimesh(points, indices.clone())
+                    .map_err(|error| eprintln!("trimesh collider couldn't be built: {error}"))
+                    .ok()
+            }
+            ColliderType::ConvexHull { points, wing } => {
+                let points: Vec<Point3<f32>> = points.iter().map(|point| Point3::from(*point)).collect();
+                let builder = ColliderBuilder::convex_hull(&points);
+                if builder.is_none() {
+                    eprintln!("convex collider {wing:?} couldn't be built (its points are flat or too few)");
+                }
+                builder
+            }
+            ColliderType::HeightField { .. } | ColliderType::Wing { .. } => None,
+        }
     }
 
     /// The wing label of a resolved wing collider.
@@ -116,16 +135,16 @@ pub struct Physics {
 impl Physics {
     /// The engine's `Physics` property for this body.
     pub fn to_engine(&self) -> EnginePhysics {
-        EnginePhysics {
-            rigidbody: EngineRigidBodyData {
+        self.colliders.iter().filter_map(ColliderType::to_engine).fold(
+            EnginePhysics::new(EngineRigidBodyData {
                 is_static: self.rigidbody.is_static,
                 mass: self.rigidbody.mass,
                 center_of_mass: self.rigidbody.center_of_mass,
                 initial_velocity: self.rigidbody.initial_velocity,
                 ..EngineRigidBodyData::default()
-            },
-            colliders: self.colliders.iter().filter_map(ColliderType::to_engine).collect(),
-        }
+            }),
+            EnginePhysics::collider,
+        )
     }
 }
 

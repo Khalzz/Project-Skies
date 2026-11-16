@@ -19,24 +19,22 @@ impl Sam {
 
     pub fn prefab(self, node: Node) -> Node {
         let node = node
-            .with_property(Physics {
-                rigidbody: RigidBodyData {
+            .with_property(
+                Physics::new(RigidBodyData {
                     center_of_mass: Vector3::new(0.0, 1.0, 0.0),
                     ..RigidBodyData::dynamic(8_000.0)
-                },
-                colliders: vec![
-                    Collider::new(ColliderShape::Cuboid {
-                        half_extents: (1.2, 0.5, 3.6),
-                    })
-                    .offset(Vector3::new(0.0, 0.5, 0.0))
-                    .friction(0.8),
-                    Collider::new(ColliderShape::Cuboid {
-                        half_extents: (1.2, 1.6, 4.05),
-                    })
-                    .offset(Vector3::new(0.0, 2.4, 0.1))
-                    .friction(0.8),
-                ],
-            })
+                })
+                .collider(
+                    ColliderBuilder::cuboid(1.2, 0.5, 3.6)
+                        .translation(Vector3::new(0.0, 0.5, 0.0))
+                        .friction(0.8),
+                )
+                .collider(
+                    ColliderBuilder::cuboid(1.2, 1.6, 4.05)
+                        .translation(Vector3::new(0.0, 2.4, 0.1))
+                        .friction(0.8),
+                ),
+            )
             .with_property(model());
 
         let node = if self.integrated_radar {

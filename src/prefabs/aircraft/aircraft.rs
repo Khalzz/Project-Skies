@@ -39,18 +39,17 @@ impl Aircraft {
                     ..Default::default()
                 }),
             )
-            .with_property(Physics {
-                rigidbody: RigidBodyData {
+            .with_property(
+                Physics::new(RigidBodyData {
                     center_of_mass: Vector3::new(0.0, 0.8, 0.0),
                     ..RigidBodyData::dynamic(3_000.0)
-                },
-                colliders: vec![Collider::new(ColliderShape::Cylinder_with {
-                    half_height: 6.8,
-                    radius: 0.95,
                 })
-                .offset(Vector3::new(0.0, 0.0, 3.0))
-                .friction(0.8)],
-            })
+                .collider(
+                    ColliderBuilder::cuboid(0.9, 1.0, 6.8)
+                        .translation(Vector3::new(0.0, 0.0, 3.0))
+                        .friction(0.8),
+                ),
+            )
             .with_property(self)
     }
 }

@@ -406,15 +406,13 @@ impl Play {
                         scale: Vector3::new(19.0, 19.0, 19.0),
                     })
                     .with_property(Model::file("models/F14/F14.gltf"))
-                    .with_property(Physics {
-                        rigidbody: RigidBodyData {
+                    .with_property(
+                        Physics::new(RigidBodyData {
                             mass: 9000.0,
                             ..RigidBodyData::fixed()
-                        },
-                        colliders: vec![Collider::new(ColliderShape::Cuboid {
-                            half_extents: (1.0, 1.0, 1.0),
-                        })],
-                    })
+                        })
+                        .collider(ColliderBuilder::cuboid(1.0, 1.0, 1.0)),
+                    )
                     .with_property(camera::fellow_aviator_cameras()),
             )
             .expect("play should only spawn 'fellow_aviator' once");
