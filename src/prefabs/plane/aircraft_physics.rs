@@ -53,9 +53,8 @@ const MARKER_SIZE: f32 = 0.6;
 /// colliders' default 0.5, which slides it like ice. ~1.5 stops a 100 m/s
 /// slide in about 7 s.
 const WRECK_FRICTION: f32 = 1.5;
-// The rigidbody's center of mass, and the pilot's seat (where seat G is
+// The pilot's seat (where seat G is
 // measured).
-const CENTER_OF_MASS_COLOR: [f32; 3] = [1.0, 0.2, 1.0];
 const PILOT_SEAT_COLOR: [f32; 3] = [0.2, 1.0, 0.4];
 // Nose-wheel heading, drawn from its contact point while on the ground.
 const STEERING_DRAW_LENGTH: f32 = 4.0;
@@ -819,11 +818,6 @@ impl PhysicsBehavior for AircraftPhysics {
             }
         }
 
-        draw.cross(
-            body.center_of_mass().coords,
-            MARKER_SIZE,
-            CENTER_OF_MASS_COLOR,
-        );
         draw.cross(
             to_world(self.instrumentation.pilot_position()),
             MARKER_SIZE,

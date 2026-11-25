@@ -718,7 +718,7 @@ fn levels() -> Vec<LevelInfo> {
 }
 
 /// Selects `id` as the current level: stages it for the "Play" button (see
-/// `SELECTED_LEVEL`, which `play::Play::new` reads back once the
+/// `SELECTED_LEVEL`, which `play_old::PlayOld::new` reads back once the
 /// chosen scene actually opens - see its own doc comment for why this static
 /// exists at all), fills in Content's name/description text, and updates
 /// every sidebar button's persistent selected-highlight with a direct style

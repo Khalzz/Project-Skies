@@ -32,7 +32,7 @@ use pankarta_software::scene_manager::node::properties::{Model, Transform3D};
 use pankarta_software::scene_manager::node::Node;
 use pankarta_software::scene_manager::scene::Scene;
 
-use crate::scenes::play::weapon::weapon_spec::WeaponSpec;
+use crate::scenes::play_old::weapon::weapon_spec::WeaponSpec;
 use flight::MissileFlight;
 
 /// Every missile fired so far - each one's number, for its node's id.

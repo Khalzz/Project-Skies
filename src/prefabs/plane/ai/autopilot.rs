@@ -36,7 +36,7 @@
 
 use nalgebra::{UnitQuaternion, Vector3};
 
-use crate::scenes::play::map::Difficulty;
+use crate::scenes::play_old::map::Difficulty;
 
 use super::super::controls::PlaneControls;
 use super::super::flight_data::FlightData;

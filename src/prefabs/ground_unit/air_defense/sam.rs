@@ -1,4 +1,5 @@
 use nalgebra::Vector3;
+use pankarta_software::physics::compute_principal_inertia;
 use pankarta_software::prelude::*;
 
 use super::super::utils;
@@ -18,23 +19,30 @@ impl Sam {
     }
 
     pub fn prefab(self, node: Node) -> Node {
+        let mass = 8_000.0;
+        let center_of_mass = Vector3::new(0.0, 1.0, 0.0);
+        let colliders = Colliders::new()
+            .add(
+                ColliderBuilder::cuboid(1.2, 0.5, 3.6)
+                    .translation(Vector3::new(0.0, 0.5, 0.0))
+                    .friction(0.8)
+                    .density(0.0),
+            )
+            .add(
+                ColliderBuilder::cuboid(1.2, 1.6, 4.05)
+                    .translation(Vector3::new(0.0, 2.4, 0.1))
+                    .friction(0.8)
+                    .density(0.0),
+            );
+        let inertia = compute_principal_inertia(mass, center_of_mass, colliders.builders());
+
         let node = node
             .with_property(
-                Physics::new(RigidBodyData {
-                    center_of_mass: Vector3::new(0.0, 1.0, 0.0),
-                    ..RigidBodyData::dynamic(8_000.0)
-                })
-                .collider(
-                    ColliderBuilder::cuboid(1.2, 0.5, 3.6)
-                        .translation(Vector3::new(0.0, 0.5, 0.0))
-                        .friction(0.8),
-                )
-                .collider(
-                    ColliderBuilder::cuboid(1.2, 1.6, 4.05)
-                        .translation(Vector3::new(0.0, 2.4, 0.1))
-                        .friction(0.8),
-                ),
+                RigidBodyBuilder::dynamic()
+                    .additional_mass_properties(MassProperties::new(center_of_mass.into(), mass, inertia))
+                    .angular_damping(2.0),
             )
+            .with_property(colliders)
             .with_property(model());
 
         let node = if self.integrated_radar {

@@ -16,7 +16,7 @@ pub struct FlightData {
     // aoa_* below (local +Z forward, +Y up, +X the left wing). Differs from
     // g_meter (center of mass) while the plane is rotating. Raw, one
     // physics step at a time - the cockpit camera's head motion
-    // (prefabs::camera::head_motion) filters it itself.
+    // (prefabs::camera_old::head_motion) filters it itself.
     pub body_g: Vector3<f32>,
     // Car-style G meter, forward/back and side only (G) - see
     // Instrumentation::update_g_meter for how they're worked out.

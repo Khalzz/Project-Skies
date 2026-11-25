@@ -27,7 +27,7 @@ use crate::ext::emitters::ParticleEmitters;
 use crate::ext::physics_behavior::PhysicsNodeExt;
 use crate::prefabs::plane::messages::AircraftEvent;
 use crate::prefabs::plane::plane::Plane;
-use crate::scenes::play::weapon::weapon_spec::{Seeker, WeaponSpec};
+use crate::scenes::play_old::weapon::weapon_spec::{Seeker, WeaponSpec};
 
 /// How far apart a missile's trail points are (m), and how many it keeps -
 /// for the editor to draw its path.

@@ -8,13 +8,14 @@
 */
 
 use nalgebra::{UnitQuaternion, Vector3};
+use pankarta_software::physics::{compute_principal_inertia, PhysicsWorld};
+use pankarta_software::scene_manager::scene_nodes::child_id;
 use pankarta_software::prelude::*;
 use pankarta_software::rendering::thick_lines::LineInstance;
 use pankarta_software::scene_manager::node::properties::Parent;
 use sdl2::sys::{KeyCode, SDL_Keycode};
 use std::collections::HashMap;
 
-use crate::prefabs::plane::plane::Plane;
 use crate::prefabs::plane::transponder::Transponder;
 
 use super::super::utils;
@@ -71,37 +72,44 @@ impl Radar {
     }
 
     pub fn prefab(self, node: Node) -> Node {
-        node.with_property(
-            Physics::new(RigidBodyData {
-                center_of_mass: Vector3::new(0.0, 0.8, 0.0),
-                ..RigidBodyData::dynamic(3_000.0)
-            })
+        let mass = 3_000.0;
+        let center_of_mass = Vector3::new(0.0, 0.8, 0.0);
+        let colliders = Colliders::new()
             // Trailer, from the wheels' bottom to the frame
-            .collider(
+            .add(
                 ColliderBuilder::cuboid(1.1, 0.45, 1.8)
                     .translation(Vector3::new(0.0, 0.45, 0.0))
-                    .friction(0.8),
+                    .friction(0.8)
+                    .density(0.0),
             )
             // Electronics shelter
-            .collider(
+            .add(
                 ColliderBuilder::cuboid(0.9, 0.4, 1.1)
                     .translation(Vector3::new(0.0, 1.25, -0.2))
-                    .friction(0.8),
-            ),
+                    .friction(0.8)
+                    .density(0.0),
+            );
+        let inertia = compute_principal_inertia(mass, center_of_mass, colliders.builders());
+
+        node.with_property(
+            RigidBodyBuilder::dynamic()
+                .additional_mass_properties(MassProperties::new(center_of_mass.into(), mass, inertia))
+                .angular_damping(2.0),
         )
+        .with_property(colliders)
         .with_property(trailer())
         .with_child(antenna())
         .with_child(utils::sensor(self.detection_range))
         .with_behavior(self)
     }
 
-    /// Every plane in range that the beam swept over this frame is painted: a new contact the
+    /// Every moving body inside the radar's sensor that the beam swept over this frame is painted: a new contact the
     /// first time, identified by its IFF the second. A contact the beam comes round to and
     /// doesn't find pulses at where it was last seen, once a sweep, and is dropped after
     /// `LOST_PULSES`. The beam is only `BEAM_WIDTH` wide and turns `step` (rad) a frame - more
     /// than that at low frame rates - so it checks the whole slice it swept, not just where it
     /// ended.
-    fn scan(&mut self, node: &Node, scene: &SceneAccess, step: f32, delta_time: f32) {
+    fn scan(&mut self, node: &Node, scene: &SceneAccess, physics: &PhysicsWorld, step: f32, delta_time: f32) {
         for contact in self.contacts.values_mut() {
             contact.since_painted += delta_time;
             contact.since_flash += delta_time;
@@ -116,13 +124,16 @@ impl Radar {
             let heading = forward.x.atan2(forward.z);
             let half_width = (BEAM_WIDTH / 2.0).to_radians();
 
-            for plane in scene
-                .nodes()
-                .filter(|other| other.get_behavior::<Plane>().is_some())
-            {
-                let Some(position) = plane
-                    .get_property::<Transform3D>()
-                    .map(|transform| transform.position)
+            // Whatever has a body inside the sensor's sphere: only moving ones (dynamic), so
+            // the ground, the island and other units' sensors aren't contacts
+            for id in physics.inside(&child_id(&node.id, "sensor")) {
+                if id == node.id {
+                    continue;
+                }
+                let Some(position) = physics
+                    .body(id)
+                    .filter(|body| body.is_dynamic())
+                    .map(|body| *body.translation())
                 else {
                     continue;
                 };
@@ -144,7 +155,7 @@ impl Radar {
                     continue;
                 }
 
-                match self.contacts.get_mut(&plane.id) {
+                match self.contacts.get_mut(id) {
                     // Seen before: painted again - and, the first time that happens on a later
                     // sweep, its IFF. The beam stays on a plane for a few frames as it passes
                     // (it's about as wide as it turns in one), so paints less than half a turn
@@ -153,7 +164,10 @@ impl Radar {
                         let new_pass = contact.since_painted >= 180.0 / ANTENNA_SPEED;
                         if new_pass && matches!(contact.age, ContactAge::New) {
                             contact.age = ContactAge::Old;
-                            if let Some(transponder) = plane.get_property::<Transponder>() {
+                            if let Some(transponder) = scene
+                                .get_node(id)
+                                .and_then(|other| other.get_property::<Transponder>())
+                            {
                                 contact.state =
                                     ContactState::Identified(transponder.coalition.clone());
                             }
@@ -165,7 +179,7 @@ impl Radar {
                     }
                     None => {
                         self.contacts.insert(
-                            plane.id.clone(),
+                            id.to_string(),
                             Contact {
                                 position,
                                 state: ContactState::Unidentified,
@@ -528,7 +542,7 @@ impl Behavior for Radar {
             }
         }
 
-        self.scan(node, scene, step, app.time.delta_time);
+        self.scan(node, scene, &app.physics, step, app.time.delta_time);
 
         if self.debug {
             self.draw_beam(node, scene, app);

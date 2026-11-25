@@ -10,7 +10,7 @@ use std::sync::{LazyLock, RwLock};
 
 use serde::{Deserialize, Serialize};
 
-use crate::scenes::play::map::Difficulty;
+use crate::scenes::play_old::map::Difficulty;
 
 /// Where the profiles are kept.
 pub const SKILLS_FILE: &str = "assets/pilot_skills.ron";

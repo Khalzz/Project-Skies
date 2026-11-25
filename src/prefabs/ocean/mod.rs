@@ -86,7 +86,7 @@ impl Ocean {
     /// its material - worked out around where the camera is now. From the
     /// scene's `after_cameras`, every frame (see the module doc).
     pub fn update(&mut self, scene: &mut Scene, node: &str, delta_time: f32) {
-        let camera = scene.cameras.active().camera.position().coords;
+        let camera = scene.cameras.active().position();
         // The rings are around the camera, so the water never runs out from
         // under it - and the waves are pinned to the world, not the mesh, so
         // sliding it doesn't move them.

@@ -6,7 +6,7 @@
 use nalgebra::Vector3;
 use serde::Deserialize;
 
-use crate::scenes::play::weapon::weapon_spec::WeaponCategory;
+use crate::scenes::play_old::weapon::weapon_spec::WeaponCategory;
 
 /// One pylon.
 #[derive(Clone, Debug, Deserialize)]

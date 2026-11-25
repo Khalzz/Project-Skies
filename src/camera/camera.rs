@@ -59,15 +59,15 @@ fn forward_of(yaw: f32, pitch: f32) -> Vector3<f32> {
     Vector3::new(yaw.cos() * pitch.cos(), pitch.sin(), yaw.sin() * pitch.cos())
 }
 
-/// A camera node's rotation looking along `forward`, level (+Y up).
+/// A camera node's rotation looking along `forward`, level (+Y up). A camera looks along its -Z.
 pub fn looking_along(forward: Vector3<f32>) -> UnitQuaternion<f32> {
-    UnitQuaternion::face_towards(&forward, &Vector3::y())
+    UnitQuaternion::face_towards(&-forward, &Vector3::y())
 }
 
 impl Camera {
     /// The camera's node: its lens and transform, and this behavior.
     pub fn camera_node(config: CameraConfig) -> Node {
-        let forward = config.transform.rotation * Vector3::z();
+        let forward = config.transform.forward();
         let yaw = forward.z.atan2(forward.x);
         let pitch = forward.y.clamp(-1.0, 1.0).asin();
         let fov = config.fov.max;

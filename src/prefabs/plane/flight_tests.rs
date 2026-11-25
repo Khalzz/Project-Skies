@@ -66,11 +66,15 @@ impl Sim {
         // The game's description of its colliders (wing labels and all), for
         // its physics half; the engine's, for the body.
         let described_colliders = physics.colliders.clone();
+        let (body, engine_colliders) = physics.to_engine();
         let def = PhysicsObjectDef {
             id: "f16".to_owned(),
             position: Vector3::new(0.0, altitude, 0.0),
             rotation,
-            physics: physics.to_engine(),
+            body,
+            colliders: engine_colliders.iter().cloned().collect(),
+            layers: Vec::new(),
+            follows_node: false,
         };
 
         let mut bodies = RigidBodySet::new();
@@ -92,9 +96,9 @@ impl Sim {
             &spec.engine,
             &spec.gear,
             &spec.effects,
-            def.physics.rigidbody().center_of_mass,
+            physics.rigidbody.center_of_mass,
             described_colliders,
-            def.physics.rigidbody().mass,
+            physics.rigidbody.mass,
             true,
         ))];
         let mut node = PhysicsNode::new("f16".to_owned(), handle, behaviors);
@@ -257,7 +261,7 @@ fn f16_full_pull_at_mach_1() {
 fn f16_loaded_full_pull_up_at_640_kt() {
     // As the test chamber's player flies it: nine AIM-9Xs on, wings level,
     // 640 kt, full aft stick - a pull straight up.
-    let map = crate::scenes::play::map::MapSpec::load("assets/scenes/test_chamber")
+    let map = crate::scenes::play_old::map::MapSpec::load("assets/scenes/test_chamber")
         .expect("the test chamber's map loads");
     let loadout = map.player().loadout.clone();
     let mut sim = Sim::f16_loaded(
@@ -279,7 +283,7 @@ fn f16_loaded_full_pull_up_at_640_kt() {
 /// - its controls fed to the physics every step, as Plane does. Returns the
 /// peak G, the lowest and last speed (m/s), printed with a trace.
 fn autopilot_flight(
-    difficulty: crate::scenes::play::map::Difficulty,
+    difficulty: crate::scenes::play_old::map::Difficulty,
     speed: crate::prefabs::plane::ai::autopilot::Speed,
     path: &[(f32, f32, f32)],
     seconds: f32,
@@ -330,7 +334,7 @@ const TIGHT_BOX: [(f32, f32, f32); 4] = [
 #[test]
 fn an_ace_autopilot_pulls_hard_and_keeps_its_speed() {
     use crate::prefabs::plane::ai::autopilot::Speed;
-    use crate::scenes::play::map::Difficulty;
+    use crate::scenes::play_old::map::Difficulty;
     let (peak, slowest, _) = autopilot_flight(Difficulty::Ace, Speed::Max, &TIGHT_BOX, 40.0);
     assert!(
         peak > 7.0,
@@ -345,7 +349,7 @@ fn an_ace_autopilot_pulls_hard_and_keeps_its_speed() {
 #[test]
 fn a_beginner_autopilot_turns_gently() {
     use crate::prefabs::plane::ai::autopilot::Speed;
-    use crate::scenes::play::map::Difficulty;
+    use crate::scenes::play_old::map::Difficulty;
     let (peak, slowest, last) =
         autopilot_flight(Difficulty::Beginner, Speed::Hold(180.0), &TIGHT_BOX, 40.0);
     assert!(

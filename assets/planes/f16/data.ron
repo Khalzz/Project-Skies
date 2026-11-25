@@ -1,6 +1,7 @@
 (
   model: (
-    model: "model/f16.glb",
+    // The model from before f16.glb was turned to face -Z: this plane's data still has its nose at +Z
+    model: "model/f16_legacy.glb",
     scale: 14.0,
     double_sided: ["Afterburner"], // It disables the backface culling of the afterburner mesh
     hud_glass: "Glass", // The HUD's glass - in the cockpit, the horizon and pitch ladder only show through it

@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use nalgebra::Vector3;
 use pankarta_software::prelude::*;
 use pankarta_software::rendering::lines::Lines;
-use rapier3d::prelude::{Collider, ColliderSet, NarrowPhase, QueryPipeline, RigidBody, RigidBodyHandle, RigidBodySet};
+use rapier3d::prelude::{ColliderSet, NarrowPhase, QueryPipeline, RigidBody, RigidBodyHandle, RigidBodySet};
 
 /// Anything crossing between a node's two halves - a type-erased box only
 /// the side that receives it downcasts back into its real type.
@@ -66,10 +66,6 @@ pub struct DebugDraw<'a> {
 }
 
 impl<'a> DebugDraw<'a> {
-    /// Lines drawn after this belong to `owner` (a node id) - kept for the
-    /// old API; the engine draws every line where it's given.
-    pub fn set_owner(&mut self, _owner: Option<String>) {}
-
     /// A line from `from` to `to`.
     pub fn line(&mut self, from: Vector3<f32>, to: Vector3<f32>, color: [f32; 3]) {
         self.lines.line(from, to, color);
@@ -89,11 +85,6 @@ impl<'a> DebugDraw<'a> {
     /// A closed outline through `corners`, in order.
     pub fn outline(&mut self, corners: &[Vector3<f32>], color: [f32; 3]) {
         self.lines.outline(corners, color);
-    }
-
-    /// `collider`'s shape as a wireframe, where it actually is in the world.
-    pub fn collider(&mut self, collider: &Collider, color: [f32; 3]) {
-        pankarta_software::physics::world::draw_shape(self.lines, collider.position(), collider.shape(), color);
     }
 }
 

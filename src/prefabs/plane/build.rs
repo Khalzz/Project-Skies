@@ -18,9 +18,9 @@ use super::pylon_spec::PylonSpec;
 use crate::ext::game_object::{Camera as GameObjectCamera, Cameras};
 use crate::ext::physics_behavior::PhysicsNodeExt;
 use crate::ext::water_contact::WaterContact;
-use crate::prefabs::camera;
-use crate::scenes::play::map::{AircraftPlacement, DEFAULT_RADAR_WARN_M};
-use crate::scenes::play::weapon::weapon_spec::WeaponSpec;
+use crate::prefabs::camera_old as camera;
+use crate::scenes::play_old::map::{AircraftPlacement, DEFAULT_RADAR_WARN_M};
+use crate::scenes::play_old::weapon::weapon_spec::WeaponSpec;
 
 // After crashing into the water: how long the wreck floats, then how long it
 // takes to flood and go under - see WaterContact::sinks.
@@ -52,6 +52,7 @@ pub fn aircraft(
     if let Some(speed) = placement.speed {
         physics.rigidbody.initial_velocity = rotation * Vector3::new(0.0, 0.0, speed);
     }
+    let (body, engine_colliders) = physics.to_engine();
 
     let mut plane = Plane::new()
         .with_effects(&spec.effects)
@@ -84,14 +85,15 @@ pub fn aircraft(
         // Its views - the cockpit at the pilot's seat.
         .with_property(cameras(spec))
         .with_property(effects::plane_emitters(&spec.effects, &spec.gear, &spec.aero.wings))
-        .with_property(physics.to_engine())
+        .with_property(body)
+        .with_property(engine_colliders)
         .add_physics_behavior(AircraftPhysics::new(&spec.aero, &spec.engine, &spec.gear, &spec.effects, center_of_mass, colliders, mass, placement.start.gear_down()))
         .add_physics_behavior(WaterContact::new(sea_level).sinks(WRECK_FLOAT_SECONDS, WRECK_SINK_SECONDS))
 }
 
 /// A plane's views as its data.ron places them - the cockpit at the pilot's
 /// seat (`aero.pilot_position`) unless `cameras` says otherwise; the rest,
-/// the camera's own defaults (see prefabs::camera). The cockpit gets the
+/// the camera's own defaults (see prefabs::camera_old). The cockpit gets the
 /// plane's `head_limits`, when it has them.
 pub fn cameras(spec: &AircraftSpec) -> Cameras {
     let mut cameras: Cameras = spec.cameras.clone();

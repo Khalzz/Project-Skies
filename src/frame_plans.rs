@@ -73,7 +73,7 @@ pub fn tactical_map() -> FramePlan {
 }
 
 /// The M map's Chart view: the world itself, seen straight down through the
-/// map's orthographic camera (see prefabs::camera's chart), with the
+/// map's orthographic camera (see prefabs::camera_old's chart), with the
 /// map's lines - aircraft, trails, flight plans, the grid - over it, the UI
 /// over those.
 pub fn tactical_chart() -> FramePlan {
@@ -162,6 +162,10 @@ fn render_tactical_map_pass(app: &mut App, encoder: &mut wgpu::CommandEncoder, v
     if let Some([x, y, width, height]) = viewport {
         render_pass.set_viewport(x, y, width, height, 0.0, 1.0);
     }
+    // Disabled: the engine keeps the camera's bind group private now, and this map will be replaced.
+    // Until then the map is just its dark background.
+    let _ = (render_pass, camera_position, screen);
+    /*
     let renderer = &mut app.renderer;
     let Some(lines) = renderer.render_sets.get_lines_mut("tactical_lines") else { return };
     // With its material (see the engine's ShaderLibrary::prepare_overlay).
@@ -177,4 +181,5 @@ fn render_tactical_map_pass(app: &mut App, encoder: &mut wgpu::CommandEncoder, v
         [camera_position.x, camera_position.y, camera_position.z],
         screen,
     );
+    */
 }

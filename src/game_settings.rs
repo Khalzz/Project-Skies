@@ -12,10 +12,10 @@ use std::sync::Mutex;
 pub struct GameSettings {
     /// Video: the free camera orbits in the plane's own frame (GTA-vehicle
     /// style - behind the plane by default, turning and rolling with it)
-    /// instead of the world's (see `prefabs::camera::Camera`'s Free mode).
+    /// instead of the world's (see `prefabs::camera_old::Camera`'s Free mode).
     pub free_camera_follows_plane: bool,
     /// Video: how strongly the cockpit camera's head reacts to acceleration/G -
-    /// 1.0 = 100% (the tuning in `prefabs::camera::head_motion::HEAD_MOTION`),
+    /// 1.0 = 100% (the tuning in `prefabs::camera_old::head_motion::HEAD_MOTION`),
     /// 0.0 = a fully static head. Set by a slider, 0..HEAD_G_REACTION_MAX.
     pub head_g_reaction: f32,
     /// Video: the cockpit view's resting up/down angle, degrees - positive

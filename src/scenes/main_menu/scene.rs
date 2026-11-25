@@ -1,7 +1,6 @@
 use nalgebra::{UnitQuaternion, Vector3};
 
 use pankarta_software::prelude::*;
-use pankarta_software::rendering::camera::camera::yaw_pitch_rotation;
 
 use crate::camera::camera::looking_along;
 use crate::prefabs::ocean::{self, Ocean};
@@ -244,7 +243,7 @@ fn drag_vec(ui: &mut egui::Ui, value: &mut Vector3<f32>) {
 /// The title jet: the F-16, drawn at the menu's size.
 fn title_f16() -> Model {
     let scale = 29.3;
-    Model::file("planes/f16/model/f16.glb").double_sided(DoubleSidedMeshes::Meshes(vec!["Afterburner".to_owned()])).transform(Transform3D { scale: Vector3::new(scale, scale, scale), ..Default::default() })
+    Model::file("planes/f16/model/f16_legacy.glb").double_sided(DoubleSidedMeshes::Meshes(vec!["Afterburner".to_owned()])).transform(Transform3D { scale: Vector3::new(scale, scale, scale), ..Default::default() })
 }
 
 /// Roll, pitch, yaw in degrees, about X, Y, and Z.
@@ -281,4 +280,9 @@ impl SceneBehaviour for MainMenu {
             app.debug_ui.visible = false;
         }
     }
+}
+
+fn yaw_pitch_rotation(yaw_deg: f32, pitch_deg: f32) -> UnitQuaternion<f32> {
+    UnitQuaternion::from_axis_angle(&Vector3::y_axis(), -yaw_deg.to_radians())
+        * UnitQuaternion::from_axis_angle(&Vector3::z_axis(), pitch_deg.to_radians())
 }

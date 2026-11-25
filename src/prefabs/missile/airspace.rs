@@ -10,7 +10,7 @@ use pankarta_software::scene_manager::node::Node;
 use pankarta_software::scene_manager::scene::Scene;
 
 use super::flight::TargetTrack;
-use crate::scenes::play::world_collision::WorldCollision;
+use crate::scenes::play_old::world_collision::WorldCollision;
 
 /// The node the airspace is on.
 pub const AIRSPACE: &str = "airspace";

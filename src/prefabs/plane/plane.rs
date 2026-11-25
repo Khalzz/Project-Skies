@@ -6,8 +6,8 @@ use crate::ext::input::InputExt;
 use crate::ext::physics_behavior::PhysicsNodeExt;
 use crate::ext::ui_layers::GameUi;
 use crate::ext::water_contact::WaterContactState;
-use crate::scenes::play::crash_effects::Crash;
-use crate::scenes::play::debug_tools::AeroSample;
+use crate::scenes::play_old::crash_effects::Crash;
+use crate::scenes::play_old::debug_tools::AeroSample;
 use pankarta_software::prelude::*;
 use pankarta_software::utils::lerps::lerp;
 
@@ -25,7 +25,7 @@ use super::quick_list::QuickList;
 use super::quick_menu::{GearStatus, QuickAction, QuickMenuStatus};
 use crate::ext::emitters::ParticleEmitters;
 use crate::ext::game_object::ColliderType;
-use crate::scenes::play::map::Difficulty;
+use crate::scenes::play_old::map::Difficulty;
 
 /// Damage one warhead dealt to one surface, waiting for the kill feed.
 pub struct PartHit {
@@ -231,7 +231,7 @@ impl Plane {
             military: 1.0,
             fuel: Fuel::default(),
             bingo_kg: None,
-            radar_warn_m: crate::scenes::play::map::DEFAULT_RADAR_WARN_M,
+            radar_warn_m: crate::scenes::play_old::map::DEFAULT_RADAR_WARN_M,
             gear_meshes: GearMeshes::new(),
             quick_menu: QuickList::new(),
             colliders: Vec::new(),

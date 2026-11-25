@@ -10,7 +10,7 @@ use super::fuel::FuelSpec;
 use super::gear_spec::GearSpec;
 use super::effects::EffectSpec;
 use super::pylon_spec::{self, PylonSpec};
-use crate::scenes::play::weapon::countermeasures::CountermeasureSpec;
+use crate::scenes::play_old::weapon::countermeasures::CountermeasureSpec;
 
 /// Where every plane's folder lives - one folder per plane, named after it
 /// (`assets/planes/f16/`), each with its own `data.ron` (see
@@ -61,7 +61,7 @@ pub struct AircraftSpec {
     /// (optional, each one too): "cockpit" (default: the pilot's seat),
     /// "third_person", "free" (the point it orbits) and "front", each a
     /// `position` (m, the plane's frame) and a `fov` - see
-    /// prefabs::camera's defaults for the ones left out.
+    /// prefabs::camera_old's defaults for the ones left out.
     pub cameras: Cameras,
     /// How far the pilot's head can move from the cockpit camera -
     /// `data.ron`'s `head_limits: (min: (..), max: (..))` (optional: no
@@ -274,7 +274,7 @@ mod tests {
     fn loads_the_f16_from_its_folder() {
         let spec = AircraftSpec::load("f16").expect("assets/planes/f16 should load");
         assert_eq!(spec.name, "f16");
-        let expected = Path::new(PLANES_DIR).join("f16").join("model/f16.glb");
+        let expected = Path::new(PLANES_DIR).join("f16").join("model/f16_legacy.glb");
         assert_eq!(Path::new(&spec.model.model), expected);
         assert!(Path::new(&spec.model.model).is_file());
         assert_eq!(spec.physics.rigidbody.mass, 11_900.0);

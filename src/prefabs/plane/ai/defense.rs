@@ -12,7 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::scenes::play::map::Difficulty;
+use crate::scenes::play_old::map::Difficulty;
 
 impl Difficulty {
     /// How long a missile's been coming before it's noticed (s) - its pilot

@@ -3,7 +3,7 @@ use std::f32::consts::PI;
 
 use super::airfoil::AirFoil;
 use super::super::super::aero_spec::{ControlSurfaceSpec, SurfaceKind, WingShape};
-use crate::scenes::play::weapon::fuze::{closest_point_on_triangle, point_triangle_distance};
+use crate::scenes::play_old::weapon::fuze::{closest_point_on_triangle, point_triangle_distance};
 
 pub struct Wing {
     pub label: String,

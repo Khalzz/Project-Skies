@@ -149,6 +149,8 @@
     (
       id: "StartCamera",
       position: (0.0, 30.0, -10667.0),
+      // A camera looks along its -Z: turned around to look along +Z, toward the start path
+      rotation: (0.0, 180.0, 0.0),
       camera: (
         fov: 60.0,
         near: 0.1,

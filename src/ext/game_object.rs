@@ -1,14 +1,14 @@
 //! The physics, cameras and lighting a plane's `data.ron` describes - read
-//! with serde, then turned into the engine's own `Physics` property
-//! (`Physics::to_engine`).
+//! with serde, then turned into the engine's own properties
+//! (`Physics::to_engine`): Rapier's `RigidBodyBuilder` and `Colliders`.
 
 use std::collections::HashMap;
 
 use nalgebra::{Point3, Unit, Vector3};
 use pankarta_software::asset_manager::Meshes;
-use pankarta_software::physics::{Collider, ModelShape, Physics as EnginePhysics, RigidBodyData as EngineRigidBodyData};
+use pankarta_software::physics::{Collider, Colliders, ModelShape};
 use pankarta_software::scene_manager::node::properties::Model;
-use rapier3d::prelude::{ColliderBuilder, ColliderSet, RigidBodyHandle, RigidBodySet};
+use rapier3d::prelude::{ColliderBuilder, ColliderSet, MassProperties, RigidBodyBuilder, RigidBodyHandle, RigidBodySet};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -105,7 +105,7 @@ pub fn wing_collider_id(label: &str) -> u128 {
 
 /// Stamps each wing collider of `body` with its `wing_collider_id` - the
 /// engine's `Collider` has no user data of its own, so its colliders are
-/// matched to `colliders` (the ones its `Physics` was built from) in order.
+/// matched to `colliders` (the ones its `Colliders` were built from) in order.
 /// Only the ones the engine built count (see `ColliderType::to_engine`).
 pub fn stamp_wing_colliders(body: RigidBodyHandle, bodies: &RigidBodySet, colliders: &mut ColliderSet, described: &[ColliderType]) {
     let Some(rigidbody) = bodies.get(body) else { return };
@@ -133,18 +133,30 @@ pub struct Physics {
 }
 
 impl Physics {
-    /// The engine's `Physics` property for this body.
-    pub fn to_engine(&self) -> EnginePhysics {
-        self.colliders.iter().filter_map(ColliderType::to_engine).fold(
-            EnginePhysics::new(EngineRigidBodyData {
-                is_static: self.rigidbody.is_static,
-                mass: self.rigidbody.mass,
-                center_of_mass: self.rigidbody.center_of_mass,
-                initial_velocity: self.rigidbody.initial_velocity,
-                ..EngineRigidBodyData::default()
-            }),
-            EnginePhysics::collider,
-        )
+    /// The engine's properties for this body: Rapier's `RigidBodyBuilder`
+    /// and the node's `Colliders`.
+    pub fn to_engine(&self) -> (RigidBodyBuilder, Colliders) {
+        // Shapes only: the body's own mass, center of mass and inertia are
+        // the final ones.
+        let colliders = self
+            .colliders
+            .iter()
+            .filter_map(ColliderType::to_engine)
+            .fold(Colliders::new(), |colliders, collider| colliders.add(collider.density(0.0)));
+        let body = if self.rigidbody.is_static {
+            RigidBodyBuilder::fixed()
+        } else {
+            let inertia = compute_principal_inertia(self.rigidbody.mass, self.rigidbody.center_of_mass, &self.colliders);
+            RigidBodyBuilder::dynamic()
+                .additional_mass_properties(MassProperties::new(
+                    self.rigidbody.center_of_mass.into(),
+                    self.rigidbody.mass,
+                    inertia,
+                ))
+                .angular_damping(2.0)
+                .linvel(self.rigidbody.initial_velocity)
+        };
+        (body, colliders)
     }
 }
 

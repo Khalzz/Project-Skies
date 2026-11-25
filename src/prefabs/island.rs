@@ -42,7 +42,7 @@ pub fn island(name: &str, trimesh: Option<(Vec<Vector3<f32>>, Vec<[u32; 3]>)>) -
         .map(|vertex| Point3::from(vertex.component_mul(&scale)))
         .collect();
     match ColliderBuilder::trimesh(points, indices) {
-        Ok(collider) => node.with_property(Physics::fixed().collider(collider)),
+        Ok(collider) => node.with_property(Colliders::new().add(collider)),
         Err(error) => {
             eprintln!("island: its trimesh collider couldn't be built: {error}");
             node

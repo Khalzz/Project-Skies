@@ -19,10 +19,10 @@ use std::collections::HashSet;
 
 use nalgebra::{UnitQuaternion, Vector3};
 
-use crate::scenes::play::weapon::fuze::{self, FuzeCollider};
-use crate::scenes::play::weapon::heat;
-use crate::scenes::play::weapon::weapon_spec::{Seeker, WeaponSpec, SPEED_OF_SOUND};
-use crate::scenes::play::world_collision::WorldCollision;
+use crate::scenes::play_old::weapon::fuze::{self, FuzeCollider};
+use crate::scenes::play_old::weapon::heat;
+use crate::scenes::play_old::weapon::weapon_spec::{Seeker, WeaponSpec, SPEED_OF_SOUND};
+use crate::scenes::play_old::world_collision::WorldCollision;
 
 /// The same air the aircraft fly in (see plane::physics::wings::wing).
 const AIR_DENSITY: f32 = 1.225;
