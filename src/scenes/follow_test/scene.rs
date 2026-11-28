@@ -91,6 +91,6 @@ impl SceneBehaviour for FollowTest {
     fn after_cameras(&mut self, scene: &mut Scene, app: &mut App) {
         // The sea's waves, around where the camera is drawn from (and the
         // sea kept centred under it).
-        self.ocean.update(scene, "world", app.time.delta_time);
+        self.ocean.update(scene, "world", app.time.delta_time, &app.origin);
     }
 }

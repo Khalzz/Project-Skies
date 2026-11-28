@@ -11,6 +11,7 @@ use crate::prefabs::{
         airframe::{
             fuselage::{Fuselage, FuselageAero},
             landing_gear::LandingGear,
+            speedbrake::Speedbrake,
             wings::{
                 body::Motion,
                 surface::{AeroForce, Surface},
@@ -28,6 +29,8 @@ use crate::prefabs::{
     - Wing: the main surface thats defined as a "airfoil".
     - Aileron: the main surface defined for controling the deviation of lift through the surface.
     - Flaps: the surface dedicated to generate more lift for take off, landing or tighter turns.
+
+    And the speedbrakes: panels that only make drag (see speedbrake.rs).
 */
 
 const METERS_PER_NEWTON: f32 = 1.0 / 5_000.0;
@@ -43,6 +46,7 @@ pub struct Airframe {
     pub landing_gear: LandingGear,
     pub surfaces: Vec<Surface>, // todo: wings (surface definition and physics step)
     pub fuselage: Fuselage,
+    pub speedbrake: Speedbrake,
     pub mass: Mass,
     pub aero: Vec<AeroForce>, // what the surfaces made last step
 }
@@ -56,6 +60,7 @@ impl Airframe {
                 colliders: Colliders::new(),
                 aero: FuselageAero::none(),
             },
+            speedbrake: Speedbrake::none(),
             mass: Mass {
                 empty: 8_700.0,
                 center_of_mass: Vector3::new(0.0, 0.0, 0.0),
@@ -65,13 +70,21 @@ impl Airframe {
         }
     }
 
+    // Everything solid: the fuselage, and each surface from its planform. Taken once, when the jet spawns
+    pub fn take_colliders(&mut self) -> Colliders {
+        let surfaces: Vec<_> = self.surfaces.iter().filter_map(Surface::collider).collect();
+        surfaces
+            .into_iter()
+            .fold(std::mem::take(&mut self.fuselage.colliders), Colliders::add)
+    }
+
     pub fn set_surfaces(mut self, surfaces: Vec<Surface>) -> Airframe {
         self.surfaces = surfaces;
         self
     }
 
     pub fn step(&mut self, id: &str, physics: &mut PhysicsWorld, atmosphere: &Atmosphere, dt: f32) {
-        self.landing_gear.step(id, physics, dt, 0.0);
+        self.landing_gear.step(id, physics, dt);
 
         let Some(body) = physics.body_mut(id) else {
             return;
@@ -90,6 +103,7 @@ impl Airframe {
             .iter()
             .flat_map(|surface| surface.aero_forces(&airflow, density))
             .chain(self.fuselage.aero.aero_forces(&airflow, density))
+            .chain(self.speedbrake.aero_forces(&airflow, density))
             .collect();
 
         for aero in &self.aero {
@@ -102,6 +116,8 @@ impl Airframe {
         for surface in &mut self.surfaces {
             surface.command(commands, dt);
         }
+        self.speedbrake.command(commands.speedbrake, dt);
+        self.landing_gear.command(commands);
         match commands.gear {
             GearLever::Up => self.landing_gear.up(),
             GearLever::Down => self.landing_gear.down(),
@@ -112,6 +128,7 @@ impl Airframe {
         for surface in &self.surfaces {
             surface.place(model);
         }
+        self.speedbrake.place(model);
     }
 
     // should be runned once per update
@@ -153,7 +170,10 @@ impl Airframe {
                     .on_top()
                     .label(&surface.label);
             }
+            self.speedbrake.debug(g, pose);
         });
+
+        app.gizmos.channel("gear", |g| self.landing_gear.debug(g, pose));
 
         app.gizmos.channel("forces", |g| {
             let arrow = |force: Vector3<f32>| pose.rotation * force * METERS_PER_NEWTON;

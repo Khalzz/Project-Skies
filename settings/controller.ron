@@ -45,6 +45,8 @@
         "air_brake_retract",
         "wheel_brake",
         "toggle_parking_brake",
+        "toggle_nws",
+        "toggle_chocks",
     ]),
     (name: "Weapons", actions: [
         "next_weapon",

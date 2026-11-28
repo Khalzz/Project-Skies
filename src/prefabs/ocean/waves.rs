@@ -223,10 +223,10 @@ impl OceanWaves {
     /// evaluated at `camera` (true world XZ) in f64 - see this module's doc
     /// comment. Each wave is two vec4s: (dir.x, dir.z, k, amplitude) and
     /// (steepness, phase at the camera, wavelength, unused).
-    pub fn params(&self, camera_x: f32, camera_z: f32) -> BTreeMap<String, Vec<f32>> {
+    pub fn params(&self, camera_x: f64, camera_z: f64) -> BTreeMap<String, Vec<f32>> {
         let mut waves = vec![0.0f32; MAX_WAVES * 2 * 4];
         for (slot, wave) in self.geometry.iter().chain(self.detail.iter()).enumerate() {
-            let phase = wave.phase_at(camera_x as f64, camera_z as f64, self.time).rem_euclid(TAU);
+            let phase = wave.phase_at(camera_x, camera_z, self.time).rem_euclid(TAU);
             waves[slot * 8..slot * 8 + 8].copy_from_slice(&[
                 wave.direction[0] as f32, wave.direction[1] as f32, wave.k as f32, wave.amplitude as f32,
                 wave.steepness as f32, phase as f32, wave.wavelength() as f32, 0.0,

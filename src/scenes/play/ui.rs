@@ -44,7 +44,7 @@ impl Behavior for SandboxUi {
         }
 
         let camera = scene.get_node(&self.camera);
-        let position = camera.and_then(|camera| camera.get_property::<Transform3D>()).map(|transform| transform.position);
+        let position = camera.and_then(|camera| camera.get_property::<Transform3D>()).map(|transform| app.origin.to_world(transform.position));
         let target = camera
             .and_then(|camera| camera.get_behavior::<Camera>())
             .and_then(|camera| camera.following())

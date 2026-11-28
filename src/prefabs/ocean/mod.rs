@@ -21,7 +21,7 @@ mod waves;
 
 use nalgebra::Vector3;
 
-use pankarta_software::prelude::{App, Mesh};
+use pankarta_software::prelude::{App, Mesh, WorldOrigin};
 use pankarta_software::scene_manager::scene::Scene;
 
 pub use settings::OceanSettings;
@@ -85,7 +85,11 @@ impl Ocean {
     /// under the camera (only XZ), and puts this frame's waves into
     /// its material - worked out around where the camera is now. From the
     /// scene's `after_cameras`, every frame (see the module doc).
-    pub fn update(&mut self, scene: &mut Scene, node: &str, delta_time: f32) {
+    ///
+    /// The waves are phased by where the camera really is in the world (`origin`, app.origin): the
+    /// scene's local numbers jump every time the floating origin moves (each ~4 km), and waves
+    /// phased by them would jump with them.
+    pub fn update(&mut self, scene: &mut Scene, node: &str, delta_time: f32, origin: &WorldOrigin) {
         let camera = scene.cameras.active().position();
         // The rings are around the camera, so the water never runs out from
         // under it - and the waves are pinned to the world, not the mesh, so
@@ -95,21 +99,21 @@ impl Ocean {
             transform.position.z = camera.z;
         }
         self.waves.advance(delta_time);
-        let params = self.params(camera);
+        let params = self.params(origin.to_world(camera));
         self.flow = (0.0, 0.0);
         shader::set_on(scene, node, &params);
     }
 
     /// Every param the shader reads, for a camera at `camera` (true world
     /// position).
-    fn params(&self, camera: Vector3<f32>) -> Params {
-        let (x, z) = (camera.x + self.flow.0, camera.z + self.flow.1);
+    fn params(&self, camera: Vector3<f64>) -> Params {
+        let (x, z) = (camera.x + self.flow.0 as f64, camera.z + self.flow.1 as f64);
         let settings = self.waves.settings();
         let mut params = self.waves.params(x, z);
-        shader::write_noise_anchor(&mut params, camera.x as f64, camera.z as f64);
+        shader::write_noise_anchor(&mut params, camera.x, camera.z);
         shader::write_tuning(&mut params, settings);
-        shader::write_detail(&mut params, settings, camera.y - self.sea_level());
-        shader::write_ripples(&mut params, &self.waves, x as f64, z as f64);
+        shader::write_detail(&mut params, settings, (camera.y - self.sea_level() as f64) as f32);
+        shader::write_ripples(&mut params, &self.waves, x, z);
         params
     }
 }

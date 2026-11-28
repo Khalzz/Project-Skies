@@ -4,7 +4,7 @@
 */
 
 use nalgebra::Vector3;
-use pankarta_software::prelude::SceneAccess;
+use pankarta_software::prelude::{Node, SceneAccess, WorldOrigin};
 
 // The node that carries the scene's Atmosphere
 pub const WORLD_NODE: &str = "world";
@@ -33,7 +33,7 @@ pub struct Wind {
 
 #[derive(Debug, Clone, Copy)]
 pub struct Atmosphere {
-    pub sea_level: f32,             // world height of the sea, meters
+    pub sea_level: f32,             // height of the sea, meters (in the world; `of` hands it in the scene's local numbers)
     pub sea_level_temperature: f32, // K
     pub sea_level_pressure: f32,    // Pa
     pub wind: Wind,
@@ -50,13 +50,19 @@ impl Atmosphere {
         },
     };
 
-    // The scene's, from its world node; the standard day without one
-    pub fn of(scene: &SceneAccess) -> Atmosphere {
-        scene
-            .get_node(WORLD_NODE)
+    // The scene's, from its world node (the standard day without one), with the sea where the floating origin has
+    // moved it, so heights compare with the scene's positions
+    pub fn of(scene: &SceneAccess, origin: &WorldOrigin) -> Atmosphere {
+        Self::from_world(scene.get_node(WORLD_NODE), origin)
+    }
+
+    pub fn from_world(world: Option<&Node>, origin: &WorldOrigin) -> Atmosphere {
+        let mut atmosphere = world
             .and_then(|world| world.get_property::<Atmosphere>())
             .copied()
-            .unwrap_or(Atmosphere::STANDARD)
+            .unwrap_or(Atmosphere::STANDARD);
+        atmosphere.sea_level -= origin.origin().y as f32;
+        atmosphere
     }
 
     pub fn with_sea_level(mut self, sea_level: f32) -> Atmosphere {

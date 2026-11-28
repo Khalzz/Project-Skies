@@ -9,8 +9,11 @@ use pankarta_software::scene_manager::{
     scene::Scene,
 };
 
+use crate::game_settings::GAME_SETTINGS;
+use crate::head_tracking;
 use crate::prefabs::aircraft::aircraft::Aircraft;
 use crate::prefabs::camera::camera_view::{CameraKind, CameraView};
+use crate::prefabs::camera::head_motion::{HeadInput, HeadMotion};
 
 // What one count of mouse movement turns the orbit, in radians
 const RADIANS_PER_COUNT: f32 = 0.007;
@@ -19,6 +22,15 @@ const ZOOM_STEP: f32 = 0.03; // share of the field of view one wheel notch narro
 const FOV_RANGE: (f32, f32) = (10.0, 100.0); // degrees
 const ZOOM_SMOOTHING: f32 = 0.12; // seconds the view takes to settle on a new zoom
 const MOUSE_SMOOTHING: f32 = 0.015; // seconds the mouse's uneven counts are smoothed over
+
+// In the cockpit: how far the head turns (degrees), and how it eases back while head tracking takes over
+const HEAD_TURN: (f32, f32) = (170.0, 70.0);
+const LOOK_CENTER_RATE: f32 = 6.0;
+const VIEW_PITCH_RATE: f32 = 4.0;
+const MAX_HEAD_ROLL: f32 = 45.0;
+// Looking behind, the pilot twists and looks over a shoulder: at fully behind the eye moves this far (meters)
+// toward the side looked at, up and forward, building with how far round (curve: 1 evenly, higher late)
+const LOOK_BEHIND: (f32, f32, f32, f32) = (0.15, 0.05, 0.08, 2.0);
 
 pub struct Camera {
     node_to_follow: Option<String>, // The node it follows, either a player or other
@@ -29,6 +41,9 @@ pub struct Camera {
     placed: bool,          // the third person orbit starts behind the target, then stays put in the world
     fov: Option<(f32, f32)>, // (now, where the wheel is taking it); None until the view sets it
     mouse: Vector2<f32>,
+    head: HeadMotion,
+    cockpit_look: Vector2<f32>, // the head's turn (yaw left +, pitch up +), degrees
+    view_pitch: f32,            // the "cockpit view angle" setting, eased toward
 }
 
 impl Camera {
@@ -42,7 +57,15 @@ impl Camera {
             placed: false,
             fov: None,
             mouse: Vector2::zeros(),
+            head: HeadMotion::new(),
+            cockpit_look: Vector2::zeros(),
+            view_pitch: 0.0,
         }
+    }
+
+    // Whether it's the pilot's eye
+    pub fn in_cockpit(&self) -> bool {
+        self.kind == CameraKind::FirstPerson
     }
 
     // The node it's looking at
@@ -74,6 +97,10 @@ impl Camera {
         let (transform, view) = self.view(target)?;
         let look_at = transform.position + transform.rotation * view.look_at;
 
+        if self.kind == CameraKind::FirstPerson {
+            return Some((self.cockpit(transform, view), view.fov));
+        }
+
         let (position, up) = match self.kind {
             // Round the target in the world, by the mouse alone: the target's turns never move it
             CameraKind::ThirdPerson => {
@@ -96,6 +123,47 @@ impl Camera {
             },
             view.fov,
         ))
+    }
+}
+
+impl Camera {
+    /*
+        The pilot's eye: the seat's resting eye, moved by the G the head feels, the pilot's look (mouse or head
+        tracker) and the twist of looking over a shoulder
+    */
+    fn cockpit(&self, transform: &Transform3D, view: &CameraView) -> Transform3D {
+        let head = self.head.pose(GAME_SETTINGS.lock().unwrap().head_g_reaction);
+
+        // The tracker's own axes are the pilot's: right, up, toward the screen
+        let tracked = head_tracking::tracked_pose();
+        let tracked_offset = Vector3::new(tracked.x, tracked.y, -tracked.z.max(0.0)) * 0.01;
+        let tracked_roll = tracked
+            .roll
+            .clamp(-MAX_HEAD_ROLL - head.roll_deg, MAX_HEAD_ROLL - head.roll_deg);
+        let tracked_turn = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), (-tracked.yaw).to_radians())
+            * UnitQuaternion::from_axis_angle(&Vector3::z_axis(), (-tracked_roll).to_radians())
+            * UnitQuaternion::from_axis_angle(&Vector3::x_axis(), tracked.pitch.to_radians());
+
+        let ahead = UnitQuaternion::face_towards(&(view.offset - view.look_at), &Vector3::y());
+        let look = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), self.cockpit_look.x.to_radians())
+            * UnitQuaternion::from_axis_angle(
+                &Vector3::x_axis(),
+                (self.cockpit_look.y + self.view_pitch).to_radians(),
+            );
+
+        // Over the shoulder, from where the view points now: 0 facing forward, 1 facing behind
+        let facing = look * -Vector3::z();
+        let turned = (-facing.x).atan2(-facing.z);
+        let (side, up, forward, curve) = LOOK_BEHIND;
+        let behind = (turned.abs() / std::f32::consts::PI).powf(curve);
+        let shoulder = Vector3::new(-side * turned.signum(), up, -forward) * behind;
+
+        let eye = view.offset + shoulder + head.offset + tracked_offset;
+        Transform3D {
+            position: transform.position + transform.rotation * eye,
+            rotation: transform.rotation * head.tilt * tracked_turn * ahead * look,
+            ..Default::default()
+        }
     }
 }
 
@@ -124,6 +192,7 @@ impl Behavior for Camera {
             self.placed = false;
             self.yaw = 0.0;
             self.pitch = 0.0;
+            self.cockpit_look = Vector2::zeros();
             self.fov = None;
         }
 
@@ -139,9 +208,23 @@ impl Behavior for Camera {
             let ease = 1.0 - (-app.time.delta_time / MOUSE_SMOOTHING).exp();
             self.mouse += (app.input.mouse_look() - self.mouse) * ease;
             let turn = self.mouse * RADIANS_PER_COUNT;
-            self.yaw -= turn.x;
-            self.pitch = (self.pitch - turn.y).clamp(-MAX_PITCH, MAX_PITCH);
+            if self.kind == CameraKind::FirstPerson && !head_tracking::trackir_receiving() {
+                let degrees = turn.map(f32::to_degrees);
+                self.cockpit_look.x = (self.cockpit_look.x - degrees.x).clamp(-HEAD_TURN.0, HEAD_TURN.0);
+                self.cockpit_look.y = (self.cockpit_look.y - degrees.y).clamp(-HEAD_TURN.1, HEAD_TURN.1);
+            } else {
+                self.yaw -= turn.x;
+                self.pitch = (self.pitch - turn.y).clamp(-MAX_PITCH, MAX_PITCH);
+            }
         }
+
+        // While a head tracker is looking, a leftover mouse look eases back to center
+        let dt = app.time.delta_time;
+        if head_tracking::trackir_receiving() {
+            self.cockpit_look *= (-LOOK_CENTER_RATE * dt).exp();
+        }
+        let view_pitch = GAME_SETTINGS.lock().unwrap().cockpit_view_pitch_deg;
+        self.view_pitch += (view_pitch - self.view_pitch) * (1.0 - (-VIEW_PITCH_RATE * dt).exp());
 
         let Some(target) = self.node_to_follow.as_deref().and_then(|id| scene.get_node(id)) else {
             return;
@@ -150,6 +233,16 @@ impl Behavior for Camera {
         let count = target
             .get_behavior::<Aircraft>()
             .map_or(0, |aircraft| aircraft.cameras.of(self.kind).len());
+
+        // The head feels what the aircraft does, whichever view is on, so the cockpit picks it up mid-throw
+        if let Some(sensors) = target.get_behavior::<Aircraft>().map(|aircraft| aircraft.sensors) {
+            let input = HeadInput {
+                lateral: sensors.lateral_g,
+                forward: sensors.longitudinal_g,
+                vertical_g: sensors.load_factor,
+            };
+            self.head.update(input, dt);
+        }
         if self.index >= count {
             self.index = 0;
         }

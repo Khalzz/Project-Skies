@@ -265,7 +265,7 @@ impl SceneBehaviour for MainMenu {
 
     fn after_cameras(&mut self, scene: &mut Scene, app: &mut App) {
         // The sea's waves, around where the camera is drawn from.
-        self.ocean.update(scene, "world", app.time.delta_time);
+        self.ocean.update(scene, "world", app.time.delta_time, &app.origin);
     }
 
     fn debug_ui(&mut self, ctx: &egui::Context, _scene: &mut Scene, app: &mut App) {

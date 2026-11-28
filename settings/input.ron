@@ -31,9 +31,14 @@
         (action: "up_wheel", bindings: [Key("Right")]),
         (action: "down_wheel", bindings: [Key("Left")]),
         (action: "toggle_landing_gear", bindings: [Key("g")]),
-        (action: "toggle_fbw_pitch", bindings: [Key("b")]),
-        (action: "wheel_brake", bindings: [Key("x")]),
+        (action: "toggle_fbw_pitch", bindings: []), // was B, now the wheel brakes
+        (action: "wheel_brake", bindings: [Key("b")]),
         (action: "toggle_parking_brake", bindings: [Key("p")]),
+        // Nose wheel steering on or off (the F-16's NWS button on the stick): on, the rudder keys steer the
+        // nose wheel; off, it castors.
+        (action: "toggle_nws", bindings: [Key("n")]),
+        // The ground crew puts the wheel chocks in (only with the jet stopped on its wheels) or takes them out.
+        (action: "toggle_chocks", bindings: [Key("c")]),
         (action: "quick_menu_up", bindings: [ControllerButton("DPadUp")]),
         (action: "quick_menu_right", bindings: [ControllerButton("DPadRight")]),
         (action: "quick_menu_down", bindings: [ControllerButton("DPadDown")]),
@@ -43,6 +48,8 @@
         // The speed brake: toggle opens or closes it. The extend/retract
         // pair is for a switch that holds a direction (no default key).
         (action: "toggle_air_brake", bindings: [Key("h")]),
+        // The LE FLAPS switch: AUTO (scheduled by the flight computer) or LOCK (held where they are).
+        (action: "toggle_le_flaps_lock", bindings: [Key(";")]),
         (action: "air_brake_extend", bindings: []),
         (action: "air_brake_retract", bindings: []),
         // Weapons: the next one in the HUD's weapon list (round to OFF), and
@@ -56,7 +63,7 @@
         // Countermeasures: one release, a quick burst, and what they release
         // (flares, chaff, both).
         (action: "countermeasure_single", bindings: [Key("f")]),
-        (action: "countermeasure_program", bindings: [Key("c")]),
+        (action: "countermeasure_program", bindings: []), // was C, now the wheel chocks
         (action: "countermeasure_mode", bindings: [Key("z")]),
         // F1-F4: what the camera follows. F1: your jet, in the cockpit - again
         // steps through its views; F2: the next other aircraft, free view.
@@ -69,6 +76,10 @@
         // F5 / F9: the debug view - colliders, and while spectating (F2-F4)
         // what's followed: its telemetry and the path it's flying.
         (action: "toggle_debug", bindings: [Key("F5"), Key("F9")]),
+        // The sandbox's (play::scene) debug views - F5: every aircraft's forces
+        // and aero gizmos, F6: the colliders.
+        (action: "toggle_forces_debug", bindings: [Key("F5")]),
+        (action: "toggle_colliders_debug", bindings: [Key("F6")]),
         (action: "toggle_debug_mouse", bindings: [Key("F7")]),
         // F8: the heat view - what an IR seeker sees.
         (action: "toggle_heat_view", bindings: [Key("F8")]),
@@ -92,7 +103,7 @@
         (action: "debug_cam_down", bindings: [Key("Left Ctrl")]),
         (action: "debug_cam_sprint", bindings: [Key("Left Shift")]),
         // N: the sandbox's free camera stays where it is, so WASD only flies the plane.
-        (action: "toggle_static_camera", bindings: [Key("n")]),
+        (action: "toggle_static_camera", bindings: []), // was N, now the nose wheel steering
         (action: "trim_pitch_up", bindings: [Key("i")]),
         (action: "trim_pitch_down", bindings: [Key("k")]),
         (action: "trim_roll_left", bindings: [Key("j")]),

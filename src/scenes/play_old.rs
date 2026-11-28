@@ -892,7 +892,7 @@ impl SceneBehaviour for PlayOld {
         // The map's lines are drawn relative to its camera.
         crate::frame_plans::set_tactical_camera_position(camera);
         // The sea's waves, around where the camera is drawn from.
-        self.ocean.update(scene, "world", app.time.delta_time);
+        self.ocean.update(scene, "world", app.time.delta_time, &app.origin);
         // The G-effects and the HUD's brightness, into the flight plan's
         // Fullscreen step - this frame's effects used up (see update_g_vision).
         app.renderer.shaders.set_instance(

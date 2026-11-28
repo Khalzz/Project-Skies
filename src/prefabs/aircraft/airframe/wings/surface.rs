@@ -66,7 +66,8 @@ pub struct Geometry {
 
 use std::f32::consts::PI;
 
-use nalgebra::{UnitVector3, Vector3};
+use nalgebra::{Point3, UnitVector3, Vector3};
+use pankarta_software::prelude::ColliderBuilder;
 use pankarta_software::{
     app::App, rendering::gizmos::Icon, scene_manager::node::properties::Model,
 };
@@ -74,7 +75,7 @@ use pankarta_software::{
 use crate::prefabs::aircraft::{
     airframe::wings::{
         airfoil::Airfoil,
-        body::{Motion, Sections, SurfaceBody},
+        body::{Edge, Motion, Sections, SurfaceBody},
     },
     flight_controls::flight_controls::Commands,
 };
@@ -103,10 +104,12 @@ pub struct Surface {
     pub root: Vector3<f32>, // root leading edge, in the aircraft's own space
     pub span_axis: UnitVector3<f32>, // which way the tip points
     alpha_scale: f32,       // how much of its angle the section feels, the rest lost to its tip vortices
+    section_slope: f32,     // the section's lift per radian
     zero_lift: f32,         // the section's, degrees
     stall: (f32, f32),      // the section's, degrees (negative, positive)
     induced_drag: f32,      // drag per Cl², from the tip vortices
     vortex_lift: f32,       // strake vortex strength (Polhamus Kv), 0 without strakes
+    thickness: f32,         // the section's thickest over its chord (the NACA name's last two digits: 64A204 is 4%)
 }
 
 // An f16 contains flaperons (flaps that work as alerons) and slats
@@ -129,10 +132,12 @@ impl Surface {
             label: label.to_string(),
             integrity: Integrity::new(health),
             alpha_scale: finite_slope / airfoil.lift_slope(),
+            section_slope: airfoil.lift_slope(),
             zero_lift: airfoil.zero_lift_alpha(),
             stall: airfoil.stall_alphas(),
             induced_drag: 1.0 / (PI * SPAN_EFFICIENCY * aspect_ratio),
             vortex_lift: 0.0,
+            thickness: 0.06,
             body,
             root,
             span_axis,
@@ -146,10 +151,36 @@ impl Surface {
         self
     }
 
+    pub fn with_thickness(mut self, thickness: f32) -> Surface {
+        self.thickness = thickness;
+        self
+    }
+
+    /*
+        Its solid shape, from the same planform the air sees: each corner half the local thickness above and
+        below it along its lift side (the thickness follows the chord, so the root is deep and the tip thin), the
+        hull around those 8 points. A swept, tapered panel is convex, so the hull is the panel. No mass of its
+        own (density 0): the jet's mass and inertia are given whole, so it only adds what can be hit. Fixed at
+        no deflection, a moving surface (a stabilator) keeps its neutral shape.
+    */
+    pub fn collider(&self) -> Option<ColliderBuilder> {
+        let planform = &self.body.planform;
+        let up = self.up();
+        let points: Vec<Point3<f32>> = planform
+            .corners()
+            .iter()
+            .flat_map(|&(along, back)| {
+                let center = self.on_aircraft((along, back));
+                let half = up * (self.thickness * planform.chord_at(along) / 2.0);
+                [Point3::from(center + half), Point3::from(center - half)]
+            })
+            .collect();
+        ColliderBuilder::convex_hull(&points).map(|collider| collider.friction(0.8).density(0.0))
+    }
+
     // Cl and Cd at `alpha` (deg): the section's, corrected for this surface's shape
     pub fn coefficients(&self, alpha: f32) -> (f32, f32) {
-        let (cl, cd) = self.airfoil.sample(self.section_alpha(alpha));
-        let (mut cl, mut cd) = (cl, cd + cl * cl * self.induced_drag);
+        let (mut cl, mut cd) = self.wing_coefficients(alpha);
 
         if self.vortex_lift > 0.0 && alpha > 0.0 {
             let angle = alpha.to_radians();
@@ -159,6 +190,33 @@ impl Surface {
             cd += extra * angle.tan();
         }
         (cl, cd)
+    }
+
+    // The wing's own share, without the strakes' vortices
+    fn wing_coefficients(&self, alpha: f32) -> (f32, f32) {
+        let (cl, cd) = self.airfoil.sample(self.section_alpha(alpha));
+        (cl, cd + cl * cl * self.induced_drag)
+    }
+
+    /*
+        The same with the leading edge drooped `droop` degrees by a flap `chord_ratio` deep. Thin airfoil
+        theory (Glauert), for a nose section hinged at cos θ = 1 − 2E:
+        - the loading at the nose, what makes a thin wing like the F-16's stall there, drops as if the
+          angle was δ·θ/π lower: the stall comes that much later, and the drag past it with it;
+        - the extra camber costs a little lift at any one angle: ΔCl = −2δ(θ − sin θ).
+        Below the stall both together give back the clean lift minus that small loss.
+        The theory has the air following the bend all the way; past 10 deg it starts separating there, so
+        the droop counts for less (the same loss the trailing edge sections take).
+    */
+    fn drooped_coefficients(&self, alpha: f32, droop: f32, chord_ratio: f32) -> (f32, f32) {
+        let theta = (1.0 - 2.0 * chord_ratio).clamp(-1.0, 1.0).acos();
+        let droop = (droop * separation_falloff(droop)).to_radians();
+        let relief = droop * theta / PI;
+        let camber = -2.0 * droop * (theta - theta.sin());
+
+        let (cl, cd) = self.airfoil.sample(self.section_alpha(alpha) - relief.to_degrees());
+        let cl = cl + self.section_slope * relief + camber;
+        (cl, cd + cl * cl * self.induced_drag)
     }
 
     /*
@@ -224,6 +282,29 @@ impl Surface {
                 if hinge.deflection.abs() < 1e-3 {
                     continue;
                 }
+                if section.edge == Edge::Leading {
+                    // It changes how the whole strip behind it meets the air
+                    let point = self.on_aircraft(section.strip_center(planform));
+                    let Some(flow) = Flow::new(airflow(point), up, density) else {
+                        continue;
+                    };
+                    let (base_cl, base_cd) = self.wing_coefficients(flow.alpha);
+                    let (cl, cd) = self.drooped_coefficients(
+                        flow.alpha,
+                        hinge.deflection,
+                        section.chord_ratio(planform),
+                    );
+                    forces.push(flow.force(
+                        cl - base_cl,
+                        cd - base_cd,
+                        section.strip_area(planform),
+                        point,
+                        flow.alpha,
+                        true,
+                    ));
+                    continue;
+                }
+
                 let point = self.on_aircraft(section.center());
                 let Some(flow) = Flow::new(airflow(point), up, density) else {
                     continue;
@@ -278,10 +359,15 @@ impl Surface {
         }
     }
 
-    // A section pivots about its leading edge (root to tip), in the aircraft's space
+    // A section pivots about its leading edge (root to tip), in the aircraft's space; a leading edge
+    // section the other way, so + droops its nose (its mesh's origin goes on its trailing edge)
     fn hinge_axis(&self, section: &Sections) -> UnitVector3<f32> {
         let [root, tip, ..] = section.corners();
-        Self::trailing_edge_down(self.on_aircraft(tip) - self.on_aircraft(root))
+        let axis = Self::trailing_edge_down(self.on_aircraft(tip) - self.on_aircraft(root));
+        match section.edge {
+            Edge::Trailing => axis,
+            Edge::Leading => -axis,
+        }
     }
 
     // A whole moving surface (stabilator, rudder) pivots about its span
@@ -353,6 +439,11 @@ impl Flow {
 fn flap_effectiveness(chord_ratio: f32, deflection: f32) -> f32 {
     let theta = (2.0 * chord_ratio - 1.0).acos();
     let tau = 1.0 - (theta - theta.sin()) / PI;
-    let falloff = 1.0 - 0.4 * ((deflection.abs() - 10.0) / 15.0).clamp(0.0, 1.0);
-    tau * falloff
+    tau * separation_falloff(deflection)
+}
+
+// How much of a hinged section's deflection still works once the flow separates over its hinge: all of
+// it up to 10 deg, falling to 60% by 25 deg
+fn separation_falloff(deflection: f32) -> f32 {
+    1.0 - 0.4 * ((deflection.abs() - 10.0) / 15.0).clamp(0.0, 1.0)
 }

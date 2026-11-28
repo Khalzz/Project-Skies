@@ -11,7 +11,7 @@ use nalgebra::{UnitQuaternion, Vector3};
 use pankarta_software::physics::{compute_principal_inertia, PhysicsWorld};
 use pankarta_software::scene_manager::scene_nodes::child_id;
 use pankarta_software::prelude::*;
-use pankarta_software::rendering::thick_lines::LineInstance;
+use pankarta_software::rendering::gizmos::GizmoColor;
 use pankarta_software::scene_manager::node::properties::Parent;
 use sdl2::sys::{KeyCode, SDL_Keycode};
 use std::collections::HashMap;
@@ -231,28 +231,22 @@ impl Radar {
         let Some((tip, _)) = self.antenna_pose(node, scene) else {
             return;
         };
-        let Some(lines) = app.renderer.render_sets.get_lines_mut(RADAR_LINES) else {
-            return;
-        };
-        for contact in self.contacts.values() {
-            let opacity = 1.0 - contact.since_flash / CONTACT_FADE;
-            if opacity <= 0.0 {
-                continue;
+        app.gizmos.channel(RADAR_GIZMOS, |g| {
+            for contact in self.contacts.values() {
+                let opacity = 1.0 - contact.since_flash / CONTACT_FADE;
+                if opacity <= 0.0 {
+                    continue;
+                }
+                let color = match &contact.state {
+                    ContactState::Unidentified => GizmoColor::WHITE,
+                    ContactState::Identified(coalition) if coalition == "Red" => GizmoColor::RED,
+                    ContactState::Identified(coalition) if coalition == "Blue" => GizmoColor::BLUE,
+                    // Any other coalition, for now.
+                    ContactState::Identified(_) => GizmoColor::YELLOW,
+                };
+                g.line(tip, contact.position).color(color.alpha(opacity)).width(3.0);
             }
-            let [red, green, blue] = match &contact.state {
-                ContactState::Unidentified => [1.0, 1.0, 1.0],
-                ContactState::Identified(coalition) if coalition == "Red" => [1.0, 0.1, 0.1],
-                ContactState::Identified(coalition) if coalition == "Blue" => [0.2, 0.5, 1.0],
-                // Any other coalition, for now.
-                ContactState::Identified(_) => [1.0, 0.8, 0.1],
-            };
-            lines.dynamic.push(LineInstance {
-                start: tip.into(),
-                end: contact.position.into(),
-                color: [red, green, blue, opacity],
-                width: 3.0,
-            });
-        }
+        });
     }
 
     /// The radar beam: a thin, tall fan from the array out to the detection range, pointing
@@ -271,35 +265,27 @@ impl Radar {
                 * Vector3::new(side.sin() * up.cos(), up.sin(), side.cos() * up.cos())
                 * range
         };
-        let color = [1.0, 0.8, 0.1];
 
         // The far edge: up the left side, down the right side.
         let steps = 12;
-        let mut edge = Vec::new();
-        for step in 0..=steps {
-            edge.push(far(
-                -half_width,
-                (BEAM_HEIGHT * step as f32 / steps as f32).to_radians(),
-            ));
-        }
-        for step in (0..=steps).rev() {
-            edge.push(far(
-                half_width,
-                (BEAM_HEIGHT * step as f32 / steps as f32).to_radians(),
-            ));
-        }
-        app.renderer.lines.outline(&edge, color);
-        // From the tip to the four corners.
-        for (side, up) in [
-            (-half_width, 0.0),
-            (half_width, 0.0),
-            (-half_width, BEAM_HEIGHT),
-            (half_width, BEAM_HEIGHT),
-        ] {
-            app.renderer
-                .lines
-                .line(tip, far(side, up.to_radians()), color);
-        }
+        let height = |step: u32| (BEAM_HEIGHT * step as f32 / steps as f32).to_radians();
+        let edge: Vec<Vector3<f32>> = (0..=steps)
+            .map(|step| far(-half_width, height(step)))
+            .chain((0..=steps).rev().map(|step| far(half_width, height(step))))
+            .collect();
+
+        app.gizmos.channel(RADAR_GIZMOS, |g| {
+            g.outline(&edge).color(GizmoColor::ORANGE);
+            // From the tip to the four corners.
+            for (side, up) in [
+                (-half_width, 0.0),
+                (half_width, 0.0),
+                (-half_width, BEAM_HEIGHT),
+                (half_width, BEAM_HEIGHT),
+            ] {
+                g.line(tip, far(side, up.to_radians())).color(GizmoColor::ORANGE);
+            }
+        });
     }
 }
 
@@ -523,7 +509,8 @@ const BEAM_HEIGHT: f32 = 55.0;
 const CONTACT_FADE: f32 = 1.0;
 const LOST_PULSES: u32 = 3;
 const LOST_GRACE: f32 = 0.25;
-pub const RADAR_LINES: &str = "radar_lines";
+/// The gizmo channel the radars draw their beam and contacts in.
+pub const RADAR_GIZMOS: &str = "radar";
 
 impl Behavior for Radar {
     fn update(&mut self, node: &mut Node, scene: &mut SceneAccess, app: &mut App) {

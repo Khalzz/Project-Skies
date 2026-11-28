@@ -47,6 +47,7 @@ impl Wheel {
         surface: &GroundSurface,
         side_limit: f32,
         hold: Option<f32>,
+        chock: f32,
     ) -> Vector3<f32> {
         let side = Vector3::y().cross(&heading);
         let brake = if self.braked {
@@ -63,7 +64,7 @@ impl Wheel {
         let longitudinal = match hold {
             // Stuck: pulled back to where it stopped, up to what it can hold
             Some(stretch) => {
-                let limit = self.holding_limit(load, brake, surface);
+                let limit = self.holding_limit(load, brake, surface, chock);
                 (-(stretch / HOLD_STRETCH + speed / HOLD_SETTLE_SPEED) * load).clamp(-limit, limit)
             }
             None => -(speed / ROLLING_SLIP_SPEED).clamp(-1.0, 1.0) * rolling,
@@ -78,9 +79,24 @@ impl Wheel {
         heading * longitudinal + side * lateral
     }
 
-    // A stopped tyre sits flattened on the ground and holds harder than a rolling one
-    pub fn holding_limit(&self, load: f32, brake: f32, surface: &GroundSurface) -> f32 {
+    // A stopped tyre sits flattened on the ground and holds harder than a rolling one; a chock against it adds
+    // what it takes to climb it (`chock`, per unit of load)
+    pub fn holding_limit(&self, load: f32, brake: f32, surface: &GroundSurface, chock: f32) -> f32 {
         let brake = if self.braked { brake.clamp(0.0, 1.0) } else { 0.0 };
-        (surface.breakaway_resistance + brake * surface.brake_friction) * load
+        (surface.breakaway_resistance + brake * surface.brake_friction + chock) * load
+    }
+
+    /*
+        A chock is a wedge against the tyre: to roll over it the wheel has to lift its load up the chock's edge,
+        which takes a push of load·tan θ, θ the angle from straight down to where the tyre touches the chock's
+        top (cos θ = (r − h)/r). A small wheel against the same chock needs a harder push, per its load.
+    */
+    pub fn chock_hold(&self, chock_height: f32) -> f32 {
+        if self.radius <= 0.0 {
+            return 0.0;
+        }
+        let height = chock_height.min(self.radius * 0.9);
+        let cos = (self.radius - height) / self.radius;
+        (1.0 - cos * cos).sqrt() / cos
     }
 }

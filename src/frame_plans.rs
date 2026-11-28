@@ -13,6 +13,8 @@ use pankarta_software::rendering::render_pipeline::render_pass::UiPass;
 use pankarta_software::rendering::render_sets::RenderSets;
 use pankarta_software::rendering::shader_library::Overlay;
 
+use crate::prefabs::world::aerial_perspective;
+
 /// Every scene without a plan of its own (the menu, the loading screen...):
 /// the engine's default - the world, the UI over it.
 pub fn standard() -> FramePlan {
@@ -20,18 +22,22 @@ pub fn standard() -> FramePlan {
         .insert_after_scene("opaque", |steps| steps.copy_depth().scene("water"))
 }
 
-/// The sandbox: the standard plan, with the radars' contact lines over the world. The lines
-/// go after the blit - the world is drawn into its own image and copied onto the screen there,
-/// so anything drawn before it is drawn over.
+/// The sandbox: the world, its aerial perspective, then everything drawn over it (the gizmos
+/// among them) after the blit - the world is drawn into its own image and copied onto the
+/// screen there, so anything drawn before it is drawn over.
 pub fn sandbox() -> FramePlan {
     FramePlan::new()
         .scene("opaque")
         .copy_depth()
         .scene("water")
+        // The haze goes over the solid world only, before the glass and other see-through things: they don't
+        // write depth, so hazed after them they'd take the haze of what's behind them on top of their own color
+        .custom(aerial_perspective::STEP, aerial_perspective::draw)
         .scene("transparent")
         .particles()
         .fullscreen(pankarta_software::rendering::shader_library::BLIT)
-        .lines(crate::prefabs::ground_unit::air_defense::radar::RADAR_LINES)
+        .lines(crate::prefabs::aircraft::avionics::hud::HUD_LINES)
+        .text(crate::prefabs::aircraft::avionics::hud::HUD_TEXT)
         .nodes_3d()
         .nodes_2d()
         .ui(UiPass::All)

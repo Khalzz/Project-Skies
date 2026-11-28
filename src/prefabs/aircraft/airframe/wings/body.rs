@@ -84,6 +84,7 @@ pub struct Mix {
     pub roll: f32,
     pub yaw: f32,
     pub flaps: f32,
+    pub leading_edge: f32, // the leading edge flap schedule (see FlyByWire::leading_edge_flaps)
 }
 
 impl Mix {
@@ -94,6 +95,7 @@ impl Mix {
             ("roll", self.roll),
             ("yaw", self.yaw),
             ("flaps", self.flaps),
+            ("leading edge", self.leading_edge),
         ]
         .iter()
         .filter(|(_, weight)| *weight != 0.0)
@@ -108,7 +110,11 @@ impl Mix {
     }
 
     pub fn is_passive(&self) -> bool {
-        self.pitch == 0.0 && self.roll == 0.0 && self.yaw == 0.0 && self.flaps == 0.0
+        self.pitch == 0.0
+            && self.roll == 0.0
+            && self.yaw == 0.0
+            && self.flaps == 0.0
+            && self.leading_edge == 0.0
     }
 }
 
@@ -121,6 +127,7 @@ pub struct Hinge {
     pub deflection: f32,
     pub mix: Mix,
     pub rate: f32, // degrees per second its actuator can move it
+    pub lag: f32,  // seconds its actuator takes to answer (first order), 0 for none
 }
 
 impl Hinge {
@@ -131,7 +138,13 @@ impl Hinge {
             deflection: 0.0,
             mix,
             rate: DEFAULT_ACTUATOR_RATE,
+            lag: 0.0,
         }
+    }
+
+    pub fn with_lag(mut self, lag: f32) -> Hinge {
+        self.lag = lag;
+        self
     }
 
     pub fn with_rate(mut self, rate: f32) -> Hinge {
@@ -151,7 +164,11 @@ impl Hinge {
         // Flaps only take the travel control left free, so a flaperon with full flaps can still roll
         // both ways instead of sitting on its limit (each weight: 1 = follows it fully, 0 = ignores it)
         let room = 1.0 - control.abs();
-        let value = control + (m.flaps * commands.flaps).clamp(-room, room);
+        // The leading edge flaps are scheduled on their own, never sharing travel with a control
+        let value = (control
+            + (m.flaps * commands.flaps).clamp(-room, room)
+            + m.leading_edge * commands.leading_edge)
+            .clamp(-1.0, 1.0);
 
         // asymmetric travel: + uses the down limit, - uses the up limit
         let target = if value >= 0.0 {
@@ -159,8 +176,14 @@ impl Hinge {
         } else {
             value * self.travel.1
         };
+        // The actuator answers with its lag, never faster than its rate
+        let answer = if self.lag > 0.0 {
+            self.deflection + (target - self.deflection) * (1.0 - (-dt / self.lag).exp())
+        } else {
+            target
+        };
         let step = self.rate * dt;
-        self.deflection += (target - self.deflection).clamp(-step, step);
+        self.deflection += (answer - self.deflection).clamp(-step, step);
     }
 
     // `axis` is in the aircraft's space, so the turn goes on top of the mesh's own rotation
@@ -203,11 +226,19 @@ impl Motion {
     }
 }
 
+// Which edge of its surface a section sits on: it changes what deflecting it does to the air
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Edge {
+    Leading,  // slats, leading edge flaps: + droops the nose down
+    Trailing, // flaps, ailerons, flaperons, elevators, rudders: + moves the trailing edge down
+}
+
 #[derive(Clone)]
 pub struct Sections {
     root: (f32, f32), // where its root leading edge sits on its surface: (along the span, back)
     planform: Planform,
     pub motion: Motion,
+    pub edge: Edge,
 }
 
 impl Sections {
@@ -216,7 +247,13 @@ impl Sections {
             root,
             planform,
             motion,
+            edge: Edge::Trailing,
         }
+    }
+
+    pub fn on_leading_edge(mut self) -> Sections {
+        self.edge = Edge::Leading;
+        self
     }
 
     pub fn with_mesh(mut self, mesh: &str) -> Sections {
@@ -239,6 +276,19 @@ impl Sections {
     pub fn center(&self) -> (f32, f32) {
         let (along, back) = self.planform.middle();
         (self.root.0 + along, self.root.1 + back)
+    }
+
+    // The strip of its surface it spans, the whole chord deep: what a leading edge flap changes the flow over
+    pub fn strip_area(&self, surface: &Planform) -> f32 {
+        let (from, to) = (self.root.0, self.root.0 + self.planform.span);
+        (surface.chord_at(from) + surface.chord_at(to)) / 2.0 * (to - from)
+    }
+
+    // That strip's quarter chord, halfway along it, in its surface's (along the span, back)
+    pub fn strip_center(&self, surface: &Planform) -> (f32, f32) {
+        let along = self.root.0 + self.planform.span / 2.0;
+        let leading_edge = along * surface.sweep.to_radians().tan();
+        (along, leading_edge + surface.chord_at(along) / 4.0)
     }
 
     // How deep it is compared to its surface's chord where it sits

@@ -8,6 +8,7 @@ use crate::prefabs::aircraft::aircraft::Aircraft;
 use crate::prefabs::aircraft::airframe::airframe::Mass;
 use crate::prefabs::aircraft::airframe::fuselage::{Fuselage, FuselageAero};
 use crate::prefabs::aircraft::airframe::landing_gear::LandingGear;
+use crate::prefabs::aircraft::airframe::speedbrake::{Panel, Speedbrake};
 use crate::prefabs::aircraft::flight_controls::controls::gear::GearLever;
 use crate::prefabs::aircraft::airframe::wings::airfoil::Airfoil;
 use crate::prefabs::aircraft::airframe::wings::body::{
@@ -15,6 +16,8 @@ use crate::prefabs::aircraft::airframe::wings::body::{
 };
 use crate::prefabs::aircraft::airframe::wings::surface::Surface;
 use crate::prefabs::aircraft::airframe::Airframe;
+use crate::prefabs::aircraft::avionics::avionics::Avionics;
+use crate::prefabs::aircraft::avionics::hud::Hud;
 use crate::prefabs::aircraft::flight_controls::control_system::ControlSystem;
 use crate::prefabs::aircraft::flight_controls::fbw::FlyByWire;
 use crate::prefabs::aircraft::flight_controls::flight_controls::FlightControls;
@@ -95,10 +98,22 @@ impl Aircraft {
                 span: 3.1,
                 sweep: 38.3,
             },
+            // Leading edge flaps: 25 deg down, 2 up, scheduled by the flight computer; the actuator
+            // answers in 0.136 s, at most 25 deg/s (NASA TP-1538)
             Motion::Pivoting {
-                hinge: Hinge::new(None, (25.0, 2.0), Mix::default()),
+                hinge: Hinge::new(
+                    None,
+                    (25.0, 2.0),
+                    Mix {
+                        leading_edge: 1.0,
+                        ..Default::default()
+                    },
+                )
+                .with_rate(25.0)
+                .with_lag(0.136),
             },
-        );
+        )
+        .on_leading_edge();
 
         let wing = |flaperon_mesh: &str| {
             SurfaceBody::new(planform, Motion::Fixed { sections: vec![] })
@@ -121,7 +136,8 @@ impl Aircraft {
             -Vector3::x_axis(),
             naca_64206.clone(),
         )
-        .with_vortex_lift(strakes);
+        .with_vortex_lift(strakes)
+        .with_thickness(0.04);
 
         let right_wing = Surface::new(
             "Right Wing",
@@ -131,7 +147,8 @@ impl Aircraft {
             Vector3::x_axis(),
             naca_64206,
         )
-        .with_vortex_lift(strakes);
+        .with_vortex_lift(strakes)
+        .with_thickness(0.04);
 
         let stabilator = |mesh: &str| {
             SurfaceBody::new(
@@ -298,6 +315,28 @@ impl Aircraft {
             .collect();
         let inertia = compute_principal_inertia(empty_mass, center_of_mass, &section_boxes);
 
+        // Speedbrakes: a clamshell each side of the nozzle, between it and the stabilators; the upper
+        // petal opens up, the lower one down, 60 deg in about two seconds. ~1.4 m² between the four.
+        // The model has no meshes for them yet, so they're only seen in the gizmos.
+        let petal = |side: f32, up: bool| Panel {
+            hinge: Vector3::new(side * 0.72, 0.0, 2.75),
+            // Turning about -x lifts the trailing edge, about +x lowers it
+            axis: if up { -Vector3::x_axis() } else { Vector3::x_axis() },
+            chord: Vector3::new(0.0, 0.0, 0.85),
+            width: 0.4,
+            mesh: None,
+        };
+        let speedbrake = Speedbrake::new(
+            vec![
+                petal(-1.0, true),
+                petal(-1.0, false),
+                petal(1.0, true),
+                petal(1.0, false),
+            ],
+            60.0,
+            30.0,
+        );
+
         let airframe = Airframe {
             landing_gear: LandingGear::new(GearLever::Down),
             surfaces,
@@ -311,6 +350,7 @@ impl Aircraft {
                 // Drag of what the wings don't count: the whole jet's ~0.014 × 27.87 m² on top of the wings'
                 aero: FuselageAero::from_rings(&body_sections, 0.4),
             },
+            speedbrake,
             aero: vec![],
         };
 
@@ -358,6 +398,7 @@ impl Aircraft {
         Aircraft {
             player: true,
             airframe,
+            avionics: Avionics::new(Hud::f16()),
             powerplant: Powerplant::new(engines),
             flight_controls: FlightControls::new(
                 0.0,
@@ -366,6 +407,8 @@ impl Aircraft {
             ),
             cameras,
             sensors: Sensors::default(),
+            debug: false,
+            chocks_placed: false,
         }
     }
 }

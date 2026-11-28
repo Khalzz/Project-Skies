@@ -18,6 +18,7 @@ const SWING_RATE: f32 = 2.0;
 const KNOTS_PER_MS: f32 = 1.943_844;
 
 pub struct Windsock {
+    pub debug: bool, // draws the wind it feels (F5 in the sandbox)
     grounded: bool,
     time: f32,
     heading: Vector3<f32>, // where the sock last pointed, kept while the wind is calm
@@ -43,6 +44,7 @@ pub fn windsock(id: &str, position: Vector3<f32>) -> Node {
                 .part("pole", pole),
         )
         .with_behavior(Windsock {
+            debug: false,
             grounded: false,
             time: 0.0,
             heading: -Vector3::z(),
@@ -66,7 +68,7 @@ impl Behavior for Windsock {
         }
 
         let top = transform.position + Vector3::y() * POLE_HEIGHT;
-        let wind = Atmosphere::of(scene).wind_at(top);
+        let wind = Atmosphere::of(scene, &app.origin).wind_at(top);
         let knots = wind.norm() * KNOTS_PER_MS;
 
         let level = Vector3::new(wind.x, 0.0, wind.z);
@@ -101,6 +103,9 @@ impl Behavior for Windsock {
             }
         }
 
+        if !self.debug {
+            return;
+        }
         app.gizmos.channel("wind", |g| {
             g.icon(top + Vector3::y() * 1.5, Icon::Wind)
                 .on_top()

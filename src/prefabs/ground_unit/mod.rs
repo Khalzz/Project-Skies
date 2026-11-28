@@ -43,14 +43,14 @@ pub fn ground_unit(name: &str, position: Vector3<f32>, kind: UnitType) -> Node {
 
 /// What every ground unit has, whatever it is.
 pub struct GroundUnit {
-    debug: bool,
+    pub debug: bool, // draws its debug gizmos (F5 in the sandbox)
     unit_type: UnitType,
 }
 
 impl GroundUnit {
     pub fn new(unit_type: UnitType) -> Self {
         GroundUnit {
-            debug: true,
+            debug: false,
             unit_type,
         }
     }

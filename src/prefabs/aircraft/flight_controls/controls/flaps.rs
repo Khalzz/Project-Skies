@@ -8,4 +8,7 @@
 pub struct Flaps {
     pub request: f32,
     pub alt_flaps: bool,
+    // The LE FLAPS switch: AUTO (false) lets the flight computer schedule the leading edge flaps,
+    // LOCK (true) holds them where they are
+    pub le_flaps_lock: bool,
 }
